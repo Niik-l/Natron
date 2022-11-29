@@ -28,7 +28,7 @@
 
 #include "Global/Macros.h"
 
-#include <QtCore/QObject>
+#include <QObject>
 
 #include "Gui/GuiFwd.h"
 

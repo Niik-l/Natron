@@ -32,8 +32,8 @@
 #include <utility>
 #include <stdexcept>
 
-#include <QtCore/QThread>
-#include <QtCore/QDebug>
+#include <QThread>
+#include <QDebug>
 
 #include <QAction>
 #include <QApplication> // qApp

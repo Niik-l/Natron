@@ -31,7 +31,7 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #include <QVBoxLayout>
 #include <QCheckBox>

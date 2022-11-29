@@ -31,7 +31,7 @@
 
 #include <list>
 
-#include <QtCore/QtGlobal> // for Q_OS_*
+#include <QtGlobal> // for Q_OS_*
 
 #include "Engine/AppManager.h"
 #include "Engine/Variant.h"

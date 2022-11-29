@@ -31,9 +31,9 @@
 #include "Node.h"
 #include "Timer.h" // gettimeofday()
 
-#include <QtCore/QWaitCondition>
-#include <QtCore/QReadWriteLock>
-#include <QtCore/QMutex>
+#include <QWaitCondition>
+#include <QReadWriteLock>
+#include <QMutex>
 
 #include "Engine/Hash64.h"
 

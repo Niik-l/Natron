@@ -34,10 +34,10 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QSize>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QMutex>
-#include <QtCore/QWaitCondition>
+#include <QSize>
+#include <QCoreApplication>
+#include <QMutex>
+#include <QWaitCondition>
 #include <QToolBar>
 #include <QMessageBox>
 CLANG_DIAG_ON(deprecated)

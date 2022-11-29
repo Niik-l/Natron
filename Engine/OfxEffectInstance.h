@@ -32,11 +32,11 @@
 #include <string>
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QMutex>
-#include <QtCore/QString>
-#include <QtCore/QObject>
+#include <QMutex>
+#include <QString>
+#include <QObject>
 CLANG_DIAG_ON(deprecated)
-#include <QtCore/QStringList>
+#include <QStringList>
 
 #include "Engine/OutputEffectInstance.h"
 #include "Engine/ViewIdx.h"

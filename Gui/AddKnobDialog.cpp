@@ -32,7 +32,7 @@
 
 #include <QCheckBox>
 #include <QTextEdit>
-#include <QtCore/QTextStream>
+#include <QTextStream>
 #include <QFormLayout>
 
 #include "Engine/EffectInstance.h"

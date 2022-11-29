@@ -34,7 +34,7 @@
 
 #include "Global/GLIncludes.h" //!<must be included before QGlWidget because of gl.h and glew.h
 
-#include <QtCore/QSize>
+#include <QSize>
 
 #include <QOpenGLWidget>
 

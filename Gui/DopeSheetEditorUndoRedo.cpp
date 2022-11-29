@@ -27,7 +27,7 @@
 
 #include <stdexcept>
 
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #ifndef NATRON_ENABLE_IO_META_NODES
 #include "Engine/AppInstance.h"

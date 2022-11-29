@@ -27,11 +27,11 @@
 
 #include <stdexcept>
 
-#include <QtCore/QSize>
-#include <QtCore/QThread>
-#include <QtCore/QCoreApplication>
+#include <QSize>
+#include <QThread>
+#include <QCoreApplication>
 #include <QMouseEvent>
-#include <QtCore/QByteArray>
+#include <QByteArray>
 
 #include <QWindow>
 

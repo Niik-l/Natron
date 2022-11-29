@@ -35,9 +35,9 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QThreadPool>
-#include <QtCore/QReadWriteLock>
-#include <QtCore/QCoreApplication>
+#include <QThreadPool>
+#include <QReadWriteLock>
+#include <QCoreApplication>
 #include <QtConcurrentMap> // QtCore on Qt4, QtConcurrent on Qt5
 #include <QtConcurrentRun> // QtCore on Qt4, QtConcurrent on Qt5
 

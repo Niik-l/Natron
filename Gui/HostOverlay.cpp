@@ -47,9 +47,9 @@
 #include "Global/KeySymbols.h"
 
 #include "Global/GLIncludes.h" //!<must be included before QGlWidget because of gl.h and glew.h
-#include <QtCore/QDebug>
-#include <QtCore/QPointF>
-#include <QtCore/QThread>
+#include <QDebug>
+#include <QPointF>
+#include <QThread>
 #include <QFont>
 #include <QColor>
 #include <QApplication>

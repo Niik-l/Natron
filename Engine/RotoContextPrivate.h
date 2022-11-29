@@ -38,12 +38,12 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QMutex>
-#include <QtCore/QReadWriteLock>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QThread>
-#include <QtCore/QReadWriteLock>
-#include <QtCore/QWaitCondition>
+#include <QMutex>
+#include <QReadWriteLock>
+#include <QCoreApplication>
+#include <QThread>
+#include <QReadWriteLock>
+#include <QWaitCondition>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

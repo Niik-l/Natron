@@ -31,7 +31,7 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QDebug>
+#include <QDebug>
 #include <QSplitter>
 #include <QVBoxLayout>
 CLANG_DIAG_ON(deprecated)

@@ -33,8 +33,8 @@
 #include <cstring> // for std::memcpy
 #include <stdexcept>
 
-#include <QtCore/QLineF>
-#include <QtCore/QDebug>
+#include <QLineF>
+#include <QDebug>
 
 #include "Engine/RotoContextPrivate.h"
 

@@ -34,10 +34,10 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QMetaType>
-#include <QtCore/QSize>
+#include <QMetaType>
+#include <QSize>
 #include <QDialog>
-#include <QtCore/QByteArray>
+#include <QByteArray>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

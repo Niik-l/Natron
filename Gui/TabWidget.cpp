@@ -29,23 +29,23 @@
 #include <sstream> // stringstream
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QThread>
+#include <QThread>
 #include <QLayout>
 #include <QMenu>
 #include <QApplication>
-#include <QtGui/QImage>
-#include <QtGui/QPixmap>
-#include <QtGui/QIcon>
-#include <QtCore/QMimeData>
-#include <QtGui/QDrag>
+#include <QImage>
+#include <QPixmap>
+#include <QIcon>
+#include <QMimeData>
+#include <QDrag>
 #include <QStyle>
-#include <QtCore/QDebug>
+#include <QDebug>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 // /opt/local/include/QtGui/qmime.h:119:10: warning: private field 'type' is not used [-Wunused-private-field]
-#include <QtGui/QDragEnterEvent>
+#include <QDragEnterEvent>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
-#include <QtGui/QDragLeaveEvent>
-#include <QtGui/QPaintEvent>
+#include <QDragLeaveEvent>
+#include <QPaintEvent>
 #include <QScrollArea>
 #include <QSplitter>
 CLANG_DIAG_ON(deprecated)

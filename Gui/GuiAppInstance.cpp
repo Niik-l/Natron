@@ -28,10 +28,10 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QDir>
+#include <QDir>
 #include <QSettings>
-#include <QtCore/QMutex>
-#include <QtCore/QCoreApplication>
+#include <QMutex>
+#include <QCoreApplication>
 
 #include "Engine/CLArgs.h"
 #include "Engine/Project.h"

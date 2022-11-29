@@ -32,10 +32,10 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QReadWriteLock>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QThread>
-#include <QtCore/QRegExp>
+#include <QReadWriteLock>
+#include <QCoreApplication>
+#include <QThread>
+#include <QRegExp>
 #include <QtConcurrentMap> // QtCore on Qt4, QtConcurrent on Qt5
 #include <QtConcurrentRun> // QtCore on Qt4, QtConcurrent on Qt5
 

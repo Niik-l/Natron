@@ -30,7 +30,7 @@
 
 #include <cstddef> // std::size_t
 
-#include <QtCore/QString>
+#include <QString>
 
 #include "Global/GlobalDefines.h"
 

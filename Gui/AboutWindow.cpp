@@ -36,11 +36,11 @@ CLANG_DIAG_OFF(deprecated)
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QTabWidget>
-#include <QtCore/QFile>
-#include <QtCore/QTextCodec>
+#include <QFile>
+#include <QTextCodec>
 #include <QItemSelectionModel>
 #include <QHeaderView>
-#include <QtCore/QDir>
+#include <QDir>
 CLANG_DIAG_ON(deprecated)
 #include <qhttpserver.h>
 

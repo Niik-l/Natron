@@ -33,13 +33,13 @@
 #include <limits>
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QtGlobal>
+#include <QtGlobal>
 #include <QtConcurrentMap> // QtCore on Qt4, QtConcurrent on Qt5
-#include <QtCore/QFutureWatcher>
-#include <QtCore/QMutex>
-#include <QtCore/QWaitCondition>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QThreadPool>
+#include <QFutureWatcher>
+#include <QMutex>
+#include <QWaitCondition>
+#include <QCoreApplication>
+#include <QThreadPool>
 CLANG_DIAG_ON(deprecated)
 
 #include "Engine/AppInstance.h"

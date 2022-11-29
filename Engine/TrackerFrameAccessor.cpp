@@ -35,7 +35,7 @@ GCC_DIAG_ON(unused-function)
 GCC_DIAG_ON(unused-parameter)
 // clang-format on
 
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #include "Engine/AbortableRenderInfo.h"
 #include "Engine/AppInstance.h"

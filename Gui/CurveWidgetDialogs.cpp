@@ -32,13 +32,13 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 //// /opt/local/include/QtGui/qmime.h:119:10: warning: private field 'type' is not used [-Wunused-private-field]
 #include <QKeyEvent>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
-#include <QtCore/QCoreApplication>
+#include <QCoreApplication>
 #include <QApplication>
 #include <QHBoxLayout> // in QtGui on Qt4, in QtWidgets on Qt5
 #include <QVBoxLayout> // in QtGui on Qt4, in QtWidgets on Qt5
-#include <QtCore/QThread>
-#include <QtCore/QSettings>
-#include <QtCore/QDebug>
+#include <QThread>
+#include <QSettings>
+#include <QDebug>
 
 #include "Engine/AppManager.h" // appPTR
 #include "Engine/Knob.h"

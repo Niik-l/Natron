@@ -28,14 +28,14 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QCoreApplication>
-#include <QtCore/QDir>
-#include <QtCore/QString>
+#include <QCoreApplication>
+#include <QDir>
+#include <QString>
 #include <QStandardPaths>
 
 #include "Global/GlobalDefines.h"
 
-#include <QtCore/QtGlobal> // for Q_OS_*
+#include <QtGlobal> // for Q_OS_*
 #if defined(Q_OS_WIN)
 #include <combaseapi.h>
 #include <IntShCut.h>
@@ -44,7 +44,7 @@
 #define CSIDL_MYMUSIC 13
 #define CSIDL_MYVIDEO 14
 #endif
-#include <QtCore/QFileInfo>
+#include <QFileInfo>
 
 #elif defined(Q_OS_LINUX) || defined(Q_OS_FREEBSD)
 #include <cerrno>
@@ -53,7 +53,7 @@
 #include <sys/types.h>
 #include <pwd.h>
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QTextStream>
+#include <QTextStream>
 #include <QHash>
 #include <QVarLengthArray>
 CLANG_DIAG_ON(deprecated)

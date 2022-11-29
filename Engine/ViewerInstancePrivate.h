@@ -37,11 +37,11 @@
 #include <cassert>
 #include <algorithm> // min, max
 
-#include <QtCore/QMutex>
-#include <QtCore/QWaitCondition>
-#include <QtCore/QReadWriteLock>
-#include <QtCore/QThread>
-#include <QtCore/QCoreApplication>
+#include <QMutex>
+#include <QWaitCondition>
+#include <QReadWriteLock>
+#include <QThread>
+#include <QCoreApplication>
 
 #include "Engine/AbortableRenderInfo.h"
 #include "Engine/OutputSchedulerThread.h"

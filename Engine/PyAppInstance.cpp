@@ -29,7 +29,7 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #include "Engine/AppInstance.h"
 #include "Engine/CreateNodeArgs.h"

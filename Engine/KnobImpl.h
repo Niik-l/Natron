@@ -35,10 +35,10 @@
 #include <string>
 #include <algorithm> // min, max
 
-#include <QtCore/QString>
-#include <QtCore/QDebug>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QThread>
+#include <QString>
+#include <QDebug>
+#include <QCoreApplication>
+#include <QThread>
 
 #include "Global/PythonUtils.h"
 

@@ -30,8 +30,8 @@
 #include <stdexcept>
 
 // Qt includes
-#include <QtCore/QDebug>
-#include <QtCore/QSize>
+#include <QDebug>
+#include <QSize>
 #include <QtEvents>
 #include <QTreeWidget>
 #include <QUndoStack>

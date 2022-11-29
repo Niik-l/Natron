@@ -25,10 +25,10 @@
 
 #include "DocumentationManager.h"
 
-#include <QtCore/QFile>
-#include <QtCore/QFileInfo>
+#include <QFile>
+#include <QFileInfo>
 GCC_ONLY_DIAG_OFF(class-memaccess)
-#include <QtCore/QVector>
+#include <QVector>
 GCC_ONLY_DIAG_ON(class-memaccess)
 
 #include <iostream>

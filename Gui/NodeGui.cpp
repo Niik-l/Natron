@@ -31,16 +31,16 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QDebug>
+#include <QDebug>
 #include <QLayout>
 #include <QAction>
-#include <QtCore/QThread>
+#include <QThread>
 #include <QFontMetrics>
 #include <QTextBlockFormat>
 #include <QTextCursor>
 #include <QGridLayout>
 #include <QCursor>
-#include <QtCore/QFile>
+#include <QFile>
 #include <QApplication>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)

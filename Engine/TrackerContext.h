@@ -33,8 +33,8 @@
 
 #include "Global/GlobalDefines.h"
 
-#include <QtCore/QMutex>
-#include <QtCore/QThread>
+#include <QMutex>
+#include <QThread>
 
 #include "Global/KeySymbols.h"
 #include "Engine/EngineFwd.h"

@@ -38,7 +38,7 @@
 #include "Gui/PanelWidget.h"
 #include "Gui/GuiFwd.h"
 
-#include <QtCore/QSize>
+#include <QSize>
 
 NATRON_NAMESPACE_ENTER
 

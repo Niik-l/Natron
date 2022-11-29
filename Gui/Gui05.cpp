@@ -28,9 +28,9 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QCoreApplication>
-#include <QtCore/QThread>
-#include <QtCore/QTimer>
+#include <QCoreApplication>
+#include <QThread>
+#include <QTimer>
 
 #include <QHBoxLayout>
 #include <QGraphicsScene>

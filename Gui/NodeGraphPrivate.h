@@ -36,13 +36,13 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QTimer>
-#include <QtCore/QMutex>
+#include <QTimer>
+#include <QMutex>
 #include <QGraphicsItem>
 #include <QGraphicsLineItem>
 #include <QGraphicsPixmapItem>
 #include <QPainter>
-#include <QtCore/QPointF>
+#include <QPointF>
 #include <QColor>
 #include <QPen>
 #include <QStyleOptionGraphicsItem>

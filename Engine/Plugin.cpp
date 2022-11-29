@@ -30,7 +30,7 @@
 #include <locale>
 #include <stdexcept>
 
-#include <QtCore/QMutex>
+#include <QMutex>
 
 #include "Engine/AppManager.h"
 #include "Engine/LibraryBinary.h"

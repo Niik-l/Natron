@@ -29,7 +29,7 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #include "Engine/AppManager.h"
 #include "Engine/Lut.h"

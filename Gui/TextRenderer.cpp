@@ -29,10 +29,10 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QString>
-#include <QtGui/QFont>
-#include <QtGui/QImage>
-#include <QtCore/QHash>
+#include <QString>
+#include <QFont>
+#include <QImage>
+#include <QHash>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

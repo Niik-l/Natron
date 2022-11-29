@@ -32,7 +32,7 @@
 #if !defined(Q_MOC_RUN) && !defined(SBK_RUN)
 #include <boost/crc.hpp>
 #endif
-#include <QtCore/QString>
+#include <QString>
 
 #include "Engine/Node.h"
 

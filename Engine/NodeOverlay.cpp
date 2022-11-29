@@ -25,7 +25,7 @@
 
 #include "NodePrivate.h"
 
-#include <QtCore/QThread>
+#include <QThread>
 
 #include "Engine/EffectInstance.h"
 #include "Engine/KnobTypes.h"

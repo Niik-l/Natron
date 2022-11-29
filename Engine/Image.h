@@ -36,9 +36,9 @@
 #include "Global/GlobalDefines.h"
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QHash>
+#include <QHash>
 CLANG_DIAG_ON(deprecated)
-#include <QtCore/QReadWriteLock>
+#include <QReadWriteLock>
 
 #include "Engine/ImageKey.h"
 #include "Engine/ImagePlaneDesc.h"

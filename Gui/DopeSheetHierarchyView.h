@@ -33,10 +33,10 @@
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
 
-#include <QtCore/QtGlobal>
+#include <QtGlobal>
 
-#include <QtWidgets/QTreeWidget>
-#include <QtWidgets/QStyledItemDelegate>
+#include <QTreeWidget>
+#include <QStyledItemDelegate>
 
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)

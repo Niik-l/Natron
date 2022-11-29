@@ -30,10 +30,10 @@
 #include <stdexcept>
 #include <iostream>
 
-#include <QtNetwork/QLocalSocket>
-#include <QtCore/QMutex>
-#include <QtCore/QWaitCondition>
-#include <QtCore/QDebug>
+#include <QLocalSocket>
+#include <QMutex>
+#include <QWaitCondition>
+#include <QDebug>
 
 #ifdef DEBUG
 #include "Global/FloatingPointExceptions.h"

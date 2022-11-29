@@ -34,7 +34,7 @@
 #include <QFont>
 #include <QStyleOption>
 #include <QFontMetrics>
-#include <QtCore/QDebug>
+#include <QDebug>
 #include <QPainter>
 #include <QPainterPath>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF

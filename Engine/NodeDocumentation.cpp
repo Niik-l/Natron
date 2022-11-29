@@ -25,8 +25,8 @@
 
 #include "NodePrivate.h"
 
-#include <QtCore/QTextStream>
-#include <QtCore/QFile>
+#include <QTextStream>
+#include <QFile>
 
 #include "Engine/EffectInstance.h"
 #include "Engine/KnobTypes.h"

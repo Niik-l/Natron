@@ -33,10 +33,10 @@
 #include <utility>
 #include <stdexcept>
 
-#include <QtCore/QtGlobal> // for Q_OS_*
-#include <QtCore/QDebug>
-#include <QtCore/QThread>
-#include <QtCore/QTimer>
+#include <QtGlobal> // for Q_OS_*
+#include <QDebug>
+#include <QThread>
+#include <QTimer>
 
 #include <QApplication> // qApp
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
@@ -58,7 +58,7 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include <QCheckBox>
 #include <QTreeView>
 #ifdef Q_WS_X11
-#include <QtGui/QX11Info>
+#include <QX11Info>
 #endif
 
 #include "Global/QtCompat.h"

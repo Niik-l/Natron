@@ -36,7 +36,7 @@
 #include <ofxParametricParam.h>
 #include <ofxNatron.h>
 
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #include "Global/GlobalDefines.h"
 #include "Engine/AppManager.h"

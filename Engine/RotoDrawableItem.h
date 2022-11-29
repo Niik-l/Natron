@@ -34,9 +34,9 @@
 
 // clang-format off
 CLANG_DIAG_OFF(deprecated-declarations)
-#include <QtCore/QObject>
-#include <QtCore/QMutex>
-#include <QtCore/QMetaType>
+#include <QObject>
+#include <QMutex>
+#include <QMetaType>
 CLANG_DIAG_ON(deprecated-declarations)
 // clang-format on
 

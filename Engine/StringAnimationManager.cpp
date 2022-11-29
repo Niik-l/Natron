@@ -30,7 +30,7 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QMutex>
+#include <QMutex>
 
 #include <ofxParam.h>
 #include <ofxhPropertySuite.h> // PropSpec

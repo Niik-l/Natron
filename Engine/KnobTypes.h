@@ -33,14 +33,14 @@
 #include <map>
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QCoreApplication>
-#include <QtCore/QObject>
+#include <QCoreApplication>
+#include <QObject>
 CLANG_DIAG_ON(deprecated)
 GCC_ONLY_DIAG_OFF(class-memaccess)
-#include <QtCore/QVector>
+#include <QVector>
 GCC_ONLY_DIAG_ON(class-memaccess)
-#include <QtCore/QMutex>
-#include <QtCore/QString>
+#include <QMutex>
+#include <QString>
 
 #include "Global/GlobalDefines.h"
 #include "Engine/Knob.h"

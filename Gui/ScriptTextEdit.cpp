@@ -33,8 +33,8 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QScrollBar>
 #include <QTextBlock>
 #include <QPainter>
-#include <QtCore/QRegExp>
-#include <QtCore/QMimeData>
+#include <QRegExp>
+#include <QMimeData>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

@@ -32,8 +32,8 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QLineF>
-#include <QtCore/QDebug>
+#include <QLineF>
+#include <QDebug>
 
 #include "Engine/AppInstance.h"
 #include "Engine/BezierCP.h"

@@ -29,7 +29,7 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #include <QApplication>
 #include <QCheckBox>

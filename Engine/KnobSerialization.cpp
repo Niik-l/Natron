@@ -31,8 +31,8 @@
 
 #include <ofxNatron.h>
 
-#include <QtCore/QDateTime>
-#include <QtCore/QDebug>
+#include <QDateTime>
+#include <QDebug>
 
 #include <ofxNatron.h>
 

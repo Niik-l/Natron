@@ -44,13 +44,13 @@
 #include "Global/StrUtils.h"
 
 GCC_DIAG_OFF(deprecated)
-#include <QtCore/QMutex>
-#include <QtCore/QThread>
-#include <QtCore/QWaitCondition>
-#include <QtCore/QMutexLocker>
-#include <QtCore/QObject>
-#include <QtCore/QBuffer>
-#include <QtCore/QRunnable>
+#include <QMutex>
+#include <QThread>
+#include <QWaitCondition>
+#include <QMutexLocker>
+#include <QObject>
+#include <QBuffer>
+#include <QRunnable>
 GCC_DIAG_ON(deprecated)
 
 #include "Engine/AppManager.h" //for access to settings

@@ -30,8 +30,8 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QObject> // QObject
-#include <QtGui/QColor> // QColor
+#include <QObject> // QObject
+#include <QColor> // QColor
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

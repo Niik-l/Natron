@@ -35,7 +35,7 @@
 #include <stdexcept>
 #include <map>
 
-#include <QtCore/QString>
+#include <QString>
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QFormLayout>
@@ -50,7 +50,7 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include <QColorDialog>
 #include <QGroupBox>
-#include <QtGui/QVector4D>
+#include <QVector4D>
 #include <QStyleFactory>
 #include <QComboBox>
 #include <QDialogButtonBox>

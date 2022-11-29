@@ -33,12 +33,12 @@
 #include <utility>
 #include <stdexcept>
 
-#include <QtCore/QDebug>
-#include <QtCore/QDir>
-#include <QtCore/QFileInfo>
-#include <QtCore/QSettings>
+#include <QDebug>
+#include <QDir>
+#include <QFileInfo>
+#include <QSettings>
 
-#include <QtGui/QScreen>
+#include <QScreen>
 
 #include <QAction>
 #include <QApplication> // qApp

@@ -32,7 +32,7 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QMutex>
+#include <QMutex>
 #include <QFrame>
 #include <QTabWidget>
 #include <QDialog>

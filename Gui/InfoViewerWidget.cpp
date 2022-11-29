@@ -28,12 +28,12 @@
 #include <cstdlib>
 #include <stdexcept>
 
-#include <QtGui/QImage>
+#include <QImage>
 #include <QHBoxLayout>
-#include <QtCore/QThread>
+#include <QThread>
 #include <QPaintEvent>
 #include <QPainter>
-#include <QtCore/QCoreApplication>
+#include <QCoreApplication>
 
 #include "Engine/ViewerInstance.h"
 #include "Engine/Lut.h"

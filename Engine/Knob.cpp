@@ -32,12 +32,12 @@
 #include <sstream> // stringstream
 #include <cctype> // isspace
 
-#include <QtCore/QDataStream>
-#include <QtCore/QDateTime>
-#include <QtCore/QByteArray>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QThread>
-#include <QtCore/QDebug>
+#include <QDataStream>
+#include <QDateTime>
+#include <QByteArray>
+#include <QCoreApplication>
+#include <QThread>
+#include <QDebug>
 
 #include "Global/GlobalDefines.h"
 

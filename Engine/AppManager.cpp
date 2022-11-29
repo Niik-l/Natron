@@ -56,7 +56,7 @@
 #include <sstream> // stringstream
 #include <locale>
 
-#include <QtCore/QtGlobal> // for Q_OS_*
+#include <QtGlobal> // for Q_OS_*
 #if defined(Q_OS_LINUX)
 #include <sys/signal.h>
 #ifndef __USE_GNU
@@ -85,17 +85,17 @@
 #include <ceres/version.h>
 #include <openMVG/version.hpp>
 
-#include <QtCore/QDateTime>
-#include <QtCore/QDebug>
-#include <QtCore/QDir>
-#include <QtCore/QTextCodec>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QSettings>
-#include <QtCore/QThreadPool>
-#include <QtCore/QTextStream>
-#include <QtNetwork/QAbstractSocket>
-#include <QtNetwork/QLocalServer>
-#include <QtNetwork/QLocalSocket>
+#include <QDateTime>
+#include <QDebug>
+#include <QDir>
+#include <QTextCodec>
+#include <QCoreApplication>
+#include <QSettings>
+#include <QThreadPool>
+#include <QTextStream>
+#include <QAbstractSocket>
+#include <QLocalServer>
+#include <QLocalSocket>
 
 
 #include "Global/ProcInfo.h"

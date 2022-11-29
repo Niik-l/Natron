@@ -29,16 +29,16 @@
 
 #include <QApplication> // qApp
 #include <QColorDialog>
-#include <QtCore/QSize>
-#include <QtCore/QTimer>
+#include <QSize>
+#include <QTimer>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 // /opt/local/include/QtGui/qmime.h:119:10: warning: private field 'type' is not used [-Wunused-private-field]
 #include <QMouseEvent>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include <QHBoxLayout>
 #include <QVBoxLayout>
-#include <QtCore/QFile>
-#include <QtCore/QTextStream>
+#include <QFile>
+#include <QTextStream>
 #include <QDesktopServices>
 #include <QTextDocument>
 

@@ -32,7 +32,7 @@
 #include <fstream>
 #include <stdexcept>
 
-#include <QtWidgets/QStyle>
+#include <QStyle>
 
 #include "Global/FStreamsSupport.h"
 

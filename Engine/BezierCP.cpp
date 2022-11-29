@@ -34,9 +34,9 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QThread>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QDebug>
+#include <QThread>
+#include <QCoreApplication>
+#include <QDebug>
 
 #include "Engine/Bezier.h"
 #include "Engine/KnobTypes.h"

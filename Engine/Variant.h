@@ -29,12 +29,12 @@
 #include "Global/Macros.h"
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QVariant>
-#include <QtCore/QMetaType>
-#include <QtCore/QDataStream>
-#include <QtCore/QByteArray>
-#include <QtCore/QString>
-#include <QtCore/QStringList>
+#include <QVariant>
+#include <QMetaType>
+#include <QDataStream>
+#include <QByteArray>
+#include <QString>
+#include <QStringList>
 CLANG_DIAG_ON(deprecated)
 
 #include "Engine/EngineFwd.h"

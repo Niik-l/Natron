@@ -19,7 +19,7 @@
 
 #include "Gui/Gui.h"
 
-#include <QtCore/QtGlobal> // for Q_OS_*
+#include <QtGlobal> // for Q_OS_*
 #ifdef Q_OS_DARWIN
 
 #include <AppKit/NSView.h>

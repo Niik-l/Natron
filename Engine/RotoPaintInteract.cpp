@@ -28,7 +28,7 @@
 
 #include <limits>
 
-#include <QtCore/QLineF>
+#include <QLineF>
 
 #include "Global/GLIncludes.h"
 #include "Engine/KnobTypes.h"

@@ -33,7 +33,7 @@
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QThread>
+#include <QThread>
 #include <QVBoxLayout>
 #include <QKeyEvent>
 #include <QApplication>

@@ -30,9 +30,9 @@
 #include <limits>
 #include <stdexcept>
 
-#include <QtCore/QThread>
+#include <QThread>
 #include <QApplication>
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #include "Engine/Bezier.h"
 #include "Engine/TimeLine.h"

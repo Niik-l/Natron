@@ -29,7 +29,7 @@
 #include <cmath>
 #include <stdexcept>
 
-#include <QtCore/QSize>
+#include <QSize>
 #include <QPainter>
 #include <QApplication>
 #include <QGraphicsScene>

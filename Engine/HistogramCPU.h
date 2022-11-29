@@ -30,7 +30,7 @@
 
 #include <vector>
 
-#include <QtCore/QThread>
+#include <QThread>
 
 #include "Engine/EngineFwd.h"
 

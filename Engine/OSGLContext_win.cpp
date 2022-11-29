@@ -29,7 +29,7 @@
 #include <iostream> // std::cerr
 #include <sstream> // stringstream
 
-#include <QtCore/QtGlobal>      // for Q_UNUSED
+#include <QtGlobal>      // for Q_UNUSED
 
 #include "Engine/AppManager.h"
 #include "Engine/MemoryInfo.h" // isApplication32Bits

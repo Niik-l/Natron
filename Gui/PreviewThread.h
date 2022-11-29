@@ -28,7 +28,7 @@
 
 #include "Global/Macros.h"
 
-#include <QtCore/QThread>
+#include <QThread>
 
 #include "Engine/GenericSchedulerThread.h"
 

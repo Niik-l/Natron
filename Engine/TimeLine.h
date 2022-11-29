@@ -31,8 +31,8 @@
 #include <list>
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QMutex>
-#include <QtCore/QObject>
+#include <QMutex>
+#include <QObject>
 CLANG_DIAG_ON(deprecated)
 
 #include "Global/GlobalDefines.h"

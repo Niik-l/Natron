@@ -29,8 +29,8 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QMutex>
-#include <QtCore/QWaitCondition>
+#include <QMutex>
+#include <QWaitCondition>
 
 #ifdef DEBUG
 #include "Global/FloatingPointExceptions.h"

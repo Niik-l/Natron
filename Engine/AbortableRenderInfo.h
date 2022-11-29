@@ -30,7 +30,7 @@
 
 #include "Global/GlobalDefines.h"
 
-#include <QtCore/QObject>
+#include <QObject>
 
 #include "Engine/EngineFwd.h"
 

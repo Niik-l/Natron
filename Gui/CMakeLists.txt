@@ -37,9 +37,6 @@ set(shiboken_args
     ${PYGUI_INCS}
     "-T../Engine" "-T${PYSIDE_TYPESYSTEMS}" "--output-directory=${PYGUI_OUT}"
     "${PYGUI_HEADER}" "typesystem_natronGui.xml")
-if(APPLE)
-   list(APPEND shiboken_args -I${Qt5_DIR}/../../../include)
-endif()
 
 execute_process(COMMAND ${Python3_EXECUTABLE} ../tools/utils/sourceList.py typesystem_natronGui.xml ${PYGUI_OUT}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}

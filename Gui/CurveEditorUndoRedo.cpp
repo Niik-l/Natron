@@ -28,7 +28,7 @@
 #include <cmath>
 #include <stdexcept>
 
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #include "Global/GlobalDefines.h"
 

@@ -28,13 +28,13 @@
 
 #include <cassert>
 #include <stdexcept>
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #include <QApplication>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 // /opt/local/include/QtGui/qmime.h:119:10: warning: private field 'type' is not used [-Wunused-private-field]
-#include <QtGui/QKeyEvent>
-#include <QtCore/QTimer>
+#include <QKeyEvent>
+#include <QTimer>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 
 #include "Engine/Node.h"

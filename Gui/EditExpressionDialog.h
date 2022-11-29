@@ -31,7 +31,7 @@
 #include <list>
 #include <utility>
 
-#include <QtCore/QString>
+#include <QString>
 
 #include "Gui/EditScriptDialog.h"
 #include "Gui/GuiFwd.h"

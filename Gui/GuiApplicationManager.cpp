@@ -30,9 +30,9 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QtGlobal> // for Q_OS_*
-#include <QtCore/QDebug>
-#include <QtCore/QSettings>
+#include <QtGlobal> // for Q_OS_*
+#include <QDebug>
+#include <QSettings>
 #include <QPixmapCache>
 #include <QApplication>
 #include <QFontDatabase>

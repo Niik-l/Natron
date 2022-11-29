@@ -38,7 +38,7 @@
 #include "Gui/GuiFwd.h"
 #include "Engine/OfxOverlayInteract.h"
 
-#include <QtCore/QSize>
+#include <QSize>
 
 #define CURVEWIDGET_DERIVATIVE_ROUND_PRECISION 3
 

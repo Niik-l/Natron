@@ -48,10 +48,10 @@
 #undef isalpha
 #undef isalnum
 
-#include <QtCore/QtGlobal>
-#include <QtCore/QString>
+#include <QtGlobal>
+#include <QString>
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QMetaType>
+#include <QMetaType>
 CLANG_DIAG_ON(deprecated)
 #include "Global/Enums.h"
 

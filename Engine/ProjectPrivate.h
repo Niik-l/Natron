@@ -33,12 +33,12 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QCoreApplication>
-#include <QtCore/QDateTime>
-#include <QtCore/QString>
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QString>
 #include <QFuture>
 #include <QFutureWatcher>
-#include <QtCore/QMutex>
+#include <QMutex>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

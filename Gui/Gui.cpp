@@ -28,8 +28,8 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QtGlobal> // for Q_OS_*
-#include <QtCore/QDebug>
+#include <QtGlobal> // for Q_OS_*
+#include <QDebug>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 // /opt/local/include/QtGui/qmime.h:119:10: warning: private field 'type' is not used [-Wunused-private-field]
 #include <QCloseEvent>
@@ -38,7 +38,7 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include <QMenuBar>
 #include <QUndoGroup>
 #include <QDesktopServices>
-#include <QtCore/QUrl>
+#include <QUrl>
 
 #include "Engine/Node.h"
 #include "Engine/Project.h"

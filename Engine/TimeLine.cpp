@@ -29,8 +29,8 @@
 #include <stdexcept>
 
 #ifndef NDEBUG
-#include <QtCore/QThread>
-#include <QtCore/QCoreApplication>
+#include <QThread>
+#include <QCoreApplication>
 #endif
 
 #include "Engine/Project.h"

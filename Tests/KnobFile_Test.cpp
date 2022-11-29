@@ -27,8 +27,8 @@
 
 #include <gtest/gtest.h>
 
-#include <QtCore/QString>
-#include <QtCore/QDir>
+#include <QString>
+#include <QDir>
 
 #include <QRandomGenerator>
 

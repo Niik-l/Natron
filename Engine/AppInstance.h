@@ -35,9 +35,9 @@
 #include <limits>
 #include <cstddef>              // for NULL
 
-#include <QtCore/QtGlobal>      // for Q_UNUSED
-#include <QtCore/QObject>  // for Q_OBJECT, Q_SIGNALS, Q_SLOTS
-#include <QtCore/QMutex>
+#include <QtGlobal>      // for Q_UNUSED
+#include <QObject>  // for Q_OBJECT, Q_SIGNALS, Q_SLOTS
+#include <QMutex>
 
 #include "Global/GlobalDefines.h"
 #include "Engine/RectD.h"

@@ -29,7 +29,7 @@
 
 #include <QFormLayout> // in QtGui on Qt4, in QtWidgets on Qt5
 #include <QHBoxLayout> // in QtGui on Qt4, in QtWidgets on Qt5
-#include <QtCore/QDebug>
+#include <QDebug>
 #include <QItemSelectionModel>
 #include <QHeaderView>
 #include <QPainter>

@@ -30,15 +30,15 @@
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
 #include <QVBoxLayout>
-#include <QtCore/QStringList>
+#include <QStringList>
 #include <QKeyEvent>
 #include <QAbstractItemView>
-#include <QtCore/QTimer>
+#include <QTimer>
 #include <QApplication>
 #include <QListView>
 #include <QSettings>
 #include <QDesktopWidget>
-#include <QtCore/QRegExp>
+#include <QRegExp>
 #include <QApplication>
 #include <QStringListModel>
 CLANG_DIAG_ON(deprecated)

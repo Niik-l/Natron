@@ -33,8 +33,8 @@
 #include <vector>
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QStringList>
-#include <QtCore/QMutex>
+#include <QStringList>
+#include <QMutex>
 CLANG_DIAG_ON(deprecated)
 
 

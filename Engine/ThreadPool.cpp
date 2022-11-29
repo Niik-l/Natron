@@ -28,10 +28,10 @@
 #include <string>
 #include <sstream> // stringstream
 
-#include <QtCore/QAtomicInt>
-#include <QtCore/QMutex>
-#include <QtCore/QThread>
-#include <QtCore/QThreadPool>
+#include <QAtomicInt>
+#include <QMutex>
+#include <QThread>
+#include <QThreadPool>
 
 #include "Engine/AbortableRenderInfo.h"
 #include "Engine/Node.h"

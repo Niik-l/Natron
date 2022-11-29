@@ -45,11 +45,11 @@
 #include <windows.h>
 #endif
 
-#include <QtCore/QFile>
-#include <QtCore/QMutex>
-#include <QtCore/QReadWriteLock>
-#include <QtCore/QDir>
-#include <QtCore/QDebug>
+#include <QFile>
+#include <QMutex>
+#include <QReadWriteLock>
+#include <QDir>
+#include <QDebug>
 
 #ifdef DEBUG
 #include <SequenceParsing.h> // for removePath

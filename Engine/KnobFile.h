@@ -32,10 +32,10 @@
 #include <map>
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QObject>
+#include <QObject>
 CLANG_DIAG_ON(deprecated)
-#include <QtCore/QMutex>
-#include <QtCore/QString>
+#include <QMutex>
+#include <QString>
 
 #include "Engine/KnobTypes.h"
 #include "Engine/ViewIdx.h"

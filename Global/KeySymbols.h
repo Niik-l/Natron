@@ -21,7 +21,7 @@
 #define KEYSYMBOLS_H
 
 #include <ofxKeySyms.h>
-#include <QtCore/QFlags>
+#include <QFlags>
 NATRON_NAMESPACE_ENTER
 enum Key
 {

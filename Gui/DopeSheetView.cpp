@@ -33,7 +33,7 @@
 #include <QApplication>
 #include <QMouseEvent>
 #include <QScrollBar>
-#include <QtCore/QThread>
+#include <QThread>
 #include <QToolButton>
 
 #include <QWindow>

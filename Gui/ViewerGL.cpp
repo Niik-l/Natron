@@ -34,16 +34,16 @@
 
 #include "Global/GLIncludes.h" //!<must be included before QGlWidget because of gl.h and glew.h
 
-#include <QtWidgets/QMenu>
-#include <QtWidgets/QToolButton>
-#include <QtWidgets/QApplication> // qApp
+#include <QMenu>
+#include <QToolButton>
+#include <QApplication> // qApp
 #include <QScreen>
 #include <QWindow>
 
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 // /opt/local/include/QtGui/qmime.h:119:10: warning: private field 'type' is not used [-Wunused-private-field]
-#include <QtGui/QKeyEvent>
-#include <QtGui/QMouseEvent>
+#include <QKeyEvent>
+#include <QMouseEvent>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include <QTreeWidget>
 #include <QTabBar>

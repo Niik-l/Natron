@@ -30,8 +30,8 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QDateTime>
-#include <QtCore/QLocale>
+#include <QDateTime>
+#include <QLocale>
 #include <QVBoxLayout>
 #include <QScrollBar>
 #include <QTextBrowser>

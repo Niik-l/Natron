@@ -30,16 +30,16 @@
 #include <algorithm> // min, max
 #include <stdexcept>
 
-#include <QtCore/QTextStream>
-#include <QtCore/QWaitCondition>
-#include <QtCore/QMutex>
-#include <QtCore/QCoreApplication>
+#include <QTextStream>
+#include <QWaitCondition>
+#include <QMutex>
+#include <QCoreApplication>
 #include <QAction>
 #include <QSettings>
-#include <QtCore/QDebug>
-#include <QtCore/QThread>
+#include <QDebug>
+#include <QThread>
 #include <QCheckBox>
-#include <QtCore/QTimer>
+#include <QTimer>
 #include <QTextEdit>
 
 #include <QScreen>

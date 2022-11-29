@@ -31,7 +31,7 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QTextStream>
+#include <QTextStream>
 #include <QGridLayout>
 #include <QTextEdit>
 CLANG_DIAG_ON(deprecated)

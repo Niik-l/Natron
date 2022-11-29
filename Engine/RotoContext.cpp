@@ -34,8 +34,8 @@
 #include <cstring> // for std::memcpy, std::memset
 #include <sstream> // stringstream
 
-#include <QtCore/QLineF>
-#include <QtCore/QDebug>
+#include <QLineF>
+#include <QDebug>
 
 //#define ROTO_RENDER_TRIANGLES_ONLY
 

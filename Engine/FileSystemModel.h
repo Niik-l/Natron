@@ -30,9 +30,9 @@
 
 #include <map>
 
-#include <QtCore/QThread>
-#include <QtCore/QAbstractItemModel>
-#include <QtCore/QDir>
+#include <QThread>
+#include <QAbstractItemModel>
+#include <QDir>
 
 #include "Global/GlobalDefines.h"
 #include "Engine/EngineFwd.h"

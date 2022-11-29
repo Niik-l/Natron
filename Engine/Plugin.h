@@ -32,9 +32,9 @@
 #include <set>
 #include <map>
 #include <list>
-#include <QtCore/QString>
-#include <QtCore/QStringList>
-#include <QtCore/QRecursiveMutex>
+#include <QString>
+#include <QStringList>
+#include <QRecursiveMutex>
 
 #include "Global/Enums.h"
 #include "Engine/EngineFwd.h"

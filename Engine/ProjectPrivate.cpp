@@ -30,11 +30,11 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QDebug>
-#include <QtCore/QTimer>
-#include <QtCore/QDateTime>
-#include <QtCore/QFile>
-#include <QtCore/QDir>
+#include <QDebug>
+#include <QTimer>
+#include <QDateTime>
+#include <QFile>
+#include <QDir>
 
 #include "Global/PythonUtils.h"
 

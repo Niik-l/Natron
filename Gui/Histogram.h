@@ -31,7 +31,7 @@
 #include "Global/GLIncludes.h" //!<must be included before QGlWidget because of gl.h and glew.h
 
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QSize>
+#include <QSize>
 CLANG_DIAG_ON(uninitialized)
 
 #include <QOpenGLWidget>

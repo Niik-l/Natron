@@ -28,13 +28,13 @@
 #include <bitset>
 #include <stdexcept>
 
-#include <QtCore/QCoreApplication>
+#include <QCoreApplication>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QCheckBox>
 #include <QItemSelectionModel>
-#include <QtCore/QRegExp>
+#include <QRegExp>
 
 #include "Engine/Node.h"
 #include "Engine/Timer.h"

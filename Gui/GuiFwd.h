@@ -36,7 +36,7 @@
 #endif
 
 // Qt
-#include <QtCore/QtGlobal>
+#include <QtGlobal>
 
 class QAbstractButton;
 class QAction;

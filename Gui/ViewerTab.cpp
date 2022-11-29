@@ -29,8 +29,8 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QDebug>
-#include <QtCore/QTimer>
+#include <QDebug>
+#include <QTimer>
 
 #include <QAction>
 #include <QVBoxLayout>

@@ -33,7 +33,7 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QObject>
+#include <QObject>
 #include <QStyledItemDelegate>
 #include <QTextEdit>
 CLANG_DIAG_ON(deprecated)

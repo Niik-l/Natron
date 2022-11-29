@@ -41,9 +41,9 @@
 #endif
 
 
-#include <QtCore/QString>
-#include <QtCore/QObject>
-#include <QtCore/QMutex>
+#include <QString>
+#include <QObject>
+#include <QMutex>
 
 #include "Engine/EngineFwd.h"
 

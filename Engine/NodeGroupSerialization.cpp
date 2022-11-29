@@ -28,8 +28,8 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QDateTime>
-#include <QtCore/QFileInfo>
+#include <QDateTime>
+#include <QFileInfo>
 
 #include "Engine/AppManager.h"
 #include "Engine/CreateNodeArgs.h"

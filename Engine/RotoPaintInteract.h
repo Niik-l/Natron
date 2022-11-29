@@ -29,8 +29,8 @@
 #include "Global/Macros.h"
 
 #include <list>
-#include <QtCore/QPointF>
-#include <QtCore/QRectF>
+#include <QPointF>
+#include <QRectF>
 
 #include <ofxNatron.h>
 

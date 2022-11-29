@@ -28,8 +28,8 @@
 
 #include "Global/Macros.h"
 
-#include <QtCore/QMutex>
-#include <QtCore/QWaitCondition>
+#include <QMutex>
+#include <QWaitCondition>
 
 #include "Engine/EngineFwd.h"
 

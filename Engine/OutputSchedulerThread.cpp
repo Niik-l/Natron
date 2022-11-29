@@ -34,15 +34,15 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QMetaType>
-#include <QtCore/QMutex>
-#include <QtCore/QWaitCondition>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QString>
-#include <QtCore/QThreadPool>
-#include <QtCore/QDebug>
-#include <QtCore/QTextStream>
-#include <QtCore/QRunnable>
+#include <QMetaType>
+#include <QMutex>
+#include <QWaitCondition>
+#include <QCoreApplication>
+#include <QString>
+#include <QThreadPool>
+#include <QDebug>
+#include <QTextStream>
+#include <QRunnable>
 
 #include "Global/MathUtils.h"
 #ifdef DEBUG

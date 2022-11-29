@@ -28,16 +28,16 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QtGlobal> // for Q_OS_*
-#include <QtCore/QProcess>
-#include <QtNetwork/QLocalServer>
-#include <QtNetwork/QLocalSocket>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QTemporaryFile>
-#include <QtCore/QWaitCondition>
-#include <QtCore/QMutex>
-#include <QtCore/QDir>
-#include <QtCore/QDebug>
+#include <QtGlobal> // for Q_OS_*
+#include <QProcess>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QCoreApplication>
+#include <QTemporaryFile>
+#include <QWaitCondition>
+#include <QMutex>
+#include <QDir>
+#include <QDebug>
 
 #ifdef DEBUG
 #include "Global/FloatingPointExceptions.h"

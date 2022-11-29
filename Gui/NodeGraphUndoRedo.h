@@ -32,8 +32,8 @@
 #include <vector>
 #include <map>
 
-#include <QtCore/QPointF>
-#include <QtCore/QCoreApplication>
+#include <QPointF>
+#include <QCoreApplication>
 #include <QUndoCommand>
 
 #include "Global/GlobalDefines.h"

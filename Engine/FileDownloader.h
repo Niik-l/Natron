@@ -30,7 +30,7 @@
 
 // clang-format off
 CLANG_DIAG_OFF(deprecated-register) //'register' storage class specifier is deprecated
-#include <QtCore/QObject>
+#include <QObject>
 CLANG_DIAG_ON(deprecated-register)
 // clang-format on
 

@@ -33,10 +33,10 @@
 #include <utility>
 #include <stdexcept>
 
-#include <QtCore/QTextStream>
-#include <QtCore/QSettings>
-#include <QtCore/QFile>
-#include <QtCore/QFileInfo>
+#include <QTextStream>
+#include <QSettings>
+#include <QFile>
+#include <QFileInfo>
 
 #include <QAction>
 #include <QApplication>

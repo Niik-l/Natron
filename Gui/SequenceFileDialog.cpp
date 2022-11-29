@@ -25,12 +25,12 @@
 
 #include "SequenceFileDialog.h"
 
-#include <QtCore/QtGlobal> // for Q_OS_*
+#include <QtGlobal> // for Q_OS_*
 #if defined(Q_OS_UNIX)
 #include <pwd.h>
 #include <unistd.h> // for pathconf() on OS X
 #elif defined(Q_OS_WIN)
-#  include <QtCore/qt_windows.h>
+#  include <qt_windows.h>
 #endif
 #include <cassert>
 #include <locale>
@@ -42,7 +42,7 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QMessageBox>
-#include <QtGui/QPainter>
+#include <QPainter>
 #include <QListView>
 #include <QHeaderView>
 #include <QCheckBox>
@@ -50,7 +50,7 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QFileSystemModel>
 //#include <QInputDialog>
 #include <QSplitter>
-#include <QtGui/QIcon>
+#include <QIcon>
 #include <QDialog>
 #include <QScrollBar>
 #include <QFileDialog>
@@ -58,19 +58,19 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QFileIconProvider>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 // /opt/local/include/QtGui/qmime.h:119:10: warning: private field 'type' is not used [-Wunused-private-field]
-#include <QtGui/QKeyEvent>
+#include <QKeyEvent>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
-#include <QtGui/QColor>
-#include <QtWidgets/QAction>
-#include <QtWidgets/QApplication>
-#include <QtWidgets/QStylePainter>
-#include <QtWidgets/QStyleOptionViewItem>
+#include <QColor>
+#include <QAction>
+#include <QApplication>
+#include <QStylePainter>
+#include <QStyleOptionViewItem>
 #include <QStandardPaths>
-#include <QtCore/QDebug>
-#include <QtCore/QEvent>
-#include <QtCore/QMimeData>
+#include <QDebug>
+#include <QEvent>
+#include <QMimeData>
 #include <QtConcurrentRun> // QtCore on Qt4, QtConcurrent on Qt5
-#include <QtCore/QSettings>
+#include <QSettings>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

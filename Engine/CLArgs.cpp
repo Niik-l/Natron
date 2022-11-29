@@ -35,10 +35,10 @@
 #include <shellapi.h>  // CommandLineToArgvW
 #endif
 
-#include <QtCore/QCoreApplication>
-#include <QtCore/QDebug>
-#include <QtCore/QFile>
-#include <QtCore/QFileInfo>
+#include <QCoreApplication>
+#include <QDebug>
+#include <QFile>
+#include <QFileInfo>
 
 #include "Global/GlobalDefines.h"
 #include "Global/GitVersion.h"

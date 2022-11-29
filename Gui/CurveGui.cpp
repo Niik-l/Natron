@@ -30,10 +30,10 @@
 #include <limits>
 #include <stdexcept>
 
-#include <QtCore/QThread>
-#include <QtCore/QObject>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QDebug>
+#include <QThread>
+#include <QObject>
+#include <QCoreApplication>
+#include <QDebug>
 
 #include "Engine/Bezier.h"
 #include "Engine/Knob.h"

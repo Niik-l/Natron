@@ -29,9 +29,9 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QDebug>
-#include <QtCore/QMutex>
-#include <QtCore/QWaitCondition>
+#include <QDebug>
+#include <QMutex>
+#include <QWaitCondition>
 
 #include "Engine/AppManager.h"
 

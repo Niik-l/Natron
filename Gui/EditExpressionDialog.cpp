@@ -29,14 +29,14 @@
 #include <cfloat>
 #include <stdexcept>
 
-#include <QtCore/QString>
+#include <QString>
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QFormLayout>
 #include <QFileDialog>
 #include <QTextEdit>
 #include <QStyle> // in QtGui on Qt4, in QtWidgets on Qt5
-#include <QtCore/QTimer>
+#include <QTimer>
 
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 // /opt/local/include/QtGui/qmime.h:119:10: warning: private field 'type' is not used [-Wunused-private-field]
@@ -44,7 +44,7 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include <QColorDialog>
 #include <QGroupBox>
-#include <QtGui/QVector4D>
+#include <QVector4D>
 #include <QStyleFactory>
 #include <QCompleter>
 

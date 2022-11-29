@@ -31,11 +31,11 @@
 
 #include "Global/GLIncludes.h" //!<must be included before QGlWidget because of gl.h and glew.h
 
-#include <QtCore/QDebug>
+#include <QDebug>
 
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 // /opt/local/include/QtGui/qmime.h:119:10: warning: private field 'type' is not used [-Wunused-private-field]
-#include <QtGui/QKeyEvent>
+#include <QKeyEvent>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 
 #include "Engine/Node.h"

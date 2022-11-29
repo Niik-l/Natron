@@ -29,8 +29,8 @@
 
 #include "BaseTest.h"
 
-#include <QtCore/QFile>
-#include <QtCore/QThreadPool>
+#include <QFile>
+#include <QThreadPool>
 
 // ofxhPropertySuite.h:565:37: warning: 'this' pointer cannot be null in well-defined C++ code; comparison may be assumed to always evaluate to true [-Wtautological-undefined-compare]
 // clang-format off

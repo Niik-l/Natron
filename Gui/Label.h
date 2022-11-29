@@ -30,7 +30,7 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QObject>
+#include <QObject>
 #include <QLabel> // in QtGui on Qt4, in QtWidgets on Qt5
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)

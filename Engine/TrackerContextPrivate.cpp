@@ -31,7 +31,7 @@
 #include <omp.h>
 #endif
 
-#include <QtCore/QThreadPool>
+#include <QThreadPool>
 
 #include "Engine/AppInstance.h"
 #include "Engine/Curve.h"

@@ -30,8 +30,8 @@
 
 #include <vector>
 
-#include <QtCore/QThread>
-#include <QtCore/QMutex>
+#include <QThread>
+#include <QMutex>
 
 #include "Global/GlobalDefines.h"
 

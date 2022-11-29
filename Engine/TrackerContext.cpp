@@ -31,9 +31,9 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QWaitCondition>
-#include <QtCore/QThread>
-#include <QtCore/QCoreApplication>
+#include <QWaitCondition>
+#include <QThread>
+#include <QCoreApplication>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

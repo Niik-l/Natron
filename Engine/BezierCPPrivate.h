@@ -28,8 +28,8 @@
 
 #include "Global/Macros.h"
 
-#include <QtCore/QMutex>
-#include <QtCore/QReadWriteLock>
+#include <QMutex>
+#include <QReadWriteLock>
 
 #include "Engine/Curve.h"
 #include "Engine/EngineFwd.h"

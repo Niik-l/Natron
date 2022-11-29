@@ -30,7 +30,7 @@
 
 #include <cstdlib> // for std::atexit()
 
-#include <QtCore/QMutexLocker>
+#include <QMutexLocker>
 
 #include "Engine/EngineFwd.h"
 

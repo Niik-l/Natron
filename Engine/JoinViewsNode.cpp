@@ -25,7 +25,7 @@
 
 #include "JoinViewsNode.h"
 
-#include <QtCore/QMutex>
+#include <QMutex>
 
 #include "Engine/AppInstance.h"
 #include "Engine/Project.h"

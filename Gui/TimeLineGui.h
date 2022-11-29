@@ -33,9 +33,9 @@
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
 #include "Global/GLIncludes.h" //!<must be included before QGlWidget because of gl.h and glew.h
-#include <QtCore/QList>
-#include <QtCore/QPointF>
-#include <QtCore/QSize>
+#include <QList>
+#include <QPointF>
+#include <QSize>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

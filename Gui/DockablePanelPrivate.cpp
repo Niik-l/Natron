@@ -29,7 +29,7 @@
 #include <utility>
 #include <stdexcept>
 
-#include <QtCore/QDebug>
+#include <QDebug>
 #include <QGridLayout>
 #include <QUndoStack>
 #include <QScrollArea>

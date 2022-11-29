@@ -33,11 +33,11 @@
 #include <vector>
 #include <map>
 
-#include <QtCore/QtGlobal> // for Q_OS_*
-#include <QtCore/QMutex>
-#include <QtCore/QString>
-#include <QtCore/QAtomicInt>
-#include <QtCore/QCoreApplication>
+#include <QtGlobal> // for Q_OS_*
+#include <QMutex>
+#include <QString>
+#include <QAtomicInt>
+#include <QCoreApplication>
 
 
 #if defined(Q_OS_LINUX) || defined(Q_OS_FREEBSD)

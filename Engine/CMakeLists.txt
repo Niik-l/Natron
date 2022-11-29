@@ -37,10 +37,7 @@ set(shiboken_args
     "-I." "-I.." "-I../Global" "-I../libs/OpenFX/include" ${PYENGINE_INCS}
     "-T${PYSIDE_TYPESYSTEMS}" "--output-directory=${PYENGINE_OUT}"
     "${PYENGINE_HEADER}" "typesystem_engine.xml")
-if(APPLE)
-    list(PREPEND shiboken_args -I${Qt5_DIR}/../../../include)
- endif()
- 
+
 execute_process(COMMAND ${Python3_EXECUTABLE} ../tools/utils/sourceList.py typesystem_engine.xml ${PYENGINE_OUT}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     OUTPUT_VARIABLE PyEngine_SOURCES)

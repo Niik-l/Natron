@@ -30,9 +30,9 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QStringList>
-#include <QtCore/QMutexLocker>
-#include <QtCore/QDebug>
+#include <QStringList>
+#include <QMutexLocker>
+#include <QDebug>
 
 #include "Engine/EffectInstance.h"
 #include "Engine/Transform.h"

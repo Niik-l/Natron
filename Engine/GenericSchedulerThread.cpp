@@ -25,11 +25,11 @@
 
 #include "GenericSchedulerThread.h"
 
-#include <QtCore/QCoreApplication>
-#include <QtCore/QMutex>
-#include <QtCore/QWaitCondition>
-#include <QtCore/QMetaType>
-#include <QtCore/QDebug>
+#include <QCoreApplication>
+#include <QMutex>
+#include <QWaitCondition>
+#include <QMetaType>
+#include <QDebug>
 
 #ifdef DEBUG
 #include "Global/FloatingPointExceptions.h"

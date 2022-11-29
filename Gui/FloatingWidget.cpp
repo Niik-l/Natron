@@ -29,7 +29,7 @@
 #include <algorithm> // min, max
 #include <stdexcept>
 
-#include <QtCore/QSize>
+#include <QSize>
 #include <QHBoxLayout>
 #include <QApplication> // qApp
 

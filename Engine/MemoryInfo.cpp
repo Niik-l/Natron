@@ -70,10 +70,10 @@
 #  error "Cannot define getPeakRSS( ) or getCurrentRSS( ) for an unknown OS."
 #endif
 
-#include <QtCore/QString>
-#include <QtCore/QLocale>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QDebug>
+#include <QString>
+#include <QLocale>
+#include <QCoreApplication>
+#include <QDebug>
 
 #include "Global/GlobalDefines.h"
 

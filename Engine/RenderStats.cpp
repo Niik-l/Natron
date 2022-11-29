@@ -29,7 +29,7 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QMutex>
+#include <QMutex>
 
 #include "Engine/Node.h"
 #include "Engine/Timer.h"

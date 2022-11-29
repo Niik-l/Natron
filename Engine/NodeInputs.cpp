@@ -26,7 +26,7 @@
 #include "NodePrivate.h"
 
 #include <QDebug>
-#include <QtCore/QThread>
+#include <QThread>
 
 #include "Engine/NodeGroup.h"
 #include "Engine/PrecompNode.h"

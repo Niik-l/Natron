@@ -29,7 +29,7 @@
 #include "Global/Macros.h"
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QObject>
+#include <QObject>
 CLANG_DIAG_ON(deprecated)
 
 #include "Engine/ViewIdx.h"

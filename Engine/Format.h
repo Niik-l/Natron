@@ -31,7 +31,7 @@
 #include <string>
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QMetaType>
+#include <QMetaType>
 CLANG_DIAG_ON(deprecated)
 
 #include "Engine/RectD.h"

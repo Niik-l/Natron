@@ -32,10 +32,10 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QSize>
+#include <QSize>
 #include <QFrame>
-#include <QtGui/QKeySequence>
-#include <QtGui/QIcon>
+#include <QKeySequence>
+#include <QIcon>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

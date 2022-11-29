@@ -28,7 +28,7 @@
 #include <cmath>
 #include <stdexcept>
 
-#include <QtCore/QDebug>
+#include <QDebug>
 #include <QStyleOption>
 
 #include "Engine/Settings.h"

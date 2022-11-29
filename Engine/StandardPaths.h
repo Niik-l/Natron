@@ -28,7 +28,7 @@
 
 #include "Global/Macros.h"
 
-#include <QtCore/QString>
+#include <QString>
 
 #include "Engine/EngineFwd.h"
 

@@ -44,16 +44,16 @@
 #endif
 
 
-#include <QtCore/QCoreApplication>
-#include <QtCore/QTimer>
-#include <QtCore/QThread>
-#include <QtCore/QDir>
-#include <QtCore/QDirIterator>
-#include <QtCore/QTemporaryFile>
-#include <QtCore/QFileInfo>
-#include <QtCore/QDebug>
-#include <QtCore/QTextStream>
-#include <QtNetwork/QHostInfo>
+#include <QCoreApplication>
+#include <QTimer>
+#include <QThread>
+#include <QDir>
+#include <QDirIterator>
+#include <QTemporaryFile>
+#include <QFileInfo>
+#include <QDebug>
+#include <QTextStream>
+#include <QHostInfo>
 #include <QtConcurrentRun> // QtCore on Qt4, QtConcurrent on Qt5
 
 #include <ofxhXml.h> // OFX::XML::escape

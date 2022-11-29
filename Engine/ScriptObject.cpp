@@ -29,7 +29,7 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QMutex>
+#include <QMutex>
 
 NATRON_NAMESPACE_ENTER
 

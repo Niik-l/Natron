@@ -30,10 +30,10 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QDebug>
-#include <QtCore/QByteArray>
-#include <QtCore/QReadWriteLock>
-#include <QtCore/QPointF>
+#include <QDebug>
+#include <QByteArray>
+#include <QReadWriteLock>
+#include <QPointF>
 
 // ofxhPropertySuite.h:565:37: warning: 'this' pointer cannot be null in well-defined C++ code; comparison may be assumed to always evaluate to true [-Wtautological-undefined-compare]
 // clang-format off

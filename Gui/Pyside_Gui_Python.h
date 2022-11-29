@@ -40,7 +40,7 @@
 #include <QSize>
 #include <QObject>
 
-#include <QtGui/qpytextobject.h>
+#include <qpytextobject.h>
 
 //Global
 #include <GlobalDefines.h>

@@ -40,18 +40,18 @@ CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
 // clang-format off
 CLANG_DIAG_OFF(deprecated-register) //'register' storage class specifier is deprecated
-#include <QtCore/QDateTime>
-#include <QtCore/QDir>
-#include <QtCore/QMutex>
-#include <QtCore/QThreadPool>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QDebug>
-#include <QtCore/QTemporaryFile>
+#include <QDateTime>
+#include <QDir>
+#include <QMutex>
+#include <QThreadPool>
+#include <QCoreApplication>
+#include <QDebug>
+#include <QTemporaryFile>
 CLANG_DIAG_ON(deprecated-register)
 // clang-format on
 #ifdef OFX_SUPPORTS_MULTITHREAD
-#include <QtCore/QThread>
-#include <QtCore/QThreadStorage>
+#include <QThread>
+#include <QThreadStorage>
 #include <QtConcurrentMap> // QtCore on Qt4, QtConcurrent on Qt5
 #endif
 CLANG_DIAG_ON(deprecated)

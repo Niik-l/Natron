@@ -28,8 +28,8 @@
 
 #include "Global/Macros.h"
 
-#include <QtCore/QMutex>
-#include <QtCore/QRecursiveMutex>
+#include <QMutex>
+#include <QRecursiveMutex>
 
 #include "Engine/Variant.h"
 #include "Engine/Knob.h"

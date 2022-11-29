@@ -33,11 +33,11 @@
 #include <set>
 #include <map>
 
-#include <QtCore/QReadWriteLock>
-#include <QtCore/QMutex>
-#include <QtCore/QString>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QRecursiveMutex>
+#include <QReadWriteLock>
+#include <QMutex>
+#include <QString>
+#include <QCoreApplication>
+#include <QRecursiveMutex>
 
 #include "Engine/Variant.h"
 #include "Engine/AppManager.h" // for AppManager::createKnob

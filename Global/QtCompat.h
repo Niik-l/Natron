@@ -21,10 +21,10 @@
 
 #include "Global/Macros.h"
 
-#include <QtCore/QtGlobal> // for Q_OS_*
-#include <QtCore/QString>
-#include <QtCore/QUrl>
-#include <QtCore/QFileInfo>
+#include <QtGlobal> // for Q_OS_*
+#include <QString>
+#include <QUrl>
+#include <QFileInfo>
 
 NATRON_NAMESPACE_ENTER
 

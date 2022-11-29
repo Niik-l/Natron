@@ -32,7 +32,7 @@
 
 #include <QGridLayout>
 #include <QCheckBox>
-#include <QtCore/QTimer>
+#include <QTimer>
 
 #include "Engine/Knob.h" // KnobI
 #include "Engine/KnobTypes.h" // KnobButton...

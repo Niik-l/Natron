@@ -28,11 +28,11 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QTimer>
-#include <QtNetwork/QAbstractNetworkCache>
-#include <QtNetwork/QNetworkAccessManager>
-#include <QtNetwork/QNetworkReply>
-#include <QtNetwork/QNetworkRequest>
+#include <QTimer>
+#include <QAbstractNetworkCache>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 
 #define NATRON_FILE_DOWNLOAD_HEARBEAT_TIMEOUT_MS 5000
 

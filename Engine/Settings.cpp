@@ -29,12 +29,12 @@
 #include <limits>
 #include <stdexcept>
 
-#include <QtCore/QDebug>
-#include <QtCore/QDir>
-#include <QtCore/QSettings>
-#include <QtCore/QThreadPool>
-#include <QtCore/QThread>
-#include <QtCore/QTextStream>
+#include <QDebug>
+#include <QDir>
+#include <QSettings>
+#include <QThreadPool>
+#include <QThread>
+#include <QTextStream>
 
 #ifdef WINDOWS
 #include <tchar.h>

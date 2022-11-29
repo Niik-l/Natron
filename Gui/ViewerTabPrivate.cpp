@@ -28,7 +28,7 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QDebug>
+#include <QDebug>
 
 #include "Engine/EffectInstance.h"
 #include "Engine/Node.h"

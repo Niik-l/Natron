@@ -30,7 +30,7 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QMutex>
+#include <QMutex>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 CLANG_DIAG_ON(deprecated)

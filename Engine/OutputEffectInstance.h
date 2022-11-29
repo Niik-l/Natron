@@ -30,7 +30,7 @@
 
 #include <list>
 
-#include <QtCore/QMutex>
+#include <QMutex>
 
 #include "Engine/EffectInstance.h"
 #include "Engine/ViewIdx.h"

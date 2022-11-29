@@ -35,10 +35,10 @@
 #include <bitset>
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QMetaType>
-#include <QtCore/QObject>
+#include <QMetaType>
+#include <QObject>
 CLANG_DIAG_ON(deprecated)
-#include <QtCore/QMutex>
+#include <QMutex>
 
 #include "Engine/AppManager.h"
 #include "Global/KeySymbols.h"

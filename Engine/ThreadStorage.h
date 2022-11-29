@@ -28,9 +28,9 @@
 
 #include "Global/Macros.h"
 
-#include <QtCore/QThread>
-#include <QtCore/QThreadStorage>
-#include <QtCore/QCoreApplication>
+#include <QThread>
+#include <QThreadStorage>
+#include <QCoreApplication>
 
 #include "Engine/EngineFwd.h"
 

@@ -34,8 +34,8 @@
 #include <sstream> // stringstream
 #include <limits>
 
-#include <QtCore/QCoreApplication>
-#include <QtCore/QTextStream>
+#include <QCoreApplication>
+#include <QTextStream>
 
 #include "Engine/AppInstance.h"
 #include "Engine/Bezier.h"

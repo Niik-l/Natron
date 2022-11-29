@@ -34,7 +34,7 @@
 
 GCC_DIAG_UNUSED_LOCAL_TYPEDEFS_OFF
 GCC_ONLY_DIAG_OFF(class-memaccess)
-#include <QtCore/QVector>
+#include <QVector>
 GCC_ONLY_DIAG_ON(class-memaccess)
 #include <QtCore>
 GCC_DIAG_UNUSED_LOCAL_TYPEDEFS_ON

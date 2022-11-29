@@ -32,9 +32,9 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QTextStream>
-#include <QtCore/QDebug>
-#include <QtCore/QCoreApplication>
+#include <QTextStream>
+#include <QDebug>
+#include <QCoreApplication>
 
 #include "Engine/CacheEntry.h"
 #include "Engine/OfxEffectInstance.h"

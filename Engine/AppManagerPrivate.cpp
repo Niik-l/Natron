@@ -25,7 +25,7 @@
 
 #include "AppManagerPrivate.h"
 
-#include <QtCore/QtGlobal> // for Q_OS_*
+#include <QtGlobal> // for Q_OS_*
 #if defined(Q_OS_UNIX)
 #include <sys/time.h>     // for getrlimit on linux
 #include <sys/resource.h> // for getrlimit
@@ -48,12 +48,12 @@ GCC_DIAG_UNUSED_LOCAL_TYPEDEFS_ON
 GCC_DIAG_ON(unused-parameter)
 // clang-format on
 
-#include <QtCore/QDebug>
-#include <QtCore/QProcess>
-#include <QtCore/QTemporaryFile>
-#include <QtCore/QCoreApplication>
-#include <QtNetwork/QLocalServer>
-#include <QtNetwork/QLocalSocket>
+#include <QDebug>
+#include <QProcess>
+#include <QTemporaryFile>
+#include <QCoreApplication>
+#include <QLocalServer>
+#include <QLocalSocket>
 
 #include "Global/QtCompat.h" // for removeRecursively
 #include "Global/GlobalDefines.h"

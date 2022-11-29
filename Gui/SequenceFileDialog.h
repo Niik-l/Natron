@@ -37,19 +37,19 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QtGlobal> // for Q_OS_*
+#include <QtGlobal> // for Q_OS_*
 #include <QStyledItemDelegate>
 #include <QTreeView>
 #include <QDialog>
-#include <QtCore/QByteArray>
-#include <QtGui/QStandardItemModel>
-#include <QtCore/QString>
-#include <QtCore/QStringList>
-#include <QtCore/QDir>
-#include <QtCore/QUrl>
-#include <QtCore/QRegExp>
-#include <QtCore/QLatin1Char>
-#include <QtCore/QSize>
+#include <QByteArray>
+#include <QStandardItemModel>
+#include <QString>
+#include <QStringList>
+#include <QDir>
+#include <QUrl>
+#include <QRegExp>
+#include <QLatin1Char>
+#include <QSize>
 #include <QComboBox>
 #include <QListView>
 CLANG_DIAG_ON(deprecated)

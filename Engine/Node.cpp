@@ -35,14 +35,14 @@
 
 #include "Global/Macros.h"
 
-#include <QtCore/QDateTime>
-#include <QtCore/QDebug>
-#include <QtCore/QReadWriteLock>
-#include <QtCore/QCoreApplication>
-#include <QtCore/QWaitCondition>
-#include <QtCore/QTextStream>
-#include <QtCore/QFile>
-#include <QtCore/QRegExp>
+#include <QDateTime>
+#include <QDebug>
+#include <QReadWriteLock>
+#include <QCoreApplication>
+#include <QWaitCondition>
+#include <QTextStream>
+#include <QFile>
+#include <QRegExp>
 
 #include <ofxNatron.h>
 

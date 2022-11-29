@@ -34,10 +34,10 @@
 #include <list>
 #include <string>
 
-#include <QtCore/QCoreApplication>
-#include <QtCore/QWaitCondition>
-#include <QtCore/QMutex>
-#include <QtCore/QRecursiveMutex>
+#include <QCoreApplication>
+#include <QWaitCondition>
+#include <QMutex>
+#include <QRecursiveMutex>
 
 #include "Global/GlobalDefines.h"
 

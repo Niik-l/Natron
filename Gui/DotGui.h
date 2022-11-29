@@ -32,11 +32,11 @@
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
-#include <QtCore/QRectF>
-#include <QtCore/QMutex>
+#include <QRectF>
+#include <QMutex>
 #include <QGraphicsItem>
 #include <QDialog>
-#include <QtCore/QMutex>
+#include <QMutex>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 

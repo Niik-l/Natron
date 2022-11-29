@@ -33,15 +33,15 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QCoreApplication>
-#include <QtCore/QDir>
-#include <QtCore/QTextStream>
+#include <QCoreApplication>
+#include <QDir>
+#include <QTextStream>
 #include <QtConcurrentMap> // QtCore on Qt4, QtConcurrent on Qt5
-#include <QtCore/QUrl>
-#include <QtCore/QFileInfo>
-#include <QtCore/QEventLoop>
-#include <QtCore/QSettings>
-#include <QtNetwork/QNetworkReply>
+#include <QUrl>
+#include <QFileInfo>
+#include <QEventLoop>
+#include <QSettings>
+#include <QNetworkReply>
 
 // ofxhPropertySuite.h:565:37: warning: 'this' pointer cannot be null in well-defined C++ code; comparison may be assumed to always evaluate to true [-Wtautological-undefined-compare]
 // clang-format off

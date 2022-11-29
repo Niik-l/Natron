@@ -29,7 +29,7 @@
 #include <stdexcept>
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QMutex>
+#include <QMutex>
 CLANG_DIAG_ON(deprecated)
 
 #include "Engine/EffectInstance.h"

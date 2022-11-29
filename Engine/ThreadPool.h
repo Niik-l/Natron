@@ -28,7 +28,7 @@
 
 #include "Global/Macros.h"
 
-#include <QtCore/QThreadPool> // defines QT_CUSTOM_THREADPOOL (or not)
+#include <QThreadPool> // defines QT_CUSTOM_THREADPOOL (or not)
 
 #include "Engine/EngineFwd.h"
 

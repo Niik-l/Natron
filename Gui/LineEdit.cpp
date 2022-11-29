@@ -38,8 +38,8 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QKeySequence>
-#include <QtCore/QUrl>
-#include <QtCore/QMimeData>
+#include <QUrl>
+#include <QMimeData>
 #include <QStyle>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)

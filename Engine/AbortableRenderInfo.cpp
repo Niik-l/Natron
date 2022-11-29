@@ -30,10 +30,10 @@
 #include <string>
 #include <cassert>
 
-#include <QtCore/QMutex>
-#include <QtCore/QAtomicInt>
-#include <QtCore/QTimer>
-#include <QtCore/QDebug>
+#include <QMutex>
+#include <QAtomicInt>
+#include <QTimer>
+#include <QDebug>
 
 #include "Engine/AppManager.h"
 #include "Engine/EffectInstance.h"

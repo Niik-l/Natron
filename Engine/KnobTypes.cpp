@@ -34,9 +34,9 @@
 #include <stdexcept>
 #include <sstream> // stringstream
 
-#include <QtCore/QDebug>
-#include <QtCore/QThread>
-#include <QtCore/QCoreApplication>
+#include <QDebug>
+#include <QThread>
+#include <QCoreApplication>
 
 #include "Engine/AppInstance.h"
 #include "Engine/Bezier.h"

@@ -36,9 +36,9 @@
 
 #include "Global/GlobalDefines.h"
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QStringList>
-#include <QtCore/QString>
-#include <QtCore/QCoreApplication>
+#include <QStringList>
+#include <QString>
+#include <QCoreApplication>
 CLANG_DIAG_ON(deprecated)
 
 #include "Engine/EngineFwd.h"

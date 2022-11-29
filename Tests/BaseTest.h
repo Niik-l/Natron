@@ -38,7 +38,7 @@
 #include <gtest/gtest.h>
 
 CLANG_DIAG_OFF(deprecated)
-#include <QtCore/QString>
+#include <QString>
 CLANG_DIAG_ON(deprecated)
 
 #include "Engine/EngineFwd.h"

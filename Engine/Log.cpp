@@ -35,9 +35,9 @@
 #include <cassert>
 #include <stdexcept>
 
-#include <QtCore/QFile>
-#include <QtCore/QTextStream>
-#include <QtCore/QMutex>
+#include <QFile>
+#include <QTextStream>
+#include <QMutex>
 
 #include "Global/GlobalDefines.h"
 

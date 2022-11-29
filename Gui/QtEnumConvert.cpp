@@ -25,7 +25,7 @@
 
 #include "QtEnumConvert.h"
 
-#include <QtCore/QDebug>
+#include <QDebug>
 #include <stdexcept>
 
 NATRON_NAMESPACE_ENTER
