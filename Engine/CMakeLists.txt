@@ -75,11 +75,11 @@ target_link_libraries(NatronEngine
         Boost::serialization
         PkgConfig::Cairo
     PRIVATE
-        Shiboken2::libshiboken
-        PySide2::pyside2
-        Qt5::Core
-        Qt5::Concurrent
-        Qt5::Network
+        ${SHIBOKEN_LIB}
+        ${PYSIDE_LIB}
+        Qt::Core
+        Qt::Concurrent
+        Qt::Network
         Python3::Module
         ${XDG_LIBS}
         ceres
@@ -109,5 +109,6 @@ target_compile_definitions(NatronEngine
     PRIVATE
         NATRON_CUSTOM_BUILD_USER_TOKEN="${BUILD_USER_NAME}"
         NATRON_BUILD_NUMBER=0
+        QT_NO_KEYWORDS
         ${XDG_DEFS}
 )

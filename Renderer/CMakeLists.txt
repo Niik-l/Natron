@@ -25,9 +25,9 @@ add_executable(NatronRenderer ${NatronRenderer_SOURCES})
 target_link_libraries(NatronRenderer
     PRIVATE
         NatronEngine
-        Qt5::Core
-        Qt5::Concurrent
-        Qt5::Network
+        Qt::Core
+        Qt::Concurrent
+        Qt::Network
         Python3::Python
 )
 target_include_directories(NatronRenderer

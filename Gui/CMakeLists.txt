@@ -31,6 +31,10 @@ list(TRANSFORM PYGUI_INCLUDE_DIRS PREPEND "-I" OUTPUT_VARIABLE PYGUI_INCS)
 set(PYGUI_HEADER PySide2_Gui_Python.h)
 set(POST_SHIBOKEN ../tools/utils/runPostShiboken2.sh)
 
+if(NATRON_QT6)
+    set(QT_OPENGLWIDGETS Qt::OpenGLWidgets)
+endif()
+
 set(shiboken_args
     "-std=c++17" "--enable-parent-ctor-heuristic" "--use-isnull-as-nb_nonzero"
     "--avoid-protected-hack" "--enable-pyside-extensions"
@@ -60,13 +64,14 @@ list(APPEND NatronGui_SOURCES
 add_library(NatronGui STATIC ${NatronGui_HEADERS} ${NatronGui_SOURCES})
 target_link_libraries(NatronGui
     PUBLIC
-        Shiboken2::libshiboken
-        PySide2::pyside2
-        Qt5::Core
-        Qt5::Concurrent
-        Qt5::Network
-        Qt5::Gui
-        Qt5::Widgets
+        ${SHIBOKEN_LIB}
+        ${PYSIDE_LIB}
+        Qt::Core
+        Qt::Concurrent
+        Qt::Network
+        Qt::Gui
+        Qt::Widgets
+        ${QT_OPENGLWIDGETS}
         Python3::Module
         NatronEngine
     PRIVATE
