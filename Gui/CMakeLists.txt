@@ -28,8 +28,7 @@ list(APPEND PYGUI_INCLUDE_DIRS ${PYSIDE_INCLUDE_DIRS} ${PYSIDE_INCLUDE_DIRS}/QtC
 list(APPEND PYGUI_INCLUDE_DIRS ${QTCORE_INCLUDE_DIRS} ${QTGUI_INCLUDE_DIRS}
     ${QTWIDGETS_INCLUDE_DIRS} ${Python3_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
 list(TRANSFORM PYGUI_INCLUDE_DIRS PREPEND "-I" OUTPUT_VARIABLE PYGUI_INCS)
-set(PYGUI_HEADER PySide2_Gui_Python.h)
-set(POST_SHIBOKEN ../tools/utils/runPostShiboken2.sh)
+set(PYGUI_HEADER PySide${PYSIDE_VERSION_MAJOR}_Gui_Python.h)
 
 if(NATRON_QT6)
     set(QT_OPENGLWIDGETS Qt::OpenGLWidgets)
@@ -47,9 +46,9 @@ execute_process(COMMAND ${Python3_EXECUTABLE} ../tools/utils/sourceList.py types
     OUTPUT_VARIABLE PyGui_SOURCES)
 set_property(SOURCE ${PyGui_SOURCES} PROPERTY SKIP_AUTOGEN ON)
 add_custom_command(OUTPUT ${PyGui_SOURCES}
-    COMMAND Shiboken2::shiboken2 ${shiboken_args}
-    COMMAND bash ${POST_SHIBOKEN} ${PYGUI_OUT}/NatronGui natrongui
-    DEPENDS ${PYGUI_HEADER} ${NatronEngine_HEADERS} ${NatronGui_HEADERS} ${POST_SHIBOKEN} typesystem_natronGui.xml
+    COMMAND $<TARGET_FILE:${SHIBOKEN_EXE}> ${shiboken_args}
+    COMMAND ${Python3_EXECUTABLE} ../tools/utils/sourceCleanup.py typesystem_natronGui.xml ${PYGUI_OUT}
+    DEPENDS ${SHIBOKEN_EXE} ${PYGUI_HEADER} NatronEngine ${NatronGui_HEADERS} ../tools/utils/sourceCleanup.py typesystem_natronGui.xml
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(APPLE)

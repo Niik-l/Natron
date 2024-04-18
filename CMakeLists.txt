@@ -73,6 +73,7 @@ if(NATRON_QT6)
     find_package(Shiboken6Tools 6.3 CONFIG REQUIRED COMPONENTS shiboken6)
     find_package(PySide6 6.3 CONFIG REQUIRED COMPONENTS pyside6)
     set(QT_VERSION_MAJOR 6)
+    set(PYSIDE_VERSION_MAJOR 6)
 
     get_target_property(PYSIDE_INCLUDE_DIRS PySide6::pyside6 INTERFACE_INCLUDE_DIRECTORIES)
     set(QTCORE_INCLUDE_DIRS ${Qt6Core_INCLUDE_DIRS})
@@ -88,6 +89,7 @@ else()
 
     find_package(PySide2 5.15 CONFIG REQUIRED COMPONENTS pyside2)
     set(QT_VERSION_MAJOR 5)
+    set(PYSIDE_VERSION_MAJOR 2)
 
     get_target_property(PYSIDE_INCLUDE_DIRS PySide2::pyside2 INTERFACE_INCLUDE_DIRECTORIES)
     set(QTCORE_INCLUDE_DIRS ${Qt5Core_INCLUDE_DIRS})

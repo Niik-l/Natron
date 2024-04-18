@@ -211,4 +211,8 @@
             </inject-code>
         </modify-function>
     </object-type>
+
+    <inject-code class="target" position="declaration">
+    NATRON_NAMESPACE_USING NATRON_PYTHON_NAMESPACE_USING
+    </inject-code>
 </typesystem>
