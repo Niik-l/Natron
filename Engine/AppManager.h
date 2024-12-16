@@ -494,7 +494,7 @@ public:
     void setOFXHostHandle(void* handle);
 
     OFX::Host::ImageEffect::Descriptor* getPluginContextAndDescribe(OFX::Host::ImageEffect::ImageEffectPlugin* plugin,
-                                                                    NATRON_ENUM::ContextEnum* ctx);
+                                                                    Natron::ContextEnum* ctx);
     AppTLS* getAppTLS() const;
     const OfxHost* getOFXHost() const;
     GPUContextPool* getGPUContextPool() const;
@@ -567,7 +567,7 @@ public:
 
     bool isTextureFloatSupported() const;
 
-    bool hasOpenGLForRequirements(NATRON_ENUM::OpenGLRequirementsTypeEnum type, QString* missingOpenGLError = 0) const;
+    bool hasOpenGLForRequirements(Natron::OpenGLRequirementsTypeEnum type, QString* missingOpenGLError = 0) const;
 
     virtual void updateAboutWindowLibrariesVersion() {}
 
@@ -736,14 +736,14 @@ void warningDialog(const std::string & title, const std::string & message, bool*
 void informationDialog(const std::string & title, const std::string & message, bool useHtml = false);
 void informationDialog(const std::string & title, const std::string & message, bool* stopAsking, bool useHtml = false);
 
-NATRON_ENUM::StandardButtonEnum questionDialog(const std::string & title, const std::string & message, bool useHtml,
-                                  NATRON_ENUM::StandardButtons buttons =
-                                      NATRON_ENUM::StandardButtons(NATRON_ENUM::eStandardButtonYes | NATRON_ENUM::eStandardButtonNo),
-                                  NATRON_ENUM::StandardButtonEnum defaultButton = NATRON_ENUM::eStandardButtonNoButton);
+Natron::StandardButtonEnum questionDialog(const std::string & title, const std::string & message, bool useHtml,
+                                  Natron::StandardButtons buttons =
+                                      Natron::StandardButtons(Natron::StandardButtonEnum::eStandardButtonYes | Natron::StandardButtonEnum::eStandardButtonNo),
+                                  Natron::StandardButtonEnum defaultButton = Natron::StandardButtonEnum::eStandardButtonNoButton);
 
-NATRON_ENUM::StandardButtonEnum questionDialog(const std::string & title, const std::string & message, bool useHtml,
-                                  NATRON_ENUM::StandardButtons buttons,
-                                  NATRON_ENUM::StandardButtonEnum defaultButton,
+Natron::StandardButtonEnum questionDialog(const std::string & title, const std::string & message, bool useHtml,
+                                  Natron::StandardButtons buttons,
+                                  Natron::StandardButtonEnum defaultButton,
                                   bool* stopAsking);
 } // namespace Dialogs
 

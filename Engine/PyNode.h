@@ -200,7 +200,7 @@ public:
     void refreshUserParamsGUI();
 
     virtual bool onKnobValueChanged(KnobI* k,
-                                    NATRON_ENUM::ValueChangedReasonEnum reason,
+                                    Natron::ValueChangedReasonEnum reason,
                                     double time,
                                     ViewSpec view,
                                     bool originatedFromMainThread)
@@ -383,8 +383,8 @@ public:
 
     double getPixelAspectRatio() const;
 
-    NATRON_ENUM::ImageBitDepthEnum getBitDepth() const;
-    NATRON_ENUM::ImagePremultiplicationEnum getPremult() const;
+    Natron::ImageBitDepthEnum getBitDepth() const;
+    Natron::ImagePremultiplicationEnum getPremult() const;
 
     void setPagesOrder(const QStringList& pages);
 };

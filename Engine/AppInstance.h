@@ -193,22 +193,22 @@ public:
     virtual void warningDialog(const std::string & title, const std::string & message, bool* stopAsking, bool useHtml) const;
     virtual void informationDialog(const std::string & title, const std::string & message, bool useHtml) const;
     virtual void informationDialog(const std::string & title, const std::string & message, bool* stopAsking, bool useHtml) const;
-    virtual NATRON_ENUM::StandardButtonEnum questionDialog(const std::string & title,
+    virtual Natron::StandardButtonEnum questionDialog(const std::string & title,
                                               const std::string & message,
                                               bool useHtml,
-                                              NATRON_ENUM::StandardButtons buttons =
-                                                  NATRON_ENUM::StandardButtons(NATRON_ENUM::eStandardButtonYes | NATRON_ENUM::eStandardButtonNo),
-                                              NATRON_ENUM::StandardButtonEnum defaultButton = NATRON_ENUM::eStandardButtonNoButton) const WARN_UNUSED_RETURN;
+                                              Natron::StandardButtons buttons =
+                                                  Natron::StandardButtons(Natron::StandardButtonEnum::eStandardButtonYes | Natron::StandardButtonEnum::eStandardButtonNo),
+                                              Natron::StandardButtonEnum defaultButton = Natron::StandardButtonEnum::eStandardButtonNoButton) const WARN_UNUSED_RETURN;
 
     /**
      * @brief Asks a question to the user and returns the reply.
      * @param stopAsking Set to true if the user do not want Natron to ask the question again.
      **/
-    virtual NATRON_ENUM::StandardButtonEnum questionDialog(const std::string & /*title*/,
+    virtual Natron::StandardButtonEnum questionDialog(const std::string & /*title*/,
                                               const std::string & /*message*/,
                                               bool /*useHtml*/,
-                                              NATRON_ENUM::StandardButtons /*buttons*/,
-                                              NATRON_ENUM::StandardButtonEnum /*defaultButton*/,
+                                              Natron::StandardButtons /*buttons*/,
+                                              Natron::StandardButtonEnum /*defaultButton*/,
                                               bool* /*stopAsking*/)
     {
         return eStandardButtonYes;
@@ -281,7 +281,7 @@ public:
     {
     }
 
-    NATRON_ENUM::ViewerColorSpaceEnum getDefaultColorSpaceForBitDepth(NATRON_ENUM::ImageBitDepthEnum bitdepth) const;
+    Natron::ViewerColorSpaceEnum getDefaultColorSpaceForBitDepth(Natron::ImageBitDepthEnum bitdepth) const;
 
     double getProjectFrameRate() const;
 

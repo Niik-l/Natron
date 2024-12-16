@@ -74,7 +74,7 @@ private:
     virtual void initializeKnobs() OVERRIDE FINAL {}
 
     virtual bool onKnobValueChanged(KnobI* k,
-                                    NATRON_ENUM::ValueChangedReasonEnum reason,
+                                    Natron::ValueChangedReasonEnum reason,
                                     double time,
                                     ViewSpec view,
                                     bool originatedFromMainThread) OVERRIDE FINAL;
@@ -91,7 +91,7 @@ class PyModalDialog
 public:
 
     PyModalDialog( Gui* gui,
-                   NATRON_ENUM::StandardButtons defaultButtons = NATRON_ENUM::StandardButtons(NATRON_ENUM::eStandardButtonOk | NATRON_ENUM::eStandardButtonCancel) );
+                   Natron::StandardButtons defaultButtons = Natron::StandardButtons(Natron::StandardButtonEnum::eStandardButtonOk | Natron::StandardButtonEnum::eStandardButtonCancel) );
 
     virtual ~PyModalDialog();
 

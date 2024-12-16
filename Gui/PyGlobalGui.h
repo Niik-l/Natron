@@ -59,7 +59,7 @@ public:
     {
     }
 
-    QPixmap getIcon(NATRON_ENUM::PixmapEnum val) const
+    QPixmap getIcon(Natron::PixmapEnum val) const
     {
         QPixmap ret;
 
@@ -101,7 +101,7 @@ public:
         Dialogs::errorDialog( title.toStdString(), message.toStdString() );
     }
 
-    NATRON_ENUM::StandardButtonEnum questionDialog(const QString& title,
+    Natron::StandardButtonEnum questionDialog(const QString& title,
                                                         const QString& message)
     {
         return Dialogs::questionDialog(title.toStdString(), message.toStdString(), false);

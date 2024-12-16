@@ -120,16 +120,16 @@ public:
     virtual void warningDialog(const std::string & title, const std::string & message, bool* stopAsking, bool useHtml) const OVERRIDE FINAL;
     virtual void informationDialog(const std::string & title, const std::string & message, bool useHtml) const OVERRIDE FINAL;
     virtual void informationDialog(const std::string & title, const std::string & message, bool* stopAsking, bool useHtml) const OVERRIDE FINAL;
-    virtual NATRON_ENUM::StandardButtonEnum questionDialog(const std::string & title,
+    virtual Natron::StandardButtonEnum questionDialog(const std::string & title,
                                               const std::string & message,
                                               bool useHtml,
-                                              NATRON_ENUM::StandardButtons buttons = NATRON_ENUM::StandardButtons(NATRON_ENUM::eStandardButtonYes | NATRON_ENUM::eStandardButtonNo),
-                                              NATRON_ENUM::StandardButtonEnum defaultButton = NATRON_ENUM::eStandardButtonNoButton) const OVERRIDE FINAL WARN_UNUSED_RETURN;
-    virtual NATRON_ENUM::StandardButtonEnum questionDialog(const std::string & title,
+                                              Natron::StandardButtons buttons = Natron::StandardButtons(Natron::StandardButtonEnum::eStandardButtonYes | Natron::StandardButtonEnum::eStandardButtonNo),
+                                              Natron::StandardButtonEnum defaultButton = Natron::StandardButtonEnum::eStandardButtonNoButton) const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual Natron::StandardButtonEnum questionDialog(const std::string & title,
                                               const std::string & message,
                                               bool useHtml,
-                                              NATRON_ENUM::StandardButtons buttons,
-                                              NATRON_ENUM::StandardButtonEnum defaultButton,
+                                              Natron::StandardButtons buttons,
+                                              Natron::StandardButtonEnum defaultButton,
                                               bool* stopAsking) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual void loadProjectGui(bool isAutosave,  boost::archive::xml_iarchive & archive) const OVERRIDE FINAL;
     virtual void saveProjectGui(boost::archive::xml_oarchive & archive) OVERRIDE FINAL;

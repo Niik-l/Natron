@@ -43,7 +43,7 @@ namespace Merge {
  * Keep this in sync with the Merge node's operators otherwise everything will fall apart.
  **/
 inline std::string
-getOperatorString(NATRON_ENUM::MergingFunctionEnum operation)
+getOperatorString(Natron::MergingFunctionEnum operation)
 {
     switch (operation) {
     case eMergeATop:
@@ -169,7 +169,7 @@ getOperatorString(NATRON_ENUM::MergingFunctionEnum operation)
 } // getOperationString
 
 inline std::string
-getOperatorHelpString(NATRON_ENUM::MergingFunctionEnum operation)
+getOperatorHelpString(Natron::MergingFunctionEnum operation)
 {
     switch (operation) {
     case eMergeATop:
@@ -295,8 +295,8 @@ getOperatorHelpString(NATRON_ENUM::MergingFunctionEnum operation)
 } // getOperationHelpString
 
 inline
-NATRON_ENUM::PixmapEnum
-getOperatorPixmap(NATRON_ENUM::MergingFunctionEnum operation)
+Natron::PixmapEnum
+getOperatorPixmap(Natron::MergingFunctionEnum operation)
 {
     switch (operation) {
     case eMergeATop:

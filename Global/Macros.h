@@ -52,7 +52,6 @@ namespace Python { }
 
 // run shiboken without the Natron namespace, and add NATRON_NAMESPACE_USING to each cpp afterwards
 #define NATRON_NAMESPACE
-#undef NATRON_ENUM
 #define NATRON_NAMESPACE_ENTER
 #define NATRON_NAMESPACE_EXIT
 #define NATRON_PYTHON_NAMESPACE
@@ -62,7 +61,6 @@ namespace Python { }
 #else // !SBK_RUN
 
 #define NATRON_NAMESPACE Natron
-#define NATRON_ENUM NATRON_NAMESPACE
 // Macros to use in each file to enter and exit the right name spaces.
 #define NATRON_NAMESPACE_ENTER namespace NATRON_NAMESPACE {
 #define NATRON_NAMESPACE_EXIT }

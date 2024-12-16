@@ -100,15 +100,15 @@ public:
         return false;
     }
 
-    void getIcon(NATRON_ENUM::PixmapEnum e, QPixmap* pix) const;
-    void getIcon(NATRON_ENUM::PixmapEnum e, int size, QPixmap* pix) const;
+    void getIcon(Natron::PixmapEnum e, QPixmap* pix) const;
+    void getIcon(Natron::PixmapEnum e, int size, QPixmap* pix) const;
 
-    void setKnobClipBoard(NATRON_ENUM::KnobClipBoardType type,
+    void setKnobClipBoard(Natron::KnobClipBoardType type,
                           const KnobIPtr& serialization,
                           int dimension);
 
 
-    void getKnobClipBoard(NATRON_ENUM::KnobClipBoardType *type,
+    void getKnobClipBoard(Natron::KnobClipBoardType *type,
                           KnobIPtr* serialization,
                           int *dimension) const;
 
