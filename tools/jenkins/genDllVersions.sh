@@ -231,7 +231,7 @@ catDll libsnappy
 catDll libheif
 catDll libkvazaar-
 catDll libcryptopp
-catDll rav1e
+catDll librav1e
 catDll libde265-
 catDll libx265
 catDll libdav1d
