@@ -44,7 +44,7 @@ jobs:
           pacman -Sl mingw64 msys > mingw-package-version-list.txt
       - name: Restore natron repo directory from cache
         id: restore-natron-repo-cache
-        uses: actions/cache/restore@v4.0.0
+        uses: actions/cache/restore@v4
         with:
           path: natron_repo
           key: ${{ env.cache-name }}-${{ hashFiles('mingw-package-version-list.txt', 'tools/MINGW-packages/**/PKGBUILD') }}
@@ -59,7 +59,7 @@ jobs:
           echo "REPO_VERSION=${REPO_VERSION}" >> "$GITHUB_OUTPUT"
       - name: Save natron repo directory to cache
         id: save-natron-repo-cache
-        uses: actions/cache/save@v4.0.0
+        uses: actions/cache/save@v4
         # save even if build fails.
         if: always()
         with:
