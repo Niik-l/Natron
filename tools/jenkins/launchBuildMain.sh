@@ -155,7 +155,6 @@ source manageLog.sh
 
 echo "CC                                : \"${CC:-}\""
 echo "CXX                               : \"${CXX:-}\""
-echo "CXX17                             : \"${CXX17:-}\""
 echo "OBJECTIVE_CC                      : \"${OBJECTIVE_CC:-}\""
 echo "OBJECTIVE_CXX                     : \"${OBJECTIVE_CXX:-}\""
 echo "-----------------------------------------------------------------------"
@@ -192,6 +191,11 @@ echo "Testing $GSED"
 echo "$GSED does not work" | $GSED -e "s/does not work/works/"
 # check that curl works
 $CURL --silent --head http://www.google.com > /dev/null && echo "$CURL works"
+
+if [ "$QT_VERSION_MAJOR" = 5 ] && [ "$system" = "Darwin" ]; then
+    # Check for a missing link in the MacPorts package
+    [ ! -f ${PYTHON_HOME}/lib/python${PYVER}/site-packages/shiboken2_generator/shiboken2-${PYVER} ] && (echo "Error: broken MacPort install"; echo "Please execute:"; echo "sudo ln -s shiboken2 ${PYTHON_HOME}/lib/python${PYVER}/site-packages/shiboken2_generator/shiboken2-${PYVER}"; echo "and relaunch."; exit 1)
+fi
 
 if [ -n "${GIT_BRANCH:+}" ]; then
     GIT_BRANCH=$(echo "$GIT_BRANCH" | sed 's#origin/##')

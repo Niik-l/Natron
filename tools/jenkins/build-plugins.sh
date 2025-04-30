@@ -184,9 +184,11 @@ if [ "$BUILD_MISC" = "1" ] && [ -d "$TMP_PATH/openfx-misc" ]; then
             CMAKE_LDFLAGS="-static -Wl,--build-id"
         fi
         rm ../DenoiseSharpen/DenoiseWavelet.cpp || true
+        set -x
         env CXX="$CXX" LDFLAGS="$CMAKE_LDFLAGS" cmake .. ${MSYS:-} -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX="$SDK_HOME" -DBITS="${BITS}" -DUSE_OSMESA=1 -DOSMESA_INCLUDES="${OSMESA_PATH}/include" -DOSMESA_LIBRARIES="-L${OSMESA_PATH}/lib -L${LLVM_PATH}/lib ${GLULIB} ${MESALIB} $LLVM_LIB" ${UNIVERSAL:-}
         make -j"${MKJOBS}"
         make install
+        set +x
         echo "Info: build openfx-misc using cmake... done!"
     else
         echo "Info: build openfx-misc using make..."
@@ -197,6 +199,7 @@ if [ "$BUILD_MISC" = "1" ] && [ -d "$TMP_PATH/openfx-misc" ]; then
 
         echo "Info: make all except CImg."
 
+        set -x
         env \
             OSMESA_PATH="${OSMESA_PATH}" \
             LLVM_PATH="${LLVM_PATH}" \
@@ -211,6 +214,7 @@ if [ "$BUILD_MISC" = "1" ] && [ -d "$TMP_PATH/openfx-misc" ]; then
             ${OMP} \
             CXXFLAGS_EXTRA="-DHAVE_OSMESA ${CXXFLAGS_EXTRA}" \
             make -j"${MKJOBS}" ${MAKEFLAGS_VERBOSE:-}
+        set +x
 
         echo "Info: make CImg."
 
@@ -219,6 +223,7 @@ if [ "$BUILD_MISC" = "1" ] && [ -d "$TMP_PATH/openfx-misc" ]; then
         
         # build CImg.ofx
 
+        set -x
         if [ "$COMPILER" = "clang" ] && [ -n "${GXX:-}" ]; then
             # Building with Apple clang (no OpenMP available), but GCC is available too!
             # libSupport was compiled by clang, now clean it to build it again with gcc
@@ -250,6 +255,7 @@ if [ "$BUILD_MISC" = "1" ] && [ -d "$TMP_PATH/openfx-misc" ]; then
                 make -j"${MKJOBS}" ${MAKEFLAGS_VERBOSE:-} -C CImg
         fi
         ${CP_OR_MV} ./*/*-*-*/*.ofx.bundle "$TMP_BINARIES_PATH/OFX/Plugins/"
+        set +x
         echo "Info: build openfx-misc using make... done!"
     fi
 
@@ -295,12 +301,15 @@ if [ "$BUILD_IO" = "1" ] && [ -d "$TMP_PATH/openfx-io" ]; then
                  IO_SEEXPR_LIB="bin/libSeExpr.dll"
             fi
         fi
+        set -x
         env CXX="$CXX" LDFLAGS="$CMAKE_LDFLAGS" cmake .. ${MSYS:-} -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX="$SDK_HOME" -DBITS="${BITS}" -DOpenImageIO_INCLUDE_DIR="${IO_DEPENDS_PATH}/include" -DOpenImageIO_LIBRARY="${IO_DEPENDS_PATH}/${IO_OIIO_LIB}" -DSEEXPR_INCLUDE_DIRS="${IO_DEPENDS_PATH}/include" -DSEEXPR_LIBRARIES="${IO_DEPENDS_PATH}/${IO_SEEXPR_LIB}" ${UNIVERSAL:-}
         make -j"${MKJOBS}"
         make install
+        set +x
         echo "Info: build openfx-io using cmake... done!"
     else
         echo "Info: build openfx-io using make..."
+        set -x
         env \
             OIIO_HOME="$SDK_HOME" \
             SEEXPR_HOME="${SDK_HOME}" \
@@ -312,6 +321,7 @@ if [ "$BUILD_IO" = "1" ] && [ -d "$TMP_PATH/openfx-io" ]; then
             CXXFLAGS_EXTRA="${CXXFLAGS_EXTRA}" \
             make -j"${MKJOBS}" ${MAKEFLAGS_VERBOSE:-}
         ${CP_OR_MV} ./*/*-*-*/*.ofx.bundle "$TMP_BINARIES_PATH/OFX/Plugins/"
+        set +x
         echo "Info: build openfx-io using make... done!"
     fi
 
@@ -349,10 +359,12 @@ if [ "$BUILD_ARENA" = "1" ] && [ -d "$TMP_PATH/openfx-arena" ]; then
         make -C Bundle lodepng.h
     fi
 
+    set -x
     env \
         MINGW="${ISWIN:-}" \
         LICENSE="$NATRON_LICENSE" \
         ${ARENA_FLAGS:-} \
+        CXX="$CXX" \
         CONFIG="${COMPILE_TYPE}" \
         OPTFLAG="${OPTFLAG}" \
         BITS="${BITS}" \
@@ -361,6 +373,7 @@ if [ "$BUILD_ARENA" = "1" ] && [ -d "$TMP_PATH/openfx-arena" ]; then
         make -j"${MKJOBS}" ${MAKEFLAGS_VERBOSE:-}
 
     ${CP_OR_MV} ./*/*-*-*/*.ofx.bundle "$TMP_BINARIES_PATH/OFX/Plugins/"
+    set +x
 
     maybe_cleanup_binary_files
 
@@ -392,6 +405,7 @@ if [ "$BUILD_GMIC" = "1" ] && [ -d "$TMP_PATH/openfx-gmic" ]; then
     echo "Info: build openfx-gmic using make..."
 
     # build GMIC.ofx
+    set -x
     if [ "$COMPILER" = "clang" ] && [ -n "${GXX:-}" ]; then
         # Building with Apple clang (no OpenMP available), but GCC is available too!
         env \
@@ -416,7 +430,7 @@ if [ "$BUILD_GMIC" = "1" ] && [ -d "$TMP_PATH/openfx-gmic" ]; then
             make -j"${GMIC_MKJOBS}" ${MAKEFLAGS_VERBOSE:-}
     fi
     ${CP_OR_MV} ./*/*-*-*/*.ofx.bundle "$TMP_BINARIES_PATH/OFX/Plugins/"
-
+    set +x
     maybe_cleanup_binary_files
 
     cd "$TMP_PATH"
