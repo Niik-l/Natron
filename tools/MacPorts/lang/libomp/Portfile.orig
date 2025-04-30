@@ -19,46 +19,50 @@ long_description        {*}${description} is intended to contain all of the\
                         with +openmp variant for clang-3.7.)
 
 categories              lang
-platforms               darwin
 supported_archs         arm64 i386 x86_64
 license                 {MIT NCSA}
 
 # Moved to epoch 1 for svn # -> version # change.
 epoch                   1
 
-subport                 libomp-devel {}
-
 if {${os.platform} eq "darwin" && ${configure.cxx_stdlib} ne "libstdc++"} {
 
-    version             18.1.8
+    version             20.1.1
     revision            0
 
-    if { ${subport} eq "libomp-devel" } {
-        # Marked obsolete 10/25/2022
-        PortGroup       obsolete 1.0
-        replaced_by     libomp
-    } else {
-        livecheck.regex {"llvmorg-([0-9.]+)".*}
-    }
+    livecheck.regex {"llvmorg-([0-9.]+)".*}
 
     distname        openmp-${version}.src
     distfiles       ${distname}.tar.xz cmake-${version}.src.tar.xz
 
     checksums \
-        openmp-${version}.src.tar.xz \
-                    rmd160  91b09cda3e4761a97d03468462dbb385d8b407c4 \
-                    sha256  60ed57245e73894e4a2a89b15889f367bd906abfe6d3f92e1718223d4b496150 \
-                    size    1320200 \
-        cmake-${version}.src.tar.xz \
-                    rmd160  dcadde4be6110d1753e88cc0c9d5f452203355c2 \
-                    sha256  59badef592dd34893cd319d42b323aaa990b452d05c7180ff20f23ab1b41e837 \
-                    size    8708
+        openmp-20.1.1.src.tar.xz \
+        rmd160  67ccc02cad70b9f4714e0a7d200ab2ec20eaeca5 \
+        sha256  a5d2bba7bc4e7d159ce3fe8d09bdadeb59ff00af967b0a2bf5993fc1528f569e \
+        size    1093888 \
+        cmake-20.1.1.src.tar.xz \
+        rmd160  49696af4a2acec9d52919ca16a9dbeaac2150d1d \
+        sha256  b5988c9e3df3a61249fa82db54061f733756e74f73dfb299ff6314873a732d61 \
+        size    8648 
 
     if {${os.major} <= 12} {
         # kmp_alloc.c includes <atomic> but libc++ is not the default on
         # these systems. https://trac.macports.org/ticket/52554
         configure.cflags-append -stdlib=libc++
     }
+
+    if {${os.platform} eq "darwin" && ${os.major} < 13} {
+        # Last python version to not require C11 (and thus a clang
+        # dependency on some OS versions). Used by libpsl (which is a
+        # dependency of cmake) for the same reason.
+        set python_branch   3.10
+    } else {
+        set python_branch   3.13
+    }
+    set python_ver          [string map {. ""} ${python_branch}]
+    depends_build-append    port:python${python_ver}
+    depends_skip_archcheck-append python${python_ver}
+    configure.args-append   -DPython3_EXECUTABLE=${prefix}/bin/python${python_branch}
 
     # Build requires std::atomic
     configure.cxxflags-append -std=c++11
@@ -74,31 +78,29 @@ if {${os.platform} eq "darwin" && ${configure.cxx_stdlib} ne "libstdc++"} {
 
     livecheck.url       https://api.github.com/repos/llvm/llvm-project/tags
 } else {
-    if { ${subport} eq "libomp-devel" } {
-        version         291764
-        replaced_by     libomp
-    } else {
-        PortGroup       github 1.0
-        # Last version working on libstdc++
-        github.setup    llvm-mirror openmp 381 svn-tags/RELEASE_
-        name            libomp
+    PortGroup       github 1.0
+    # Last version working on libstdc++
+    github.setup    llvm-mirror openmp 381 svn-tags/RELEASE_
+    # Change github.tarball_from to 'releases' or 'archive' next update
+    github.tarball_from tarball
+    name            libomp
 
-        worksrcdir      openmp-${version}/final/runtime
-        version         3.8.1
-        checksums       rmd160  a41054068a127ef84610afef8090109078cb6c46 \
-                        sha256  4c46b5946fe9b2a701661746d11c7c85c51a7f18673194a7ebd2a43470948a34 \
-                        size    5587986
-        set rtpath      "./"
+    worksrcdir      openmp-${version}/final/runtime
+    version         3.8.1
+    checksums       rmd160  a41054068a127ef84610afef8090109078cb6c46 \
+                    sha256  4c46b5946fe9b2a701661746d11c7c85c51a7f18673194a7ebd2a43470948a34 \
+                    size    5587986
+    set rtpath      "./"
 
-        # use cmake-bootstrap to minimize dependencies.
-        depends_build-replace  \
-                        path:bin/cmake:cmake port:cmake-bootstrap
-        configure.cmd   ${prefix}/libexec/cmake-bootstrap/bin/cmake
-    }
+    # use cmake-bootstrap to minimize dependencies.
+    depends_build-replace  \
+                    path:bin/cmake:cmake port:cmake-bootstrap
+    configure.cmd   ${prefix}/libexec/cmake-bootstrap/bin/cmake
+
+    depends_build-append    port:perl5
     livecheck.type      none
 }
 
-depends_build-append    port:perl5
 cmake.out_of_source     yes
 
 # According to documentation builds with clang >= 3.3
@@ -147,8 +149,6 @@ variant top_level description \
 
 post-extract {
     # Patch tool for build with CMAKE_INSTALL_PREFIX
-    reinplace "/bulk.*compatibility/s/s\+/s+.*/" \
-        ${rtpath}tools/check-depends.pl
     if {[vercmp ${version} 15.0.0] >= 0} {
         system -W ${workpath} "mv cmake*.src/Modules/* openmp*/cmake/"
     }
@@ -195,4 +195,3 @@ notes "
 
 test.run                yes
 test.target             libomp-micro-tests
-

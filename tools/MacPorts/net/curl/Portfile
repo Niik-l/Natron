@@ -6,10 +6,10 @@ PortGroup                       clang_dependency 1.0
 # Increase the revision of p5-www-curl whenever the version of curl gets updated.
 
 name                            curl
-version                         8.10.1
-checksums                       rmd160  ddd20616891b01574bbc1c187affd78a19b7d54a \
-                                sha256  73a4b0e99596a09fa5924a4fb7e4b995a85fda0d18a2c02ab9cf134bebce04ee \
-                                size    2726748
+version                         8.13.0
+checksums                       rmd160  9d259af2206988c36e548394b8bbf26fdada0ca2 \
+                                sha256  4a093979a3c2d02de2fbc00549a32771007f2e78032c6faa5ecd2f7a9e152025 \
+                                size    2773628
 
 categories                      net www
 platforms                       darwin freebsd
@@ -35,13 +35,11 @@ checksums-prepend               ${curl_distfile}
 if {${name} eq ${subport}} {
     PortGroup                   muniversal 1.0
 
-    revision                    1
+    revision                    0
 
     depends_build               path:bin/pkg-config:pkgconfig
 
     depends_lib                 port:zlib
-
-    patchfiles-append           curl-config.in.patch
 
     configure.args              --disable-silent-rules \
                                 --enable-ipv6 \
@@ -306,11 +304,11 @@ subport curl-ca-bundle {
 
     # The approximate time (in seconds since the epoch) when the port maintainer
     # updated the certdata.txt file in this port. (The output of "date +%s".)
-    set certdata_updated        1722278626
+    set certdata_updated        1734045673
     # The upstream commit in which certdata.txt was last updated.
-    set certdata_commit         e3195e969188a333692e5e366d6fda6bb8d7c761
+    set certdata_commit         fc857d1685f9cd017a2cf656a52d871b02a4cc89
     # The date (in YYYYMMDD format) that commit was pushed.
-    set certdata_date           20240703
+    set certdata_date           20241119
     set certdata_file           certdata.txt
     # Using tar.bz2 would be preferable because it's smaller but upstream has
     # disabled the creation of all but zip archives:
@@ -331,13 +329,12 @@ subport curl-ca-bundle {
     distfiles-append            ${certdata_distfile}:certdata
 
     checksums-append            ${certdata_distfile} \
-                                rmd160  713e3d54ce7985975048c7c632352f6e42533a37 \
-                                sha256  3d7b01525e04a2c9b896eb054e31767d113058ead9b00761f8ead014b861fd8e \
-                                size    285603
+                                rmd160  84fe81fcee192f13de1a21fb44b9a529515db8f9 \
+                                sha256  3112344e7742a3372e756f8c080765cc98dc7b2807b813cdef5b9d5421ec0784 \
+                                size    291100
 
     extract.only                ${curl_distfile}
-    extract.post_args-append    ${worksrcdir}/Makefile.dist \
-                                ${worksrcdir}/scripts/mk-ca-bundle.pl
+    extract.post_args-append    ${worksrcdir}/scripts/mk-ca-bundle.pl
 
     post-extract {
         system -W ${workpath} "unzip -q -a [shellescape ${distpath}/${certdata_distfile}]"
@@ -345,12 +342,11 @@ subport curl-ca-bundle {
         file mkdir ${worksrcpath}/lib
     }
 
-    patchfiles                  patch-no-autodownload.diff
-
     use_configure               no
 
-    build.args                  -f Makefile.dist
-    build.target                ca-bundle
+    build.cmd                   scripts/mk-ca-bundle.pl
+    build.args                  -n lib/ca-bundle.crt
+    build.target
 
     destroot {
         set ca_bundle_dir ${prefix}/share/curl

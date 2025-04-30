@@ -87,7 +87,6 @@ if [ "$PKGOS" = "OSX" ]; then
                 # if command -v clang-mp-17 >/dev/null 2>&1; then
                 #     CC=clang-mp-17
                 #     CXX="clang++-mp-17 -stdlib=libc++ -std=c++14"
-                #     CXX17="clang++-mp-17 -stdlib=libc++ -std=c++17"
                 if command -v clang-mp-16 >/dev/null 2>&1; then
                     CC=clang-mp-16
                     CXX="clang++-mp-16 -stdlib=libc++ -std=c++17"

@@ -15,10 +15,11 @@ PortGroup           xcode_workaround 1.0
 
 name                ffmpeg
 set my_name         ffmpeg
+conflicts           ffmpeg-devel
 
 # Please increase the revision of mpv whenever ffmpeg's version is updated.
-version             4.4.4
-revision            8
+version             4.4.5
+revision            7
 epoch               1
 
 license             LGPL-2.1+
@@ -61,14 +62,14 @@ distname            ${my_name}-${version}
 dist_subdir         ${my_name}
 use_xz              yes
 
-checksums           rmd160  ac9916e0915cfe3952993644d0a26d9e7c70e1b7 \
-                    sha256  e80b380d595c809060f66f96a5d849511ef4a76a26b76eacf5778b94c3570309 \
-                    size    9565584
+checksums           rmd160  51d7e4cd1beec0c44c93f466732d11c2573fd77a \
+                    sha256  f9514e0d3515aee5a271283df71636e1d1ff7274b15853bcd84e144be416ab07 \
+                    size    9575596
 
 depends_build-append \
                     port:cctools \
                     port:gmake \
-                    port:pkgconfig \
+                    path:bin/pkg-config:pkgconfig \
                     port:texinfo
 
 depends_lib-append \
@@ -90,11 +91,13 @@ depends_lib-append \
                     port:libtheora \
                     port:libvorbis \
                     path:lib/pkgconfig/vpx.pc:libvpx \
+                    port:lzo2 \
                     port:openjpeg \
                     port:openh264 \
                     port:snappy \
                     port:soxr \
                     path:lib/libspeex.dylib:speex \
+                    port:webp \
                     port:xz \
                     port:zimg \
                     port:zlib \
@@ -112,19 +115,21 @@ patchfiles-append   patch-libavcodec-videotoolboxenc.c.diff
 # Fixed via upstream commit: b786bc7433dfe082441a57c1ba9ae9ea47904b78
 patchfiles-append   patch-issue-9439-non-b-frame-encoding.diff
 
-# Patch for upstream issue:
-# libavcodec/libsvtav1.c:124:53: error: no member named 'compressed_ten_bit_format' in 'struct EbSvtAv1EncConfiguration'
-#         (config->encoder_bit_depth > 8) && (config->compressed_ten_bit_format == 0) ? 1 : 0;
-#                                             ~~~~~~  ^
-# https://trac.macports.org/ticket/67327
-# Fixed via upstream commit: 031f1561cd286596cdb374da32f8aa816ce3b135
-patchfiles-append   patch-libavcodec-libsvtav1-ten_bit_format.diff
+# add retina resolution capabilities via -movflags write_pixeldensity flag
+# this patch is by daniel kaiser who posted on the ffmpeg bugtracker:
+# https://fftrac-bg.ffmpeg.org/ticket/7045
+# but he never formally submitted it to the FFMpeg mailing list, which i did
+# https://ffmpeg.org/pipermail/ffmpeg-devel/2024-July/331470.html
+# so the FFMpeg team does not seem to care to include this functionality
+patchfiles-append   patch-add-pixeldensity.diff
 
-# Patch for building docs with texinfo >= 7
-# https://trac.macports.org/ticket/68747
-# https://trac.ffmpeg.org/ticket/10636
-# Fixed via upstream commit: f01fdedb69e4accb1d1555106d8f682ff1f1ddc7
-patchfiles-append   patch-texinfo-7.diff
+# SVT-AV1 v3 has API changes
+# See https://gitlab.com/AOMediaCodec/SVT-AV1/-/commit/988e930c1083ce518ead1d364e3a486e9209bf73
+patchfiles-append   patch-svt-av1-v3.diff
+
+# doc/t2h: Support texinfo 7.1 and 7.2 pretest
+# https://trac.macports.org/ticket/72110
+patchfiles-append   patch-texinfo7x-pretest-support.diff
 
 # enable auto configure of asm optimizations
 # requires Xcode 3.1 or better on Leopard
@@ -162,18 +167,22 @@ configure.cflags-append \
                     -Wno-deprecated-declarations \
                     ${configure.cppflags}
 
-set port_sharedir   ${prefix}/share
-set port_docdir     ${port_sharedir}/doc
+set port_prefix     ${prefix}
+set port_sharedir   ${port_prefix}/share
+set port_datadir    ${port_sharedir}/data/ffmpeg
+set port_docdir     ${port_sharedir}/doc/ffmpeg
+set port_mandir     ${port_sharedir}/man
 
 configure.pre_args-append \
                     --cxx="${configure.cxx}" \
                     --cc="${configure.cc}" \
-                    --mandir=${prefix}/share/man
+                    --datadir=${port_datadir} \
+                    --docdir=${port_docdir} \
+                    --mandir=${port_mandir}
 
 configure.args-append \
                     --disable-audiotoolbox \
                     --disable-indev=jack \
-                    --disable-libaom \
                     --disable-libjack \
                     --disable-libopencore-amrnb \
                     --disable-libopencore-amrwb \
@@ -207,6 +216,7 @@ configure.args-append \
                     --enable-libtheora \
                     --enable-libvorbis \
                     --enable-libvpx \
+                    --enable-libwebp \
                     --enable-libzimg \
                     --enable-libzvbi \
                     --enable-lzma \
@@ -432,20 +442,7 @@ post-destroot {
     }
 }
 
-variant x11 {
-    # enable x11grab_xcb input device
-    depends_lib-append \
-                    port:xorg-libxcb \
-                    port:xorg-libXext \
-                    port:xorg-libXfixes
-    configure.args-delete \
-                    --disable-xlib \
-                    --disable-libxcb \
-                    --disable-libxcb-shm \
-                    --disable-libxcb-xfixes
-}
-
-variant natronmini requires highbitdepth aom conflicts x11 description {Minimal FFmpeg for Natron, without bluray, subtitles, network, display support.} {
+variant natronmini requires highbitdepth conflicts x11 description {Minimal FFmpeg for Natron, without bluray, subtitles, network, display support.} {
 
     depends_lib-delete \
                     port:libiconv \
@@ -485,12 +482,30 @@ variant natronmini requires highbitdepth aom conflicts x11 description {Minimal 
 
 }
 
-if {[variant_isset x11]} {
-    require_active_variants libsdl2 x11
-} else {
-    require_active_variants libsdl2 "" x11
+variant x11 {
+    # enable x11grab_xcb input device
+    # Re libXv see: https://trac.macports.org/ticket/58617
+    depends_lib-append \
+                    port:xorg-libxcb \
+                    port:xorg-libXext \
+                    port:xorg-libXfixes \
+                    port:xorg-libXv
+    configure.args-delete \
+                    --disable-xlib \
+                    --disable-libxcb \
+                    --disable-libxcb-shm \
+                    --disable-libxcb-xfixes
 }
 
+# On PowerPC libsdl2 is a stub for libsdl2-powerpc, which is always built
+# with X11 backend. It is meaningless to require it as a variant there.
+if {${configure.build_arch} ni [list ppc ppc64]} {
+    if {[variant_isset x11]} {
+        require_active_variants libsdl2 x11
+    } else {
+        require_active_variants libsdl2 "" x11
+    }
+}
 
 variant libdc1394 description {Enable IIDC-1394 frame grabbing using libdc1394 (experimental)} {
     depends_lib-append \
@@ -530,12 +545,6 @@ variant darwinssl description {Enable https support using Apple built-in TLS lib
                     --enable-gnutls
     depends_lib-delete \
                     path:lib/pkgconfig/gnutls.pc:gnutls
-}
-
-variant aom description {Enable Alliance for Open Media AV1 Codec} {
-    depends_lib-append      port:aom
-    configure.args-delete   --disable-libaom
-    configure.args-append   --enable-libaom
 }
 
 variant highbitdepth description {Build using libvpx with 10/12-bit output} {}

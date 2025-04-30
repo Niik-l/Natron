@@ -347,6 +347,14 @@ if [ "${QT_VERSION_MAJOR}" -lt 5 ]; then
 fi
 QTDIR=${QTDIR:-${SDK_HOME}/libexec/qt${QT_VERSION_MAJOR}}
 PYTHON_HOME=${PYTHON_HOME:-${SDK_HOME}/Library/Frameworks/Python.framework/Versions/${PYVER}}
+
+if [ "${QT_VERSION_MAJOR}" = 4 ]; then
+    QT_VERSION=$(pkg-config --modversion QtCore)
+else
+    QT_VERSION=$(pkg-config --modversion Qt${QT_VERSION_MAJOR}Core)
+fi
+QT_VERSION_MINOR=$(echo $QT_VERSION | cut -d. -f2)
+
 ## all Qt frameworks:
 case "${QT_VERSION_MAJOR}" in
 5)

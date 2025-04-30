@@ -1,5 +1,5 @@
---- Portfile.orig	2024-04-03 11:45:38
-+++ Portfile	2024-04-03 12:55:41
+--- Portfile.orig	2025-04-30 10:46:09.000000000 +0200
++++ Portfile	2025-04-30 10:51:50.000000000 +0200
 @@ -3,6 +3,7 @@
  PortSystem                  1.0
  PortGroup                   conflicts_build 1.0
@@ -8,13 +8,7 @@
  
  # TARGET_OS_IOS, TARGET_OS_WATCH, TARGET_OS_TV missing in TargetConditionals.h:
  legacysupport.newest_darwin_requires_legacy 10
-@@ -85,11 +86,13 @@
-                             --with-dps \
-                             --with-bzlib \
-                             --with-djvu \
-+                            --with-fftw \
-                             --with-fontconfig \
-                             --with-gslib \
+@@ -95,6 +96,7 @@
                              --with-jbig \
                              --with-jpeg \
                              --with-lcms \
@@ -22,9 +16,9 @@
                              --with-openjp2 \
                              --with-png \
                              --with-tiff \
-@@ -122,6 +125,60 @@
-     }
- }
+@@ -131,6 +133,60 @@
+ # https://trac.macports.org/wiki/WimplicitFunctionDeclaration#strchr
+ configure.checks.implicit_function_declaration.whitelist-append strchr
  
 +variant natron conflicts x11 requires pango rsvg q32 hdri description {Natron version} {
 +    # libc++-based build
@@ -83,7 +77,7 @@
  test.run                    yes
  test.target                 check
  test.env                    DYLD_LIBRARY_PATH=${worksrcpath}/magick/.libs
-@@ -129,6 +186,23 @@
+@@ -138,6 +194,23 @@
  # ImageMagick uses .la files at runtime to find its coder modules.
  destroot.delete_la_files    no
  
@@ -107,7 +101,7 @@
  variant graphviz description {Support Graphviz} {
      depends_lib-append      path:bin/dot:graphviz
      configure.args-replace  --without-gvc --with-gvc
-@@ -163,6 +237,11 @@
+@@ -172,6 +245,11 @@
  
  default_variants            +x11
  
