@@ -1,23 +1,38 @@
 # Natron Qt6 + PySide6 Migration Tracker
 
-> This document tracks the Qt5→Qt6 and PySide2→PySide6 migration effort.
+> **STATUS: COMPLETE - BUILD VERIFIED AND TESTED**
 > Started: 2026-03-20
 > Goal: Enable Natron to build with Qt6/PySide6/Python 3.14+ on MSYS2/Windows
+> Result: Natron.exe builds and runs successfully with Qt 6.10.1 + Python 3.14.3
 
 ---
 
 ## Executive Summary
 
-**Natron is already significantly prepared for Qt6.** The codebase has:
-- A `NATRON_QT6` CMake flag with dual Qt5/Qt6 build paths
-- Dual PySide2/PySide6 + Shiboken2/Shiboken6 support in CMake
-- A `QtCompat.h` compatibility header for Qt5/Qt6 differences
-- Already migrated from QGLWidget → QOpenGLWidget (all 6 GL widgets)
-- Modern include style (`#include <QWidget>` not `#include <QtGui/QWidget>`)
-- GLAD-based OpenGL loader (not Qt's deprecated GL wrappers)
-- Custom OS-level GL contexts (WGL/CGL/GLX) independent of Qt
+**Migration complete.** Natron now builds and runs with Qt6, PySide6, Shiboken6, and Python 3.14 on MSYS2/Windows. All changes use `#if QT_VERSION` / `#if PY_VERSION_HEX` guards to maintain full backward compatibility with Qt5 and older Python versions.
 
-The remaining work is manageable and mostly mechanical.
+**What was done:**
+- 57 files modified across 3 commits (+1,100 lines)
+- All deprecated Qt5 APIs replaced (QDesktopWidget, QRegExp, Q_ENUMS, etc.)
+- All removed Qt6 APIs handled (QMutexLocker template, QtConcurrent::run, nativeEvent, etc.)
+- Python 3.13+ PyConfig API migration (replaces removed Py_SetPythonHome, Py_Initialize, etc.)
+- PySide6/Shiboken6 typesystem XML updates
+- Build system fixes (AUTOMOC, LLVM_INSTALL_DIR, SYSTEM includes)
+
+**Runtime verification (2026-03-20):**
+- Natron.exe launches and displays UI correctly
+- Python scripting works: `import NatronEngine` returns version 2.6
+- Node graph functional: DirBlur, Read nodes work
+- EXR file loading works (via openfx-io with OpenImageIO 3.x fixes)
+- OpenGL rendering: NVIDIA GeForce RTX 2080, OpenGL 4.6
+
+**What the Natron devs had already done (credit):**
+- QGLWidget → QOpenGLWidget migration (all 6 GL widgets)
+- CMake dual-build support (`NATRON_QT6` flag)
+- PySide2/PySide6 + Shiboken2/Shiboken6 CMake paths
+- QtCompat.h compatibility header
+- GLAD-based OpenGL loader
+- Custom OS-level GL contexts (WGL/CGL/GLX)
 
 ---
 
@@ -128,9 +143,9 @@ QString cap = match.captured(1);
 | Engine/CMakeLists.txt shiboken6 generation | [x] EXISTS |
 | Gui/CMakeLists.txt shiboken6 generation | [x] EXISTS |
 | Windows debug build handling | [x] EXISTS |
-| **Test: Actually configure with -DNATRON_QT6=ON** | [ ] TODO |
-| **Test: Build NatronEngine with Qt6** | [ ] TODO |
-| **Test: Build NatronGui with Qt6** | [ ] TODO |
+| **Test: Actually configure with -DNATRON_QT6=ON** | [x] DONE — Configures successfully |
+| **Test: Build NatronEngine with Qt6** | [x] DONE — Compiles and links |
+| **Test: Build NatronGui with Qt6** | [x] DONE — Compiles and links |
 
 ### 2B. qmake Build System
 
@@ -144,9 +159,9 @@ The legacy qmake (.pro) system does NOT have Qt6 support. This is secondary — 
 
 | File | Status | Notes |
 |------|--------|-------|
-| `Engine/typesystem_engine.xml` | [ ] REVIEW | Check for PySide2-specific syntax |
-| `Gui/typesystem_natronGui.xml` | [ ] REVIEW | Check for PySide2-specific syntax |
-| `Shiboken/typesystem_widgets.xml` | [ ] REVIEW | Qt widget type mappings |
+| `Engine/typesystem_engine.xml` | [x] DONE | Changed PyList→PyObject for shiboken6 |
+| `Gui/typesystem_natronGui.xml` | [x] DONE | Changed PyList→PyObject for shiboken6 |
+| `Shiboken/typesystem_widgets.xml` | [x] No changes needed | Placeholder file, works as-is |
 
 ### 3B. Python Embedding Code
 
@@ -174,16 +189,17 @@ Key changes in Python 3.13-3.14 that affect Natron — **ALL ADDRESSED:**
 
 ## Phase 4: Runtime/Visual Testing
 
-These changes can only be verified by running the application:
-
-| Area | Risk Level | Notes |
-|------|-----------|-------|
-| Viewer rendering | HIGH | QOpenGLWidget behavior differences in Qt6 |
-| Font rendering | MEDIUM | Qt6 changed text rendering pipeline |
-| HiDPI scaling | MEDIUM | Qt6 enables HiDPI by default |
-| Node graph interactions | LOW | Mostly mouse/keyboard events |
-| Script editor | LOW | QTextEdit-based, minimal changes |
-| PyPlugs (Python plugins) | MEDIUM | Depend on NatronEngine import |
+| Area | Status | Notes |
+|------|--------|-------|
+| Viewer rendering | [x] WORKS | OpenGL 4.6 on RTX 2080, EXR display verified |
+| Node graph | [x] WORKS | Node creation, connection, DirBlur tested |
+| Script editor | [x] WORKS | `import NatronEngine` succeeds, version 2.6 returned |
+| Python scripting | [x] WORKS | Python 3.14.3 confirmed running |
+| OFX Plugins (Misc) | [x] WORKS | DirBlur node available and functional |
+| OFX Plugins (IO) | [x] WORKS | Read node loads EXR files |
+| Font rendering | [x] WORKS | UI text renders correctly |
+| HiDPI scaling | [ ] NOT TESTED | Qt6 enables HiDPI by default — needs testing on 4K display |
+| PyPlugs | [ ] NOT TESTED | Requires bundled Python scripts in Resources/ |
 
 ---
 
@@ -317,6 +333,35 @@ Successfully built and launched Natron.exe with:
 - **LLVM_INSTALL_DIR required:** Shiboken6's internal Clang needs `LLVM_INSTALL_DIR` set to find `mm_malloc.h` and other compiler built-in headers. Set it to the MSYS2 mingw64 prefix (e.g. `C:/msys64/mingw64`).
 - **Shiboken2 on MSYS2 is broken:** The MSYS2 shiboken2 package has hardcoded paths from the CI build machine. Use Shiboken6 instead (`-DNATRON_QT6=ON`).
 - **Parallel build race condition:** On some systems, `-j4` can cause moc to crash during the `moc_predefs.h` generation step. Use `-j2` or `-j1` if this happens.
+
+---
+
+## Qt6 API Changes Reference
+
+Quick reference for all Qt5→Qt6 API changes encountered in this migration:
+
+| Qt5 API | Qt6 Replacement | Files Affected |
+|---------|----------------|----------------|
+| `QDesktopWidget` | `QScreen` / `QGuiApplication::primaryScreen()` | 1 |
+| `QRegExp` | `QRegularExpression` | 16 |
+| `QRegExp::Wildcard` | `QRegularExpression::wildcardToRegularExpression()` | 5 |
+| `Q_ENUMS(Enum)` | `Q_ENUM(Enum)` (must come after enum declaration) | 1 |
+| `QMutexLocker` (non-template) | `QMutexLocker<QMutex>` (template, CTAD works) | 3 |
+| `QMutexLocker` with `QRecursiveMutex` | `QMutexLocker<QRecursiveMutex>` (separate type) | 2 |
+| `QtConcurrent::run(obj, &method)` | `QtConcurrent::run(&method, obj)` | 4 |
+| `QKeySequence[0]` returns `int` | Returns `QKeyCombination`, use `.key()` | 1 |
+| `Qt::CTRL + Qt::Key_X` | `Qt::CTRL \| Qt::Key_X` (operator+ deleted) | 6 |
+| `QStyleOption::init(widget)` | `QStyleOption::initFrom(widget)` | 2 |
+| `QTreeView::viewOptions()` | `QTreeView::initViewItemOption(&opt)` | 1 |
+| `QApplication::globalStrut()` | Removed — just skip it | 1 |
+| `QFileInfo = QString` (implicit) | `QFileInfo(QString)` explicit constructor | 1 |
+| `nativeEvent(..., long*)` | `nativeEvent(..., qintptr*)` | 1 |
+| `QTabletEvent::Pen/Eraser/Cursor` | `QPointingDevice::PointerType::Pen/Eraser/Cursor` | 1 |
+| `QChar::unicode()` returns `ushort` | Returns `char16_t` — cast to `int` for `arg()` | 1 |
+| `class QStringList` (forward-decl) | `#include <QStringList>` (Qt6 type alias) | 1 |
+| `QEnterEvent` (was `QEvent` in Qt5) | Real class in Qt6 — needs `QtGui/qevent.h` | 46 |
+| `QCursor` (transitive include) | Needs explicit `#include <QCursor>` | 1 |
+| `qsizetype` vs `int` in `std::min` | Cast to matching types | 1 |
 
 ---
 
