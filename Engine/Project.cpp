@@ -55,6 +55,11 @@
 #include <QTextStream>
 #include <QHostInfo>
 #include <QtConcurrentRun> // QtCore on Qt4, QtConcurrent on Qt5
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QRegularExpression>
+#else
+#include <QRegExp>
+#endif
 
 #include <ofxhXml.h> // OFX::XML::escape
 
@@ -504,7 +509,11 @@ findBackups(const QString & filePath)
         ret.append(filePath);
     }
     // find files matching filePath.~[0-9]+~
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QRegularExpression rx(QString::fromUtf8("\\.~(\\d+)~$"));
+#else
     QRegExp rx(QString::fromUtf8("\\.~(\\d+)~$"));
+#endif
     QFileInfo fileInfo(filePath);
     QString fileName = fileInfo.fileName();
     QDirIterator it(fileInfo.dir());
@@ -518,7 +527,12 @@ findBackups(const QString & filePath)
 
         // If the filename contains target string - put it in the hitlist
         QString fn = file.fileName();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        QRegularExpressionMatch rxMatch = rx.match(fn);
+        if (fn.startsWith(fileName) && rxMatch.hasMatch() && rxMatch.capturedStart() == fileName.size()) {
+#else
         if (fn.startsWith(fileName) && rx.lastIndexIn(fn) == fileName.size()) {
+#endif
             ret.append(file.filePath());
         }
     }
@@ -532,6 +546,17 @@ findBackups(const QString & filePath)
 static QString
 nextBackup(const QString & filePath)
 {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QRegularExpression rx(QString::fromUtf8("\\.~(\\d+)~$"));
+    QRegularExpressionMatch rxMatch = rx.match(filePath);
+    if (rxMatch.hasMatch()) {
+        int pos = rxMatch.capturedStart();
+        int i = rxMatch.captured(1).toInt();
+        return filePath.left(pos) + QString::fromUtf8(".~%1~").arg(i+1);
+    } else {
+        return filePath + QString::fromUtf8(".~1~");
+    }
+#else
     QRegExp rx(QString::fromUtf8("\\.~(\\d+)~$"));
     int pos = rx.lastIndexIn(filePath);
     if (pos >= 0) {
@@ -540,6 +565,7 @@ nextBackup(const QString & filePath)
     } else {
         return filePath + QString::fromUtf8(".~1~");
     }
+#endif
 }
 
 QString

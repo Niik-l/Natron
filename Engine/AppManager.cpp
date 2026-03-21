@@ -2940,7 +2940,9 @@ AppManager::initPython()
     //If this is set, Python won’t add the user site-packages directory to sys.path.
     //See https://www.python.org/dev/peps/pep-0370/
     qputenv("PYTHONNOUSERSITE", "1");
+#if PY_VERSION_HEX < 0x030D0000
     ++Py_NoUserSiteDirectory;
+#endif
 
     //
     // set up paths, clear those that don't exist or are not valid

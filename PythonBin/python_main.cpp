@@ -79,7 +79,35 @@ extern "C" {
         std::wstring utf16 = NATRON_NAMESPACE::StrUtils::utf8_to_utf16(commandLineArgsUtf8[i]);
         wideArgs[i] = wcsdup(utf16.c_str());
     }
+
+#if PY_VERSION_HEX >= 0x030D0000
+    // Python 3.13+: Use PyConfig API for initialization, then Py_RunMain()
+    PyStatus status;
+    PyConfig config;
+    PyConfig_InitPythonConfig(&config);
+
+    config.user_site_directory = 0;
+
+    status = PyConfig_SetArgv(&config, argc, &wideArgs[0]);
+    if (PyStatus_Exception(status)) {
+        PyConfig_Clear(&config);
+        Py_ExitStatusException(status);
+        return 1;
+    }
+
+    status = Py_InitializeFromConfig(&config);
+    if (PyStatus_Exception(status)) {
+        PyConfig_Clear(&config);
+        Py_ExitStatusException(status);
+        return 1;
+    }
+    PyConfig_Clear(&config);
+
+    int ret = Py_RunMain();
+#else
+    // Legacy path: Py_Main handles initialization internally
     int ret = Py_Main(commandLineArgsUtf8.size(), &wideArgs[0]);
+#endif
     return ret;
 } //main
 #ifdef __NATRON_WIN32__

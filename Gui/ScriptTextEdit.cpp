@@ -33,7 +33,11 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QScrollBar>
 #include <QTextBlock>
 #include <QPainter>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QRegularExpression>
+#else
 #include <QRegExp>
+#endif
 #include <QMimeData>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
@@ -58,13 +62,21 @@ struct PyHighLightRule
                     const QTextCharFormat &matchingFormat)
     {
         originalRuleStr = patternStr;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        pattern = QRegularExpression(patternStr);
+#else
         pattern = QRegExp(patternStr);
+#endif
         nth = n;
         format = matchingFormat;
     }
 
     QString originalRuleStr;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QRegularExpression pattern;
+#else
     QRegExp pattern;
+#endif
     int nth;
     QTextCharFormat format;
 };
@@ -77,8 +89,13 @@ struct PySyntaxHighlighterPrivate
     QStringList braces;
     QHash<QString, QTextCharFormat> basicStyles;
     QList<PyHighLightRule> rules;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QRegularExpression triSingleQuote;
+    QRegularExpression triDoubleQuote;
+#else
     QRegExp triSingleQuote;
     QRegExp triDoubleQuote;
+#endif
 
     PySyntaxHighlighterPrivate(PySyntaxHighlighter* publicInterface)
         : publicInterface(publicInterface)
@@ -125,6 +142,17 @@ void
 PySyntaxHighlighter::highlightBlock(const QString &text)
 {
     for (QList<PyHighLightRule>::Iterator it = _imp->rules.begin(); it != _imp->rules.end(); ++it) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        QRegularExpressionMatchIterator matchIter = it->pattern.globalMatch(text);
+        while (matchIter.hasNext()) {
+            QRegularExpressionMatch match = matchIter.next();
+            int idx = match.capturedStart(it->nth);
+            int length = match.capturedLength(it->nth);
+            if (idx >= 0) {
+                setFormat(idx, length, it->format);
+            }
+        }
+#else
         int idx = it->pattern.indexIn(text, 0);
         while (idx >= 0) {
             // Get index of Nth match
@@ -133,6 +161,7 @@ PySyntaxHighlighter::highlightBlock(const QString &text)
             setFormat(idx, length, it->format);
             idx = it->pattern.indexIn(text, idx + length);
         }
+#endif
     }
 
     setCurrentBlockState(0);
@@ -184,6 +213,48 @@ PySyntaxHighlighterPrivate::initializeRules()
     rules.append( PyHighLightRule( QString::fromUtf8("\\b[+-]?[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\\b"), 0, basicStyles.value( QString::fromUtf8("numbers") ) ) );
 }
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+bool
+PySyntaxHighlighter::matchMultiline(const QString &text,
+                                    const QRegularExpression &delimiter,
+                                    const int inState,
+                                    const QTextCharFormat &style)
+{
+    int start = -1;
+    int add = -1;
+    int end = -1;
+    int length = 0;
+
+    if (previousBlockState() == inState) {
+        start = 0;
+        add = 0;
+    } else {
+        QRegularExpressionMatch match = delimiter.match(text);
+        start = match.hasMatch() ? match.capturedStart() : -1;
+        add = match.hasMatch() ? match.capturedLength() : -1;
+    }
+
+    while (start >= 0) {
+        QRegularExpressionMatch endMatch = delimiter.match(text, start + add);
+        end = endMatch.hasMatch() ? endMatch.capturedStart() : -1;
+        if (end >= add) {
+            length = end - start + add + endMatch.capturedLength();
+            setCurrentBlockState(0);
+        } else {
+            setCurrentBlockState(inState);
+            length = text.length() - start + add;
+        }
+        setFormat(start, length, style);
+        QRegularExpressionMatch nextMatch = delimiter.match(text, start + length);
+        start = nextMatch.hasMatch() ? nextMatch.capturedStart() : -1;
+    }
+    if (currentBlockState() == inState) {
+        return true;
+    } else {
+        return false;
+    }
+}
+#else
 bool
 PySyntaxHighlighter::matchMultiline(const QString &text,
                                     const QRegExp &delimiter,
@@ -230,6 +301,7 @@ PySyntaxHighlighter::matchMultiline(const QString &text,
         return false;
     }
 }
+#endif
 
 const QTextCharFormat
 PySyntaxHighlighterPrivate::getTextCharFormat(double r,

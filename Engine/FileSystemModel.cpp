@@ -56,6 +56,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Global/FloatingPointExceptions.h"
 #endif
 
+#include "Global/QtCompat.h"
 #include "AppManager.h" // appPTR & StrUtils
 
 
@@ -193,7 +194,11 @@ struct FileSystemModelPrivate
     QStringList headers;
     QDir::Filters filters;
     QString encodedRegexps;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    std::list<QRegularExpression> regexps;
+#else
     std::list<QRegExp> regexps;
+#endif
     mutable QMutex filtersMutex;
     mutable QMutex sequenceModeEnabledMutex;
     bool sequenceModeEnabled;
@@ -1041,10 +1046,17 @@ FileSystemModel::setRegexpFilters(const QString& filters)
                 ++i;
             }
             if ( regExp != QString( QLatin1Char('*') ) ) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+                QRegularExpression rx = NATRON_NAMESPACE::QtCompat::wildcardToRegex(regExp, Qt::CaseInsensitive);
+                if ( rx.isValid() ) {
+                    _imp->regexps.push_back(rx);
+                }
+#else
                 QRegExp rx(regExp, Qt::CaseInsensitive, QRegExp::Wildcard);
                 if ( rx.isValid() ) {
                     _imp->regexps.push_back(rx);
                 }
+#endif
             }
             ++i;
         }
@@ -1082,11 +1094,20 @@ FileSystemModel::isAcceptedByRegexps(const QString & path) const
         return true;
     }
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    for (std::list<QRegularExpression>::const_iterator it = _imp->regexps.begin(); it != _imp->regexps.end(); ++it) {
+        QRegularExpressionMatch m = it->match(path);
+        if ( m.hasMatch() ) {
+            return true;
+        }
+    }
+#else
     for (std::list<QRegExp>::const_iterator it = _imp->regexps.begin(); it != _imp->regexps.end(); ++it) {
         if ( it->exactMatch(path) ) {
             return true;
         }
     }
+#endif
 
     return false;
 }

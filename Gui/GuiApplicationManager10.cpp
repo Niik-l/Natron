@@ -41,8 +41,12 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QSettings>
 #include <QFileInfo>
 #include <QApplication>
-#include <QDesktopWidget>
 #include <QFileOpenEvent>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QScreen>
+#else
+#include <QDesktopWidget>
+#endif
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 
@@ -299,9 +303,15 @@ GuiApplicationManager::initializeQApp(int &argc,
 #endif
         app = new Application(this, argc, argv);
     }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QScreen* screen = app->primaryScreen();
+    int dpiX = screen ? qRound(screen->logicalDotsPerInchX()) : 96;
+    int dpiY = screen ? qRound(screen->logicalDotsPerInchY()) : 96;
+#else
     QDesktopWidget* desktop = app->desktop();
     int dpiX = desktop->logicalDpiX();
     int dpiY = desktop->logicalDpiY();
+#endif
 
     setCurrentLogicalDPI(dpiX, dpiY);
 

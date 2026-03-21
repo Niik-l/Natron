@@ -46,6 +46,11 @@
 NATRON_NAMESPACE_ENTER
 NATRON_PYTHON_NAMESPACE_ENTER
 
+#if PY_VERSION_HEX >= 0x030D0000
+// Python 3.13+: store pythonHome from setupPythonEnv() for use in PyConfig-based initialization
+static std::wstring s_pythonHomeW;
+#endif
+
 static bool fileExists(const std::string& path)
 {
     FStreamsSupport::ifstream ifile;
@@ -72,7 +77,9 @@ void setupPythonEnv(const std::string& binPath)
     //If this is set, Python won’t add the user site-packages directory to sys.path.
     //See https://www.python.org/dev/peps/pep-0370/
     ProcInfo::putenv_wrapper("PYTHONNOUSERSITE", "1");
+#if PY_VERSION_HEX < 0x030D0000
     ++Py_NoUserSiteDirectory;
+#endif
 
     //
     // set up paths, clear those that don't exist or are not valid
@@ -150,7 +157,12 @@ void setupPythonEnv(const std::string& binPath)
 #     if defined(NATRON_CONFIG_SNAPSHOT) || defined(DEBUG)
         printf( "Py_SetPythonHome(\"%s\")\n", pythonHome.c_str() );
 #     endif
+#if PY_VERSION_HEX >= 0x030D0000
+        // Python 3.13+: Py_SetPythonHome is removed; store for PyConfig-based init
+        s_pythonHomeW = pythonHomeW;
+#else
         Py_SetPythonHome( const_cast<wchar_t*>( pythonHomeW.c_str() ) );
+#endif
     }
 
 
@@ -221,40 +233,158 @@ void setupPythonEnv(const std::string& binPath)
 
 PyObject* initializePython3(const std::vector<wchar_t*>& commandLineArgsWide)
 {
-    //See https://developer.blender.org/T31507
-    //Python will not load anything in site-packages if this is set
-    //We are sure that nothing in system wide site-packages is loaded, for instance on OS X with Python installed
-    //through macports on the system, the following printf show the following:
-
-    /*Py_GetProgramName is /Applications/Natron.app/Contents/MacOS/Natron
-     Py_GetPrefix is /Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7
-     Py_GetExecPrefix is /Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7
-     Py_GetProgramFullPath is /Applications/Natron.app/Contents/MacOS/Natron
-     Py_GetPath is /Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7/lib/python2.7:/Applications/Natron.app/Contents/MacOS/../Plugins:/Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7/lib/python27.zip:/Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7/lib/python2.7/:/Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7/lib/python2.7/plat-darwin:/Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7/lib/python2.7/plat-mac:/Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7/lib/python2.7/plat-mac/lib-scriptpackages:/Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7/lib/python2.7/lib-tk:/Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7/lib/python2.7/lib-old:/Applications/Natron.app/Contents/MacOS/../Frameworks/Python.framework/Versions/2.7/lib/python2.7/lib-dynload
-     Py_GetPythonHome is ../Frameworks/Python.framework/Versions/2.7/lib
-     Python library is in /Applications/Natron.app/Contents/Frameworks/Python.framework/Versions/2.7/lib/python2.7/site-packages*/
-
-    //Py_NoSiteFlag = 1;
-
+#if PY_VERSION_HEX >= 0x030D0000
     /////////////////////////////////////////
-    // Py_SetProgramName
+    // Python 3.13+ initialization using PyConfig API
     /////////////////////////////////////////
     //
-    // Must be done before Py_Initialize (see doc of Py_Initialize)
-    //
+    // The legacy APIs (Py_SetProgramName, Py_SetPythonHome, Py_Initialize,
+    // PySys_SetArgv, PyEval_InitThreads) were removed in Python 3.13+.
+    // Use the structured PyConfig API instead.
+
+    PyStatus status;
+    PyConfig config;
+    PyConfig_InitPythonConfig(&config);
+
+    config.user_site_directory = 0;
+
+    // Set program name
+    status = PyConfig_SetString(&config, &config.program_name, commandLineArgsWide[0]);
+    if (PyStatus_Exception(status)) {
+        PyConfig_Clear(&config);
+        Py_ExitStatusException(status);
+        return nullptr;
+    }
+
+    // Set home directory (stored by setupPythonEnv)
+    if (!s_pythonHomeW.empty()) {
+        status = PyConfig_SetString(&config, &config.home, s_pythonHomeW.c_str());
+        if (PyStatus_Exception(status)) {
+            PyConfig_Clear(&config);
+            Py_ExitStatusException(status);
+            return nullptr;
+        }
+    }
+
+    // Set argv
+    status = PyConfig_SetArgv(&config, (int)commandLineArgsWide.size(),
+                               const_cast<wchar_t* const*>(&commandLineArgsWide[0]));
+    if (PyStatus_Exception(status)) {
+        PyConfig_Clear(&config);
+        Py_ExitStatusException(status);
+        return nullptr;
+    }
+
+#if defined(NATRON_CONFIG_SNAPSHOT) || defined(DEBUG)
+    printf("Py_InitializeFromConfig()\n");
+#endif
+    status = Py_InitializeFromConfig(&config);
+    if (PyStatus_Exception(status)) {
+        PyConfig_Clear(&config);
+        Py_ExitStatusException(status);
+        return nullptr;
+    }
+    PyConfig_Clear(&config);
+
+    // Set sys.prefix and sys.exec_prefix from home
+    if (!s_pythonHomeW.empty()) {
+        PyObject *prefix = PyUnicode_FromWideChar(s_pythonHomeW.c_str(), -1);
+        PySys_SetObject(const_cast<char*>("prefix"), prefix);
+        Py_XDECREF(prefix);
+        PyObject *exec_prefix = PyUnicode_FromWideChar(s_pythonHomeW.c_str(), -1);
+        PySys_SetObject(const_cast<char*>("exec_prefix"), exec_prefix);
+        Py_XDECREF(exec_prefix);
+    }
+
+    PyObject* mainModule = PyImport_ImportModule("__main__");
+
+#if defined(NATRON_CONFIG_SNAPSHOT) || defined(DEBUG)
+    /// print info about python lib (using sys module queries for 3.13+)
+    {
+        printf( "PATH is %s\n", Py_GETENV("PATH") );
+        printf( "PYTHONPATH is %s\n", Py_GETENV("PYTHONPATH") );
+        printf( "PYTHONHOME is %s\n", Py_GETENV("PYTHONHOME") );
+
+        // Global flags are removed in 3.13+; query sys.flags instead
+        PyObject* sysModule = PyImport_ImportModule("sys");
+        if (sysModule) {
+            PyObject* flags = PyObject_GetAttrString(sysModule, "flags");
+            if (flags) {
+                PySys_FormatStdout("  sys.flags = %A\n", flags);
+                Py_DECREF(flags);
+            }
+            Py_DECREF(sysModule);
+        }
+
+        printf( "Py_GetProgramName is %ls\n", Py_GetProgramName() );
+        printf( "Py_GetPrefix is %ls\n", Py_GetPrefix() );
+        printf( "Py_GetExecPrefix is %ls\n", Py_GetExecPrefix() );
+        printf( "Py_GetProgramFullPath is %ls\n", Py_GetProgramFullPath() );
+        printf( "Py_GetPath is %ls\n", Py_GetPath() );
+
+#define DUMP_SYS(NAME) \
+            do { \
+                obj = PySys_GetObject(#NAME); \
+                PySys_FormatStderr("  sys.%s = ", #NAME); \
+                if (obj != NULL) { \
+                    PySys_FormatStdout("%A", obj); \
+                } \
+                else { \
+                    PySys_WriteStdout("(not set)"); \
+                } \
+                PySys_FormatStdout("\n"); \
+            } while (0)
+
+        PyObject *obj;
+        DUMP_SYS(version);
+        DUMP_SYS(_base_executable);
+        DUMP_SYS(base_prefix);
+        DUMP_SYS(base_exec_prefix);
+        DUMP_SYS(platlibdir);
+        DUMP_SYS(executable);
+        DUMP_SYS(prefix);
+        DUMP_SYS(exec_prefix);
+#undef DUMP_SYS
+
+        PyObject *sys_path = PySys_GetObject("path");
+        if (sys_path != NULL && PyList_Check(sys_path)) {
+            PySys_WriteStdout("  sys.path = [\n");
+            Py_ssize_t len = PyList_GET_SIZE(sys_path);
+            for (Py_ssize_t i=0; i < len; i++) {
+                PyObject *path = PyList_GET_ITEM(sys_path, i);
+                PySys_FormatStdout("    %A,\n", path);
+            }
+            PySys_WriteStdout("  ]\n");
+        }
+
+        PyObject* dict = PyModule_GetDict(mainModule);
+        PyErr_Clear();
+
+        // distutils was removed in Python 3.12; use sysconfig instead
+        std::string script("import sysconfig; print('Python library is in ' + sysconfig.get_path('purelib'))");
+        PyObject* v = PyRun_String(script.c_str(), Py_file_input, dict, 0);
+        if (v) {
+            Py_DECREF(v);
+        }
+    }
+#endif // DEBUG
+
+    // Release the GIL for multi-threaded use
+    PyThreadState *_save = PyEval_SaveThread();
+
+    return mainModule;
+
+#else // PY_VERSION_HEX < 0x030D0000
+    /////////////////////////////////////////
+    // Legacy Python initialization (Python < 3.13)
+    /////////////////////////////////////////
 
     Py_SetProgramName(commandLineArgsWide[0]);
 
-    /////////////////////////////////////////
-    // Py_Initialize
-    /////////////////////////////////////////
-    //
-    // Initialize the Python interpreter. In an application embedding Python, this should be called before using any other Python/C API functions; with the exception of Py_SetProgramName(), Py_SetPythonHome() and Py_SetPath().
 #if defined(NATRON_CONFIG_SNAPSHOT) || defined(DEBUG)
     printf("Py_Initialize()\n");
 #endif
     Py_Initialize();
-    // pythonHome must be const, so that the c_str() pointer is never invalidated
 
     // Py_SetPath clears sys.prefix and sys.exec_prefix
     // https://github.com/NatronGitHub/Natron/issues/696
@@ -265,30 +395,13 @@ PyObject* initializePython3(const std::vector<wchar_t*>& commandLineArgsWide)
     PySys_SetObject(const_cast<char*>("exec_prefix"), exec_prefix);
     Py_XDECREF(exec_prefix);
 
-    /////////////////////////////////////////
-    // PySys_SetArgv
-    /////////////////////////////////////////
-    //
-    PySys_SetArgv( commandLineArgsWide.size(), const_cast<wchar_t**>(&commandLineArgsWide[0]) ); /// relative module import
+    PySys_SetArgv( commandLineArgsWide.size(), const_cast<wchar_t**>(&commandLineArgsWide[0]) );
 
-    PyObject* mainModule = PyImport_ImportModule("__main__"); //create main module , new ref
+    PyObject* mainModule = PyImport_ImportModule("__main__");
 
-    //See https://web.archive.org/web/20150918224620/http://wiki.blender.org/index.php/Dev:2.4/Source/Python/API/Threads
-    //Python releases the GIL every 100 virtual Python instructions, we do not want that to happen in the middle of an expression.
-    // Not recessary since we also have the Natron GIL to control the execution of our own scripts.
-    //_PyEval_SetSwitchInterval(std::numeric_limits<long>::max());
-
-    //See answer for http://stackoverflow.com/questions/15470367/pyeval-initthreads-in-python-3-how-when-to-call-it-the-saga-continues-ad-naus
-    // Note: on Python >= 3.7 this is already done by Py_Initialize(),
 #if PY_VERSION_HEX < 0x03070000
     PyEval_InitThreads();
 #endif
-
-    // Follow https://web.archive.org/web/20150918224620/http://wiki.blender.org/index.php/Dev:2.4/Source/Python/API/Threads
-    ///All calls to the Python API should call PythonGILLocker beforehand.
-    // Disabled because it seems to crash Natron at launch.
-    //_imp->mainThreadState = PyGILState_GetThisThreadState();
-    //PyEval_ReleaseThread(_imp->mainThreadState);
 
     std::string err;
 #if defined(NATRON_CONFIG_SNAPSHOT) || defined(DEBUG)
@@ -358,7 +471,11 @@ PyObject* initializePython3(const std::vector<wchar_t*>& commandLineArgsWide)
         PyErr_Clear();
 
         ///This is faster than PyRun_SimpleString since is doesn't call PyImport_AddModule("__main__")
+#if PY_VERSION_HEX >= 0x030C0000
+        std::string script("import sysconfig; print('Python library is in ' + sysconfig.get_path('purelib'))");
+#else
         std::string script("from distutils.sysconfig import get_python_lib; print('Python library is in ' + get_python_lib())");
+#endif
         PyObject* v = PyRun_String(script.c_str(), Py_file_input, dict, 0);
         if (v) {
             Py_DECREF(v);
@@ -369,10 +486,9 @@ PyObject* initializePython3(const std::vector<wchar_t*>& commandLineArgsWide)
     // Release the GIL, because PyEval_InitThreads acquires the GIL
     // see https://docs.python.org/3.7/c-api/init.html#c.PyEval_InitThreads
     PyThreadState *_save = PyEval_SaveThread();
-    // The lock should be released just before PyFinalize() using:
-    // PyEval_RestoreThread(_save);
 
     return mainModule;
+#endif // PY_VERSION_HEX >= 0x030D0000
 } // initializePython
 
 

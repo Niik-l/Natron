@@ -42,7 +42,11 @@
 #include <QWaitCondition>
 #include <QTextStream>
 #include <QFile>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QRegularExpression>
+#else
 #include <QRegExp>
+#endif
 
 #include <ofxNatron.h>
 

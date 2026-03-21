@@ -49,6 +49,8 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Settings.h"
 #include "Engine/Utils.h" // convertFromPlainText
 
+#include "Global/QtCompat.h"
+
 #include "Gui/ActionShortcuts.h"
 #include "Gui/GuiDefines.h"
 #include "Gui/AnimatedCheckBox.h"
@@ -819,7 +821,11 @@ PreferencesPanel::filterPlugins(const QString & txt)
             pattern.push_back(txt[i]);
         }
         pattern.push_back( QLatin1Char('*') );
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        QRegularExpression expr = QtCompat::wildcardToRegexUnanchored(pattern, Qt::CaseInsensitive);
+#else
         QRegExp expr(pattern, Qt::CaseInsensitive, QRegExp::WildcardUnix);
+#endif
         std::list<QTreeWidgetItem*> itemsToDisplay;
         for (PluginTreeNodeList::iterator it = _imp->pluginsList.begin(); it != _imp->pluginsList.end(); ++it) {
             if ( it->plugin && it->plugin->getLabelWithoutSuffix().contains(expr) ) {

@@ -47,7 +47,11 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QStringList>
 #include <QDir>
 #include <QUrl>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QRegularExpression>
+#else
 #include <QRegExp>
+#endif
 #include <QLatin1Char>
 #include <QSize>
 #include <QComboBox>

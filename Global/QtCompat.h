@@ -26,9 +26,59 @@
 #include <QUrl>
 #include <QFileInfo>
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QRegularExpression>
+#else
+#include <QRegExp>
+#endif
+
 NATRON_NAMESPACE_ENTER
 
 namespace QtCompat {
+
+// Wildcard-to-regex conversion helper for Qt5/Qt6 compatibility.
+// On Qt6, QRegExp is removed; use QRegularExpression with wildcardToRegularExpression().
+// On Qt5, use QRegExp with Wildcard pattern syntax directly.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+inline QRegularExpression wildcardToRegex(const QString& pattern, Qt::CaseSensitivity cs = Qt::CaseSensitive) {
+    QRegularExpression::PatternOptions opts = QRegularExpression::NoPatternOption;
+    if (cs == Qt::CaseInsensitive) {
+        opts |= QRegularExpression::CaseInsensitiveOption;
+    }
+    return QRegularExpression(QRegularExpression::wildcardToRegularExpression(pattern), opts);
+}
+
+// Unanchored wildcard for use with QString::contains() (partial matching).
+inline QRegularExpression wildcardToRegexUnanchored(const QString& pattern, Qt::CaseSensitivity cs = Qt::CaseSensitive) {
+    QRegularExpression::PatternOptions opts = QRegularExpression::NoPatternOption;
+    if (cs == Qt::CaseInsensitive) {
+        opts |= QRegularExpression::CaseInsensitiveOption;
+    }
+    // wildcardToRegularExpression produces anchored pattern (\A...\z);
+    // for partial matching, use UnanchoredWildcardConversion (Qt 6.6+)
+    // or strip the anchors manually
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    return QRegularExpression(
+        QRegularExpression::wildcardToRegularExpression(pattern, QRegularExpression::UnanchoredWildcardConversion),
+        opts);
+#else
+    QString rx = QRegularExpression::wildcardToRegularExpression(pattern);
+    // Strip \A(?:  prefix and  )\z  suffix added by wildcardToRegularExpression
+    if (rx.startsWith(QLatin1String("\\A(?:")) && rx.endsWith(QLatin1String(")\\z"))) {
+        rx = rx.mid(5, rx.length() - 8);
+    }
+    return QRegularExpression(rx, opts);
+#endif
+}
+#else
+inline QRegExp wildcardToRegex(const QString& pattern, Qt::CaseSensitivity cs = Qt::CaseSensitive) {
+    return QRegExp(pattern, cs, QRegExp::Wildcard);
+}
+
+inline QRegExp wildcardToRegexUnanchored(const QString& pattern, Qt::CaseSensitivity cs = Qt::CaseSensitive) {
+    return QRegExp(pattern, cs, QRegExp::Wildcard);
+}
+#endif
 /*Removes the . and the extension from the filename and also
  * returns the extension as a string.*/
 inline QString

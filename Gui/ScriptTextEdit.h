@@ -59,7 +59,11 @@ public:
 private:
 
     virtual void highlightBlock(const QString &text) OVERRIDE FINAL;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    bool matchMultiline(const QString &text, const QRegularExpression &delimiter, const int inState, const QTextCharFormat &style);
+#else
     bool matchMultiline(const QString &text, const QRegExp &delimiter, const int inState, const QTextCharFormat &style);
+#endif
 
     std::unique_ptr<PySyntaxHighlighterPrivate> _imp;
 };

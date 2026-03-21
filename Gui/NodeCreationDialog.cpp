@@ -37,8 +37,7 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QApplication>
 #include <QListView>
 #include <QSettings>
-#include <QDesktopWidget>
-#include <QRegExp>
+#include "Global/QtCompat.h"
 #include <QApplication>
 #include <QStringListModel>
 CLANG_DIAG_ON(deprecated)
@@ -151,9 +150,19 @@ CompleterLineEdit::filterText(const QString & txt)
             pattern.push_back(txt[i]);
         }
         pattern.push_back( QLatin1Char('*') );
-        QRegExp expr(pattern, Qt::CaseInsensitive, QRegExp::WildcardUnix);
-
 #ifdef NODE_TAB_DIALOG_USE_MATCHED_LENGTH
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        QRegularExpression expr = QtCompat::wildcardToRegex(pattern, Qt::CaseInsensitive);
+        std::map<int, QStringList> matchOrdered;
+        for (PluginsNamesMap::iterator it = _imp->names.begin(); it != _imp->names.end(); ++it) {
+            QRegularExpressionMatch m = expr.match(it->second.first);
+            if ( m.hasMatch() ) {
+                QStringList& matchedForLength =  matchOrdered[m.capturedLength()];
+                matchedForLength.push_front(it->second.second);
+            }
+        }
+#else
+        QRegExp expr(pattern, Qt::CaseInsensitive, QRegExp::WildcardUnix);
         std::map<int, QStringList> matchOrdered;
         for (PluginsNamesMap::iterator it = _imp->names.begin(); it != _imp->names.end(); ++it) {
             if ( expr.exactMatch(it->second.first) ) {
@@ -161,10 +170,16 @@ CompleterLineEdit::filterText(const QString & txt)
                 matchedForLength.push_front(it->second.second);
             }
         }
+#endif
         for (std::map<int, QStringList>::iterator it = matchOrdered.begin(); it != matchOrdered.end(); ++it) {
             sl.append(it->second);
         }
 #else
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        QRegularExpression expr = QtCompat::wildcardToRegexUnanchored(pattern, Qt::CaseInsensitive);
+#else
+        QRegExp expr(pattern, Qt::CaseInsensitive, QRegExp::WildcardUnix);
+#endif
 
         for (PluginsNamesMap::iterator it = _imp->names.begin(); it != _imp->names.end(); ++it) {
             if ( it->second.first.contains(expr) ) {

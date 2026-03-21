@@ -368,6 +368,18 @@ FindNodeDialog::updateFindResults(const QString& filter)
     }
     Qt::CaseSensitivity sensitivity = _imp->caseSensitivity->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
     const NodesGuiList& activeNodes = _imp->graph->getAllActiveNodes();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QRegularExpression exp = QtCompat::wildcardToRegex(_imp->matchWhole->isChecked() ? filter :
+                ( QChar::fromLatin1('*') + filter + QChar::fromLatin1('*') ),
+                sensitivity);
+
+    if ( exp.isValid() ) {
+        for (NodesGuiList::const_iterator it = activeNodes.begin(); it != activeNodes.end(); ++it) {
+            if ( (*it)->isVisible() && exp.match( QString::fromUtf8( (*it)->getNode()->getLabel().c_str() ) ).hasMatch() ) {
+                _imp->nodeResults.push_back(*it);
+            }
+        }
+#else
     QRegExp exp(_imp->matchWhole->isChecked() ? filter :
                 ( QChar::fromLatin1('*') + filter + QChar::fromLatin1('*') ),
                 sensitivity,
@@ -379,6 +391,7 @@ FindNodeDialog::updateFindResults(const QString& filter)
                 _imp->nodeResults.push_back(*it);
             }
         }
+#endif
 
         if ( ( _imp->nodeResults.size() ) == 0 ) {
             _imp->resultLabel->setText( QString() );

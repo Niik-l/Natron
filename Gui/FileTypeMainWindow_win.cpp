@@ -51,7 +51,11 @@
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QRegularExpression>
+#else
 #include <QRegExp>
+#endif
 
 NATRON_NAMESPACE_ENTER
 
@@ -283,10 +287,18 @@ DocumentWindow::ddeExecute(MSG* message,
         return true;
     }
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QRegularExpression regCommand( QString::fromUtf8("^\\[(\\w+)\\((.*)\\)\\]$") );
+    QRegularExpressionMatch regCommandMatch = regCommand.match(command);
+    if ( regCommandMatch.hasMatch() ) {
+        executeDdeCommand( regCommandMatch.captured(1), regCommandMatch.captured(2) );
+    }
+#else
     QRegExp regCommand( QString::fromUtf8("^\\[(\\w+)\\((.*)\\)\\]$") );
     if ( regCommand.exactMatch(command) ) {
         executeDdeCommand( regCommand.cap(1), regCommand.cap(2) );
     }
+#endif
 
     *result = 0;
 
@@ -345,6 +357,19 @@ void
 DocumentWindow::executeDdeCommand(const QString& command,
                                   const QString& params)
 {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QRegularExpression regCommand( QString::fromUtf8("^\"(.*)\"$") );
+    QRegularExpressionMatch regCommandMatch = regCommand.match(params);
+    bool singleCommand = regCommandMatch.hasMatch();
+
+    if ( ( 0 == command.compare(QString::fromUtf8("open"), Qt::CaseInsensitive) ) && singleCommand ) {
+        ddeOpenFile( regCommandMatch.captured(1) );
+    } else if ( ( 0 == command.compare(QString::fromUtf8("new"), Qt::CaseInsensitive) ) && singleCommand ) {
+        ddeNewFile( regCommandMatch.captured(1) );
+    } else if ( ( 0 == command.compare(QString::fromUtf8("print"), Qt::CaseInsensitive) ) && singleCommand ) {
+        ddePrintFile( regCommandMatch.captured(1) );
+    } else {
+#else
     QRegExp regCommand( QString::fromUtf8("^\"(.*)\"$") );
     bool singleCommand = regCommand.exactMatch(params);
 
@@ -355,6 +380,7 @@ DocumentWindow::executeDdeCommand(const QString& command,
     } else if ( ( 0 == command.compare(QString::fromUtf8("print"), Qt::CaseInsensitive) ) && singleCommand ) {
         ddePrintFile( regCommand.cap(1) );
     } else {
+#endif
         executeUnknownDdeCommand(command, params);
     }
 }

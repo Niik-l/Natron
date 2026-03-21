@@ -83,6 +83,12 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 
 #include <QOpenGLContext>
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QRegularExpression>
+#else
+#include <QRegExp>
+#endif
+
 
 #define USER_ROI_BORDER_TICK_SIZE 15.f
 #define USER_ROI_CROSS_RADIUS 15.f
@@ -1069,7 +1075,11 @@ NATRON_NAMESPACE_ANONYMOUS_ENTER
 static QStringList
 explode(const QString& str)
 {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QRegularExpression rx( QString::fromUtf8("(\\ |\\-|\\.|\\/|\\t|\\n)") ); //RegEx for ' ' '/' '.' '-' '\t' '\n'
+#else
     QRegExp rx( QString::fromUtf8("(\\ |\\-|\\.|\\/|\\t|\\n)") ); //RegEx for ' ' '/' '.' '-' '\t' '\n'
+#endif
     QStringList ret;
     int startIndex = 0;
 
