@@ -186,7 +186,11 @@ cp /d/projects/openfx-io/build/IO.ofx \
 
 ---
 
-## 8. Run Natron
+## 8. Bundle DLLs and Python (standalone launch)
+
+Natron needs MSYS2's DLLs and Python standard library to run. You can either launch from the MSYS2 terminal (step 8a) or bundle everything so it runs standalone from Windows Explorer (step 8b).
+
+### 8a. Run from MSYS2 terminal (quick)
 
 ```bash
 cd /d/projects/Natron/build-qt6/App
@@ -194,10 +198,34 @@ export PATH="/c/msys64/mingw64/bin:$PATH"
 ./Natron.exe
 ```
 
-You should see:
+### 8b. Bundle for standalone launch (double-click from Explorer)
+
+Copy all required DLLs into the App directory:
+
+```bash
+cd /d/projects/Natron/build-qt6/App
+
+# Copy all required DLLs from MSYS2
+for dll in $(objdump -p Natron.exe | grep "DLL Name" | awk '{print $3}'); do
+    [ -f "/c/msys64/mingw64/bin/$dll" ] && cp "/c/msys64/mingw64/bin/$dll" .
+done
+
+# Also copy indirect dependencies (repeat until no new DLLs are found)
+for dll in *.dll; do
+    for dep in $(objdump -p "$dll" 2>/dev/null | grep "DLL Name" | awk '{print $3}'); do
+        [ -f "/c/msys64/mingw64/bin/$dep" ] && [ ! -f "$dep" ] && cp "/c/msys64/mingw64/bin/$dep" .
+    done
+done
+
+# Qt6 platform plugin (required for windowing)
+mkdir -p platforms
+cp /c/msys64/mingw64/share/qt6/plugins/platforms/qwindows.dll platforms/
+
+# Python standard library (required for scripting)
+cp -r /c/msys64/mingw64/lib/python3.14 ../lib/python3.14
 ```
-Natron Version 2.6
-```
+
+After this, you can double-click `Natron.exe` from Windows Explorer without needing the MSYS2 terminal.
 
 ### Verify it works:
 1. **Python:** Open Script Editor, type `import NatronEngine; print(NatronEngine.natron.getNatronVersionString())`
@@ -207,6 +235,15 @@ Natron Version 2.6
 ---
 
 ## Troubleshooting
+
+### "libfontconfig-1.dll was not found" (or other DLL errors on double-click)
+The MSYS2 DLLs aren't bundled with the exe. Either launch from the MSYS2 terminal (step 8a) or bundle the DLLs (step 8b).
+
+### "Failed to import encodings module" on launch
+Python's standard library isn't bundled. Copy it with:
+```bash
+cp -r /c/msys64/mingw64/lib/python3.14 /d/projects/Natron/build-qt6/lib/python3.14
+```
 
 ### "Could not find a decoder to read exr file format"
 The OFX IO plugin isn't installed. Follow step 7 above.
