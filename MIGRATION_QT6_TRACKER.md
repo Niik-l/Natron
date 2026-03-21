@@ -278,7 +278,9 @@ pacman -S mingw-w64-x86_64-qt6-base mingw-w64-x86_64-pyside6 mingw-w64-x86_64-sh
 **Important:** You must point CMake to the MSYS2 Python 3.14 — otherwise it may find a system Python and fail with a version mismatch.
 
 ```bash
-PATH="/c/msys64/mingw64/bin:$PATH"
+export PATH="/c/msys64/mingw64/bin:$PATH"
+export LLVM_INSTALL_DIR=C:/msys64/mingw64
+
 cmake .. -G "MinGW Makefiles" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DNATRON_QT6=ON \
@@ -288,7 +290,17 @@ cmake .. -G "MinGW Makefiles" \
   -DPython3_EXECUTABLE=/c/msys64/mingw64/bin/python3.exe \
   -DPython_EXECUTABLE=/c/msys64/mingw64/bin/python3.exe \
   -DPython3_ROOT_DIR=/c/msys64/mingw64 \
-  -DPython_ROOT_DIR=/c/msys64/mingw64
+  -DPython_ROOT_DIR=/c/msys64/mingw64 \
+  -DNATRON_LLVM_INSTALL_DIR=C:/msys64/mingw64
+```
+
+### Build
+
+**Important:** `LLVM_INSTALL_DIR` must be set in the environment when building, so shiboken6's internal Clang can find GCC's built-in headers (like `mm_malloc.h`). Without it, shiboken binding generation will fail.
+
+```bash
+export LLVM_INSTALL_DIR=C:/msys64/mingw64
+mingw32-make -j2
 ```
 
 ### Verified Build (2026-03-20)
@@ -301,8 +313,10 @@ Successfully built and launched Natron.exe with:
 - Boost 1.90, Cairo 1.18.4, Hoedown 3.0.7, Ceres 1.12.0, OpenMVG 0.9.0
 
 ### Known Issues
-- **Strawberry Perl PATH conflict:** If Strawberry Perl is installed, its `g++` may be found before MSYS2's. Ensure `/c/msys64/mingw64/bin` is first in PATH.
+- **Strawberry Perl PATH conflict:** If Strawberry Perl is installed, its `g++` (GCC 13.2) may be found before MSYS2's (GCC 15.2). This causes shiboken6's Clang parser to mix incompatible C++ standard library headers and crash. Fix: ensure `/c/msys64/mingw64/bin` is first in PATH, or uninstall Strawberry Perl.
+- **LLVM_INSTALL_DIR required:** Shiboken6's internal Clang needs `LLVM_INSTALL_DIR` set to find `mm_malloc.h` and other compiler built-in headers. Set it to the MSYS2 mingw64 prefix (e.g. `C:/msys64/mingw64`).
 - **Shiboken2 on MSYS2 is broken:** The MSYS2 shiboken2 package has hardcoded paths from the CI build machine. Use Shiboken6 instead (`-DNATRON_QT6=ON`).
+- **Parallel build race condition:** On some systems, `-j4` can cause moc to crash during the `moc_predefs.h` generation step. Use `-j2` or `-j1` if this happens.
 
 ---
 
