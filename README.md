@@ -17,9 +17,9 @@ Natron is a free, open-source (GPLv2 license) video compositor, similar in funct
 Natron is looking for developers and maintainers! You can help develop and maintain Natron if you have the following skills:
 
 - [Git](https://en.wikipedia.org/wiki/Git) and [GitHub](https://en.wikipedia.org/wiki/GitHub)
-- [C++](https://en.wikipedia.org/wiki/C%2B%2B) (Natron source is still C++98, but switching to [C++11](https://en.wikipedia.org/wiki/C%2B%2B11) or [C++14](https://en.wikipedia.org/wiki/C%2B%2B11) should be straightforward if needed)
+- [C++](https://en.wikipedia.org/wiki/C%2B%2B) (Natron uses C++17)
 - [Design patterns](https://en.wikipedia.org/wiki/Software_design_pattern)
-- [Qt](https://www.qt.io/) (Natron builds with Qt4 or Qt5, but does not yet support Qt6)
+- [Qt](https://www.qt.io/) (Natron builds with Qt5 or Qt6 — see [COMPILING_QT6.md](COMPILING_QT6.md) for Qt6 build instructions)
 - Basic knowledge of [OpenGL](https://en.wikipedia.org/wiki/OpenGL)
 - Basic knowledge of [Python](<https://en.wikipedia.org/wiki/Python_(programming_language)>)
 
