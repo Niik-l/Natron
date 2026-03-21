@@ -42,7 +42,7 @@ execute_process(COMMAND ${Python3_EXECUTABLE} ../tools/utils/sourceList.py types
     OUTPUT_VARIABLE PyEngine_SOURCES)
 set_property(SOURCE ${PyEngine_SOURCES} PROPERTY SKIP_AUTOGEN ON)
 add_custom_command(OUTPUT ${PyEngine_SOURCES}
-    COMMAND $<TARGET_FILE:${SHIBOKEN_EXE}> ${shiboken_args}
+    COMMAND ${CMAKE_COMMAND} -E env "LLVM_INSTALL_DIR=${NATRON_LLVM_INSTALL_DIR}" $<TARGET_FILE:${SHIBOKEN_EXE}> ${shiboken_args}
     COMMAND ${Python3_EXECUTABLE} ../tools/utils/sourceCleanup.py typesystem_engine.xml ${PYENGINE_OUT}
     DEPENDS ${SHIBOKEN_EXE} ${PYENGINE_HEADER} ${NatronEngine_HEADERS} ../tools/utils/sourceCleanup.py typesystem_engine.xml
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -67,11 +67,14 @@ list(APPEND NatronEngine_SOURCES
     ../libs/SequenceParsing/SequenceParsing.cpp
 )
 add_library(NatronEngine STATIC ${NatronEngine_HEADERS} ${NatronEngine_SOURCES})
+
+# Exclude non-Qt include paths from AUTOMOC to prevent moc from parsing
+# Python, Boost, and other third-party headers it doesn't need.
+set_target_properties(NatronEngine PROPERTIES AUTOMOC_PATH_PREFIX OFF)
+
 target_link_libraries(NatronEngine
     PUBLIC
         HostSupport
-        Boost::headers
-        Boost::serialization
         PkgConfig::Cairo
     PRIVATE
         ${SHIBOKEN_LIB}
@@ -88,6 +91,9 @@ target_link_libraries(NatronEngine
         tess
 )
 
+# Link Boost separately so we can mark its includes as SYSTEM
+target_link_libraries(NatronEngine PUBLIC Boost::headers Boost::serialization)
+
 if(WIN32)
     #System library is required on windows to map network share names from drive letters
     target_link_libraries(NatronEngine PRIVATE mpr)
@@ -97,12 +103,18 @@ target_include_directories(NatronEngine
     PUBLIC
         ../Global/glad$<IF:$<CONFIG:Debug>,Deb,Rel>/include
     PRIVATE
-        ${PYSIDE_INCLUDE_DIRS}/QtCore
         .
         ..
         ../Global
         ../libs/SequenceParsing
         ${X11_INCLUDE_DIR}
+)
+# Non-Qt includes that AUTOMOC/moc doesn't need — mark as SYSTEM to keep
+# them out of moc's include search path (moc only needs Qt headers).
+target_include_directories(NatronEngine SYSTEM PRIVATE
+        ${PYSIDE_INCLUDE_DIRS}/QtCore
+        ${Python3_INCLUDE_DIRS}
+        ${SHIBOKEN_INCLUDE_DIRS}
 )
 target_compile_definitions(NatronEngine
     PRIVATE

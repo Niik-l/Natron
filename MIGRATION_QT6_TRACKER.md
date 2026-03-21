@@ -229,6 +229,80 @@ The Natron team has already completed significant Qt6 preparation:
 | 2026-03-20 | `Global/PythonUtils.cpp` | Full PyConfig API rewrite for Python 3.13+, guarded Py_NoUserSiteDirectory, distutils→sysconfig |
 | 2026-03-20 | `Engine/AppManager.cpp` | Guarded Py_NoUserSiteDirectory for Python 3.13+ |
 | 2026-03-20 | `PythonBin/python_main.cpp` | PyConfig+Py_RunMain for Python 3.13+, legacy Py_Main kept for older |
+| 2026-03-20 | `libs/qhttpserver/src/qhttprequest.h` | Q_ENUMS→Q_ENUM for Qt6, fixed Q_PROPERTY type mismatch |
+| 2026-03-20 | `Engine/EngineFwd.h` | QStringList: replaced forward-declaration with `#include <QStringList>` (Qt6 type alias) |
+| 2026-03-20 | `Engine/PyGlobalFunctions.h` | Added `#ifndef NATRON_BUILD_NUMBER` fallback for shiboken |
+| 2026-03-20 | `Engine/typesystem_engine.xml` | Changed `PyList` → `PyObject` replace-type for shiboken6 compat |
+| 2026-03-20 | `Gui/typesystem_natronGui.xml` | Changed `PyList` → `PyObject` replace-type for shiboken6 compat |
+| 2026-03-20 | `Global/QtCompat.h` | Added QEnterEvent Qt6 alias (include outside namespace), QtMutexLocker typedef |
+| 2026-03-20 | `Engine/EffectInstance.cpp` | QMutexLocker→QtMutexLocker for unique_ptr, QRecursiveMutex separate locker |
+| 2026-03-20 | `Engine/EffectInstanceRenderRoI.cpp` | QMutexLocker→QtMutexLocker, QRecursiveMutex separate locker |
+| 2026-03-20 | `Engine/NodeGroup.cpp` | Cast QChar::unicode() to int for QString::arg() (Qt6 returns char16_t) |
+| 2026-03-20 | `Engine/Project.cpp` | QtConcurrent::run() arg order swap for Qt6 |
+| 2026-03-20 | `Engine/TrackerNodeInteract.cpp` | QtConcurrent::run() arg order swap for Qt6 (2 occurrences) |
+| 2026-03-20 | `Gui/GuiApplicationManager.cpp` | QtConcurrent::run() arg order swap for Qt6 |
+| 2026-03-20 | `Gui/ActionShortcuts.h` | QKeySequence operator[] returns QKeyCombination in Qt6 — use .key() |
+| 2026-03-20 | `Gui/DocumentationManager.cpp` | Explicit QFileInfo() constructor (Qt6 removed implicit QString→QFileInfo) |
+| 2026-03-20 | `Gui/DopeSheetHierarchyView.cpp` | viewOptions()→initViewItemOption() for Qt6 |
+| 2026-03-20 | `Gui/FileTypeMainWindow_win.cpp` | nativeEvent long*→qintptr* for Qt6, DDE helpers updated |
+| 2026-03-20 | `Gui/FileTypeMainWindow_win.h` | nativeEvent and DDE helper signatures: long*→qintptr* for Qt6 |
+| 2026-03-20 | `Gui/Gui15.cpp` | Qt key combo operator+ → operator| (Qt6 deleted operator+) |
+| 2026-03-20 | `Gui/CurveWidgetPrivate.cpp` | Qt key combo operator+ → operator| |
+| 2026-03-20 | `Gui/KnobGuiString.cpp` | Qt key combo operator+ → operator| |
+| 2026-03-20 | `Gui/ScriptEditor.cpp` | Qt key combo operator+ → operator| |
+| 2026-03-20 | `Gui/SequenceFileDialog.cpp` | Qt key combo operator+ → operator|, fixed Qt::UpArrow→Qt::Key_Up |
+| 2026-03-20 | `Gui/ViewerTab.cpp` | Qt key combo operator+ → operator| |
+| 2026-03-20 | `Gui/Gui40.cpp` | Cast qsizetype→int for std::min() compatibility |
+| 2026-03-20 | `Gui/GuiApplicationManagerPrivate.h` | Added missing `#include <QCursor>` for Qt6 |
+| 2026-03-20 | `Gui/ScaleSliderQWidget.cpp` | QStyleOption::init()→initFrom() for Qt6 |
+| 2026-03-20 | `Gui/SplashScreen.cpp` | QStyleOption::init()→initFrom() for Qt6 |
+| 2026-03-20 | `Gui/TableModelView.cpp` | Removed QApplication::globalStrut() (deleted in Qt6) |
+| 2026-03-20 | `Gui/ViewerGL.cpp` | QTabletEvent pointer types → QPointingDevice::PointerType for Qt6 |
+| 2026-03-20 | `CMakeLists.txt` | Added NATRON_LLVM_INSTALL_DIR option for shiboken clang |
+| 2026-03-20 | `Engine/CMakeLists.txt` | AUTOMOC_PATH_PREFIX, SYSTEM includes, shiboken LLVM env |
+| 2026-03-20 | `Gui/CMakeLists.txt` | AUTOMOC_PATH_PREFIX, SYSTEM includes, shiboken LLVM env |
+
+---
+
+## Build Instructions
+
+### Prerequisites (MSYS2 mingw64)
+
+Install Qt6, PySide6, and Shiboken6:
+```bash
+pacman -S mingw-w64-x86_64-qt6-base mingw-w64-x86_64-pyside6 mingw-w64-x86_64-shiboken6
+```
+
+### CMake Configure (Qt6 + Python 3.14)
+
+**Important:** You must point CMake to the MSYS2 Python 3.14 — otherwise it may find a system Python and fail with a version mismatch.
+
+```bash
+PATH="/c/msys64/mingw64/bin:$PATH"
+cmake .. -G "MinGW Makefiles" \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DNATRON_QT6=ON \
+  -DCMAKE_C_COMPILER=/c/msys64/mingw64/bin/gcc.exe \
+  -DCMAKE_CXX_COMPILER=/c/msys64/mingw64/bin/g++.exe \
+  -DCMAKE_MAKE_PROGRAM=/c/msys64/mingw64/bin/mingw32-make.exe \
+  -DPython3_EXECUTABLE=/c/msys64/mingw64/bin/python3.exe \
+  -DPython_EXECUTABLE=/c/msys64/mingw64/bin/python3.exe \
+  -DPython3_ROOT_DIR=/c/msys64/mingw64 \
+  -DPython_ROOT_DIR=/c/msys64/mingw64
+```
+
+### Verified Build (2026-03-20)
+
+Successfully built and launched Natron.exe with:
+- Qt 6.10.1
+- PySide6 6.10.2 / Shiboken6 6.10.2
+- Python 3.14.3
+- GCC 15.2.0 (MSYS2 mingw64)
+- Boost 1.90, Cairo 1.18.4, Hoedown 3.0.7, Ceres 1.12.0, OpenMVG 0.9.0
+
+### Known Issues
+- **Strawberry Perl PATH conflict:** If Strawberry Perl is installed, its `g++` may be found before MSYS2's. Ensure `/c/msys64/mingw64/bin` is first in PATH.
+- **Shiboken2 on MSYS2 is broken:** The MSYS2 shiboken2 package has hardcoded paths from the CI build machine. Use Shiboken6 instead (`-DNATRON_QT6=ON`).
 
 ---
 

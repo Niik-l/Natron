@@ -93,7 +93,11 @@ DocumentWindow::~DocumentWindow()
 // —— protected slots —————————————————————————
 // —— events ————————————————————————————
 bool
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+DocumentWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result)
+#else
 DocumentWindow::nativeEvent(const QByteArray& eventType, void* message, long* result)
+#endif
 {
     MSG* msg = static_cast<MSG*>(message);
     switch (msg->message) {
@@ -236,8 +240,11 @@ DocumentWindow::enableShellOpen()
 // —— private slots ——————————————————————————
 // —— private helpers —————————————————————————
 bool
-DocumentWindow::ddeInitiate(MSG* message,
-                            long* result)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+DocumentWindow::ddeInitiate(MSG* message, qintptr* result)
+#else
+DocumentWindow::ddeInitiate(MSG* message, long* result)
+#endif
 {
     if ( ( 0 != LOWORD(message->lParam) ) &&
          ( 0 != HIWORD(message->lParam) ) &&
@@ -261,8 +268,11 @@ DocumentWindow::ddeInitiate(MSG* message,
 }
 
 bool
-DocumentWindow::ddeExecute(MSG* message,
-                           long* result)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+DocumentWindow::ddeExecute(MSG* message, qintptr* result)
+#else
+DocumentWindow::ddeExecute(MSG* message, long* result)
+#endif
 {
     // unpack the DDE message
     UINT_PTR unused = 0;
@@ -306,8 +316,11 @@ DocumentWindow::ddeExecute(MSG* message,
 }
 
 bool
-DocumentWindow::ddeTerminate(MSG* message,
-                             long* result)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+DocumentWindow::ddeTerminate(MSG* message, qintptr* result)
+#else
+DocumentWindow::ddeTerminate(MSG* message, long* result)
+#endif
 {
     Q_UNUSED(result);
     // The client or server application should respond by posting a WM_DDE_TERMINATE message.

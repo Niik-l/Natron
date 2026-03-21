@@ -69,7 +69,7 @@
         </modify-function>
         <modify-function signature="renderBlocking(std::list&lt;Effect*&gt;,std::list&lt;int&gt;,std::list&lt;int&gt;,std::list&lt;int&gt;)">
             <modify-argument index="1">
-                <replace-type modified-type="PyList"/>
+                <replace-type modified-type="PyObject"/>
             </modify-argument>
             <modify-argument index="2">
                 <remove-argument/>

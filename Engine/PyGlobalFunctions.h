@@ -28,6 +28,12 @@
 
 #include "Global/Macros.h"
 
+// NATRON_BUILD_NUMBER is normally set via CMake compile definitions,
+// but shiboken doesn't receive -D flags. Provide a fallback for binding generation.
+#ifndef NATRON_BUILD_NUMBER
+#define NATRON_BUILD_NUMBER 0
+#endif
+
 /**
  * @brief Used to wrap all global functions that are in the Natron namespace so shiboken
  * doesn't generate the Natron namespace

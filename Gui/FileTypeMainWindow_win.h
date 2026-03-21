@@ -138,7 +138,11 @@ protected:
     /**
      * reimpl as DDE events come as windows events and are not translated by Qt.
      */
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    virtual bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result);
+#else
     virtual bool nativeEvent(const QByteArray& eventType, void* message, long* result);
+#endif
 
     // —— helpers for the file registration ——————————————————
     /**
@@ -243,17 +247,29 @@ private:
     /**
      * implementation of the WM_DDE_INITIATE windows message
      */
+    #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    bool ddeInitiate(MSG* message, qintptr* result);
+#else
     bool ddeInitiate(MSG* message, long* result);
+#endif
 
     /**
      * implementation of the WM_DDE_EXECUTE windows message
      */
+    #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    bool ddeExecute(MSG* message, qintptr* result);
+#else
     bool ddeExecute(MSG* message, long* result);
+#endif
 
     /**
      * implementation of the WM_DDE_TERMINATE windows message
      */
+    #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    bool ddeTerminate(MSG* message, qintptr* result);
+#else
     bool ddeTerminate(MSG* message, long* result);
+#endif
 
     /**
      * Sets specified value in the registry under HKCU\Software\Classes, which is mapped to HKCR then.

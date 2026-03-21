@@ -792,7 +792,7 @@
         <modify-function signature="renderInternal(bool,Effect*,int,int,int)" remove="all"/>
         <modify-function signature="render(std::list&lt;Effect*&gt;,std::list&lt;int&gt;,std::list&lt;int&gt;,std::list&lt;int&gt;)">
             <modify-argument index="1">
-                <replace-type modified-type="PyList"/>
+                <replace-type modified-type="PyObject"/>
             </modify-argument>
             <modify-argument index="2">
                 <remove-argument/>
@@ -1621,7 +1621,7 @@
                 <remove-argument/>
             </modify-argument>
             <modify-argument index="return">
-                <replace-type modified-type="PyList"/>
+                <replace-type modified-type="PyObject"/>
             </modify-argument>
             <inject-code class="target" position="beginning">
                 std::list&lt;double&gt; keys;
@@ -1746,7 +1746,7 @@
                 <remove-argument/>
             </modify-argument>
             <modify-argument index="return">
-                <replace-type modified-type="PyList"/>
+                <replace-type modified-type="PyObject"/>
             </modify-argument>
             <inject-code class="target" position="beginning">
                 std::list&lt;Track*&gt; tracks;
@@ -1768,7 +1768,7 @@
                 <remove-argument/>
             </modify-argument>
             <modify-argument index="return">
-                <replace-type modified-type="PyList"/>
+                <replace-type modified-type="PyObject"/>
             </modify-argument>
             <inject-code class="target" position="beginning">
                 std::list&lt;Track*&gt; tracks;

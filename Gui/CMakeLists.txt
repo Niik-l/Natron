@@ -46,7 +46,7 @@ execute_process(COMMAND ${Python3_EXECUTABLE} ../tools/utils/sourceList.py types
     OUTPUT_VARIABLE PyGui_SOURCES)
 set_property(SOURCE ${PyGui_SOURCES} PROPERTY SKIP_AUTOGEN ON)
 add_custom_command(OUTPUT ${PyGui_SOURCES}
-    COMMAND $<TARGET_FILE:${SHIBOKEN_EXE}> ${shiboken_args}
+    COMMAND ${CMAKE_COMMAND} -E env "LLVM_INSTALL_DIR=${NATRON_LLVM_INSTALL_DIR}" $<TARGET_FILE:${SHIBOKEN_EXE}> ${shiboken_args}
     COMMAND ${Python3_EXECUTABLE} ../tools/utils/sourceCleanup.py typesystem_natronGui.xml ${PYGUI_OUT}
     DEPENDS ${SHIBOKEN_EXE} ${PYGUI_HEADER} NatronEngine ${NatronGui_HEADERS} ../tools/utils/sourceCleanup.py typesystem_natronGui.xml
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -61,26 +61,27 @@ list(APPEND NatronGui_SOURCES
     GuiResources.qrc
 )
 add_library(NatronGui STATIC ${NatronGui_HEADERS} ${NatronGui_SOURCES})
+
+# Exclude non-Qt include paths from AUTOMOC (see Engine/CMakeLists.txt)
+set_target_properties(NatronGui PROPERTIES AUTOMOC_PATH_PREFIX OFF)
+
 target_link_libraries(NatronGui
     PUBLIC
-        ${SHIBOKEN_LIB}
-        ${PYSIDE_LIB}
         Qt::Core
         Qt::Concurrent
         Qt::Network
         Qt::Gui
         Qt::Widgets
         ${QT_OPENGLWIDGETS}
-        Python3::Module
         NatronEngine
     PRIVATE
+        ${SHIBOKEN_LIB}
+        ${PYSIDE_LIB}
+        Python3::Module
         qhttpserver
 )
 target_include_directories(NatronGui
     PRIVATE
-        ${PYSIDE_INCLUDE_DIRS}/QtCore
-        ${PYSIDE_INCLUDE_DIRS}/QtGui
-        ${PYSIDE_INCLUDE_DIRS}/QtWidgets
         .
         ..
         ../Engine
@@ -88,6 +89,14 @@ target_include_directories(NatronGui
         ../libs/SequenceParsing
         ../libs/qhttpserver/src
         ${CMAKE_BINARY_DIR}/Engine/Qt${QT_VERSION_MAJOR}/NatronEngine
+)
+# Non-Qt includes — mark as SYSTEM to exclude from AUTOMOC/moc
+target_include_directories(NatronGui SYSTEM PRIVATE
+        ${PYSIDE_INCLUDE_DIRS}/QtCore
+        ${PYSIDE_INCLUDE_DIRS}/QtGui
+        ${PYSIDE_INCLUDE_DIRS}/QtWidgets
+        ${Python3_INCLUDE_DIRS}
+        ${SHIBOKEN_INCLUDE_DIRS}
 )
 target_compile_definitions(NatronGui
     PRIVATE

@@ -2086,13 +2086,25 @@ ViewerGL::tabletEvent(QTabletEvent* e)
     switch ( e->type() ) {
     case QEvent::TabletPress: {
         switch ( e->pointerType() ) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        case QPointingDevice::PointerType::Cursor:
+#else
         case QTabletEvent::Cursor:
+#endif
             _imp->pointerTypeOnPress  = ePenTypeCursor;
             break;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        case QPointingDevice::PointerType::Eraser:
+#else
         case QTabletEvent::Eraser:
+#endif
             _imp->pointerTypeOnPress  = ePenTypeEraser;
             break;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        case QPointingDevice::PointerType::Pen:
+#else
         case QTabletEvent::Pen:
+#endif
         default:
             _imp->pointerTypeOnPress  = ePenTypePen;
             break;

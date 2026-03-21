@@ -61,7 +61,7 @@ class QNetworkRequest;
 class QProcess;
 class QSettings;
 class QString;
-class QStringList;
+#include <QStringList>
 class QThread;
 class QTimer;
 class QUrl;

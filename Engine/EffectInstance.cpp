@@ -4097,10 +4097,18 @@ EffectInstance::attachOpenGLContext_public(const OSGLContextPtr& glContext,
 {
     NON_RECURSIVE_ACTION();
     bool concurrentGLRender = supportsConcurrentOpenGLRenders();
-    std::unique_ptr<QMutexLocker> locker;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    std::unique_ptr<QMutexLocker<QRecursiveMutex>> locker;
     if (concurrentGLRender) {
-        locker.reset( new QMutexLocker(&_imp->attachedContextsMutex) );
-    } else {
+        locker.reset( new QMutexLocker<QRecursiveMutex>(&_imp->attachedContextsMutex) );
+    }
+#else
+    std::unique_ptr<QtMutexLocker> locker;
+    if (concurrentGLRender) {
+        locker.reset( new QtMutexLocker(&_imp->attachedContextsMutex) );
+    }
+#endif
+    else {
         _imp->attachedContextsMutex.lock();
     }
 
@@ -4158,10 +4166,17 @@ EffectInstance::dettachOpenGLContext_public(const OSGLContextPtr& glContext, con
 {
     NON_RECURSIVE_ACTION();
     bool concurrentGLRender = supportsConcurrentOpenGLRenders();
-    std::unique_ptr<QMutexLocker> locker;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    std::unique_ptr<QMutexLocker<QRecursiveMutex>> locker;
     if (concurrentGLRender) {
-        locker.reset( new QMutexLocker(&_imp->attachedContextsMutex) );
+        locker.reset( new QMutexLocker<QRecursiveMutex>(&_imp->attachedContextsMutex) );
     }
+#else
+    std::unique_ptr<QtMutexLocker> locker;
+    if (concurrentGLRender) {
+        locker.reset( new QtMutexLocker(&_imp->attachedContextsMutex) );
+    }
+#endif
 
 
     bool mustUnlock = data->getHasTakenLock();

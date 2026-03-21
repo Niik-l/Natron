@@ -782,7 +782,11 @@ Project::onAutoSaveTimerTriggered()
     if (canAutoSave) {
         std::shared_ptr<QFutureWatcher<void> > watcher = std::make_shared<QFutureWatcher<void> >();
         QObject::connect( watcher.get(), SIGNAL(finished()), this, SLOT(onAutoSaveFutureFinished()) );
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        watcher->setFuture( QtConcurrent::run(&Project::autoSave, this) );
+#else
         watcher->setFuture( QtConcurrent::run(this, &Project::autoSave) );
+#endif
         _imp->autoSaveFutures.push_back(watcher);
     } else {
         ///If the auto-save failed because a render is in progress, try every 2 seconds to auto-save.

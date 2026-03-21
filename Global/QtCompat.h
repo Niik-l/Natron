@@ -28,6 +28,7 @@
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #include <QRegularExpression>
+#include <QtGui/qevent.h>
 #else
 #include <QRegExp>
 #endif
@@ -97,8 +98,13 @@ removeFileExtension(QString & filename)
 }
 
 // Define compatibility typedefs so code builds with Qt5 & Qt6
+// In Qt5, QWidget::enterEvent(QEvent*) — typedef QEvent as QEnterEvent.
+// In Qt6, QEnterEvent is a real class in QtGui — no typedef needed, but we
+// must alias it into QtCompat so `QtCompat::QEnterEvent` resolves.
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-typedef QEnterEvent QEnterEvent;
+// Qt6: QEnterEvent is already included at the top of this file (outside namespace).
+// Alias it into QtCompat so QtCompat::QEnterEvent resolves to ::QEnterEvent.
+using QEnterEvent = ::QEnterEvent;
 #elif QT_VERSION >= QT_VERSION_CHECK(5, 0, 0)
 typedef QEvent QEnterEvent;
 #else
@@ -108,5 +114,17 @@ typedef QEvent QEnterEvent;
 } // namespace QtCompat
 
 NATRON_NAMESPACE_EXIT
+
+// Qt6 made QMutexLocker a template class: QMutexLocker<QMutex>.
+// Plain usage like `QMutexLocker l(&mutex)` works in both Qt5 and Qt6
+// thanks to C++17 CTAD (class template argument deduction).
+// But `std::unique_ptr<QMutexLocker>` and `new QMutexLocker(...)` need
+// the explicit template parameter in Qt6. Use this typedef:
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QMutex>
+typedef QMutexLocker<QMutex> QtMutexLocker;
+#else
+typedef QMutexLocker QtMutexLocker;
+#endif
 
 #endif // NATRON_GLOBAL_QTCOMPAT_H
