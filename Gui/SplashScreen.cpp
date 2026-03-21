@@ -56,7 +56,7 @@ SplashScreen::SplashScreen(const QString & filePath)
         if ( QString::fromUtf8(NATRON_DEVELOPMENT_STATUS) == QString::fromUtf8(NATRON_DEVELOPMENT_RELEASE_CANDIDATE) ) {
             buildNo = QString::number(NATRON_BUILD_NUMBER);
         }
-        _versionString = tr("v%1 - %2 %3")
+        _versionString = tr("v%1 - %2 %3 (Qt6/Py3.14 Fork)")
                          .arg( QString::fromUtf8(NATRON_VERSION_STRING) )
                          .arg( QString::fromUtf8(NATRON_DEVELOPMENT_STATUS) )
                          .arg(buildNo);

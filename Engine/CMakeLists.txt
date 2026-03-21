@@ -118,7 +118,7 @@ target_include_directories(NatronEngine SYSTEM PRIVATE
 )
 target_compile_definitions(NatronEngine
     PRIVATE
-        NATRON_CUSTOM_BUILD_USER_TOKEN="${BUILD_USER_NAME}"
+        $<$<BOOL:${BUILD_USER_NAME}>:NATRON_CUSTOM_BUILD_USER_TOKEN="${BUILD_USER_NAME}">
         NATRON_BUILD_NUMBER=0
         QT_NO_KEYWORDS
         ${XDG_DEFS}

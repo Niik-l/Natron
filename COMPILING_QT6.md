@@ -2,6 +2,18 @@
 
 A step-by-step guide to building Natron from source with Qt6, PySide6, and Python 3.14 on Windows using MSYS2.
 
+**Disk space:** Expect ~2-3GB for the full build directory (Natron.exe alone is ~819MB with debug info).
+
+---
+
+## 0. Pre-flight: Strawberry Perl Check
+
+**Do this first.** If Strawberry Perl is installed, its bundled GCC will silently conflict with MSYS2's GCC and cause confusing build failures (shiboken crashes, moc crashes, wrong headers).
+
+Either:
+- **Uninstall Strawberry Perl**, or
+- **Remove it from PATH** before building: Settings → Environment Variables → remove any `C:\Strawberry\...` entries from `Path`
+
 ---
 
 ## 1. Install MSYS2
@@ -143,6 +155,9 @@ cmake .. -G "MinGW Makefiles" \
 mingw32-make -j2
 ```
 
+> **CMake error about CMAKE_SYSTEM_PROCESSOR?** If you get an error about empty `CMAKE_SYSTEM_PROCESSOR`,
+> edit the plugin's `CMakeLists.txt` and quote it: change `${CMAKE_SYSTEM_PROCESSOR}` to `"${CMAKE_SYSTEM_PROCESSOR}"`.
+
 ### openfx-io (Read, Write — EXR, PNG, FFmpeg, etc.)
 
 ```bash
@@ -161,8 +176,55 @@ cmake .. -G "MinGW Makefiles" \
 mingw32-make -j2
 ```
 
-> **Note:** openfx-io may need minor patches for OpenImageIO 3.x and FFmpeg 7.x compatibility.
-> See the `MIGRATION_QT6_TRACKER.md` for details on the fixes needed.
+### Known patches for openfx-io
+
+openfx-io has not been updated for OpenImageIO 3.x and FFmpeg 8.x. You will need these fixes:
+
+**1. OIIO 3.x — ImageCache returns shared_ptr** (`OIIO/ReadOIIO.cpp`):
+```cpp
+// Change: ImageCache* _cache;
+// To:     std::shared_ptr<ImageCache> _cache;
+// Also change: ImageCache* sharedcache = ImageCache::create(true);
+// To:          std::shared_ptr<ImageCache> sharedcache = ImageCache::create(true);
+// And: , _cache(NULL)  →  , _cache(nullptr)
+```
+
+**2. OIIO 3.x — ImageIOParameterList removed** (`OIIO/ReadOIIO.cpp`):
+```cpp
+// Change: for (ImageIOParameterList::const_iterator p = ...
+// To:     for (auto p = subImages[sIt].extra_attribs.cbegin(); p != ...
+```
+
+**3. OIIO 3.x — read_scanlines/read_tiles need subimage, miplevel** (`OIIO/ReadOIIO.cpp`):
+```cpp
+// Add subimage and miplevel (0) as the first two arguments:
+// Change: img->read_scanlines(ybegin, yend, z, chbegin, chend, ...
+// To:     img->read_scanlines(subImageIndex, 0, ybegin, yend, z, chbegin, chend, ...
+// Same for read_tiles — add subImageIndex, 0 as first two args.
+```
+
+**4. OIIO 3.x — OIIO_NAMESPACE removed** (`OIIO/WriteOIIO.cpp`):
+```cpp
+// Change: OIIO_NAMESPACE::TypeDesc oiioBitDepth;
+// To:     OIIO::TypeDesc oiioBitDepth;
+```
+
+**5. FFmpeg 8.x — pkt_duration renamed** (`FFmpeg/FFmpegFile.cpp`):
+```cpp
+// Change: decodedFrame->pkt_duration
+// To:     decodedFrame->duration
+// (two occurrences)
+```
+
+**6. OpenImageIO_Util linking** (`cmake/Modules/FindOpenImageIO.cmake`):
+```cmake
+# After: set (OPENIMAGEIO_LIBRARIES ${OPENIMAGEIO_LIBRARY})
+# Add:
+find_library(OPENIMAGEIO_UTIL_LIBRARY NAMES OpenImageIO_Util HINTS ${OPENIMAGEIO_LIBRARY_DIRS})
+if (OPENIMAGEIO_UTIL_LIBRARY)
+    list(APPEND OPENIMAGEIO_LIBRARIES ${OPENIMAGEIO_UTIL_LIBRARY})
+endif()
+```
 
 ---
 
@@ -274,10 +336,12 @@ CMake found a different Python (e.g. Python 3.12 from a standalone install). Fix
 ```
 
 ### moc crashes with exit code 0xC0000005
-Parallel build race condition. Use fewer threads:
+Parallel build race condition. Try:
 ```bash
-mingw32-make -j1  # single-threaded, slower but reliable
+mingw32-make -j2  # usually works (recommended)
+mingw32-make -j1  # single-threaded fallback, slower but always reliable
 ```
+Note: `-j4` or higher generally works fine for the main Natron build on 16GB+ machines, but can cause issues during the autogen/moc phase.
 
 ---
 
@@ -294,7 +358,7 @@ mingw32-make -j1  # single-threaded, slower but reliable
 | Cairo | 1.18.4 |
 | OpenImageIO | 3.1.11 |
 | OpenEXR | 3.4.6 |
-| FFmpeg | 7.x |
+| FFmpeg | 7.x / 8.x (MSYS2 may ship either) |
 | GCC | 15.2.0 |
 
 ---
