@@ -262,22 +262,13 @@ export PATH="/c/msys64/mingw64/bin:$PATH"
 
 ### 8b. Bundle for standalone launch (double-click from Explorer)
 
-Copy all required DLLs into the App directory:
+Copy all MSYS2 DLLs into the App directory. Natron and its dependencies (Qt6, OIIO, FFmpeg, Python, etc.) have deep dependency chains, so the simplest approach is to copy all of them:
 
 ```bash
 cd /d/projects/Natron/build-qt6/App
 
-# Copy all required DLLs from MSYS2
-for dll in $(objdump -p Natron.exe | grep "DLL Name" | awk '{print $3}'); do
-    [ -f "/c/msys64/mingw64/bin/$dll" ] && cp "/c/msys64/mingw64/bin/$dll" .
-done
-
-# Also copy indirect dependencies (repeat until no new DLLs are found)
-for dll in *.dll; do
-    for dep in $(objdump -p "$dll" 2>/dev/null | grep "DLL Name" | awk '{print $3}'); do
-        [ -f "/c/msys64/mingw64/bin/$dep" ] && [ ! -f "$dep" ] && cp "/c/msys64/mingw64/bin/$dep" .
-    done
-done
+# Copy all MSYS2 DLLs (simplest, ~700 DLLs, ~1.5GB)
+cp /c/msys64/mingw64/bin/*.dll .
 
 # Qt6 platform plugin (required for windowing)
 mkdir -p platforms
@@ -286,6 +277,8 @@ cp /c/msys64/mingw64/share/qt6/plugins/platforms/qwindows.dll platforms/
 # Python standard library (required for scripting)
 cp -r /c/msys64/mingw64/lib/python3.14 ../lib/python3.14
 ```
+
+> **Note:** Copying all DLLs is brute-force but reliable. For a leaner distribution, you can use `objdump -p Natron.exe` to trace only the required DLLs, but the dependency chain is deep (Qt6 → OIIO → FFmpeg → codecs) and missing even one will cause a launch error.
 
 After this, you can double-click `Natron.exe` from Windows Explorer without needing the MSYS2 terminal.
 

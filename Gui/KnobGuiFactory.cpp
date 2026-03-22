@@ -33,6 +33,7 @@
 #include "Engine/Knob.h"
 #include "Engine/KnobTypes.h"
 #include "Engine/KnobFile.h"
+#include "Engine/Dev/Channel/KnobShuffle.h"
 
 #include "Gui/KnobGui.h"
 #include "Gui/KnobGuiFile.h"
@@ -46,6 +47,7 @@
 #include "Gui/KnobGuiString.h"
 #include "Gui/KnobGuiBool.h"
 #include "Gui/KnobGuiParametric.h"
+#include "Gui/KnobGuiShuffle.h"
 #include "Gui/DockablePanel.h"
 
 NATRON_NAMESPACE_ENTER
@@ -104,6 +106,7 @@ KnobGuiFactory::loadBultinKnobs()
     _loadedKnobs.insert( knobGuiFactoryEntry<KnobParametric, KnobGuiParametric>() );
     _loadedKnobs.insert( knobGuiFactoryEntry<KnobPath, KnobGuiPath>() );
     _loadedKnobs.insert( knobGuiFactoryEntry<KnobLayers, KnobGuiLayers>() );
+    _loadedKnobs.insert( knobGuiFactoryEntry<KnobShuffle, KnobGuiShuffle>() );
 }
 
 KnobGui *

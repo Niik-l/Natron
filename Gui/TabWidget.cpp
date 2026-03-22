@@ -68,6 +68,7 @@ CLANG_DIAG_ON(deprecated)
 #include "Gui/GuiDefines.h"
 #include "Gui/GuiMacros.h"
 #include "Gui/Histogram.h"
+#include "Gui/Viewport3DTab.h"
 #include "Gui/Menu.h"
 #include "Gui/NodeGraph.h"
 #include "Gui/PropertiesBinWrapper.h"
@@ -433,6 +434,7 @@ TabWidget::createMenu()
     menu.addSeparator();
     menu.addAction( tr("New viewer"), this, SLOT(addNewViewer()) );
     menu.addAction( tr("New histogram"), this, SLOT(newHistogramHere()) );
+    menu.addAction( tr("New 3D viewport"), this, SLOT(newViewport3DHere()) );
     menu.addAction( tr("Node graph here"), this, SLOT(moveNodeGraphHere()) );
     menu.addAction( tr("Curve Editor here"), this, SLOT(moveCurveEditorHere()) );
     menu.addAction( tr("Dope Sheet Editor here"), this, SLOT(moveDopeSheetEditorHere()) );
@@ -763,6 +765,16 @@ TabWidget::newHistogramHere()
     Histogram* h = _imp->gui->addNewHistogram();
 
     appendTab(h, h);
+
+    _imp->gui->getApp()->triggerAutoSave();
+}
+
+void
+TabWidget::newViewport3DHere()
+{
+    Viewport3DTab* v = _imp->gui->addNewViewport3D();
+
+    appendTab(v, v);
 
     _imp->gui->getApp()->triggerAutoSave();
 }

@@ -493,6 +493,12 @@ typedef std::list<NodePtr> NodesList;
 typedef std::list<NodeWPtr> NodesWList;
 typedef std::vector<KnobIPtr> KnobsVec;
 
+// Dev nodes — forward declarations
+class DeepImage;
+class Camera3DNode;
+typedef std::shared_ptr<DeepImage> DeepImagePtr;
+typedef std::shared_ptr<DeepImage const> DeepImageConstPtr;
+
 NATRON_NAMESPACE_EXIT
 
 #endif // Engine_EngineFwd_h

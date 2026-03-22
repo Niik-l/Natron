@@ -54,8 +54,8 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include "Gui/KnobWidgetDnD.h"
 #include "Gui/SpinBoxValidator.h"
 
-#define SPINBOX_MAX_WIDTH 50
-#define SPINBOX_MIN_WIDTH 35
+#define SPINBOX_MAX_WIDTH 65
+#define SPINBOX_MIN_WIDTH 45
 
 NATRON_NAMESPACE_ENTER
 

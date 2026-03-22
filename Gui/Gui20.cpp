@@ -56,6 +56,8 @@
 #include "Gui/GuiApplicationManager.h" // appPTR
 #include "Gui/GuiPrivate.h"
 #include "Gui/Histogram.h"
+#include "Gui/Viewport3D.h"
+#include "Gui/Viewport3DTab.h"
 #include "Gui/Menu.h"
 #include "Gui/NodeGraph.h"
 #include "Gui/NodeGui.h"
@@ -622,6 +624,35 @@ Gui::removeHistogram(Histogram* h)
     assert( it != _imp->_histograms.end() );
     delete *it;
     _imp->_histograms.erase(it);
+}
+
+Viewport3DTab*
+Gui::addNewViewport3D()
+{
+    Viewport3DTab* v = new Viewport3DTab(this);
+    QMutexLocker l(&_imp->_viewport3DMutex);
+    std::stringstream ss;
+
+    ss << _imp->_nextViewport3DIndex;
+
+    v->setScriptName( "viewport3d" + ss.str() );
+    v->setLabel( "3D Viewport" + ss.str() );
+    ++_imp->_nextViewport3DIndex;
+    _imp->_viewport3Ds.push_back(v);
+
+    return v;
+}
+
+void
+Gui::removeViewport3D(Viewport3DTab* v)
+{
+    unregisterTab(v);
+    QMutexLocker l(&_imp->_viewport3DMutex);
+    std::list<Viewport3DTab*>::iterator it = std::find(_imp->_viewport3Ds.begin(), _imp->_viewport3Ds.end(), v);
+
+    assert( it != _imp->_viewport3Ds.end() );
+    delete *it;
+    _imp->_viewport3Ds.erase(it);
 }
 
 const std::list<Histogram*> &

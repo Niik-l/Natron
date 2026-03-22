@@ -165,6 +165,10 @@ public:
     std::list<Histogram*> _histograms;
     int _nextHistogramIndex; //< for giving a unique name to histogram tabs
 
+    mutable QMutex _viewport3DMutex;
+    std::list<Viewport3DTab*> _viewport3Ds;
+    int _nextViewport3DIndex;
+
     ///The node graph (i.e: the view of the scene)
     NodeGraph* _nodeGraphArea;
     NodeGraph* _lastFocusedGraph;

@@ -98,7 +98,7 @@ struct ScaleSliderQWidgetPrivate
         , value(initialPos)
         , dragging(false)
         , font( parent->font() )
-        , sliderColor(85, 116, 114)
+        , sliderColor(180, 160, 80)
         , initialized(false)
         , mustInitializeSliderPosition(true)
         , readOnly(false)

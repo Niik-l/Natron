@@ -113,7 +113,7 @@ CLANG_DIAG_ON(uninitialized)
 
 
 #define NATRON_PLUGIN_ICON_SIZE 20
-#define PLUGIN_ICON_OFFSET 2
+#define PLUGIN_ICON_OFFSET 6
 
 NATRON_NAMESPACE_ENTER
 
@@ -603,7 +603,7 @@ NodeGui::createGui()
     if (!node) {
         return; // throw exception instead?
     }
-    int cornerRadiusPx = 0;
+    int cornerRadiusPx = 5;
     _boundingBox = new NodeGraphRectItem(this, cornerRadiusPx);
     _boundingBox->setZValue(depth);
 
@@ -2307,7 +2307,7 @@ NodeGui::refreshStateIndicator()
     } else if (_mergeHintActive) {
         _stateIndicator->setBrush(Qt::green);
     } else if (isSelected) {
-        _stateIndicator->setBrush(Qt::white);
+        _stateIndicator->setBrush( QColor(255, 230, 128, 255) ); // light yellow selection
     } else if ( !message.isEmpty() && ( (type == 1) || (type == 2) ) ) {
         if (type == 1) {
             _stateIndicator->setBrush( QColor(128, 0, 0, 255) ); //< error

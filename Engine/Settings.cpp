@@ -1639,9 +1639,9 @@ Settings::setDefaultValues()
     _diskCachedFrameColor->setDefaultValue(0.27, 0);
     _diskCachedFrameColor->setDefaultValue(0.38, 1);
     _diskCachedFrameColor->setDefaultValue(0.25, 2);
-    _sliderColor->setDefaultValue(0.33, 0);
-    _sliderColor->setDefaultValue(0.45, 1);
-    _sliderColor->setDefaultValue(0.44, 2);
+    _sliderColor->setDefaultValue(0.71, 0);
+    _sliderColor->setDefaultValue(0.63, 1);
+    _sliderColor->setDefaultValue(0.31, 2);
 
     // Apprance/Curve Editor
     _curveEditorBGColor->setDefaultValue(0., 0);

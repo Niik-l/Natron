@@ -138,6 +138,47 @@
 #include "Engine/ViewerInstance.h" // RenderStatsMap
 #include "Engine/WriteNode.h"
 
+// Dev nodes — Deep Compositing
+#include "Dev/Deep/DeepRead.h"
+#include "Dev/Deep/DeepWrite.h"
+#include "Dev/Deep/DeepFlatten.h"
+#include "Dev/Deep/DeepMerge.h"
+#include "Dev/Deep/DeepRecolor.h"
+#include "Dev/Deep/DeepSlice.h"
+#include "Dev/Deep/DeepHoldout.h"
+#include "Dev/Deep/DeepFromImage.h"
+#include "Dev/Deep/DeepGrade.h"
+#include "Dev/Deep/DeepReformat.h"
+#include "Dev/Deep/DeepCrop.h"
+#include "Dev/Deep/DeepToPoints.h"
+#include "Dev/Deep/DeepTransform.h"
+#include "Dev/Deep/DeepExpression.h"
+#include "Dev/Deep/DeepColorCorrect.h"
+#include "Dev/Deep/DeepDefocus.h"
+
+// Dev nodes — Channel
+#include "Dev/Channel/DevShuffle.h"
+
+// Dev nodes — Particles
+#include "Dev/Particles/ParticleEmitter.h"
+#include "Dev/Particles/ParticleGravity.h"
+
+// Dev nodes — 3D System
+#include "Dev/Scene3D/Camera3DNode.h"
+#include "Dev/Scene3D/Sphere3D.h"
+#include "Dev/Scene3D/Card3D.h"
+#include "Dev/Scene3D/Cube3D.h"
+#include "Dev/Scene3D/Cylinder3D.h"
+#include "Dev/Scene3D/Scene3D.h"
+#include "Dev/Scene3D/ScanlineRender.h"
+#include "Dev/Scene3D/Light3D.h"
+#include "Dev/Scene3D/Project3D.h"
+#include "Dev/Scene3D/Group3D.h"
+#include "Dev/Scene3D/Volume3D.h"
+#include "Dev/Scene3D/ReadVDB.h"
+#include "Dev/Scene3D/ReadAlembicCamera.h"
+#include "Dev/Scene3D/ReadGeo.h"
+
 #include "sbkversion.h" // shiboken/pyside version
 
 #include "AppManagerPrivate.h" // include breakpad after Engine, because it includes /usr/include/AssertMacros.h on OS X which defines a check(x) macro, which conflicts with boost
@@ -1557,6 +1598,47 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     if ( !isBackground() ) {
         registerBuiltInPlugin<ViewerInstance>(QString::fromUtf8(NATRON_IMAGES_PATH "viewer_icon.png"), false, false);
     }
+
+    // Dev nodes — Deep Compositing
+    registerBuiltInPlugin<DeepRead>(QString::fromUtf8(NATRON_IMAGES_PATH "readImage.png"), false, false);
+    registerBuiltInPlugin<DeepWrite>(QString::fromUtf8(NATRON_IMAGES_PATH "writeImage.png"), false, false);
+    registerBuiltInPlugin<DeepFlatten>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepMerge>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepRecolor>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepSlice>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepHoldout>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepFromImage>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepGrade>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepReformat>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepCrop>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepToPoints>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepTransform>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepExpression>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepColorCorrect>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepDefocus>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+
+    // Dev nodes — 3D System
+    registerBuiltInPlugin<Camera3DNode>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<Sphere3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<Card3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<Cube3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<Cylinder3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<Scene3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ScanlineRender>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<Light3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<Project3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<Group3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<Volume3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ReadVDB>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ReadAlembicCamera>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ReadGeo>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+
+    // Dev nodes — Channel
+    registerBuiltInPlugin<DevShuffle>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/channel_grouping_2.png"), false, false);
+
+    // Dev nodes — Particles
+    registerBuiltInPlugin<ParticleEmitter>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleGravity>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 }
 
 bool

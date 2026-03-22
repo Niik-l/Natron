@@ -42,7 +42,7 @@
 #define NATRON_PREVIEW_WIDTH 64
 #define NATRON_PREVIEW_HEIGHT 38
 
-#define NODE_WIDTH 80
+#define NODE_WIDTH 100
 #define NODE_HEIGHT 30
 
 #define NATRON_WHEEL_ZOOM_PER_DELTA 1.00152 // 120 wheel deltas (one click on a standard wheel mouse) is x1.2

@@ -27,6 +27,7 @@
 #include "NodeGraphRectItem.h"
 
 #include <QPainter>
+#include <QLinearGradient>
 
 NATRON_NAMESPACE_ENTER
 
@@ -41,7 +42,14 @@ void
 NodeGraphRectItem::paint(QPainter *painter, const QStyleOptionGraphicsItem* /*option*/, QWidget* /*widget*/)
 {
     painter->setPen(pen());
-    painter->setBrush(brush());
+
+    // Apply a subtle top-to-bottom gradient over the node's base color
+    QColor baseColor = brush().color();
+    QLinearGradient gradient(rect().topLeft(), rect().bottomLeft());
+    gradient.setColorAt(0.0, baseColor.lighter(130));  // lighter at top
+    gradient.setColorAt(1.0, baseColor.darker(120));   // darker at bottom
+    painter->setBrush(QBrush(gradient));
+
     painter->drawRoundedRect(rect(), _cornerRadiusPx, _cornerRadiusPx);
 }
 

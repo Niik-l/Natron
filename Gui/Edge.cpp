@@ -128,7 +128,7 @@ Edge::Edge(int inputNb_,
 {
     _imp->dest = dest_;
 
-    setPen( QPen(Qt::black, 2, Qt::SolidLine, Qt::SquareCap, Qt::BevelJoin) );
+    setPen( QPen(Qt::black, 3, Qt::SolidLine, Qt::SquareCap, Qt::BevelJoin) );
     _imp->initLabel();
     setAcceptedMouseButtons(Qt::LeftButton);
     initLine();
@@ -167,7 +167,7 @@ Edge::Edge(const NodeGuiPtr & src,
 {
     _imp->source = src;
     assert(src);
-    setPen( QPen(Qt::black, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin) );
+    setPen( QPen(Qt::black, 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin) );
     setAcceptedMouseButtons(Qt::LeftButton);
     initLine();
     //setFlag(QGraphicsItem::ItemStacksBehindParent);

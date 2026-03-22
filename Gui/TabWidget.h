@@ -294,6 +294,8 @@ public Q_SLOTS:
 
     void newHistogramHere();
 
+    void newViewport3DHere();
+
     void movePropertiesBinHere();
 
     void moveScriptEditorHere();

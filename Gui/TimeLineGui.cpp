@@ -358,7 +358,7 @@ TimeLineGui::paintGL()
     glCheckError();
 
     {
-        double screenPixelRatio = _imp->viewerTab->getViewer()->getScreenPixelRatio();
+        double screenPixelRatio = (_imp->viewerTab && _imp->viewerTab->getViewer()) ? _imp->viewerTab->getViewer()->getScreenPixelRatio() : 1.0;
         if (screenPixelRatio != _imp->_screenPixelRatio) {
             _imp->_screenPixelRatio = screenPixelRatio;
             _imp->_textFont.reset(new QFont(appFont, appFontSize * screenPixelRatio, QFont::Bold));
@@ -429,7 +429,7 @@ TimeLineGui::paintGL()
 
         /// change the background color of the portion of the timeline where images are lying
         double firstFrame, lastFrame;
-        if ( !_imp->viewerTab->isFileDialogViewer() ) {
+        if ( !_imp->viewerTab || !_imp->viewerTab->isFileDialogViewer() ) {
             _imp->gui->getApp()->getFrameRange(&firstFrame, &lastFrame);
         } else {
             int f, l;
@@ -888,7 +888,7 @@ void
 TimeLineGui::seek(SequenceTime time)
 {
     if ( time != _imp->timeline->currentFrame() ) {
-        _imp->gui->getApp()->setLastViewerUsingTimeline( _imp->viewer->getNode() );
+        if (_imp->viewer) { _imp->gui->getApp()->setLastViewerUsingTimeline( _imp->viewer->getNode() ); }
         _imp->seekingTimeline = true;
         _imp->timeline->onFrameChanged(time);
         _imp->seekingTimeline = false;
@@ -957,7 +957,7 @@ TimeLineGui::mouseMoveEvent(QMouseEvent* e)
     } else if ( (_imp->state == eTimelineStateDraggingCursor) && !onEditingFinishedOnly ) {
         if ( tseq != _imp->timeline->currentFrame() ) {
             _imp->gui->setDraftRenderEnabled(true);
-            _imp->gui->getApp()->setLastViewerUsingTimeline( _imp->viewer->getNode() );
+            if (_imp->viewer) { _imp->gui->getApp()->setLastViewerUsingTimeline( _imp->viewer->getNode() ); }
             _imp->seekingTimeline = true;
             _imp->timeline->onFrameChanged(tseq);
             _imp->seekingTimeline = false;
@@ -1035,7 +1035,7 @@ TimeLineGui::mouseReleaseEvent(QMouseEvent* e)
         if (leftBound > rightBound) {
             std::swap(leftBound, rightBound);
         } else if (leftBound == rightBound) {
-            if ( !_imp->viewerTab->isFileDialogViewer() ) {
+            if ( !_imp->viewerTab || !_imp->viewerTab->isFileDialogViewer() ) {
                 double firstFrame, lastFrame;
                 _imp->gui->getApp()->getFrameRange(&firstFrame, &lastFrame);
                 leftBound = std::floor(firstFrame + 0.5);
@@ -1068,7 +1068,7 @@ TimeLineGui::mouseReleaseEvent(QMouseEvent* e)
             double t = toTimeLine( e->x() );
             SequenceTime tseq = std::floor(t + 0.5);
             if ( ( tseq != _imp->timeline->currentFrame() ) ) {
-                _imp->gui->getApp()->setLastViewerUsingTimeline( _imp->viewer->getNode() );
+                if (_imp->viewer) { _imp->gui->getApp()->setLastViewerUsingTimeline( _imp->viewer->getNode() ); }
                 _imp->timeline->onFrameChanged(tseq);
             }
         } else if (autoProxyEnabled && wasScrubbing) {
@@ -1391,7 +1391,9 @@ void
 TimeLineGui::onProjectFrameRangeChanged(int left,
                                         int right)
 {
-    assert(_imp->viewerTab);
+    if ( !_imp->viewerTab ) {
+        return;
+    }
     if ( _imp->viewerTab->isFileDialogViewer() ) {
         return;
     }

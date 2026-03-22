@@ -147,6 +147,9 @@ public:
     const std::list<Histogram*> & getHistograms() const;
     std::list<Histogram*> getHistograms_mt_safe() const;
 
+    Viewport3DTab* addNewViewport3D();
+    void removeViewport3D(Viewport3DTab* v);
+
     void maximize(TabWidget* what);
 
     void minimize();

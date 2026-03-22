@@ -1,0 +1,448 @@
+/* ***** BEGIN LICENSE BLOCK *****
+ * This file is part of Natron <https://natrongithub.github.io/>,
+ * (C) 2018-2023 The Natron developers
+ * (C) 2013-2018 INRIA and Alexandre Gauthier-Foichat
+ *
+ * Natron is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * Natron is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
+ * ***** END LICENSE BLOCK ***** */
+
+// ***** BEGIN PYTHON BLOCK *****
+#include <Python.h>
+// ***** END PYTHON BLOCK *****
+
+#include "ReadAlembicCamera.h"
+
+#include <cassert>
+#include <cmath>
+#include <sstream>
+#include <vector>
+
+#include "../../AppInstance.h"
+#include "../../ChoiceOption.h"
+#include "../../Image.h"
+#include "../../ImagePlaneDesc.h"
+#include "../../KnobFile.h"
+#include "../../KnobTypes.h"
+#include "../../Node.h"
+#include "../../ViewIdx.h"
+
+#ifdef NATRON_HAVE_ALEMBIC
+#include <Alembic/AbcGeom/All.h>
+#include <Alembic/AbcCoreOgawa/All.h>
+#endif
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+NATRON_NAMESPACE_ENTER
+
+#ifdef NATRON_HAVE_ALEMBIC
+// Recursively find camera objects in the Alembic hierarchy
+static void
+findCamerasRecursive(const Alembic::AbcGeom::IObject& obj,
+                     const std::string& parentPath,
+                     std::vector<std::string>& cameraPaths)
+{
+    using namespace Alembic::AbcGeom;
+
+    std::string fullPath = parentPath.empty() ? obj.getName() : (parentPath + "/" + obj.getName());
+
+    if (ICamera::matches(obj.getHeader())) {
+        cameraPaths.push_back(fullPath);
+    }
+
+    for (size_t i = 0; i < obj.getNumChildren(); ++i) {
+        findCamerasRecursive(obj.getChild(i), fullPath, cameraPaths);
+    }
+}
+#endif
+
+
+struct ReadAlembicCameraPrivate
+{
+    KnobFileWPtr filePath;
+    KnobChoiceWPtr objectPath;
+    KnobButtonWPtr reloadBtn;
+    KnobIntWPtr frameOffset;
+
+    // Output knobs (animated)
+    KnobDoubleWPtr translateX, translateY, translateZ;
+    KnobDoubleWPtr rotateX, rotateY, rotateZ;
+    KnobDoubleWPtr focalLength;
+    KnobDoubleWPtr hAperture, vAperture;
+    KnobDoubleWPtr nearClipKnob, farClipKnob;
+    KnobStringWPtr info;
+
+    // Cached camera paths
+    std::vector<std::string> cameraPaths;
+    std::string loadedFilePath;
+};
+
+
+ReadAlembicCamera::ReadAlembicCamera(NodePtr node)
+    : EffectInstance(node)
+    , _imp(new ReadAlembicCameraPrivate())
+{
+    setSupportsRenderScaleMaybe(eSupportsNo);
+}
+
+ReadAlembicCamera::~ReadAlembicCamera()
+{
+}
+
+std::string
+ReadAlembicCamera::getPluginDescription() const
+{
+    return
+#ifdef NATRON_HAVE_ALEMBIC
+    tr("Import animated cameras from Alembic (.abc) files.\n\n"
+       "Set the file path to an .abc file and select the camera from the dropdown. "
+       "Camera transform (translate/rotate) and intrinsics (focal length, aperture) "
+       "are exposed as animated knob values.\n\n"
+       "Use expression links to connect these values to other nodes.\n"
+       "The camera frustum is visualized in the 3D viewport when this node is selected.\n\n"
+       "Supports exports from Maya, Houdini, 3DEqualizer, and Blender.").toStdString();
+#else
+    tr("ReadAlembicCamera requires the Alembic library. Rebuild Natron with Alembic support.").toStdString();
+#endif
+}
+
+void
+ReadAlembicCamera::addAcceptedComponents(int /*inputNb*/, std::list<ImagePlaneDesc>* comps)
+{
+    comps->push_back(ImagePlaneDesc::getRGBAComponents());
+}
+
+void
+ReadAlembicCamera::addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const
+{
+    depths->push_back(eImageBitDepthFloat);
+}
+
+bool
+ReadAlembicCamera::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
+{
+    return false;
+}
+
+void
+ReadAlembicCamera::initializeKnobs()
+{
+    KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("File"));
+
+    KnobFilePtr fp = AppManager::createKnob<KnobFile>(this, tr("File"));
+    fp->setName("filename");
+    fp->setHintToolTip(tr("Path to the Alembic (.abc) file."));
+    fp->setAnimationEnabled(false);
+    page->addKnob(fp);
+    _imp->filePath = fp;
+
+    KnobChoicePtr obj = AppManager::createKnob<KnobChoice>(this, tr("Camera"));
+    obj->setName("objectPath");
+    obj->setHintToolTip(tr("Select which camera to use from the Alembic file."));
+    page->addKnob(obj);
+    _imp->objectPath = obj;
+
+    KnobButtonPtr reload = AppManager::createKnob<KnobButton>(this, tr("Reload"));
+    reload->setName("reload");
+    reload->setHintToolTip(tr("Re-read the Alembic file."));
+    page->addKnob(reload);
+    _imp->reloadBtn = reload;
+
+    KnobIntPtr foff = AppManager::createKnob<KnobInt>(this, tr("Frame Offset"));
+    foff->setName("frameOffset");
+    foff->setDefaultValue(0);
+    foff->setHintToolTip(tr("Offset the Alembic animation relative to the Natron timeline."));
+    page->addKnob(foff);
+    _imp->frameOffset = foff;
+
+    // Camera output page
+    KnobPagePtr camPage = AppManager::createKnob<KnobPage>(this, tr("Camera"));
+
+    KnobDoublePtr tx = AppManager::createKnob<KnobDouble>(this, tr("Translate X"));
+    tx->setName("translateX"); tx->setAnimationEnabled(true); tx->setEvaluateOnChange(false);
+    camPage->addKnob(tx); _imp->translateX = tx;
+
+    KnobDoublePtr ty = AppManager::createKnob<KnobDouble>(this, tr("Translate Y"));
+    ty->setName("translateY"); ty->setAnimationEnabled(true); ty->setEvaluateOnChange(false);
+    camPage->addKnob(ty); _imp->translateY = ty;
+
+    KnobDoublePtr tz = AppManager::createKnob<KnobDouble>(this, tr("Translate Z"));
+    tz->setName("translateZ"); tz->setAnimationEnabled(true); tz->setEvaluateOnChange(false);
+    camPage->addKnob(tz); _imp->translateZ = tz;
+
+    KnobDoublePtr rx = AppManager::createKnob<KnobDouble>(this, tr("Rotate X"));
+    rx->setName("rotateX"); rx->setAnimationEnabled(true); rx->setEvaluateOnChange(false);
+    camPage->addKnob(rx); _imp->rotateX = rx;
+
+    KnobDoublePtr ry = AppManager::createKnob<KnobDouble>(this, tr("Rotate Y"));
+    ry->setName("rotateY"); ry->setAnimationEnabled(true); ry->setEvaluateOnChange(false);
+    camPage->addKnob(ry); _imp->rotateY = ry;
+
+    KnobDoublePtr rz = AppManager::createKnob<KnobDouble>(this, tr("Rotate Z"));
+    rz->setName("rotateZ"); rz->setAnimationEnabled(true); rz->setEvaluateOnChange(false);
+    camPage->addKnob(rz); _imp->rotateZ = rz;
+
+    KnobDoublePtr fl = AppManager::createKnob<KnobDouble>(this, tr("Focal Length"));
+    fl->setName("focalLength"); fl->setAnimationEnabled(true); fl->setEvaluateOnChange(false);
+    fl->setDefaultValue(50.0);
+    camPage->addKnob(fl); _imp->focalLength = fl;
+
+    KnobDoublePtr ha = AppManager::createKnob<KnobDouble>(this, tr("H Aperture (mm)"));
+    ha->setName("hAperture"); ha->setAnimationEnabled(true); ha->setEvaluateOnChange(false);
+    ha->setDefaultValue(36.0);
+    camPage->addKnob(ha); _imp->hAperture = ha;
+
+    KnobDoublePtr va = AppManager::createKnob<KnobDouble>(this, tr("V Aperture (mm)"));
+    va->setName("vAperture"); va->setAnimationEnabled(true); va->setEvaluateOnChange(false);
+    va->setDefaultValue(24.0);
+    camPage->addKnob(va); _imp->vAperture = va;
+
+    KnobDoublePtr nc = AppManager::createKnob<KnobDouble>(this, tr("Near Clip"));
+    nc->setName("nearClip"); nc->setAnimationEnabled(true); nc->setEvaluateOnChange(false);
+    nc->setDefaultValue(0.1);
+    camPage->addKnob(nc); _imp->nearClipKnob = nc;
+
+    KnobDoublePtr fc = AppManager::createKnob<KnobDouble>(this, tr("Far Clip"));
+    fc->setName("farClip"); fc->setAnimationEnabled(true); fc->setEvaluateOnChange(false);
+    fc->setDefaultValue(10000.0);
+    camPage->addKnob(fc); _imp->farClipKnob = fc;
+
+    KnobStringPtr info = AppManager::createKnob<KnobString>(this, tr("Info"));
+    info->setName("info"); info->setAnimationEnabled(false);
+    info->setEvaluateOnChange(false); info->setIsPersistent(false);
+    info->setDefaultValue("Set file path to an .abc file.");
+    camPage->addKnob(info); _imp->info = info;
+}
+
+bool
+ReadAlembicCamera::knobChanged(KnobI* k,
+                               ValueChangedReasonEnum /*reason*/,
+                               ViewSpec /*view*/,
+                               double /*time*/,
+                               bool /*originatedFromMainThread*/)
+{
+    if (_imp->filePath.lock().get() == k || _imp->reloadBtn.lock().get() == k) {
+        std::string path = _imp->filePath.lock()->getValue();
+        if (!path.empty()) {
+            loadAlembicFile(path);
+        }
+        return true;
+    }
+    return false;
+}
+
+void
+ReadAlembicCamera::loadAlembicFile(const std::string& path)
+{
+#ifdef NATRON_HAVE_ALEMBIC
+    using namespace Alembic::AbcGeom;
+
+    try {
+        IArchive archive(Alembic::AbcCoreOgawa::ReadArchive(), path);
+        IObject top = archive.getTop();
+
+        _imp->cameraPaths.clear();
+        findCamerasRecursive(top, "", _imp->cameraPaths);
+
+        if (_imp->cameraPaths.empty()) {
+            setPersistentMessage(eMessageTypeError, "No cameras found in " + path);
+            return;
+        }
+
+        // Populate camera choice dropdown
+        KnobChoicePtr objKnob = _imp->objectPath.lock();
+        std::vector<ChoiceOption> entries;
+        for (const std::string& cp : _imp->cameraPaths) {
+            entries.push_back(ChoiceOption(cp, "", ""));
+        }
+        objKnob->populateChoices(entries);
+        objKnob->setDefaultValue(0);
+
+        // Load the first camera's data
+        std::string selectedPath = _imp->cameraPaths[0];
+
+        // Navigate to the camera object
+        IObject obj = top;
+        // Split path and navigate
+        std::istringstream iss(selectedPath);
+        std::string token;
+        while (std::getline(iss, token, '/')) {
+            if (token.empty()) continue;
+            for (size_t i = 0; i < obj.getNumChildren(); ++i) {
+                if (obj.getChild(i).getName() == token) {
+                    obj = obj.getChild(i);
+                    break;
+                }
+            }
+        }
+
+        if (!ICamera::matches(obj.getHeader())) {
+            setPersistentMessage(eMessageTypeError, "Selected object is not a camera: " + selectedPath);
+            return;
+        }
+
+        ICamera cam(obj);
+        ICameraSchema camSchema = cam.getSchema();
+        int frameOffset = _imp->frameOffset.lock()->getValue();
+
+        // Read camera intrinsics (may have fewer samples than Xform)
+        size_t numCamSamples = camSchema.getNumSamples();
+        Alembic::AbcCoreAbstract::TimeSamplingPtr camTimeSampling = camSchema.getTimeSampling();
+
+        for (size_t i = 0; i < numCamSamples; ++i) {
+            double abcTime = camTimeSampling->getSampleTime(i);
+            double natronFrame = abcTime * 24.0 + frameOffset + 1.0; // +1 because Natron frames are 1-based
+
+            ISampleSelector sel((Alembic::AbcCoreAbstract::index_t)i);
+            CameraSample sample;
+            camSchema.get(sample, sel);
+
+            double fl = sample.getFocalLength();
+            double hAp = sample.getHorizontalAperture() * 10.0; // cm → mm
+            double vAp = sample.getVerticalAperture() * 10.0;   // cm → mm
+            double nearC = sample.getNearClippingPlane();
+            double farC = sample.getFarClippingPlane();
+
+            if (numCamSamples == 1) {
+                // Static camera intrinsics — set as default values (no keyframes)
+                _imp->focalLength.lock()->setValue(fl);
+                _imp->hAperture.lock()->setValue(hAp);
+                _imp->vAperture.lock()->setValue(vAp);
+                _imp->nearClipKnob.lock()->setValue(nearC);
+                _imp->farClipKnob.lock()->setValue(farC);
+            } else {
+                _imp->focalLength.lock()->setValueAtTime(natronFrame, fl, ViewSpec::all(), 0);
+                _imp->hAperture.lock()->setValueAtTime(natronFrame, hAp, ViewSpec::all(), 0);
+                _imp->vAperture.lock()->setValueAtTime(natronFrame, vAp, ViewSpec::all(), 0);
+                _imp->nearClipKnob.lock()->setValueAtTime(natronFrame, nearC, ViewSpec::all(), 0);
+                _imp->farClipKnob.lock()->setValueAtTime(natronFrame, farC, ViewSpec::all(), 0);
+            }
+        }
+
+        // Read camera transform from parent Xform (typically has more samples)
+        IObject parent = obj.getParent();
+        size_t numXformSamples = 0;
+
+        if (IXform::matches(parent.getHeader())) {
+            IXform xform(parent);
+            IXformSchema xSchema = xform.getSchema();
+            numXformSamples = xSchema.getNumSamples();
+            Alembic::AbcCoreAbstract::TimeSamplingPtr xformTimeSampling = xSchema.getTimeSampling();
+
+            for (size_t i = 0; i < numXformSamples; ++i) {
+                double abcTime = xformTimeSampling->getSampleTime(i);
+                double natronFrame = abcTime * 24.0 + frameOffset + 1.0;
+
+                ISampleSelector sel((Alembic::AbcCoreAbstract::index_t)i);
+                XformSample xSample;
+                xSchema.get(xSample, sel);
+
+                // Get the 4x4 matrix
+                Imath::M44d matrix = xSample.getMatrix();
+
+                // Extract translation
+                _imp->translateX.lock()->setValueAtTime(natronFrame, matrix[3][0], ViewSpec::all(), 0);
+                _imp->translateY.lock()->setValueAtTime(natronFrame, matrix[3][1], ViewSpec::all(), 0);
+                _imp->translateZ.lock()->setValueAtTime(natronFrame, matrix[3][2], ViewSpec::all(), 0);
+
+                // Extract rotation (Euler angles from rotation matrix)
+                // Maya uses XYZ rotation order by default
+                double sy = matrix[0][2];
+                double ry = std::asin(std::max(-1.0, std::min(1.0, sy)));
+                double cosRy = std::cos(ry);
+
+                double rx, rz;
+                if (std::abs(cosRy) > 0.001) {
+                    rx = std::atan2(-matrix[1][2], matrix[2][2]);
+                    rz = std::atan2(-matrix[0][1], matrix[0][0]);
+                } else {
+                    rx = std::atan2(matrix[2][1], matrix[1][1]);
+                    rz = 0.0;
+                }
+
+                _imp->rotateX.lock()->setValueAtTime(natronFrame, rx * 180.0 / M_PI, ViewSpec::all(), 0);
+                _imp->rotateY.lock()->setValueAtTime(natronFrame, ry * 180.0 / M_PI, ViewSpec::all(), 0);
+                _imp->rotateZ.lock()->setValueAtTime(natronFrame, rz * 180.0 / M_PI, ViewSpec::all(), 0);
+            }
+        }
+
+        // Update info
+        std::ostringstream ss;
+        ss << "Camera: " << selectedPath
+           << " | Xform samples: " << numXformSamples
+           << " | Camera samples: " << numCamSamples
+           << " | Cameras found: " << _imp->cameraPaths.size();
+        _imp->info.lock()->setValue(ss.str());
+        _imp->loadedFilePath = path;
+
+        clearPersistentMessage(false);
+
+    } catch (const std::exception& e) {
+        setPersistentMessage(eMessageTypeError, std::string("Error reading Alembic file: ") + e.what());
+    }
+#else
+    Q_UNUSED(path);
+    setPersistentMessage(eMessageTypeError, "Alembic support not available. Rebuild with Alembic library.");
+#endif
+}
+
+void
+ReadAlembicCamera::getCameraTransform(double time, double& tx, double& ty, double& tz,
+                                      double& rx, double& ry, double& rz) const
+{
+    tx = _imp->translateX.lock()->getValueAtTime(time);
+    ty = _imp->translateY.lock()->getValueAtTime(time);
+    tz = _imp->translateZ.lock()->getValueAtTime(time);
+    rx = _imp->rotateX.lock()->getValueAtTime(time);
+    ry = _imp->rotateY.lock()->getValueAtTime(time);
+    rz = _imp->rotateZ.lock()->getValueAtTime(time);
+}
+
+double
+ReadAlembicCamera::getFocalLength(double time) const
+{
+    return _imp->focalLength.lock()->getValueAtTime(time);
+}
+
+double
+ReadAlembicCamera::getHAperture(double time) const
+{
+    return _imp->hAperture.lock()->getValueAtTime(time);
+}
+
+StatusEnum
+ReadAlembicCamera::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
+                                         ViewIdx /*view*/, RectD* rod)
+{
+    // Generator node — produce a 1x1 "dummy" output
+    rod->x1 = 0;
+    rod->y1 = 0;
+    rod->x2 = 1;
+    rod->y2 = 1;
+    return eStatusOK;
+}
+
+StatusEnum
+ReadAlembicCamera::render(const RenderActionArgs& /*args*/)
+{
+    // No image output — this node only produces knob values
+    return eStatusOK;
+}
+
+NATRON_NAMESPACE_EXIT
+NATRON_NAMESPACE_USING
+
+#include "moc_ReadAlembicCamera.cpp"

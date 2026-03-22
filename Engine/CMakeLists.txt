@@ -21,8 +21,28 @@ include(FindPkgConfig)
 
 pkg_check_modules(Cairo REQUIRED IMPORTED_TARGET cairo fontconfig)
 
+# Dev nodes dependencies
+find_package(OpenImageIO QUIET)
+if(OpenImageIO_FOUND)
+    message(STATUS "OpenImageIO found — Deep nodes will have full EXR support")
+else()
+    message(STATUS "OpenImageIO not found — Deep nodes will have limited functionality")
+endif()
+
 file(GLOB NatronEngine_HEADERS *.h)
 file(GLOB NatronEngine_SOURCES *.cpp)
+
+# Dev nodes — custom node extensions
+file(GLOB DevDeep_HEADERS Dev/Deep/*.h)
+file(GLOB DevDeep_SOURCES Dev/Deep/*.cpp)
+file(GLOB DevScene3D_HEADERS Dev/Scene3D/*.h)
+file(GLOB DevScene3D_SOURCES Dev/Scene3D/*.cpp)
+file(GLOB DevParticles_HEADERS Dev/Particles/*.h)
+file(GLOB DevParticles_SOURCES Dev/Particles/*.cpp)
+file(GLOB DevChannel_HEADERS Dev/Channel/*.h)
+file(GLOB DevChannel_SOURCES Dev/Channel/*.cpp)
+list(APPEND NatronEngine_HEADERS ${DevDeep_HEADERS} ${DevScene3D_HEADERS} ${DevParticles_HEADERS} ${DevChannel_HEADERS})
+list(APPEND NatronEngine_SOURCES ${DevDeep_SOURCES} ${DevScene3D_SOURCES} ${DevParticles_SOURCES} ${DevChannel_SOURCES})
 
 set(PYENGINE_OUT ${CMAKE_CURRENT_BINARY_DIR}/Qt${QT_VERSION_MAJOR})
 set(PYENGINE_INCLUDE_DIRS ${PYSIDE_INCLUDE_DIRS} ${PYSIDE_INCLUDE_DIRS}/QtCore)
@@ -89,6 +109,7 @@ target_link_libraries(NatronEngine
         mv
         openMVG
         tess
+        $<$<BOOL:${OpenImageIO_FOUND}>:OpenImageIO::OpenImageIO>
 )
 
 # Link Boost separately so we can mark its includes as SYSTEM
@@ -107,6 +128,10 @@ target_include_directories(NatronEngine
         ..
         ../Global
         ../libs/SequenceParsing
+        Dev/Deep
+        Dev/Scene3D
+        Dev/Particles
+        Dev/Channel
         ${X11_INCLUDE_DIR}
 )
 # Non-Qt includes that AUTOMOC/moc doesn't need — mark as SYSTEM to keep
@@ -122,4 +147,5 @@ target_compile_definitions(NatronEngine
         NATRON_BUILD_NUMBER=0
         QT_NO_KEYWORDS
         ${XDG_DEFS}
+        $<$<BOOL:${OpenImageIO_FOUND}>:NATRON_HAVE_OPENIMAGEIO>
 )
