@@ -155,6 +155,11 @@
 #include "Dev/Deep/DeepExpression.h"
 #include "Dev/Deep/DeepColorCorrect.h"
 #include "Dev/Deep/DeepDefocus.h"
+#include "Dev/Deep/DeepSplit.h"
+#include "Dev/Deep/DeepPositionMatte.h"
+#include "Dev/Deep/DeepFog.h"
+#include "Dev/Deep/DeepGodRays.h"
+#include "Dev/Deep/DeepAO.h"
 
 // Dev nodes — Channel
 #include "Dev/Channel/DevShuffle.h"
@@ -1616,6 +1621,11 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<DeepExpression>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
     registerBuiltInPlugin<DeepColorCorrect>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
     registerBuiltInPlugin<DeepDefocus>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepSplit>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepPositionMatte>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepFog>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepGodRays>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepAO>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
 
     // Dev nodes — 3D System
     registerBuiltInPlugin<Camera3DNode>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);

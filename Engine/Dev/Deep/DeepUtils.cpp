@@ -34,6 +34,10 @@
 #include "DeepRecolor.h"
 #include "DeepReformat.h"
 #include "DeepSlice.h"
+#include "DeepSplit.h"
+#include "DeepPositionMatte.h"
+#include "DeepFog.h"
+#include "DeepAO.h"
 #include "DeepTransform.h"
 
 NATRON_NAMESPACE_ENTER
@@ -61,6 +65,10 @@ getDeepImageFromEffect(EffectInstance* effect)
     if (DeepTransform* n = dynamic_cast<DeepTransform*>(effect)) return n->getDeepImage();
     if (DeepExpression* n = dynamic_cast<DeepExpression*>(effect)) return n->getDeepImage();
     if (DeepColorCorrect* n = dynamic_cast<DeepColorCorrect*>(effect)) return n->getDeepImage();
+    if (DeepSplit* n = dynamic_cast<DeepSplit*>(effect)) return n->getDeepImage();
+    if (DeepPositionMatte* n = dynamic_cast<DeepPositionMatte*>(effect)) return n->getDeepImage();
+    if (DeepFog* n = dynamic_cast<DeepFog*>(effect)) return n->getDeepImage();
+    if (DeepAO* n = dynamic_cast<DeepAO*>(effect)) return n->getDeepImage();
 
     return DeepImagePtr();
 }
