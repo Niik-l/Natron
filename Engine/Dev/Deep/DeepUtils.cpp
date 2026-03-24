@@ -38,6 +38,18 @@
 #include "DeepPositionMatte.h"
 #include "DeepFog.h"
 #include "DeepAO.h"
+#include "DeepRelight.h"
+#include "DeepContactShadow.h"
+#include "DeepConsolidate.h"
+#include "DeepDepthWarp.h"
+#include "DeepSampleFilter.h"
+#include "DeepNormalize.h"
+#include "DeepChannelMath.h"
+#include "DeepQuantize.h"
+#include "DeepNormalMatte.h"
+#include "DeepVelocityMatte.h"
+#include "DeepFromFrames.h"
+#include "DeepBlend.h"
 #include "DeepTransform.h"
 
 NATRON_NAMESPACE_ENTER
@@ -69,6 +81,18 @@ getDeepImageFromEffect(EffectInstance* effect)
     if (DeepPositionMatte* n = dynamic_cast<DeepPositionMatte*>(effect)) return n->getDeepImage();
     if (DeepFog* n = dynamic_cast<DeepFog*>(effect)) return n->getDeepImage();
     if (DeepAO* n = dynamic_cast<DeepAO*>(effect)) return n->getDeepImage();
+    if (DeepRelight* n = dynamic_cast<DeepRelight*>(effect)) return n->getDeepImage();
+    if (DeepContactShadow* n = dynamic_cast<DeepContactShadow*>(effect)) return n->getDeepImage();
+    if (DeepConsolidate* n = dynamic_cast<DeepConsolidate*>(effect)) return n->getDeepImage();
+    if (DeepDepthWarp* n = dynamic_cast<DeepDepthWarp*>(effect)) return n->getDeepImage();
+    if (DeepSampleFilter* n = dynamic_cast<DeepSampleFilter*>(effect)) return n->getDeepImage();
+    if (DeepNormalize* n = dynamic_cast<DeepNormalize*>(effect)) return n->getDeepImage();
+    if (DeepChannelMath* n = dynamic_cast<DeepChannelMath*>(effect)) return n->getDeepImage();
+    if (DeepQuantize* n = dynamic_cast<DeepQuantize*>(effect)) return n->getDeepImage();
+    if (DeepNormalMatte* n = dynamic_cast<DeepNormalMatte*>(effect)) return n->getDeepImage();
+    if (DeepVelocityMatte* n = dynamic_cast<DeepVelocityMatte*>(effect)) return n->getDeepImage();
+    if (DeepFromFrames* n = dynamic_cast<DeepFromFrames*>(effect)) return n->getDeepImage();
+    if (DeepBlend* n = dynamic_cast<DeepBlend*>(effect)) return n->getDeepImage();
 
     return DeepImagePtr();
 }
