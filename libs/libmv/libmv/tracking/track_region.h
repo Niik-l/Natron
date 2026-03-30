@@ -19,6 +19,7 @@
 // IN THE SOFTWARE.
 
 #ifndef LIBMV_TRACKING_TRACK_REGION_H_
+#define LIBMV_TRACKING_TRACK_REGION_H_
 
 // Necessary for M_E when building with MSVC.
 #define _USE_MATH_DEFINES

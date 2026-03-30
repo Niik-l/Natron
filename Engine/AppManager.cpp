@@ -193,9 +193,6 @@
 // 3D Camera Tracking
 #include "CameraTrackerNode.h"
 
-// Dev overlay test
-#include "Dev/DevOverlayTest.h"
-
 // Dev nodes — 3D System
 #include "Dev/Scene3D/Camera3DNode.h"
 #include "Dev/Scene3D/Sphere3D.h"
@@ -1672,8 +1669,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     // 3D Camera Tracking
     registerBuiltInPlugin<CameraTrackerNode>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
-    // Dev overlay test
-    registerBuiltInPlugin<DevOverlayTest>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+
 
     // Dev nodes — 3D System
     registerBuiltInPlugin<Camera3DNode>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);

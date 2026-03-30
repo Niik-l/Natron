@@ -98,9 +98,26 @@ set(mv_SOURCES
     libmv/image/array_nd.cc
     libmv/image/convolve.cc
     libmv/multiview/conditioning.cc
+    libmv/multiview/euclidean_resection.cc
+    libmv/multiview/fundamental.cc
     libmv/multiview/homography.cc
+    libmv/multiview/panography.cc
     libmv/multiview/projection.cc
+    libmv/multiview/triangulation.cc
     libmv/numeric/numeric.cc
+    libmv/simple_pipeline/bundle.cc
+    libmv/simple_pipeline/camera_intrinsics.cc
+    libmv/simple_pipeline/detect.cc
+    libmv/simple_pipeline/distortion_models.cc
+    libmv/simple_pipeline/initialize_reconstruction.cc
+    libmv/simple_pipeline/intersect.cc
+    libmv/simple_pipeline/keyframe_selection.cc
+    libmv/simple_pipeline/modal_solver.cc
+    libmv/simple_pipeline/pipeline.cc
+    libmv/simple_pipeline/reconstruction.cc
+    libmv/simple_pipeline/reconstruction_scale.cc
+    libmv/simple_pipeline/resect.cc
+    libmv/simple_pipeline/tracks.cc
     libmv/tracking/track_region.cc
 )
 add_library(mv STATIC ${mv_HEADERS} ${mv_SOURCES})
