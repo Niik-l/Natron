@@ -30,6 +30,7 @@
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
+#include "../../NodeMetadata.h"
 #include "../../ViewIdx.h"
 
 NATRON_NAMESPACE_ENTER
@@ -109,6 +110,22 @@ Scene3D::getConnectedInput(int index) const
         }
     }
     return EffectInstancePtr();
+}
+
+StatusEnum
+Scene3D::getPreferredMetadata(NodeMetadata& metadata)
+{
+    // If any connected input has animated knobs, this scene is frame-varying.
+    // This ensures Natron's cache includes time in the ImageKey, so downstream
+    // renderers (CyclesRender, ScanlineRender) re-render when the frame changes.
+    for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
+        EffectInstancePtr inp = getInput(i);
+        if (inp && inp->getHasAnimation()) {
+            metadata.setIsFrameVarying(true);
+            return eStatusOK;
+        }
+    }
+    return eStatusOK;
 }
 
 StatusEnum

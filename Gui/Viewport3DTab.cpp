@@ -40,6 +40,15 @@
 #include "Gui/TimeLineGui.h"
 #include "Gui/Viewport3D.h"
 #include "Engine/TimeLine.h"
+#include "Engine/Project.h"
+#include "Engine/Node.h"
+
+#ifdef NATRON_CYCLES
+#include "Engine/Dev/Cycles/CyclesRenderer.h"
+#include "Engine/Dev/Scene3D/SceneGraph.h"
+#include <QMessageBox>
+#include <QFileDialog>
+#endif
 
 NATRON_NAMESPACE_ENTER
 
@@ -108,6 +117,15 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
     connect(_gridBtn, SIGNAL(clicked()), this, SLOT(onToggleGrid()));
     toolbarLayout->addWidget(_gridBtn);
 
+    // World/Local toggle
+    _spaceBtn = new QToolButton(toolbar);
+    _spaceBtn->setText(QString::fromUtf8("W"));
+    _spaceBtn->setToolTip(QString::fromUtf8("Transform Space: World (W) / Local (L)"));
+    _spaceBtn->setFixedHeight(22);
+    _spaceBtn->setFixedWidth(28);
+    connect(_spaceBtn, SIGNAL(clicked()), this, SLOT(onToggleTransformSpace()));
+    toolbarLayout->addWidget(_spaceBtn);
+
     // Reset camera
     QToolButton* resetBtn = new QToolButton(toolbar);
     resetBtn->setText(QString::fromUtf8("Reset"));
@@ -128,6 +146,17 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
     toolbarLayout->addWidget(infoLabel);
 
     toolbarLayout->addStretch();
+
+#ifdef NATRON_CYCLES
+    // Cycles render button
+    QToolButton* renderBtn = new QToolButton(toolbar);
+    renderBtn->setText(QString::fromUtf8("Render"));
+    renderBtn->setToolTip(QString::fromUtf8("Render scene with Cycles (saves PNG)"));
+    renderBtn->setFixedHeight(22);
+    renderBtn->setStyleSheet(QString::fromUtf8("QToolButton { background-color: #4a6e2e; color: white; padding: 0 8px; }"));
+    connect(renderBtn, SIGNAL(clicked()), this, SLOT(onCyclesRender()));
+    toolbarLayout->addWidget(renderBtn);
+#endif
 
     mainLayout->addWidget(toolbar);
 
@@ -206,7 +235,7 @@ Viewport3DTab::onGizmoScale()
     _translateBtn->setChecked(false);
     _rotateBtn->setChecked(false);
     _scaleBtn->setChecked(true);
-    QKeyEvent ev(QEvent::KeyPress, Qt::Key_T, Qt::NoModifier);
+    QKeyEvent ev(QEvent::KeyPress, Qt::Key_R, Qt::NoModifier);
     _viewport->keyPressEvent(&ev);
 }
 
@@ -221,6 +250,64 @@ Viewport3DTab::onToggleGrid()
 {
     _gridVisible = _gridBtn->isChecked();
     _viewport->update();
+}
+
+void
+Viewport3DTab::onToggleTransformSpace()
+{
+    _viewport->toggleTransformSpace();
+    _spaceBtn->setText(_viewport->isLocalSpace()
+        ? QString::fromUtf8("L")
+        : QString::fromUtf8("W"));
+}
+
+void
+Viewport3DTab::onCyclesRender()
+{
+#ifdef NATRON_CYCLES
+    Gui* gui = getGui();
+    if (!gui) return;
+    GuiAppInstancePtr app = gui->getApp();
+    if (!app) return;
+    ProjectPtr project = app->getProject();
+    if (!project) return;
+
+    // Build scene graph from current nodes
+    double time = app->getTimeLine()->currentFrame();
+    NodesList nodes;
+    project->getNodes_recursive(nodes, true);
+
+    SceneGraph sceneGraph;
+    sceneGraph.rebuild(nodes, time);
+
+    if (sceneGraph.size() == 0) {
+        QMessageBox::information(this, QString::fromUtf8("Cycles Render"),
+            QString::fromUtf8("No 3D nodes in the scene. Add a Sphere3D, Cube3D, or Card3D first."));
+        return;
+    }
+
+    // Ask where to save
+    QString savePath = QFileDialog::getSaveFileName(this,
+        QString::fromUtf8("Save Cycles Render"),
+        QString::fromUtf8("D:/cycles_natron_render.png"),
+        QString::fromUtf8("PNG (*.png);;EXR (*.exr)"));
+    if (savePath.isEmpty()) return;
+
+    // TODO: Viewport3D uses demo-style camera, not Camera3D.
+    // Viewport Render button needs updating to use the new camera matrices.
+    // For now, CyclesRender node is the primary render path.
+    bool ok = false;
+    (void)savePath; // suppress unused warning
+
+    if (ok) {
+        QMessageBox::information(this, QString::fromUtf8("Cycles Render"),
+            QString::fromUtf8("Render complete! %1 nodes rendered.\nSaved to: %2")
+            .arg(sceneGraph.size()).arg(savePath));
+    } else {
+        QMessageBox::warning(this, QString::fromUtf8("Cycles Render"),
+            QString::fromUtf8("Render failed."));
+    }
+#endif
 }
 
 void

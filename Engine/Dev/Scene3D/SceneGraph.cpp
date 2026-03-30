@@ -44,6 +44,7 @@
 #include "../Deep/PointCloudData.h"
 #include "ReadAlembicCamera.h"
 #include "ReadGeo.h"
+#include "../../KnobTypes.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -61,46 +62,91 @@ SceneGraph::buildTRS(float tx, float ty, float tz,
                      float sx, float sy, float sz,
                      float out[16])
 {
-    // Build column-major 4x4 TRS matrix
-    // Order: Scale → RotateZ → RotateX → RotateY → Translate
+    // Build TRS matrix matching ImGuizmo::RecomposeMatrixFromComponents exactly.
+    // ImGuizmo uses Rodrigues rotation for each axis, then multiplies Rx*Ry*Rz
+    // using FPU_MatrixF_x_MatrixF. We replicate that exact computation here
+    // so buildTRS and RecomposeMatrixFromComponents produce identical m16 values.
+    //
+    // This means glMultMatrixf(out) renders objects in the same orientation
+    // that ImGuizmo::Manipulate expects — no transposing needed at the boundary.
 
-    float crx = cosf(rx * (float)M_PI / 180.0f), srx = sinf(rx * (float)M_PI / 180.0f);
-    float cry = cosf(ry * (float)M_PI / 180.0f), sry = sinf(ry * (float)M_PI / 180.0f);
-    float crz = cosf(rz * (float)M_PI / 180.0f), srz = sinf(rz * (float)M_PI / 180.0f);
+    // Build individual rotation matrices (same as ImGuizmo::RotationAxis)
+    // Each is stored as m16[16] in ImGuizmo's layout
+    auto rotAxis = [](float m[16], float axX, float axY, float axZ, float angleDeg) {
+        float rad = angleDeg * (float)M_PI / 180.0f;
+        float c = cosf(rad), s = sinf(rad), k = 1.0f - c;
+        float xx = axX*axX*k+c,   xy = axX*axY*k,     zx = axZ*axX*k;
+        float yy = axY*axY*k+c,   yz = axY*axZ*k,     zz = axZ*axZ*k+c;
+        float xs = axX*s,         ys = axY*s,          zs = axZ*s;
+        // Matches ImGuizmo::RotationAxis element layout exactly
+        m[0]=xx;     m[1]=xy+zs;  m[2]=zx-ys;  m[3]=0;
+        m[4]=xy-zs;  m[5]=yy;     m[6]=yz+xs;  m[7]=0;
+        m[8]=zx+ys;  m[9]=yz-xs;  m[10]=zz;    m[11]=0;
+        m[12]=0;     m[13]=0;     m[14]=0;      m[15]=1;
+    };
 
-    // Rotation matrix = Ry * Rx * Rz (column-major)
-    float r00 = cry * crz + sry * srx * srz;
-    float r01 = crx * srz;
-    float r02 = -sry * crz + cry * srx * srz;
+    // Multiply matching ImGuizmo::FPU_MatrixF_x_MatrixF exactly
+    auto matMul = [](const float a[16], const float b[16], float r[16]) {
+        r[0]  = a[0]*b[0]  + a[1]*b[4]  + a[2]*b[8]   + a[3]*b[12];
+        r[1]  = a[0]*b[1]  + a[1]*b[5]  + a[2]*b[9]   + a[3]*b[13];
+        r[2]  = a[0]*b[2]  + a[1]*b[6]  + a[2]*b[10]  + a[3]*b[14];
+        r[3]  = a[0]*b[3]  + a[1]*b[7]  + a[2]*b[11]  + a[3]*b[15];
+        r[4]  = a[4]*b[0]  + a[5]*b[4]  + a[6]*b[8]   + a[7]*b[12];
+        r[5]  = a[4]*b[1]  + a[5]*b[5]  + a[6]*b[9]   + a[7]*b[13];
+        r[6]  = a[4]*b[2]  + a[5]*b[6]  + a[6]*b[10]  + a[7]*b[14];
+        r[7]  = a[4]*b[3]  + a[5]*b[7]  + a[6]*b[11]  + a[7]*b[15];
+        r[8]  = a[8]*b[0]  + a[9]*b[4]  + a[10]*b[8]  + a[11]*b[12];
+        r[9]  = a[8]*b[1]  + a[9]*b[5]  + a[10]*b[9]  + a[11]*b[13];
+        r[10] = a[8]*b[2]  + a[9]*b[6]  + a[10]*b[10] + a[11]*b[14];
+        r[11] = a[8]*b[3]  + a[9]*b[7]  + a[10]*b[11] + a[11]*b[15];
+        r[12] = a[12]*b[0] + a[13]*b[4] + a[14]*b[8]  + a[15]*b[12];
+        r[13] = a[12]*b[1] + a[13]*b[5] + a[14]*b[9]  + a[15]*b[13];
+        r[14] = a[12]*b[2] + a[13]*b[6] + a[14]*b[10] + a[15]*b[14];
+        r[15] = a[12]*b[3] + a[13]*b[7] + a[14]*b[11] + a[15]*b[15];
+    };
 
-    float r10 = -cry * srz + sry * srx * crz;
-    float r11 = crx * crz;
-    float r12 = sry * srz + cry * srx * crz;
+    float rotX[16], rotY[16], rotZ[16], tmp[16];
+    rotAxis(rotX, 1, 0, 0, rx);
+    rotAxis(rotY, 0, 1, 0, ry);
+    rotAxis(rotZ, 0, 0, 1, rz);
 
-    float r20 = sry * crx;
-    float r21 = -srx;
-    float r22 = cry * crx;
+    // mat = rotX * rotY * rotZ (same order as ImGuizmo)
+    matMul(rotX, rotY, tmp);
+    matMul(tmp, rotZ, out);
 
-    // Column-major: out[col*4 + row]
-    out[0]  = r00 * sx;  out[1]  = r01 * sx;  out[2]  = r02 * sx;  out[3]  = 0;
-    out[4]  = r10 * sy;  out[5]  = r11 * sy;  out[6]  = r12 * sy;  out[7]  = 0;
-    out[8]  = r20 * sz;  out[9]  = r21 * sz;  out[10] = r22 * sz;  out[11] = 0;
-    out[12] = tx;        out[13] = ty;        out[14] = tz;        out[15] = 1;
+    // Apply scale to right/up/dir vectors (same as ImGuizmo)
+    // right = out[0..3], up = out[4..7], dir = out[8..11]
+    out[0] *= sx; out[1] *= sx; out[2] *= sx; out[3] *= sx;
+    out[4] *= sy; out[5] *= sy; out[6] *= sy; out[7] *= sy;
+    out[8] *= sz; out[9] *= sz; out[10] *= sz; out[11] *= sz;
+
+    // Set translation
+    out[12] = tx; out[13] = ty; out[14] = tz; out[15] = 1.0f;
 }
 
 void
 SceneGraph::multiply(const float a[16], const float b[16], float out[16])
 {
-    // Column-major 4x4 matrix multiply: out = a * b
-    for (int col = 0; col < 4; ++col) {
-        for (int row = 0; row < 4; ++row) {
-            float sum = 0;
-            for (int k = 0; k < 4; ++k) {
-                sum += a[k * 4 + row] * b[col * 4 + k];
-            }
-            out[col * 4 + row] = sum;
-        }
-    }
+    // Matrix multiply matching ImGuizmo::FPU_MatrixF_x_MatrixF exactly
+    // out = a * b
+    float r[16];
+    r[0]  = a[0]*b[0]  + a[1]*b[4]  + a[2]*b[8]   + a[3]*b[12];
+    r[1]  = a[0]*b[1]  + a[1]*b[5]  + a[2]*b[9]   + a[3]*b[13];
+    r[2]  = a[0]*b[2]  + a[1]*b[6]  + a[2]*b[10]  + a[3]*b[14];
+    r[3]  = a[0]*b[3]  + a[1]*b[7]  + a[2]*b[11]  + a[3]*b[15];
+    r[4]  = a[4]*b[0]  + a[5]*b[4]  + a[6]*b[8]   + a[7]*b[12];
+    r[5]  = a[4]*b[1]  + a[5]*b[5]  + a[6]*b[9]   + a[7]*b[13];
+    r[6]  = a[4]*b[2]  + a[5]*b[6]  + a[6]*b[10]  + a[7]*b[14];
+    r[7]  = a[4]*b[3]  + a[5]*b[7]  + a[6]*b[11]  + a[7]*b[15];
+    r[8]  = a[8]*b[0]  + a[9]*b[4]  + a[10]*b[8]  + a[11]*b[12];
+    r[9]  = a[8]*b[1]  + a[9]*b[5]  + a[10]*b[9]  + a[11]*b[13];
+    r[10] = a[8]*b[2]  + a[9]*b[6]  + a[10]*b[10] + a[11]*b[14];
+    r[11] = a[8]*b[3]  + a[9]*b[7]  + a[10]*b[11] + a[11]*b[15];
+    r[12] = a[12]*b[0] + a[13]*b[4] + a[14]*b[8]  + a[15]*b[12];
+    r[13] = a[12]*b[1] + a[13]*b[5] + a[14]*b[9]  + a[15]*b[13];
+    r[14] = a[12]*b[2] + a[13]*b[6] + a[14]*b[10] + a[15]*b[14];
+    r[15] = a[12]*b[3] + a[13]*b[7] + a[14]*b[11] + a[15]*b[15];
+    std::memcpy(out, r, sizeof(r));
 }
 
 int
@@ -163,12 +209,26 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             sn.name = nodeName;
             sn.sourceNode = node;
 
-            // Transpose Imath row-major → GL column-major
-            for (int r = 0; r < 4; ++r) {
-                for (int c = 0; c < 4; ++c) {
-                    sn.localMatrix[c * 4 + r] = mesh->transform[r * 4 + c];
-                }
-            }
+            // Use knob-based T/R/S (same as Sphere3D, Card3D, etc.)
+            KnobIPtr kTX = effect->getKnobByName("translateX");
+            KnobIPtr kTY = effect->getKnobByName("translateY");
+            KnobIPtr kTZ = effect->getKnobByName("translateZ");
+            KnobIPtr kRX = effect->getKnobByName("rotateX");
+            KnobIPtr kRY = effect->getKnobByName("rotateY");
+            KnobIPtr kRZ = effect->getKnobByName("rotateZ");
+            KnobIPtr kSX = effect->getKnobByName("scaleX");
+            KnobIPtr kSY = effect->getKnobByName("scaleY");
+            KnobIPtr kSZ = effect->getKnobByName("scaleZ");
+            float tx = kTX ? (float)dynamic_cast<KnobDouble*>(kTX.get())->getValueAtTime(time) : 0;
+            float ty = kTY ? (float)dynamic_cast<KnobDouble*>(kTY.get())->getValueAtTime(time) : 0;
+            float tz = kTZ ? (float)dynamic_cast<KnobDouble*>(kTZ.get())->getValueAtTime(time) : 0;
+            float rx = kRX ? (float)dynamic_cast<KnobDouble*>(kRX.get())->getValueAtTime(time) : 0;
+            float ry = kRY ? (float)dynamic_cast<KnobDouble*>(kRY.get())->getValueAtTime(time) : 0;
+            float rz = kRZ ? (float)dynamic_cast<KnobDouble*>(kRZ.get())->getValueAtTime(time) : 0;
+            float sx = kSX ? (float)dynamic_cast<KnobDouble*>(kSX.get())->getValueAtTime(time) : 1;
+            float sy = kSY ? (float)dynamic_cast<KnobDouble*>(kSY.get())->getValueAtTime(time) : 1;
+            float sz = kSZ ? (float)dynamic_cast<KnobDouble*>(kSZ.get())->getValueAtTime(time) : 1;
+            buildTRS(tx, ty, tz, rx, ry, rz, sx, sy, sz, sn.localMatrix);
 
             nameToIndex[nodeName] = (int)_nodes.size();
             _nodes.push_back(sn);
@@ -293,7 +353,8 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         Light3D* light3d = dynamic_cast<Light3D*>(effect.get());
         if (light3d) {
             double ltx, lty, ltz, lr, lg, lb, lint;
-            light3d->getLightParams(time, ltx, lty, ltz, lr, lg, lb, lint);
+            double lexp_unused;
+            light3d->getLightParams(time, ltx, lty, ltz, lr, lg, lb, lint, lexp_unused);
 
             SceneNode sn;
             sn.type = eSceneNodeLight;

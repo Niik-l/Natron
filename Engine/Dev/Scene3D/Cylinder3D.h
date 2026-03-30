@@ -32,6 +32,7 @@
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
+#include "MaterialProvider.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -50,6 +51,7 @@ struct Cylinder3DPrivate;
  */
 class Cylinder3D
     : public EffectInstance
+    , public MaterialProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -64,7 +66,7 @@ public:
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 2; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
@@ -123,6 +125,18 @@ public:
     };
     const CachedTexture& getCachedTexture() const { return _cachedTexture; }
     void updateCachedTexture(double time);
+
+    // MaterialProvider interface
+    virtual void getMaterialBaseColor(double time, double& r, double& g, double& b) const OVERRIDE;
+    virtual double getMaterialRoughness(double time) const OVERRIDE;
+    virtual double getMaterialMetallic(double time) const OVERRIDE;
+    virtual double getMaterialSpecular(double time) const OVERRIDE;
+    virtual void getMaterialEmission(double time, double& r, double& g, double& b, double& strength) const OVERRIDE;
+    virtual double getMaterialTransmission(double time) const OVERRIDE;
+    virtual double getMaterialIOR(double time) const OVERRIDE;
+    virtual std::string getMaterialTextureFile() const OVERRIDE;
+    virtual bool hasMaterialInput() const OVERRIDE;
+    virtual MaterialProvider* getConnectedMaterial() const OVERRIDE;
 
 private:
 

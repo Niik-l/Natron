@@ -40,6 +40,7 @@ NATRON_NAMESPACE_ENTER
 
 class TimeLineGui;
 class Viewport3D;
+class Viewport3D;
 
 /**
  * @brief Wrapper panel for the 3D viewport, matching the 2D viewer layout.
@@ -71,6 +72,7 @@ public Q_SLOTS:
     void onGizmoScale();
     void onResetCamera();
     void onToggleGrid();
+    void onCyclesRender();
     void onFrameChanged(double frame);
     void onPlayForward();
     void onPlayBackward();
@@ -79,6 +81,7 @@ public Q_SLOTS:
     void onFirstFrame();
     void onLastFrame();
     void onFrameSpinChanged(int value);
+    void onToggleTransformSpace();
 
 private:
 
@@ -96,6 +99,7 @@ private:
     QToolButton* _rotateBtn;
     QToolButton* _scaleBtn;
     QToolButton* _gridBtn;
+    QToolButton* _spaceBtn;
     bool _gridVisible;
 };
 

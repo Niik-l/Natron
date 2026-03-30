@@ -21,6 +21,15 @@ file(GLOB NatronEngine_HEADERS ../Engine/*.h)
 file(GLOB NatronGui_HEADERS *.h)
 file(GLOB NatronGui_SOURCES *.cpp)
 
+# ImGui + ImGuizmo (MIT license) — 3D viewport gizmos
+list(APPEND NatronGui_SOURCES
+    ImGuizmo/imgui.cpp
+    ImGuizmo/imgui_draw.cpp
+    ImGuizmo/imgui_widgets.cpp
+    ImGuizmo/imgui_tables.cpp
+    ImGuizmo/ImGuizmo.cpp
+)
+
 set(PYGUI_OUT ${CMAKE_CURRENT_BINARY_DIR}/Qt${QT_VERSION_MAJOR})
 set(PYGUI_INCLUDE_DIRS . .. ../Engine ../Global ../libs/OpenFX/include)
 list(APPEND PYGUI_INCLUDE_DIRS ${PYSIDE_INCLUDE_DIRS} ${PYSIDE_INCLUDE_DIRS}/QtCore
@@ -89,6 +98,7 @@ target_include_directories(NatronGui
         ../libs/SequenceParsing
         ../libs/qhttpserver/src
         ${CMAKE_BINARY_DIR}/Engine/Qt${QT_VERSION_MAJOR}/NatronEngine
+        ImGuizmo
 )
 # Non-Qt includes — mark as SYSTEM to exclude from AUTOMOC/moc
 target_include_directories(NatronGui SYSTEM PRIVATE
@@ -103,4 +113,5 @@ target_compile_definitions(NatronGui
         $<$<BOOL:${BUILD_USER_NAME}>:NATRON_CUSTOM_BUILD_USER_TOKEN="${BUILD_USER_NAME}">
         NATRON_BUILD_NUMBER=0
         QT_NO_KEYWORDS
+        $<$<BOOL:${NATRON_CYCLES}>:NATRON_CYCLES>
 )

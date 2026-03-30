@@ -40,6 +40,69 @@ target_link_libraries(Natron
         NatronGui
         Python3::Python
 )
+
+# Cycles renderer libraries (optional — linked via NatronEngine INTERFACE)
+if(NATRON_CYCLES)
+    set(CYCLES_LIBS
+        ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_scene.a
+        ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_session.a
+        ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_integrator.a
+        ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_bvh.a
+        ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_subd.a
+        ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_graph.a
+        ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_device.a
+        ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_kernel.a
+        ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_util.a
+        ${NATRON_CYCLES_BUILD_DIR}/lib/libextern_sky.a
+    )
+    find_library(EMBREE_LIB embree4 HINTS /c/msys64/mingw64/lib)
+    find_library(OIDN_LIB OpenImageDenoise HINTS /c/msys64/mingw64/lib)
+    find_library(TBB_LIB tbb12 HINTS /c/msys64/mingw64/lib)
+    find_library(OSD_GPU_LIB osdGPU HINTS /c/msys64/mingw64/lib)
+    find_library(OSD_CPU_LIB osdCPU HINTS /c/msys64/mingw64/lib)
+    find_library(PUGIXML_LIB pugixml HINTS /c/msys64/mingw64/lib)
+    find_library(ZSTD_LIB zstd HINTS /c/msys64/mingw64/lib)
+    find_library(OIIO_LIB OpenImageIO HINTS /c/msys64/mingw64/lib)
+    find_library(OIIO_UTIL_LIB OpenImageIO_Util HINTS /c/msys64/mingw64/lib)
+    find_library(OCIO_LIB OpenColorIO HINTS /c/msys64/mingw64/lib)
+    find_library(OPENEXR_LIB OpenEXR HINTS /c/msys64/mingw64/lib)
+    find_library(OPENEXRCORE_LIB OpenEXRCore HINTS /c/msys64/mingw64/lib)
+    find_library(IEX_LIB Iex HINTS /c/msys64/mingw64/lib)
+    find_library(ILMTHREAD_LIB IlmThread HINTS /c/msys64/mingw64/lib)
+    find_library(IMATH_LIB Imath HINTS /c/msys64/mingw64/lib)
+    find_library(OPENPGL_LIB openpgl HINTS /c/msys64/mingw64/lib)
+    find_library(PNG_LIB png HINTS /c/msys64/mingw64/lib)
+    find_library(JPEG_LIB jpeg HINTS /c/msys64/mingw64/lib)
+    find_library(TIFF_LIB tiff HINTS /c/msys64/mingw64/lib)
+
+    # Link Cycles libs via NatronEngine INTERFACE (after NatronEngine.a on link line)
+    # Listed twice to resolve circular dependencies with GCC single-pass linker
+    target_link_libraries(NatronEngine
+        INTERFACE
+            ${CYCLES_LIBS}
+            ${CYCLES_LIBS}
+            ${EMBREE_LIB}
+            ${OIDN_LIB}
+            ${TBB_LIB}
+            ${OSD_GPU_LIB}
+            ${OSD_CPU_LIB}
+            ${PUGIXML_LIB}
+            ${ZSTD_LIB}
+            ${OIIO_LIB}
+            ${OIIO_UTIL_LIB}
+            ${OCIO_LIB}
+            ${OPENEXR_LIB}
+            ${OPENEXRCORE_LIB}
+            ${IEX_LIB}
+            ${ILMTHREAD_LIB}
+            ${IMATH_LIB}
+            ${OPENPGL_LIB}
+            ${PNG_LIB}
+            ${JPEG_LIB}
+            ${TIFF_LIB}
+    )
+endif()
+
 target_include_directories(Natron
     PRIVATE
         ..

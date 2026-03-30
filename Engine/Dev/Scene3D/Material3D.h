@@ -1,7 +1,6 @@
 /* ***** BEGIN LICENSE BLOCK *****
  * This file is part of Natron <https://natrongithub.github.io/>,
  * (C) 2018-2023 The Natron developers
- * (C) 2013-2018 INRIA and Alexandre Gauthier-Foichat
  *
  * Natron is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,8 +16,8 @@
  * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef NATRON_ENGINE_GROUP3D_H
-#define NATRON_ENGINE_GROUP3D_H
+#ifndef NATRON_ENGINE_MATERIAL3D_H
+#define NATRON_ENGINE_MATERIAL3D_H
 
 // ***** BEGIN PYTHON BLOCK *****
 #include <Python.h>
@@ -29,28 +28,24 @@
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
-
-#define GROUP3D_MAX_INPUTS 8
+#include "MaterialProvider.h"
 
 NATRON_NAMESPACE_ENTER
 
-struct Group3DPrivate;
+struct Material3DPrivate;
 
 /**
- * @brief Groups multiple 3D objects (cameras, geo, cards, point clouds)
- * into an organizational unit.
+ * @brief Standalone PBR material node for Cycles rendering.
  *
- * Accepts up to 8 inputs from any 3D node type (ReadGeo, ReadAlembicCamera,
- * Card3DRender, DeepToPoints).
+ * No inputs. Provides Principled BSDF material parameters.
+ * Connect to a geometry node's "mat" input to assign the material.
+ * Multiple geometry nodes can share the same Material3D.
  *
- * Provides an optional unified transform that applies to all children.
- * The 3D viewport can filter display to show only objects in a specific Group3D.
- *
- * This is Natron's simplified equivalent of Nuke's Scene node — focused on
- * grouping and organization rather than full scene graph management.
+ * Equivalent to Houdini's Material node or Blender's Material data-block.
  */
-class Group3D
+class Material3D
     : public EffectInstance
+    , public MaterialProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -58,28 +53,27 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
 
-    static EffectInstance* BuildEffect(NodePtr n) { return new Group3D(n); }
+    static EffectInstance* BuildEffect(NodePtr n) { return new Material3D(n); }
 
-    Group3D(NodePtr node);
-    virtual ~Group3D();
+    Material3D(NodePtr node);
+    virtual ~Material3D();
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return GROUP3D_MAX_INPUTS; }
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 5; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
+    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return PLUGINID_NATRON_GROUP3D; }
+    { return PLUGINID_NATRON_MATERIAL3D; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "Group3D"; }
+    { return "Material3D"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
     { grouping->push_back("3D"); }
-
-    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual bool isInputOptional(int /*inputNb*/) const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return true; }
@@ -88,31 +82,44 @@ public:
     virtual void addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const OVERRIDE FINAL;
 
     virtual RenderSafetyEnum renderThreadSafety() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return eRenderSafetyFullySafe; }
+    { return eRenderSafetyInstanceSafe; }
 
     virtual bool supportsTiles() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
-    virtual bool supportsMultiResolution() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
+    virtual bool supportsMultiResolution() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
-    // Group transform for the viewport
-    void getGroupTransform(double time, float& tx, float& ty, float& tz,
-                           float& rx, float& ry, float& rz,
-                           float& sx, float& sy, float& sz) const;
+    // MaterialProvider interface
+    virtual void getMaterialBaseColor(double time, double& r, double& g, double& b) const OVERRIDE;
+    virtual double getMaterialRoughness(double time) const OVERRIDE;
+    virtual double getMaterialMetallic(double time) const OVERRIDE;
+    virtual double getMaterialSpecular(double time) const OVERRIDE;
+    virtual void getMaterialEmission(double time, double& r, double& g, double& b, double& strength) const OVERRIDE;
+    virtual double getMaterialTransmission(double time) const OVERRIDE;
+    virtual double getMaterialIOR(double time) const OVERRIDE;
+    virtual std::string getMaterialTextureFile() const OVERRIDE;
+    virtual std::string getMaterialNormalMapFile() const OVERRIDE;
+    virtual std::string getMaterialRoughnessMapFile() const OVERRIDE;
+    virtual std::string getMaterialMetallicMapFile() const OVERRIDE;
+    virtual std::string getMaterialEmissionMapFile() const OVERRIDE;
+    virtual double getMaterialNormalStrength(double time) const OVERRIDE;
 
-    // Check if a node is connected to this group
-    bool isNodeInGroup(const std::string& nodeName) const;
+    /**
+     * @brief Render connected 2D inputs to temp files for Cycles.
+     * Called by CyclesRender before syncing the scene.
+     * Input 0=Diffuse, 1=Metallic, 2=Roughness, 3=Emission, 4=Normal
+     */
+    void bakeInputTextures(double time);
 
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
-    virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
-    std::unique_ptr<Group3DPrivate> _imp;
+    std::unique_ptr<Material3DPrivate> _imp;
 };
 
 NATRON_NAMESPACE_EXIT
 
-#endif // NATRON_ENGINE_GROUP3D_H
+#endif // NATRON_ENGINE_MATERIAL3D_H

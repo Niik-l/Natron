@@ -25,6 +25,8 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <sstream>
 #include <vector>
 
@@ -45,7 +47,9 @@
 NATRON_NAMESPACE_ENTER
 
 #ifdef NATRON_HAVE_ALEMBIC
-// Find geometry objects in the hierarchy
+/**
+ * @brief Recursively find all PolyMesh, SubD, and Points objects in the Alembic hierarchy.
+ */
 static void
 findGeoRecursive(const Alembic::AbcGeom::IObject& obj,
                  const std::string& parentPath,
@@ -65,7 +69,114 @@ findGeoRecursive(const Alembic::AbcGeom::IObject& obj,
         findGeoRecursive(obj.getChild(i), fullPath, geoPaths);
     }
 }
-#endif
+
+/**
+ * @brief Navigate from the top object to a child by slash-separated path.
+ * Returns true if the object was found.
+ */
+static bool
+navigateToObject(const Alembic::AbcGeom::IObject& top,
+                 const std::string& path,
+                 Alembic::AbcGeom::IObject& result)
+{
+    result = top;
+    std::istringstream iss(path);
+    std::string token;
+    while (std::getline(iss, token, '/')) {
+        if (token.empty()) {
+            continue;
+        }
+        bool found = false;
+        for (size_t i = 0; i < result.getNumChildren(); ++i) {
+            if (result.getChild(i).getName() == token) {
+                result = result.getChild(i);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief Read mesh data from positions/faceIndices/faceCounts using raw float/int access.
+ *
+ * The critical fix: we treat position data as a raw float array rather than
+ * accessing Imath::V3f members (x, y, z). This avoids crashes caused by
+ * struct layout mismatches between Natron's Imath and Alembic's Imath.
+ */
+static void
+readMeshArrays(const void* positionsRaw, size_t numVerts,
+               const void* faceIndicesRaw, size_t numFaceIndices,
+               const void* faceCountsRaw, size_t numFaces,
+               MeshData* mesh)
+{
+    // -- Vertices: raw float access, 3 floats per vertex --
+    const float* rawPos = reinterpret_cast<const float*>(positionsRaw);
+    mesh->vertices.resize(numVerts * 3);
+    mesh->numVertices = numVerts;
+    std::memcpy(mesh->vertices.data(), rawPos, numVerts * 3 * sizeof(float));
+
+    // -- Face indices: raw int32_t access --
+    const int32_t* rawIdx = reinterpret_cast<const int32_t*>(faceIndicesRaw);
+    mesh->faceIndices.resize(numFaceIndices);
+    for (size_t i = 0; i < numFaceIndices; ++i) {
+        mesh->faceIndices[i] = static_cast<int>(rawIdx[i]);
+    }
+
+    // -- Face counts: raw int32_t access --
+    const int32_t* rawCnt = reinterpret_cast<const int32_t*>(faceCountsRaw);
+    mesh->faceCounts.resize(numFaces);
+    mesh->numFaces = numFaces;
+    for (size_t i = 0; i < numFaces; ++i) {
+        mesh->faceCounts[i] = static_cast<int>(rawCnt[i]);
+    }
+
+    // -- Build edge indices for wireframe rendering --
+    mesh->edgeIndices.clear();
+    mesh->edgeIndices.reserve(numFaceIndices * 2); // upper bound
+    size_t idxOffset = 0;
+    for (size_t f = 0; f < numFaces; ++f) {
+        int count = static_cast<int>(rawCnt[f]);
+        for (int v = 0; v < count; ++v) {
+            mesh->edgeIndices.push_back(static_cast<int>(rawIdx[idxOffset + v]));
+            mesh->edgeIndices.push_back(static_cast<int>(rawIdx[idxOffset + ((v + 1) % count)]));
+        }
+        idxOffset += count;
+    }
+}
+
+/**
+ * @brief Read Xform matrix from a sample, storing as column-major float[16] for OpenGL.
+ * Uses raw double access to avoid Imath M44d struct layout issues.
+ */
+static void
+readXformMatrix(const Alembic::AbcGeom::IXformSchema& xSchema,
+                size_t sampleIndex,
+                float outMatrix[16])
+{
+    using namespace Alembic::AbcGeom;
+    ISampleSelector sel(static_cast<Alembic::AbcCoreAbstract::index_t>(sampleIndex));
+    XformSample xSample;
+    xSchema.get(xSample, sel);
+
+    // getMatrix() returns Imath::M44d -- 16 doubles in row-major order.
+    // Access the raw doubles to avoid struct layout dependency.
+    Imath::M44d matrix = xSample.getMatrix();
+    const double* rawMat = reinterpret_cast<const double*>(&matrix);
+
+    // Transpose from Imath row-major to OpenGL column-major:
+    // GL[col*4+row] = Imath[row*4+col]
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            outMatrix[c * 4 + r] = static_cast<float>(rawMat[r * 4 + c]);
+        }
+    }
+}
+#endif // NATRON_HAVE_ALEMBIC
 
 
 struct ReadGeoPrivate
@@ -75,16 +186,37 @@ struct ReadGeoPrivate
     KnobButtonWPtr reloadBtn;
     KnobStringWPtr info;
 
+    // Transform
+    KnobDoubleWPtr translateX, translateY, translateZ;
+    KnobDoubleWPtr rotateX, rotateY, rotateZ;
+    KnobDoubleWPtr scaleX, scaleY, scaleZ;
+
     std::vector<std::string> geoPaths;
     std::string loadedFilePath;
     std::string loadedObjectPath;
 
-    // Cached Xform data for animation
+    // Material
+    KnobColorWPtr baseColor;
+    KnobDoubleWPtr roughness, metallic, specular;
+    KnobColorWPtr emissionColor;
+    KnobDoubleWPtr emissionStrength;
+    KnobDoubleWPtr transmission, ior;
+    KnobFileWPtr textureFile;
+
+    // Re-entrancy guard: prevents recursive knobChanged calls
+    // when we programmatically update knobs during loading.
+    bool isLoading = false;
+
+    // Cached Xform data for animated transforms
     bool hasAnimatedXform = false;
     size_t numXformSamples = 0;
-    std::vector<float> xformMatrices; // numXformSamples * 16 floats (row-major from Imath)
+    std::vector<float> xformMatrices; // numXformSamples * 16 floats (column-major)
 };
 
+
+// ---------------------------------------------------------------------------
+// Construction / Description
+// ---------------------------------------------------------------------------
 
 ReadGeo::ReadGeo(NodePtr node)
     : EffectInstance(node)
@@ -111,6 +243,17 @@ ReadGeo::getPluginDescription() const
 #endif
 }
 
+std::string
+ReadGeo::getInputLabel(int inputNb) const
+{
+    if (inputNb == 0) return "Material";
+    return std::string();
+}
+
+// ---------------------------------------------------------------------------
+// EffectInstance overrides: formats, bit depths
+// ---------------------------------------------------------------------------
+
 void
 ReadGeo::addAcceptedComponents(int /*inputNb*/, std::list<ImagePlaneDesc>* comps)
 {
@@ -129,49 +272,210 @@ ReadGeo::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Knobs
+// ---------------------------------------------------------------------------
+
 void
 ReadGeo::initializeKnobs()
 {
     KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("File"));
 
-    KnobFilePtr fp = AppManager::createKnob<KnobFile>(this, tr("File"));
-    fp->setName("filename");
-    fp->setHintToolTip(tr("Path to the Alembic (.abc) file."));
-    fp->setAnimationEnabled(false);
-    page->addKnob(fp);
-    _imp->filePath = fp;
+    {
+        KnobFilePtr fp = AppManager::createKnob<KnobFile>(this, tr("File"));
+        fp->setName("filename");
+        fp->setHintToolTip(tr("Path to the Alembic (.abc) file."));
+        fp->setAnimationEnabled(false);
+        page->addKnob(fp);
+        _imp->filePath = fp;
+    }
 
-    KnobChoicePtr obj = AppManager::createKnob<KnobChoice>(this, tr("Object"));
-    obj->setName("objectPath");
-    obj->setHintToolTip(tr("Select which geometry object to load."));
-    page->addKnob(obj);
-    _imp->objectPath = obj;
+    {
+        KnobChoicePtr obj = AppManager::createKnob<KnobChoice>(this, tr("Object"));
+        obj->setName("objectPath");
+        obj->setHintToolTip(tr("Select which geometry object to load."));
+        page->addKnob(obj);
+        _imp->objectPath = obj;
+    }
 
-    KnobButtonPtr reload = AppManager::createKnob<KnobButton>(this, tr("Reload"));
-    reload->setName("reload");
-    page->addKnob(reload);
-    _imp->reloadBtn = reload;
+    {
+        KnobButtonPtr reload = AppManager::createKnob<KnobButton>(this, tr("Reload"));
+        reload->setName("reload");
+        page->addKnob(reload);
+        _imp->reloadBtn = reload;
+    }
 
-    KnobStringPtr info = AppManager::createKnob<KnobString>(this, tr("Info"));
-    info->setName("info"); info->setAnimationEnabled(false);
-    info->setEvaluateOnChange(false); info->setIsPersistent(false);
-    info->setDefaultValue("Set file path to an .abc file.");
-    page->addKnob(info); _imp->info = info;
+    {
+        KnobStringPtr infoKnob = AppManager::createKnob<KnobString>(this, tr("Info"));
+        infoKnob->setName("info");
+        infoKnob->setAnimationEnabled(false);
+        infoKnob->setEvaluateOnChange(false);
+        infoKnob->setIsPersistent(false);
+        infoKnob->setDefaultValue("Set file path to an .abc file.");
+        page->addKnob(infoKnob);
+        _imp->info = infoKnob;
+    }
+
+    // Transform page
+    KnobPagePtr xformPage = AppManager::createKnob<KnobPage>(this, tr("Transform"));
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate X"));
+        k->setName("translateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-100.0); k->setDisplayMaximum(100.0);
+        xformPage->addKnob(k); _imp->translateX = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate Y"));
+        k->setName("translateY"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-100.0); k->setDisplayMaximum(100.0);
+        xformPage->addKnob(k); _imp->translateY = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate Z"));
+        k->setName("translateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-100.0); k->setDisplayMaximum(100.0);
+        xformPage->addKnob(k); _imp->translateZ = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate X"));
+        k->setName("rotateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateX = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Y"));
+        k->setName("rotateY"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateY = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Z"));
+        k->setName("rotateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateZ = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale X"));
+        k->setName("scaleX"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
+        xformPage->addKnob(k); _imp->scaleX = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale Y"));
+        k->setName("scaleY"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
+        xformPage->addKnob(k); _imp->scaleY = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale Z"));
+        k->setName("scaleZ"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
+        xformPage->addKnob(k); _imp->scaleZ = k;
+    }
+
+    // Material page
+    KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));
+    {
+        KnobColorPtr k = AppManager::createKnob<KnobColor>(this, tr("Base Color"), 3);
+        k->setName("baseColor");
+        k->setDefaultValue(0.8, 0); k->setDefaultValue(0.8, 1); k->setDefaultValue(0.8, 2);
+        k->setAnimationEnabled(true);
+        matPage->addKnob(k); _imp->baseColor = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Roughness"));
+        k->setName("roughness"); k->setDefaultValue(0.5);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        matPage->addKnob(k); _imp->roughness = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Metallic"));
+        k->setName("metallic"); k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        matPage->addKnob(k); _imp->metallic = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Specular"));
+        k->setName("specular"); k->setDefaultValue(0.5);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        matPage->addKnob(k); _imp->specular = k;
+    }
+    {
+        KnobColorPtr k = AppManager::createKnob<KnobColor>(this, tr("Emission Color"), 3);
+        k->setName("emissionColor");
+        k->setDefaultValue(1.0, 0); k->setDefaultValue(1.0, 1); k->setDefaultValue(1.0, 2);
+        matPage->addKnob(k); _imp->emissionColor = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Emission Strength"));
+        k->setName("emissionStrength"); k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(10.0);
+        matPage->addKnob(k); _imp->emissionStrength = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Transmission"));
+        k->setName("transmission"); k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("0 = opaque, 1 = fully transparent (glass). Use with IOR."));
+        matPage->addKnob(k); _imp->transmission = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("IOR"));
+        k->setName("ior"); k->setDefaultValue(1.45);
+        k->setMinimum(1.0); k->setDisplayMinimum(1.0); k->setDisplayMaximum(2.5);
+        k->setHintToolTip(tr("Index of refraction. Glass=1.5, Water=1.33, Diamond=2.42"));
+        matPage->addKnob(k); _imp->ior = k;
+    }
+    // Texture Maps page — order: Diffuse, Metallic, Roughness, Emission, Normal
+    KnobPagePtr texPage = AppManager::createKnob<KnobPage>(this, tr("Texture Maps"));
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Diffuse Map"));
+        k->setName("textureFile");
+        k->setHintToolTip(tr("Base color / albedo texture. Supports .exr, .hdr, .png, .jpg"));
+        texPage->addKnob(k); _imp->textureFile = k;
+    }
 }
 
 bool
 ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
                      ViewSpec /*view*/, double /*time*/, bool /*originatedFromMainThread*/)
 {
+    // Re-entrancy guard: loadAlembicGeo modifies knobs which would trigger knobChanged again
+    if (_imp->isLoading) {
+        return false;
+    }
+
     if (_imp->filePath.lock().get() == k || _imp->reloadBtn.lock().get() == k) {
         std::string path = _imp->filePath.lock()->getValue();
         if (!path.empty()) {
+            _imp->isLoading = true;
             loadAlembicGeo(path);
+            _imp->isLoading = false;
         }
         return true;
     }
+
+    // Object dropdown changed: reload the selected object from the already-open file
+    if (_imp->objectPath.lock().get() == k) {
+        std::string path = _imp->filePath.lock()->getValue();
+        if (!path.empty()) {
+            _imp->isLoading = true;
+            loadAlembicGeo(path);
+            _imp->isLoading = false;
+        }
+        return true;
+    }
+
     return false;
 }
+
+// ---------------------------------------------------------------------------
+// Alembic loading
+// ---------------------------------------------------------------------------
 
 void
 ReadGeo::loadAlembicGeo(const std::string& path)
@@ -180,127 +484,172 @@ ReadGeo::loadAlembicGeo(const std::string& path)
     using namespace Alembic::AbcGeom;
 
     try {
-        IArchive archive(Alembic::AbcCoreOgawa::ReadArchive(), path);
+        // Verify file is readable before handing to Alembic
+        {
+            FILE* testF = fopen(path.c_str(), "rb");
+            if (!testF) {
+                setPersistentMessage(eMessageTypeError, "Cannot open file: " + path);
+                return;
+            }
+            fclose(testF);
+        }
+
+        // Open archive with Ogawa reader
+        Alembic::AbcCoreOgawa::ReadArchive reader;
+        IArchive archive(reader, path);
         IObject top = archive.getTop();
 
+        // --- Discover geometry objects ---
+        // Start from top's children (not top itself) so paths don't include
+        // the root "ABC" name. navigateToObject starts FROM top, so paths
+        // must be relative to top's children.
         _imp->geoPaths.clear();
-        findGeoRecursive(top, "", _imp->geoPaths);
+        for (size_t i = 0; i < top.getNumChildren(); ++i) {
+            findGeoRecursive(top.getChild(i), "", _imp->geoPaths);
+        }
 
         if (_imp->geoPaths.empty()) {
             setPersistentMessage(eMessageTypeError, "No geometry found in " + path);
             return;
         }
 
-        // Populate choice dropdown
+        // --- Populate the Object dropdown ---
         KnobChoicePtr objKnob = _imp->objectPath.lock();
-        std::vector<ChoiceOption> entries;
-        for (const std::string& gp : _imp->geoPaths) {
-            entries.push_back(ChoiceOption(gp, "", ""));
-        }
-        objKnob->populateChoices(entries);
-        objKnob->setDefaultValue(0);
-
-        // Load the first geometry
-        std::string selectedPath = _imp->geoPaths[0];
-
-        // Navigate to the object
-        IObject obj = top;
-        std::istringstream iss(selectedPath);
-        std::string token;
-        while (std::getline(iss, token, '/')) {
-            if (token.empty()) continue;
-            for (size_t i = 0; i < obj.getNumChildren(); ++i) {
-                if (obj.getChild(i).getName() == token) {
-                    obj = obj.getChild(i);
-                    break;
-                }
+        if (objKnob) {
+            std::vector<ChoiceOption> entries;
+            for (const std::string& gp : _imp->geoPaths) {
+                entries.push_back(ChoiceOption(gp, "", ""));
+            }
+            objKnob->populateChoices(entries);
+            // Keep current selection if still valid, otherwise default to 0
+            int curIdx = objKnob->getValue();
+            if (curIdx < 0 || curIdx >= (int)_imp->geoPaths.size()) {
+                objKnob->setDefaultValue(0);
             }
         }
 
+        // --- Determine which object is selected ---
+        int selectedIdx = 0;
+        if (objKnob) {
+            selectedIdx = objKnob->getValue();
+            if (selectedIdx < 0 || selectedIdx >= (int)_imp->geoPaths.size()) {
+                selectedIdx = 0;
+            }
+        }
+        std::string selectedPath = _imp->geoPaths[selectedIdx];
+
+        // --- Navigate to the selected object ---
+        IObject obj;
+        if (!navigateToObject(top, selectedPath, obj)) {
+            setPersistentMessage(eMessageTypeError, "Object not found: " + selectedPath);
+            return;
+        }
+
+        // --- Allocate MeshData FIRST, before touching any Alembic sample data ---
         MeshDataPtr mesh = std::make_shared<MeshData>();
 
-        if (IPolyMesh::matches(obj.getHeader()) || ISubD::matches(obj.getHeader())) {
-            // Read poly mesh
+        bool isPoly = IPolyMesh::matches(obj.getHeader());
+        bool isSubD = ISubD::matches(obj.getHeader());
+
+        if (isPoly) {
             IPolyMesh polyMesh(obj);
             IPolyMeshSchema schema = polyMesh.getSchema();
             IPolyMeshSchema::Sample sample;
             schema.get(sample);
 
-            // Vertices
-            const Imath::V3f* positions = sample.getPositions()->get();
-            size_t numVerts = sample.getPositions()->size();
-            mesh->vertices.resize(numVerts * 3);
-            for (size_t i = 0; i < numVerts; ++i) {
-                mesh->vertices[i * 3 + 0] = positions[i].x;
-                mesh->vertices[i * 3 + 1] = positions[i].y;
-                mesh->vertices[i * 3 + 2] = positions[i].z;
-            }
-            mesh->numVertices = numVerts;
+            // Raw pointer access -- avoids Imath::V3f struct layout dependency
+            const void* posPtr     = sample.getPositions()->get();
+            size_t      numVerts   = sample.getPositions()->size();
+            const void* idxPtr     = sample.getFaceIndices()->get();
+            size_t      numIdx     = sample.getFaceIndices()->size();
+            const void* cntPtr     = sample.getFaceCounts()->get();
+            size_t      numFaces   = sample.getFaceCounts()->size();
 
-            // Face indices and counts
-            const int32_t* faceIdxs = sample.getFaceIndices()->get();
-            size_t numFaceIdxs = sample.getFaceIndices()->size();
-            const int32_t* faceCnts = sample.getFaceCounts()->get();
-            size_t numFaces = sample.getFaceCounts()->size();
-            mesh->numFaces = numFaces;
+            readMeshArrays(posPtr, numVerts, idxPtr, numIdx, cntPtr, numFaces, mesh.get());
 
-            mesh->faceIndices.assign(faceIdxs, faceIdxs + numFaceIdxs);
-            mesh->faceCounts.assign(faceCnts, faceCnts + numFaces);
-
-            // Build edge indices for wireframe rendering
-            size_t idxOffset = 0;
-            for (size_t f = 0; f < numFaces; ++f) {
-                int count = faceCnts[f];
-                for (int v = 0; v < count; ++v) {
-                    mesh->edgeIndices.push_back(faceIdxs[idxOffset + v]);
-                    mesh->edgeIndices.push_back(faceIdxs[idxOffset + ((v + 1) % count)]);
+            // Read UVs — try common Alembic UV param names
+            IV2fGeomParam uvParam = schema.getUVsParam();
+            if (uvParam.valid()) {
+                IV2fGeomParam::Sample uvSample;
+                uvParam.getExpanded(uvSample);
+                const Alembic::Abc::V2fArraySamplePtr& uvVals = uvSample.getVals();
+                if (uvVals && uvVals->size() > 0) {
+                    size_t numUVs = uvVals->size();
+                    const float* rawUV = reinterpret_cast<const float*>(uvVals->get());
+                    mesh->uvs.resize(numUVs * 2);
+                    std::memcpy(mesh->uvs.data(), rawUV, numUVs * 2 * sizeof(float));
+                    mesh->hasUVs = true;
+                    (void)0; // UVs loaded
                 }
-                idxOffset += count;
             }
 
-            // Cache all Xform samples for animation
-            _imp->hasAnimatedXform = false;
-            _imp->numXformSamples = 0;
-            _imp->xformMatrices.clear();
+        } else if (isSubD) {
+            ISubD subdMesh(obj);
+            ISubDSchema schema = subdMesh.getSchema();
+            ISubDSchema::Sample sample;
+            schema.get(sample);
 
-            IObject parent = obj.getParent();
-            if (IXform::matches(parent.getHeader())) {
-                IXform xform(parent);
-                IXformSchema xSchema = xform.getSchema();
-                size_t numSamples = xSchema.getNumSamples();
+            const void* posPtr     = sample.getPositions()->get();
+            size_t      numVerts   = sample.getPositions()->size();
+            const void* idxPtr     = sample.getFaceIndices()->get();
+            size_t      numIdx     = sample.getFaceIndices()->size();
+            const void* cntPtr     = sample.getFaceCounts()->get();
+            size_t      numFaces   = sample.getFaceCounts()->size();
+
+            readMeshArrays(posPtr, numVerts, idxPtr, numIdx, cntPtr, numFaces, mesh.get());
+
+            // Read UVs from SubD
+            IV2fGeomParam uvParam = schema.getUVsParam();
+            if (uvParam.valid()) {
+                IV2fGeomParam::Sample uvSample;
+                uvParam.getExpanded(uvSample);
+                const Alembic::Abc::V2fArraySamplePtr& uvVals = uvSample.getVals();
+                if (uvVals && uvVals->size() > 0) {
+                    size_t numUVs = uvVals->size();
+                    const float* rawUV = reinterpret_cast<const float*>(uvVals->get());
+                    mesh->uvs.resize(numUVs * 2);
+                    std::memcpy(mesh->uvs.data(), rawUV, numUVs * 2 * sizeof(float));
+                    mesh->hasUVs = true;
+                    (void)0; // UVs loaded
+                }
+            }
+
+        } else {
+            setPersistentMessage(eMessageTypeError, "Object is not a supported mesh type: " + selectedPath);
+            return;
+        }
+
+        // --- Read Xform from parent if available ---
+        _imp->hasAnimatedXform = false;
+        _imp->numXformSamples = 0;
+        _imp->xformMatrices.clear();
+
+        IObject parent = obj.getParent();
+        if (parent.valid() && IXform::matches(parent.getHeader())) {
+            IXform xform(parent);
+            IXformSchema xSchema = xform.getSchema();
+            size_t numSamples = xSchema.getNumSamples();
+
+            if (numSamples > 0) {
                 _imp->numXformSamples = numSamples;
                 _imp->hasAnimatedXform = (numSamples > 1);
                 _imp->xformMatrices.resize(numSamples * 16);
 
                 for (size_t s = 0; s < numSamples; ++s) {
-                    ISampleSelector sel((Alembic::AbcCoreAbstract::index_t)s);
-                    XformSample xSample;
-                    xSchema.get(xSample, sel);
-                    Imath::M44d matrix = xSample.getMatrix();
-
-                    // Imath M44d is row-major: matrix[row][col]
-                    // OpenGL glMultMatrixf expects column-major
-                    // Transpose: GL[col*4+row] = Imath[row][col]
-                    for (int r = 0; r < 4; ++r) {
-                        for (int c = 0; c < 4; ++c) {
-                            _imp->xformMatrices[s * 16 + c * 4 + r] = (float)matrix[r][c];
-                        }
-                    }
+                    readXformMatrix(xSchema, s, &_imp->xformMatrices[s * 16]);
                 }
 
                 // Set frame 0 transform on the mesh
-                for (int i = 0; i < 16; ++i) {
-                    mesh->transform[i] = _imp->xformMatrices[i];
-                }
-
+                std::memcpy(mesh->transform, _imp->xformMatrices.data(), 16 * sizeof(float));
             }
-
         }
 
+        // --- Store result ---
         _lastMeshData = mesh;
         _imp->loadedFilePath = path;
         _imp->loadedObjectPath = selectedPath;
 
+        // --- Update info string ---
         std::ostringstream ss;
         ss << "Object: " << selectedPath
            << " | Vertices: " << mesh->numVertices
@@ -310,7 +659,9 @@ ReadGeo::loadAlembicGeo(const std::string& path)
         clearPersistentMessage(false);
 
     } catch (const std::exception& e) {
-        setPersistentMessage(eMessageTypeError, std::string("Error: ") + e.what());
+        setPersistentMessage(eMessageTypeError, std::string("Alembic error: ") + e.what());
+    } catch (...) {
+        setPersistentMessage(eMessageTypeError, "Unknown error loading Alembic file.");
     }
 #else
     Q_UNUSED(path);
@@ -318,11 +669,16 @@ ReadGeo::loadAlembicGeo(const std::string& path)
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Mesh data access
+// ---------------------------------------------------------------------------
+
 MeshDataPtr
 ReadGeo::getMeshData(double time) const
 {
-    if (_lastMeshData && time >= 0 && _imp && _imp->hasAnimatedXform &&
-        _imp->numXformSamples > 0 && !_imp->xformMatrices.empty()) {
+    if (_lastMeshData && time >= 0 && _imp &&
+        _imp->hasAnimatedXform && _imp->numXformSamples > 0 &&
+        !_imp->xformMatrices.empty()) {
         updateTransformAtTime(_lastMeshData.get(), time);
     }
     return _lastMeshData;
@@ -331,26 +687,35 @@ ReadGeo::getMeshData(double time) const
 void
 ReadGeo::updateTransformAtTime(MeshData* mesh, double time) const
 {
-    if (!mesh || !_imp->hasAnimatedXform || _imp->numXformSamples == 0) return;
-
-    // Map Natron frame (1-based) to Alembic sample index
-    // Assume 24fps, frame 1 = sample 0
-    int sampleIdx = (int)(time - 1.0);
-    if (sampleIdx < 0) sampleIdx = 0;
-    if (sampleIdx >= (int)_imp->numXformSamples) sampleIdx = (int)_imp->numXformSamples - 1;
-
-    // Copy the cached matrix
-    const float* mat = &_imp->xformMatrices[sampleIdx * 16];
-    for (int i = 0; i < 16; ++i) {
-        mesh->transform[i] = mat[i];
+    if (!mesh || !_imp->hasAnimatedXform || _imp->numXformSamples == 0) {
+        return;
     }
+
+    // Map Natron frame (1-based) to Alembic sample index.
+    // Assume 24fps, frame 1 = sample 0.
+    int sampleIdx = static_cast<int>(time - 1.0);
+    if (sampleIdx < 0) {
+        sampleIdx = 0;
+    }
+    if (sampleIdx >= static_cast<int>(_imp->numXformSamples)) {
+        sampleIdx = static_cast<int>(_imp->numXformSamples) - 1;
+    }
+
+    std::memcpy(mesh->transform, &_imp->xformMatrices[sampleIdx * 16], 16 * sizeof(float));
 }
+
+// ---------------------------------------------------------------------------
+// Render (outputs a 1x1 transparent image, same as Light3D / Scene3D)
+// ---------------------------------------------------------------------------
 
 StatusEnum
 ReadGeo::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
                                ViewIdx /*view*/, RectD* rod)
 {
-    rod->x1 = 0; rod->y1 = 0; rod->x2 = 1; rod->y2 = 1;
+    rod->x1 = 0;
+    rod->y1 = 0;
+    rod->x2 = 1;
+    rod->y2 = 1;
     return eStatusOK;
 }
 
@@ -358,6 +723,58 @@ StatusEnum
 ReadGeo::render(const RenderActionArgs& /*args*/)
 {
     return eStatusOK;
+}
+
+// ---------------------------------------------------------------------------
+// MaterialProvider
+// ---------------------------------------------------------------------------
+
+void
+ReadGeo::getMaterialBaseColor(double time, double& r, double& g, double& b) const
+{
+    KnobColorPtr c = _imp->baseColor.lock();
+    if (c) { r = c->getValueAtTime(time, 0); g = c->getValueAtTime(time, 1); b = c->getValueAtTime(time, 2); }
+    else { r = 0.8; g = 0.8; b = 0.8; }
+}
+
+double ReadGeo::getMaterialRoughness(double time) const
+{ KnobDoublePtr k = _imp->roughness.lock(); return k ? k->getValueAtTime(time) : 0.5; }
+
+double ReadGeo::getMaterialMetallic(double time) const
+{ KnobDoublePtr k = _imp->metallic.lock(); return k ? k->getValueAtTime(time) : 0.0; }
+
+double ReadGeo::getMaterialSpecular(double time) const
+{ KnobDoublePtr k = _imp->specular.lock(); return k ? k->getValueAtTime(time) : 0.5; }
+
+void
+ReadGeo::getMaterialEmission(double time, double& r, double& g, double& b, double& strength) const
+{
+    KnobColorPtr c = _imp->emissionColor.lock();
+    if (c) { r = c->getValueAtTime(time, 0); g = c->getValueAtTime(time, 1); b = c->getValueAtTime(time, 2); }
+    else { r = 1.0; g = 1.0; b = 1.0; }
+    KnobDoublePtr s = _imp->emissionStrength.lock();
+    strength = s ? s->getValueAtTime(time) : 0.0;
+}
+
+double ReadGeo::getMaterialTransmission(double time) const
+{ KnobDoublePtr k = _imp->transmission.lock(); return k ? k->getValueAtTime(time) : 0.0; }
+
+double ReadGeo::getMaterialIOR(double time) const
+{ KnobDoublePtr k = _imp->ior.lock(); return k ? k->getValueAtTime(time) : 1.45; }
+
+std::string ReadGeo::getMaterialTextureFile() const
+{ KnobFilePtr k = _imp->textureFile.lock(); return k ? k->getValue() : std::string(); }
+
+bool ReadGeo::hasMaterialInput() const
+{
+    EffectInstancePtr inp = getInput(0);
+    return inp && dynamic_cast<MaterialProvider*>(inp.get()) != nullptr;
+}
+
+MaterialProvider* ReadGeo::getConnectedMaterial() const
+{
+    EffectInstancePtr inp = getInput(0);
+    return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
 }
 
 NATRON_NAMESPACE_EXIT

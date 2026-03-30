@@ -31,6 +31,7 @@
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
+#include "../../NodeMetadata.h"
 #include "../../ViewIdx.h"
 
 NATRON_NAMESPACE_ENTER
@@ -193,6 +194,24 @@ Group3D::isNodeInGroup(const std::string& nodeName) const
         }
     }
     return false;
+}
+
+StatusEnum
+Group3D::getPreferredMetadata(NodeMetadata& metadata)
+{
+    // If any connected input has animated knobs, this group is frame-varying.
+    for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
+        EffectInstancePtr inp = getInput(i);
+        if (inp && inp->getHasAnimation()) {
+            metadata.setIsFrameVarying(true);
+            return eStatusOK;
+        }
+    }
+    // Also check own knobs (group transform might be animated)
+    if (getNode()->hasAnimatedKnob()) {
+        metadata.setIsFrameVarying(true);
+    }
+    return eStatusOK;
 }
 
 StatusEnum

@@ -32,6 +32,7 @@
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
+#include "MaterialProvider.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -47,11 +48,13 @@ struct MeshData
     std::vector<int> faceIndices;    // triangle indices
     std::vector<int> faceCounts;     // verts per face (for wireframe)
     std::vector<int> edgeIndices;    // line indices for wireframe
+    std::vector<float> uvs;          // u,v per face-vertex (indexed by faceIndices order)
+    bool hasUVs;
     float transform[16];             // 4x4 column-major transform
     std::size_t numVertices;
     std::size_t numFaces;
 
-    MeshData() : numVertices(0), numFaces(0)
+    MeshData() : hasUVs(false), numVertices(0), numFaces(0)
     {
         for (int i = 0; i < 16; ++i) transform[i] = (i % 5 == 0) ? 1.0f : 0.0f; // identity
     }
@@ -65,6 +68,7 @@ typedef std::shared_ptr<MeshData> MeshDataPtr;
  */
 class ReadGeo
     : public EffectInstance
+    , public MaterialProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -79,8 +83,9 @@ public:
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
+    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return PLUGINID_NATRON_READGEO; }
@@ -117,6 +122,18 @@ public:
      * @brief Update the transform matrix for the given time.
      */
     void updateTransformAtTime(MeshData* mesh, double time) const;
+
+    // MaterialProvider interface
+    virtual void getMaterialBaseColor(double time, double& r, double& g, double& b) const OVERRIDE;
+    virtual double getMaterialRoughness(double time) const OVERRIDE;
+    virtual double getMaterialMetallic(double time) const OVERRIDE;
+    virtual double getMaterialSpecular(double time) const OVERRIDE;
+    virtual void getMaterialEmission(double time, double& r, double& g, double& b, double& strength) const OVERRIDE;
+    virtual double getMaterialTransmission(double time) const OVERRIDE;
+    virtual double getMaterialIOR(double time) const OVERRIDE;
+    virtual std::string getMaterialTextureFile() const OVERRIDE;
+    virtual bool hasMaterialInput() const OVERRIDE;
+    virtual MaterialProvider* getConnectedMaterial() const OVERRIDE;
 
 private:
 

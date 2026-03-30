@@ -33,6 +33,9 @@ include(GNUInstallDirs)
 option(NATRON_QT6 "use Qt6" OFF)
 option(NATRON_SYSTEM_LIBS "use system versions of dependencies instead of bundled ones" OFF)
 option(NATRON_BUILD_TESTS "build the Natron test suite" ON)
+option(NATRON_CYCLES "Enable Cycles renderer integration (requires Cycles built separately)" OFF)
+set(NATRON_CYCLES_DIR "" CACHE PATH "Path to Cycles source directory")
+set(NATRON_CYCLES_BUILD_DIR "" CACHE PATH "Path to Cycles build directory")
 set(NATRON_LLVM_INSTALL_DIR "" CACHE PATH "LLVM/Clang install dir for shiboken (e.g. /c/msys64/mingw64)")
 # Set LLVM_INSTALL_DIR in the process environment so shiboken's clang can find
 # its built-in headers (mm_malloc.h, etc). This is needed on Windows when

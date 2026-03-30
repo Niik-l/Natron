@@ -721,7 +721,8 @@ ScanlineRender::render(const RenderActionArgs& args)
                 // Light uniforms
                 if (light3d) {
                     double ltx, lty, ltz, lr, lg, lb, lint;
-                    light3d->getLightParams(args.time, ltx, lty, ltz, lr, lg, lb, lint);
+                    double lexp_unused;
+                    light3d->getLightParams(args.time, ltx, lty, ltz, lr, lg, lb, lint, lexp_unused);
                     glUniform1i(glGetUniformLocation(progId, "u_LightEnabled"), 1);
                     glUniform3f(glGetUniformLocation(progId, "u_LightPos"), (float)ltx, (float)lty, (float)ltz);
                     glUniform3f(glGetUniformLocation(progId, "u_LightColor"), (float)lr, (float)lg, (float)lb);
@@ -822,7 +823,8 @@ ScanlineRender::render(const RenderActionArgs& args)
                 // Light uniforms for procedural volume
                 if (light3d) {
                     double ltx, lty, ltz, lr, lg, lb, lint;
-                    light3d->getLightParams(args.time, ltx, lty, ltz, lr, lg, lb, lint);
+                    double lexp_unused;
+                    light3d->getLightParams(args.time, ltx, lty, ltz, lr, lg, lb, lint, lexp_unused);
                     glUniform1i(glGetUniformLocation(progId, "u_LightEnabled"), 1);
                     glUniform3f(glGetUniformLocation(progId, "u_LightPos"), (float)ltx, (float)lty, (float)ltz);
                     glUniform3f(glGetUniformLocation(progId, "u_LightColor"), (float)lr, (float)lg, (float)lb);

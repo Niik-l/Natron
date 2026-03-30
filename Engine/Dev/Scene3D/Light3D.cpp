@@ -26,6 +26,7 @@
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
+#include "../../KnobFile.h"
 #include "../../Node.h"
 #include "../../ViewIdx.h"
 
@@ -33,9 +34,17 @@ NATRON_NAMESPACE_ENTER
 
 struct Light3DPrivate
 {
+    KnobChoiceWPtr lightType;
     KnobDoubleWPtr translateX, translateY, translateZ;
-    KnobDoubleWPtr colorR, colorG, colorB;
+    KnobDoubleWPtr rotateX, rotateY, rotateZ;
+    KnobColorWPtr color;
     KnobDoubleWPtr intensity;
+    KnobDoubleWPtr exposure;
+    KnobDoubleWPtr spotAngle;
+    KnobDoubleWPtr spotSmooth;
+    KnobDoubleWPtr areaSizeU, areaSizeV;
+    KnobDoubleWPtr spread;
+    KnobFileWPtr environmentMap;
     KnobDoubleWPtr shadowDensity;
     KnobIntWPtr shadowSteps;
 };
@@ -102,32 +111,108 @@ Light3D::initializeKnobs()
         k->setDisplayMinimum(-100.0); k->setDisplayMaximum(100.0);
         xformPage->addKnob(k); _imp->translateZ = k;
     }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate X"));
+        k->setName("rotateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        k->setHintToolTip(tr("Rotation around X axis in degrees. Used for Spot and Area lights to aim them."));
+        xformPage->addKnob(k); _imp->rotateX = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Y"));
+        k->setName("rotateY"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateY = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Z"));
+        k->setName("rotateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateZ = k;
+    }
 
     KnobPagePtr lightPage = AppManager::createKnob<KnobPage>(this, tr("Light"));
 
     {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Color R"));
-        k->setName("colorR"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
-        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
-        lightPage->addKnob(k); _imp->colorR = k;
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Light Type"));
+        k->setName("lightType");
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("Point", "", "Omnidirectional point light"));
+        entries.push_back(ChoiceOption("Distant", "", "Directional sun light (parallel rays)"));
+        entries.push_back(ChoiceOption("Spot", "", "Cone-shaped spotlight"));
+        entries.push_back(ChoiceOption("Area", "", "Rectangular area light (soft shadows)"));
+        entries.push_back(ChoiceOption("Dome", "", "Environment dome light (HDRI)"));
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        lightPage->addKnob(k);
+        _imp->lightType = k;
     }
     {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Color G"));
-        k->setName("colorG"); k->setDefaultValue(0.95); k->setAnimationEnabled(true);
-        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
-        lightPage->addKnob(k); _imp->colorG = k;
-    }
-    {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Color B"));
-        k->setName("colorB"); k->setDefaultValue(0.9); k->setAnimationEnabled(true);
-        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
-        lightPage->addKnob(k); _imp->colorB = k;
+        KnobColorPtr k = AppManager::createKnob<KnobColor>(this, tr("Light Color"), 3);
+        k->setName("lightColor");
+        k->setDefaultValue(1.0, 0);
+        k->setDefaultValue(0.95, 1);
+        k->setDefaultValue(0.9, 2);
+        k->setAnimationEnabled(true);
+        lightPage->addKnob(k);
+        _imp->color = k;
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Intensity"));
-        k->setName("intensity"); k->setDefaultValue(2.0); k->setAnimationEnabled(true);
+        k->setName("intensity"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
         k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(10.0);
         lightPage->addKnob(k); _imp->intensity = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Exposure"));
+        k->setName("exposure"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-5.0); k->setDisplayMaximum(5.0);
+        k->setHintToolTip(tr("Exposure adjustment in stops. 0 = no change, 1 = 2x brighter, -1 = half."));
+        lightPage->addKnob(k); _imp->exposure = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Spot Angle"));
+        k->setName("spotAngle"); k->setDefaultValue(45.0); k->setAnimationEnabled(true);
+        k->setMinimum(1.0); k->setMaximum(180.0);
+        k->setDisplayMinimum(1.0); k->setDisplayMaximum(180.0);
+        k->setHintToolTip(tr("Spot light cone angle in degrees. Only used for Spot light type."));
+        lightPage->addKnob(k); _imp->spotAngle = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Spot Smooth"));
+        k->setName("spotSmooth"); k->setDefaultValue(0.15); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Softness of spot light edge falloff. 0 = hard edge, 1 = fully soft."));
+        lightPage->addKnob(k); _imp->spotSmooth = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Area Width"));
+        k->setName("areaSizeU"); k->setDefaultValue(2.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(20.0);
+        k->setHintToolTip(tr("Width of area light rectangle. Only used for Area light type."));
+        lightPage->addKnob(k); _imp->areaSizeU = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Area Height"));
+        k->setName("areaSizeV"); k->setDefaultValue(2.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(20.0);
+        k->setHintToolTip(tr("Height of area light rectangle. Only used for Area light type."));
+        lightPage->addKnob(k); _imp->areaSizeV = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Spread"));
+        k->setName("spread"); k->setDefaultValue(180.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setMaximum(180.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(180.0);
+        k->setHintToolTip(tr("Spread angle for area light falloff in degrees. 180 = full hemisphere, smaller = more focused."));
+        lightPage->addKnob(k); _imp->spread = k;
+    }
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Environment Map"));
+        k->setName("environmentMap");
+        k->setHintToolTip(tr("HDR/EXR image for Dome light. Leave empty for solid color.\nSupports .exr, .hdr, .png, .jpg"));
+        lightPage->addKnob(k); _imp->environmentMap = k;
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Shadow Density"));
@@ -141,21 +226,103 @@ Light3D::initializeKnobs()
         k->setMinimum(1); k->setDisplayMinimum(4); k->setDisplayMaximum(64);
         lightPage->addKnob(k); _imp->shadowSteps = k;
     }
+
+    // Set initial visibility based on default light type (Point)
+    updateKnobVisibility();
 }
 
 void
 Light3D::getLightParams(double time,
                         double& tx, double& ty, double& tz,
                         double& r, double& g, double& b,
-                        double& intensity) const
+                        double& intensity, double& exposure) const
 {
     tx = _imp->translateX.lock()->getValueAtTime(time);
     ty = _imp->translateY.lock()->getValueAtTime(time);
     tz = _imp->translateZ.lock()->getValueAtTime(time);
-    r = _imp->colorR.lock()->getValueAtTime(time);
-    g = _imp->colorG.lock()->getValueAtTime(time);
-    b = _imp->colorB.lock()->getValueAtTime(time);
+    KnobColorPtr col = _imp->color.lock();
+    if (col) {
+        r = col->getValueAtTime(time, 0);
+        g = col->getValueAtTime(time, 1);
+        b = col->getValueAtTime(time, 2);
+    } else {
+        r = 1.0; g = 1.0; b = 1.0;
+    }
     intensity = _imp->intensity.lock()->getValueAtTime(time);
+    KnobDoublePtr expKnob = _imp->exposure.lock();
+    exposure = expKnob ? expKnob->getValueAtTime(time) : 0.0;
+}
+
+std::string
+Light3D::getEnvironmentMap() const
+{
+    KnobFilePtr k = _imp->environmentMap.lock();
+    return k ? k->getValue() : std::string();
+}
+
+double Light3D::getSpotAngle(double time) const
+{ KnobDoublePtr k = _imp->spotAngle.lock(); return k ? k->getValueAtTime(time) : 45.0; }
+
+double Light3D::getSpotSmooth(double time) const
+{ KnobDoublePtr k = _imp->spotSmooth.lock(); return k ? k->getValueAtTime(time) : 0.15; }
+
+double Light3D::getAreaSizeU(double time) const
+{ KnobDoublePtr k = _imp->areaSizeU.lock(); return k ? k->getValueAtTime(time) : 2.0; }
+
+double Light3D::getAreaSizeV(double time) const
+{ KnobDoublePtr k = _imp->areaSizeV.lock(); return k ? k->getValueAtTime(time) : 2.0; }
+
+double Light3D::getSpread(double time) const
+{ KnobDoublePtr k = _imp->spread.lock(); return k ? k->getValueAtTime(time) : 180.0; }
+
+Light3D::LightType
+Light3D::getLightType() const
+{
+    KnobChoicePtr k = _imp->lightType.lock();
+    if (!k) return eLightPoint;
+    return (LightType)k->getValue();
+}
+
+void
+Light3D::updateKnobVisibility()
+{
+    KnobChoicePtr ltKnob = _imp->lightType.lock();
+    if (!ltKnob) return;
+    LightType lt = (LightType)ltKnob->getValue();
+
+    bool isSpot = (lt == eLightSpot);
+    bool isArea = (lt == eLightArea);
+    bool isDome = (lt == eLightDome);
+    bool needsRotation = (lt == eLightSpot || lt == eLightArea || lt == eLightDistant);
+
+    // Rotation knobs — only for directional lights
+    if (KnobDoublePtr k = _imp->rotateX.lock()) k->setSecret(!needsRotation);
+    if (KnobDoublePtr k = _imp->rotateY.lock()) k->setSecret(!needsRotation);
+    if (KnobDoublePtr k = _imp->rotateZ.lock()) k->setSecret(!needsRotation);
+
+    // Spot-only knobs
+    if (KnobDoublePtr k = _imp->spotAngle.lock()) k->setSecret(!isSpot);
+    if (KnobDoublePtr k = _imp->spotSmooth.lock()) k->setSecret(!isSpot);
+
+    // Area-only knobs
+    if (KnobDoublePtr k = _imp->areaSizeU.lock()) k->setSecret(!isArea);
+    if (KnobDoublePtr k = _imp->areaSizeV.lock()) k->setSecret(!isArea);
+    if (KnobDoublePtr k = _imp->spread.lock()) k->setSecret(!isArea);
+
+    // Dome-only knobs
+    if (KnobFilePtr k = _imp->environmentMap.lock()) k->setSecret(!isDome);
+}
+
+bool
+Light3D::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /*view*/,
+                      double /*time*/, bool /*originatedFromMainThread*/)
+{
+    KnobChoicePtr ltKnob = _imp->lightType.lock();
+    if (ltKnob && k == ltKnob.get()) {
+        updateKnobVisibility();
+        return true;
+    }
+    return false;
 }
 
 StatusEnum

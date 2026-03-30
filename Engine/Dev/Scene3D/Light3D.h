@@ -85,16 +85,35 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
+    enum LightType {
+        eLightPoint = 0,
+        eLightDistant,   // Sun
+        eLightSpot,
+        eLightArea,
+        eLightDome       // Environment/HDRI
+    };
+
     void getLightParams(double time,
                         double& tx, double& ty, double& tz,
                         double& r, double& g, double& b,
-                        double& intensity) const;
+                        double& intensity, double& exposure) const;
+
+    LightType getLightType() const;
+    std::string getEnvironmentMap() const;
+    double getSpotAngle(double time) const;
+    double getSpotSmooth(double time) const;
+    double getAreaSizeU(double time) const;
+    double getAreaSizeV(double time) const;
+    double getSpread(double time) const;
 
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
+    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
+
+    void updateKnobVisibility();
 
     std::unique_ptr<Light3DPrivate> _imp;
 };

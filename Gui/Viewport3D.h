@@ -45,10 +45,12 @@ NATRON_NAMESPACE_ENTER
 struct Viewport3DPrivate;
 
 /**
- * @class A dockable 3D viewport panel for visualizing deep compositing data
- * as point clouds in 3D space. Uses QOpenGLWidget with orbit/pan/dolly camera.
+ * @class Viewport3D — replacement 3D viewport using ImGuizmo demo camera architecture.
  *
- * Follows the Histogram pattern: QOpenGLWidget + PanelWidget, Pimpl.
+ * Camera uses spherical coordinates (camYAngle, camXAngle, camDistance) and LookAt,
+ * copied verbatim from the ImGuizmo demo's main.cpp.
+ * Object matrices use ImGuizmo::RecomposeMatrixFromComponents so GL rendering
+ * and ImGuizmo gizmo manipulation agree on orientation.
  */
 class Viewport3D
     : public QOpenGLWidget
@@ -60,15 +62,20 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 public:
 
     Viewport3D(Gui* gui,
-               const QOpenGLWidget* shareWidget = NULL);
+                  const QOpenGLWidget* shareWidget = NULL);
 
     virtual ~Viewport3D();
 
     Gui* getGui() const { return _gui; }
 
+    /** @brief Get the camera view matrix (16 floats, row-major like ImGuizmo demo). */
+    void getCameraView(float m16[16]) const;
+
+    /** @brief Get the camera projection matrix (16 floats, row-major like ImGuizmo demo). */
+    void getCameraProjection(float m16[16]) const;
+
     /**
      * @brief Set point cloud data to render. Thread-safe.
-     * Call this from the engine thread when DeepToPoints produces new data.
      */
     void setPointCloud(const PointCloudDataPtr& cloud, float pointSize = 2.0f);
 
@@ -78,15 +85,14 @@ public Q_SLOTS:
 
     /**
      * @brief Scan the node graph for DeepToPoints nodes and grab
-     * point cloud data from the first one found. Called automatically
-     * on a timer, or manually via 'R' key.
+     * point cloud data from the first one found.
      */
     void refreshPointCloud();
 
-    void onCameraMenuTriggered(QAction* action);
-
 public:
     virtual void keyPressEvent(QKeyEvent* e) OVERRIDE FINAL;
+    void toggleTransformSpace();
+    bool isLocalSpace() const;
 
 private:
 
@@ -100,14 +106,9 @@ private:
     virtual QSize sizeHint() const OVERRIDE FINAL;
 
     void drawGrid() const;
-    void drawTransformGizmo() const;
-    void selectObjectAtPosition(int screenX, int screenY);
-    int hitTestGizmoAxis(int screenX, int screenY) const; // Returns 0=X, 1=Y, 2=Z, -1=none
-    bool worldToScreen(float wx, float wy, float wz, float& sx, float& sy) const;
     void drawAxes() const;
     void drawPointCloud() const;
-    void applyAlembicCamera() const;
-    void showCameraMenu(const QPoint& globalPos);
+    void selectObjectAtPosition(int screenX, int screenY);
 
     // Per-node draw methods (called from paintGL via SceneGraph traversal)
     void drawMeshNode(const SceneNode& sn) const;

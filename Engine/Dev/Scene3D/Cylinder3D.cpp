@@ -31,6 +31,7 @@
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
+#include "../../KnobFile.h"
 #include "../../Node.h"
 #include "../../TimeLine.h"
 #include "../../ViewIdx.h"
@@ -52,6 +53,14 @@ struct Cylinder3DPrivate
     KnobIntWPtr rows, columns;
     KnobDoubleWPtr radius, height;
     KnobBoolWPtr closeTop, closeBottom;
+
+    // Material
+    KnobColorWPtr baseColor;
+    KnobDoubleWPtr roughness, metallic, specular;
+    KnobColorWPtr emissionColor;
+    KnobDoubleWPtr emissionStrength;
+    KnobDoubleWPtr transmission, ior;
+    KnobFileWPtr textureFile;
 };
 
 
@@ -81,6 +90,7 @@ std::string
 Cylinder3D::getInputLabel(int inputNb) const
 {
     if (inputNb == 0) return "img";
+    if (inputNb == 1) return "mat";
     return "";
 }
 
@@ -201,6 +211,79 @@ Cylinder3D::initializeKnobs()
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Close Bottom"));
         k->setName("closeBottom"); k->setDefaultValue(true);
         geoPage->addKnob(k); _imp->closeBottom = k;
+    }
+
+    // Material page
+    KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));
+    {
+        KnobColorPtr k = AppManager::createKnob<KnobColor>(this, tr("Base Color"), 3);
+        k->setName("baseColor");
+        k->setDefaultValue(0.8, 0); k->setDefaultValue(0.8, 1); k->setDefaultValue(0.8, 2);
+        k->setAnimationEnabled(true);
+        matPage->addKnob(k); _imp->baseColor = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Roughness"));
+        k->setName("roughness"); k->setDefaultValue(0.5);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setAnimationEnabled(true);
+        matPage->addKnob(k); _imp->roughness = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Metallic"));
+        k->setName("metallic"); k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setAnimationEnabled(true);
+        matPage->addKnob(k); _imp->metallic = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Specular"));
+        k->setName("specular"); k->setDefaultValue(0.5);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setAnimationEnabled(true);
+        matPage->addKnob(k); _imp->specular = k;
+    }
+    {
+        KnobColorPtr k = AppManager::createKnob<KnobColor>(this, tr("Emission Color"), 3);
+        k->setName("emissionColor");
+        k->setDefaultValue(1.0, 0); k->setDefaultValue(1.0, 1); k->setDefaultValue(1.0, 2);
+        k->setAnimationEnabled(true);
+        matPage->addKnob(k); _imp->emissionColor = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Emission Strength"));
+        k->setName("emissionStrength"); k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(10.0);
+        k->setAnimationEnabled(true);
+        matPage->addKnob(k); _imp->emissionStrength = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Transmission"));
+        k->setName("transmission"); k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("0 = opaque, 1 = fully transparent (glass). Use with IOR."));
+        k->setAnimationEnabled(true);
+        matPage->addKnob(k); _imp->transmission = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("IOR"));
+        k->setName("ior"); k->setDefaultValue(1.45);
+        k->setMinimum(1.0); k->setDisplayMinimum(1.0); k->setDisplayMaximum(2.5);
+        k->setHintToolTip(tr("Index of refraction. Glass=1.5, Water=1.33, Diamond=2.42"));
+        k->setAnimationEnabled(true);
+        matPage->addKnob(k); _imp->ior = k;
+    }
+    // Texture Maps page
+    KnobPagePtr texPage = AppManager::createKnob<KnobPage>(this, tr("Texture Maps"));
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Diffuse Map"));
+        k->setName("textureFile");
+        k->setHintToolTip(tr("Base color / albedo texture. Supports .exr, .hdr, .png, .jpg"));
+        texPage->addKnob(k); _imp->textureFile = k;
     }
 }
 
@@ -435,6 +518,56 @@ Cylinder3D::render(const RenderActionArgs& args)
         }
     }
     return eStatusOK;
+}
+
+// ==================== MaterialProvider ====================
+
+void
+Cylinder3D::getMaterialBaseColor(double time, double& r, double& g, double& b) const
+{
+    KnobColorPtr c = _imp->baseColor.lock();
+    if (c) { r = c->getValueAtTime(time, 0); g = c->getValueAtTime(time, 1); b = c->getValueAtTime(time, 2); }
+    else { r = 0.8; g = 0.8; b = 0.8; }
+}
+
+double Cylinder3D::getMaterialRoughness(double time) const
+{ KnobDoublePtr k = _imp->roughness.lock(); return k ? k->getValueAtTime(time) : 0.5; }
+
+double Cylinder3D::getMaterialMetallic(double time) const
+{ KnobDoublePtr k = _imp->metallic.lock(); return k ? k->getValueAtTime(time) : 0.0; }
+
+double Cylinder3D::getMaterialSpecular(double time) const
+{ KnobDoublePtr k = _imp->specular.lock(); return k ? k->getValueAtTime(time) : 0.5; }
+
+void
+Cylinder3D::getMaterialEmission(double time, double& r, double& g, double& b, double& strength) const
+{
+    KnobColorPtr c = _imp->emissionColor.lock();
+    if (c) { r = c->getValueAtTime(time, 0); g = c->getValueAtTime(time, 1); b = c->getValueAtTime(time, 2); }
+    else { r = 1.0; g = 1.0; b = 1.0; }
+    KnobDoublePtr s = _imp->emissionStrength.lock();
+    strength = s ? s->getValueAtTime(time) : 0.0;
+}
+
+double Cylinder3D::getMaterialTransmission(double time) const
+{ KnobDoublePtr k = _imp->transmission.lock(); return k ? k->getValueAtTime(time) : 0.0; }
+
+double Cylinder3D::getMaterialIOR(double time) const
+{ KnobDoublePtr k = _imp->ior.lock(); return k ? k->getValueAtTime(time) : 1.45; }
+
+std::string Cylinder3D::getMaterialTextureFile() const
+{ KnobFilePtr k = _imp->textureFile.lock(); return k ? k->getValue() : std::string(); }
+
+bool Cylinder3D::hasMaterialInput() const
+{
+    EffectInstancePtr inp = getInput(1);
+    return inp && dynamic_cast<MaterialProvider*>(inp.get()) != nullptr;
+}
+
+MaterialProvider* Cylinder3D::getConnectedMaterial() const
+{
+    EffectInstancePtr inp = getInput(1);
+    return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
 }
 
 NATRON_NAMESPACE_EXIT

@@ -29,10 +29,23 @@ else()
     message(STATUS "OpenImageIO not found — Deep nodes will have limited functionality")
 endif()
 
+# Alembic support (optional — for ReadGeo and ReadAlembicCamera)
+find_library(ALEMBIC_LIBRARY NAMES Alembic HINTS /c/msys64/mingw64/lib)
+find_path(ALEMBIC_INCLUDE_DIR NAMES Alembic/AbcGeom/All.h HINTS /c/msys64/mingw64/include)
+if(ALEMBIC_LIBRARY AND ALEMBIC_INCLUDE_DIR)
+    message(STATUS "Alembic found — ReadGeo and ReadAlembicCamera will have Alembic support")
+    set(NATRON_HAVE_ALEMBIC ON)
+else()
+    message(STATUS "Alembic not found — ReadGeo will have limited functionality")
+    set(NATRON_HAVE_ALEMBIC OFF)
+endif()
+
 file(GLOB NatronEngine_HEADERS *.h)
 file(GLOB NatronEngine_SOURCES *.cpp)
 
 # Dev nodes — custom node extensions
+file(GLOB DevRoot_HEADERS Dev/*.h)
+file(GLOB DevRoot_SOURCES Dev/*.cpp)
 file(GLOB DevDeep_HEADERS Dev/Deep/*.h)
 file(GLOB DevDeep_SOURCES Dev/Deep/*.cpp)
 file(GLOB DevScene3D_HEADERS Dev/Scene3D/*.h)
@@ -41,8 +54,16 @@ file(GLOB DevParticles_HEADERS Dev/Particles/*.h)
 file(GLOB DevParticles_SOURCES Dev/Particles/*.cpp)
 file(GLOB DevChannel_HEADERS Dev/Channel/*.h)
 file(GLOB DevChannel_SOURCES Dev/Channel/*.cpp)
-list(APPEND NatronEngine_HEADERS ${DevDeep_HEADERS} ${DevScene3D_HEADERS} ${DevParticles_HEADERS} ${DevChannel_HEADERS})
-list(APPEND NatronEngine_SOURCES ${DevDeep_SOURCES} ${DevScene3D_SOURCES} ${DevParticles_SOURCES} ${DevChannel_SOURCES})
+if(NATRON_CYCLES)
+    file(GLOB DevCycles_HEADERS Dev/Cycles/*.h)
+    file(GLOB DevCycles_SOURCES Dev/Cycles/*.cpp)
+endif()
+list(APPEND NatronEngine_HEADERS ${DevRoot_HEADERS} ${DevDeep_HEADERS} ${DevScene3D_HEADERS} ${DevParticles_HEADERS} ${DevChannel_HEADERS})
+list(APPEND NatronEngine_SOURCES ${DevRoot_SOURCES} ${DevDeep_SOURCES} ${DevScene3D_SOURCES} ${DevParticles_SOURCES} ${DevChannel_SOURCES})
+if(NATRON_CYCLES)
+    list(APPEND NatronEngine_HEADERS ${DevCycles_HEADERS})
+    list(APPEND NatronEngine_SOURCES ${DevCycles_SOURCES})
+endif()
 
 set(PYENGINE_OUT ${CMAKE_CURRENT_BINARY_DIR}/Qt${QT_VERSION_MAJOR})
 set(PYENGINE_INCLUDE_DIRS ${PYSIDE_INCLUDE_DIRS} ${PYSIDE_INCLUDE_DIRS}/QtCore)
@@ -141,6 +162,13 @@ target_include_directories(NatronEngine SYSTEM PRIVATE
         ${Python3_INCLUDE_DIRS}
         ${SHIBOKEN_INCLUDE_DIRS}
 )
+# Cycles renderer includes (optional)
+if(NATRON_CYCLES)
+    target_include_directories(NatronEngine SYSTEM PRIVATE
+        ${NATRON_CYCLES_DIR}/src
+        ${NATRON_CYCLES_DIR}/third_party/atomic
+    )
+endif()
 target_compile_definitions(NatronEngine
     PRIVATE
         $<$<BOOL:${BUILD_USER_NAME}>:NATRON_CUSTOM_BUILD_USER_TOKEN="${BUILD_USER_NAME}">
@@ -148,4 +176,30 @@ target_compile_definitions(NatronEngine
         QT_NO_KEYWORDS
         ${XDG_DEFS}
         $<$<BOOL:${OpenImageIO_FOUND}>:NATRON_HAVE_OPENIMAGEIO>
+        $<$<BOOL:${NATRON_HAVE_ALEMBIC}>:NATRON_HAVE_ALEMBIC>
 )
+# Alembic includes and linking (optional)
+if(NATRON_HAVE_ALEMBIC)
+    target_include_directories(NatronEngine PRIVATE
+        ${ALEMBIC_INCLUDE_DIR}
+        /c/msys64/mingw64/include/Imath
+    )
+    target_link_libraries(NatronEngine PRIVATE ${ALEMBIC_LIBRARY})
+endif()
+# Cycles compile definitions (optional)
+if(NATRON_CYCLES)
+    target_compile_definitions(NatronEngine PRIVATE
+        NATRON_CYCLES
+        CCL_NAMESPACE_BEGIN=namespace\ ccl\ {
+        CCL_NAMESPACE_END=}
+        WITH_EMBREE
+        WITH_OPENIMAGEDENOISE
+        WITH_OPENSUBDIV
+        WITH_OCIO
+        WITH_PUGIXML
+        WITH_SYSTEM_PUGIXML
+    )
+    if(WIN32)
+        target_compile_definitions(NatronEngine PRIVATE _USE_MATH_DEFINES)
+    endif()
+endif()
