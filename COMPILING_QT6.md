@@ -70,9 +70,10 @@ pacman -S --noconfirm \
 ```bash
 cd /d/projects  # or wherever you want to put it
 
-# Clone Natron (use the Qt6 migration branch/fork)
-git clone https://github.com/YOUR_USERNAME/Natron.git
+# Clone Natron
+git clone https://github.com/Niik-l/Natron.git
 cd Natron
+git checkout RB-2.6
 
 # Initialize submodules (OpenFX, SequenceParsing, google-test, etc.)
 git submodule update --init --recursive
@@ -87,7 +88,8 @@ git submodule update --init --recursive
 mkdir build-qt6
 cd build-qt6
 
-# Set environment variables
+# Set environment variables (needed in every new terminal session)
+# If using MSYS2 MINGW64 terminal, PATH is already set — but LLVM_INSTALL_DIR is still needed
 export PATH="/c/msys64/mingw64/bin:$PATH"
 export LLVM_INSTALL_DIR=C:/msys64/mingw64
 
@@ -275,10 +277,13 @@ mkdir -p platforms
 cp /c/msys64/mingw64/share/qt6/plugins/platforms/qwindows.dll platforms/
 
 # Python standard library (required for scripting)
+# Check your Python version with: python3 --version
 cp -r /c/msys64/mingw64/lib/python3.14 ../lib/python3.14
 ```
 
-> **Note:** Copying all DLLs is brute-force but reliable. For a leaner distribution, you can use `objdump -p Natron.exe` to trace only the required DLLs, but the dependency chain is deep (Qt6 → OIIO → FFmpeg → codecs) and missing even one will cause a launch error.
+> **Note:** The Python version (3.14) may change when MSYS2 updates. Check with `python3 --version` and adjust the path accordingly.
+
+> **Note:** Copying all DLLs is brute-force but reliable. For a leaner distribution, `ntldd -R Natron.exe` (install with `pacman -S mingw-w64-x86_64-ntldd`) can trace only the required DLLs.
 
 After this, you can double-click `Natron.exe` from Windows Explorer without needing the MSYS2 terminal.
 
@@ -286,6 +291,77 @@ After this, you can double-click `Natron.exe` from Windows Explorer without need
 1. **Python:** Open Script Editor, type `import NatronEngine; print(NatronEngine.natron.getNatronVersionString())`
 2. **Nodes:** Press Tab in the node graph, type "Blur" — should find DirBlur, GodRays, etc.
 3. **Read files:** Create a Read node and load an EXR or PNG image
+
+---
+
+## 9. Enable Cycles Renderer (optional)
+
+Natron includes an optional Cycles path tracer integration (the same renderer used by Blender). It's disabled by default.
+
+### Install Cycles dependencies
+
+```bash
+pacman -S --noconfirm \
+  mingw-w64-x86_64-embree \
+  mingw-w64-x86_64-openimagedenoise \
+  mingw-w64-x86_64-openpgl \
+  mingw-w64-x86_64-opensubdiv \
+  mingw-w64-x86_64-pugixml \
+  mingw-w64-x86_64-libepoxy
+```
+
+### Build Cycles standalone
+
+```bash
+cd /d/projects
+git clone https://github.com/blender/cycles.git
+cd cycles
+git checkout v5.0.0
+
+# Apply MinGW compatibility patch (from Natron repo)
+git apply /d/projects/Natron/patches/cycles-mingw.patch
+
+mkdir build && cd build
+cmake .. -G "MinGW Makefiles" \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DWITH_CYCLES_STANDALONE=ON \
+  -DWITH_CYCLES_STANDALONE_GUI=OFF \
+  -DWITH_CYCLES_USD=OFF \
+  -DWITH_USD=OFF \
+  -DWITH_CYCLES_OSL=OFF \
+  -DWITH_CYCLES_DEVICE_CUDA=OFF \
+  -DWITH_CYCLES_DEVICE_OPTIX=OFF \
+  -DWITH_CYCLES_DEVICE_HIP=OFF \
+  -DWITH_CYCLES_DEVICE_ONEAPI=OFF \
+  -DWITH_CYCLES_EMBREE=ON \
+  -DWITH_CYCLES_OPENIMAGEDENOISE=ON \
+  -DWITH_CYCLES_OPENCOLORIO=ON \
+  -DWITH_CYCLES_OPENSUBDIV=ON \
+  -DWITH_CYCLES_OPENVDB=OFF \
+  -DWITH_CYCLES_ALEMBIC=OFF \
+  -DWITH_CYCLES_LOGGING=OFF \
+  -DWITH_LIBS_PRECOMPILED=OFF \
+  -DTBB_ROOT_DIR=/c/msys64/mingw64
+
+mingw32-make -j2
+```
+
+### Rebuild Natron with Cycles enabled
+
+Go back to your Natron build directory and reconfigure:
+
+```bash
+cd /d/projects/Natron/build-qt6
+
+cmake .. -G "MinGW Makefiles" \
+  -DNATRON_CYCLES=ON \
+  -DNATRON_CYCLES_DIR=/d/projects/cycles \
+  -DNATRON_CYCLES_BUILD_DIR=/d/projects/cycles/build
+
+mingw32-make -j2
+```
+
+The **CyclesRender** node will now appear in the 3D menu group. Connect Scene3D + Camera3D to it for path-traced output.
 
 ---
 
