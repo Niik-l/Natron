@@ -190,6 +190,7 @@
 #include "Dev/Cycles/CyclesRender.h"
 #endif
 
+
 // 3D Camera Tracking
 #include "CameraTrackerNode.h"
 
@@ -1665,6 +1666,8 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<DeepFromFrames>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
     registerBuiltInPlugin<DeepBlend>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
     registerBuiltInPlugin<DeepDifference>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+
+
 
     // 3D Camera Tracking
     registerBuiltInPlugin<CameraTrackerNode>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);

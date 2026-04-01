@@ -124,9 +124,12 @@ export LLVM_INSTALL_DIR=C:/msys64/mingw64
 
 # Build (use -j2 to avoid parallel build issues)
 mingw32-make -j2
+
+# If you hit "ar: malformed archive" or race conditions, drop to single-threaded:
+# mingw32-make -j1
 ```
 
-This will take 5-15 minutes depending on your machine. When complete you'll see:
+This will take 5-15 minutes depending on your machine (`-j1` is slower but always reliable). When complete you'll see:
 ```
 [100%] Built target Natron
 ```
@@ -362,6 +365,9 @@ mingw32-make -j2
 ```
 
 The **CyclesRender** node will now appear in the 3D menu group. Connect Scene3D + Camera3D to it for path-traced output.
+
+> **Note:** If enabling Cycles for the first time on an existing build, you may need to clear the AUTOMOC cache:
+> `rm -rf Engine/NatronEngine_autogen && cmake .. -G "MinGW Makefiles"` then rebuild.
 
 ---
 

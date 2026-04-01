@@ -516,3 +516,6 @@ CyclesRender::render(const RenderActionArgs& args)
 }
 
 NATRON_NAMESPACE_EXIT
+NATRON_NAMESPACE_USING
+
+#include "moc_CyclesRender.cpp"
