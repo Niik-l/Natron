@@ -21,7 +21,9 @@
 
 #include "../../../Global/Macros.h"
 
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 #include <functional>
@@ -29,6 +31,7 @@
 NATRON_NAMESPACE_ENTER
 
 class SceneGraph;
+struct ObjectVisibility;
 
 /**
  * @brief Bridge between Natron's SceneGraph and Blender's Cycles renderer.
@@ -56,11 +59,41 @@ public:
      * @brief Sync scene with raw camera parameters (used by CyclesRender node).
      * Position and rotation in world space, focal length and aperture for FOV.
      */
+    struct DOFParams {
+        bool enabled = false;
+        float apertureSize = 0.0f;  // pre-computed: focalLength / (2 * fstop)
+        float focusDistance = 10.0f;
+        int blades = 0;             // 0=circular, 3+=polygonal
+        float bladeRotation = 0.0f; // radians
+    };
+
+    struct MotionBlurParams {
+        bool enabled = false;
+        float shutterTime = 0.5f;   // in frames
+        int shutterPosition = 1;    // 0=Start, 1=Center, 2=End
+    };
+
+    struct IntegratorParams {
+        int maxBounces = 7;
+        int diffuseBounces = 7;
+        int glossyBounces = 7;
+        int transmissionBounces = 7;
+        float aoFactor = 0.0f;       // 0 = disabled (proper GI), 1 = full AO
+        int aoBounces = 0;
+        float aoDistance = 10.0f;
+    };
+
     void syncSceneWithCamera(const SceneGraph& sg,
                              double camTX, double camTY, double camTZ,
                              double camRX, double camRY, double camRZ,
                              double focalLength, double hAperture,
-                             double time = 0);
+                             double time = 0,
+                             const std::vector<std::string>& requestedPasses = std::vector<std::string>(),
+                             const std::map<std::string, ObjectVisibility>* visibilityMap = nullptr,
+                             const std::set<std::string>* activeLights = nullptr,
+                             const DOFParams* dof = nullptr,
+                             const MotionBlurParams* motionBlur = nullptr,
+                             const IntegratorParams* integrator = nullptr);
 
     /**
      * @brief Start rendering (non-blocking). Cycles renders on its own thread.
@@ -111,6 +144,28 @@ public:
                                    double time = 0);
 
     /**
+     * @brief Render to memory buffers (blocking) with multiple AOV passes and light groups.
+     *
+     * @param requestedPasses  List of pass names to render (e.g. "Combined", "DiffDir", "Normal").
+     *                         "Combined" is always included even if not listed.
+     * @param outPassBuffers   Output map: pass name -> RGBA float pixel buffer (width*height*4).
+     *                         Light group passes are named "Combined_<groupName>".
+     */
+    bool renderToBufferWithCameraMultiPass(const SceneGraph& sg,
+                                            double camTX, double camTY, double camTZ,
+                                            double camRX, double camRY, double camRZ,
+                                            double focalLength, double hAperture,
+                                            const std::vector<std::string>& requestedPasses,
+                                            std::map<std::string, std::vector<float>>& outPassBuffers,
+                                            int width, int height, int samples = 64,
+                                            double time = 0,
+                                            const std::map<std::string, ObjectVisibility>* visibilityMap = nullptr,
+                                            const std::set<std::string>* activeLights = nullptr,
+                                            const DOFParams* dof = nullptr,
+                                            const MotionBlurParams* motionBlur = nullptr,
+                                            const IntegratorParams* integrator = nullptr);
+
+    /**
      * @brief Set the number of samples for the next render.
      */
     void setSamples(int samples);
@@ -125,6 +180,14 @@ public:
      */
     int getWidth() const;
     int getHeight() const;
+
+    /**
+     * @brief Save pass buffers to a multi-layer EXR file using OIIO.
+     * Each entry maps pass name → float buffer (w*h*4 floats).
+     */
+    static bool saveMultiLayerEXR(const std::string& filepath,
+                                   const std::map<std::string, std::vector<float>>& passBuffers,
+                                   int width, int height);
 
     /**
      * @brief Quick smoke test — create and destroy a session.

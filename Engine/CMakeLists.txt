@@ -29,7 +29,7 @@ else()
     message(STATUS "OpenImageIO not found — Deep nodes will have limited functionality")
 endif()
 
-# Alembic support (optional — for ReadGeo and ReadAlembicCamera)
+# Alembic support for ReadGeo and ReadAlembicCamera
 find_library(ALEMBIC_LIBRARY NAMES Alembic HINTS /c/msys64/mingw64/lib)
 find_path(ALEMBIC_INCLUDE_DIR NAMES Alembic/AbcGeom/All.h HINTS /c/msys64/mingw64/include)
 if(ALEMBIC_LIBRARY AND ALEMBIC_INCLUDE_DIR)
@@ -44,8 +44,6 @@ file(GLOB NatronEngine_HEADERS *.h)
 file(GLOB NatronEngine_SOURCES *.cpp)
 
 # Dev nodes — custom node extensions
-file(GLOB DevRoot_HEADERS Dev/*.h)
-file(GLOB DevRoot_SOURCES Dev/*.cpp)
 file(GLOB DevDeep_HEADERS Dev/Deep/*.h)
 file(GLOB DevDeep_SOURCES Dev/Deep/*.cpp)
 file(GLOB DevScene3D_HEADERS Dev/Scene3D/*.h)
@@ -54,12 +52,16 @@ file(GLOB DevParticles_HEADERS Dev/Particles/*.h)
 file(GLOB DevParticles_SOURCES Dev/Particles/*.cpp)
 file(GLOB DevChannel_HEADERS Dev/Channel/*.h)
 file(GLOB DevChannel_SOURCES Dev/Channel/*.cpp)
+file(GLOB DevTransform_HEADERS Dev/Transform/*.h)
+file(GLOB DevTransform_SOURCES Dev/Transform/*.cpp)
+file(GLOB DevColor_HEADERS Dev/Color/*.h)
+file(GLOB DevColor_SOURCES Dev/Color/*.cpp)
 if(NATRON_CYCLES)
     file(GLOB DevCycles_HEADERS Dev/Cycles/*.h)
     file(GLOB DevCycles_SOURCES Dev/Cycles/*.cpp)
 endif()
-list(APPEND NatronEngine_HEADERS ${DevRoot_HEADERS} ${DevDeep_HEADERS} ${DevScene3D_HEADERS} ${DevParticles_HEADERS} ${DevChannel_HEADERS})
-list(APPEND NatronEngine_SOURCES ${DevRoot_SOURCES} ${DevDeep_SOURCES} ${DevScene3D_SOURCES} ${DevParticles_SOURCES} ${DevChannel_SOURCES})
+list(APPEND NatronEngine_HEADERS ${DevDeep_HEADERS} ${DevScene3D_HEADERS} ${DevParticles_HEADERS} ${DevChannel_HEADERS} ${DevTransform_HEADERS} ${DevColor_HEADERS})
+list(APPEND NatronEngine_SOURCES ${DevDeep_SOURCES} ${DevScene3D_SOURCES} ${DevParticles_SOURCES} ${DevChannel_SOURCES} ${DevTransform_SOURCES} ${DevColor_SOURCES})
 if(NATRON_CYCLES)
     list(APPEND NatronEngine_HEADERS ${DevCycles_HEADERS})
     list(APPEND NatronEngine_SOURCES ${DevCycles_SOURCES})
@@ -107,7 +109,23 @@ list(APPEND NatronEngine_SOURCES
     ../Global/StrUtils.cpp
     ../libs/SequenceParsing/SequenceParsing.cpp
 )
+# CameraTrackerNode is WIP and depends on libmv Eigen templates that break
+# with GCC 15. Exclude from build until ready.
+list(FILTER NatronEngine_SOURCES EXCLUDE REGEX "CameraTrackerNode\\.cpp$")
+list(FILTER NatronEngine_HEADERS EXCLUDE REGEX "CameraTrackerNode\\.h$")
+
 add_library(NatronEngine STATIC ${NatronEngine_HEADERS} ${NatronEngine_SOURCES})
+
+# GCC 15 breaks Eigen template instantiation at -O2. Apply -O1 to files
+# that include Eigen/libmv headers.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15")
+    set_source_files_properties(
+        TrackerContext.cpp
+        TrackerContextPrivate.cpp
+        TrackerFrameAccessor.cpp
+        PROPERTIES COMPILE_OPTIONS "-O1"
+    )
+endif()
 
 # Exclude non-Qt include paths from AUTOMOC to prevent moc from parsing
 # Python, Boost, and other third-party headers it doesn't need.
@@ -152,42 +170,15 @@ target_include_directories(NatronEngine
         Dev/Deep
         Dev/Scene3D
         Dev/Particles
+        /c/msys64/mingw64/include/Imath
         Dev/Channel
         ${X11_INCLUDE_DIR}
 )
-# Non-Qt includes that AUTOMOC/moc doesn't need — mark as SYSTEM to keep
-# them out of moc's include search path (moc only needs Qt headers).
-target_include_directories(NatronEngine SYSTEM PRIVATE
-        ${PYSIDE_INCLUDE_DIRS}/QtCore
-        ${Python3_INCLUDE_DIRS}
-        ${SHIBOKEN_INCLUDE_DIRS}
-)
-# Cycles renderer includes (optional)
 if(NATRON_CYCLES)
     target_include_directories(NatronEngine SYSTEM PRIVATE
         ${NATRON_CYCLES_DIR}/src
         ${NATRON_CYCLES_DIR}/third_party/atomic
     )
-endif()
-target_compile_definitions(NatronEngine
-    PRIVATE
-        $<$<BOOL:${BUILD_USER_NAME}>:NATRON_CUSTOM_BUILD_USER_TOKEN="${BUILD_USER_NAME}">
-        NATRON_BUILD_NUMBER=0
-        QT_NO_KEYWORDS
-        ${XDG_DEFS}
-        $<$<BOOL:${OpenImageIO_FOUND}>:NATRON_HAVE_OPENIMAGEIO>
-        $<$<BOOL:${NATRON_HAVE_ALEMBIC}>:NATRON_HAVE_ALEMBIC>
-)
-# Alembic includes and linking (optional)
-if(NATRON_HAVE_ALEMBIC)
-    target_include_directories(NatronEngine PRIVATE
-        ${ALEMBIC_INCLUDE_DIR}
-        /c/msys64/mingw64/include/Imath
-    )
-    target_link_libraries(NatronEngine PRIVATE ${ALEMBIC_LIBRARY})
-endif()
-# Cycles compile definitions (optional)
-if(NATRON_CYCLES)
     target_compile_definitions(NatronEngine PRIVATE
         NATRON_CYCLES
         CCL_NAMESPACE_BEGIN=namespace\ ccl\ {
@@ -199,7 +190,32 @@ if(NATRON_CYCLES)
         WITH_PUGIXML
         WITH_SYSTEM_PUGIXML
     )
+    # Cycles needs _USE_MATH_DEFINES on Windows for M_PI in OpenSubdiv headers
     if(WIN32)
         target_compile_definitions(NatronEngine PRIVATE _USE_MATH_DEFINES)
     endif()
 endif()
+# Non-Qt includes that AUTOMOC/moc doesn't need — mark as SYSTEM to keep
+# them out of moc's include search path (moc only needs Qt headers).
+target_include_directories(NatronEngine SYSTEM PRIVATE
+        ${PYSIDE_INCLUDE_DIRS}/QtCore
+        ${Python3_INCLUDE_DIRS}
+        ${SHIBOKEN_INCLUDE_DIRS}
+        $<$<BOOL:${NATRON_HAVE_ALEMBIC}>:${ALEMBIC_INCLUDE_DIR}>
+        $<$<BOOL:${NATRON_HAVE_ALEMBIC}>:/c/msys64/mingw64/include/Imath>
+)
+# Alembic link
+if(NATRON_HAVE_ALEMBIC)
+    target_include_directories(NatronEngine PRIVATE /c/msys64/mingw64/include/Imath)
+    target_link_libraries(NatronEngine PRIVATE ${ALEMBIC_LIBRARY})
+    target_compile_options(NatronEngine PRIVATE "-I/c/msys64/mingw64/include/Imath")
+endif()
+target_compile_definitions(NatronEngine
+    PRIVATE
+        $<$<BOOL:${BUILD_USER_NAME}>:NATRON_CUSTOM_BUILD_USER_TOKEN="${BUILD_USER_NAME}">
+        NATRON_BUILD_NUMBER=0
+        QT_NO_KEYWORDS
+        ${XDG_DEFS}
+        $<$<BOOL:${OpenImageIO_FOUND}>:NATRON_HAVE_OPENIMAGEIO>
+        $<$<BOOL:${NATRON_HAVE_ALEMBIC}>:NATRON_HAVE_ALEMBIC>
+)

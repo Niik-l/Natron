@@ -260,4 +260,7 @@ target_compile_definitions(ceres
 )
 target_link_libraries(ceres PUBLIC glog::glog)
 set_target_properties(ceres PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15")
+    target_compile_options(ceres PRIVATE -O1)
+endif()
 add_library(Ceres::ceres ALIAS ceres)

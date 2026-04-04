@@ -233,7 +233,7 @@ class TrackerPanelV1;
 class VerticalColorBar;
 class ViewerGL;
 class ViewerTab;
-class Viewport3D;
+class DevViewport3D;
 class Viewport3DTab;
 class ViewerToolButton;
 class KnobPageGui;

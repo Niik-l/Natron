@@ -35,14 +35,8 @@ if(APPLE)
         MACOSX_BUNDLE_COPYRIGHT "Copyright (c) 2023 The Natron Developers"
     )
 endif()
-target_link_libraries(Natron
-    PRIVATE
-        NatronGui
-        Python3::Python
-)
-
-# Cycles renderer libraries (optional — linked via NatronEngine INTERFACE)
 if(NATRON_CYCLES)
+    # Cycles static libraries
     set(CYCLES_LIBS
         ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_scene.a
         ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_session.a
@@ -74,9 +68,10 @@ if(NATRON_CYCLES)
     find_library(PNG_LIB png HINTS /c/msys64/mingw64/lib)
     find_library(JPEG_LIB jpeg HINTS /c/msys64/mingw64/lib)
     find_library(TIFF_LIB tiff HINTS /c/msys64/mingw64/lib)
+    find_library(OPENVDB_LIB openvdb HINTS /c/msys64/mingw64/lib)
 
-    # Link Cycles libs via NatronEngine INTERFACE (after NatronEngine.a on link line)
-    # Listed twice to resolve circular dependencies with GCC single-pass linker
+    # NatronEngine references Cycles. Add Cycles libs to NatronEngine's
+    # INTERFACE so they appear after NatronEngine on the link line.
     target_link_libraries(NatronEngine
         INTERFACE
             ${CYCLES_LIBS}
@@ -100,9 +95,20 @@ if(NATRON_CYCLES)
             ${PNG_LIB}
             ${JPEG_LIB}
             ${TIFF_LIB}
+            ${OPENVDB_LIB}
+    )
+    target_link_libraries(Natron
+        PRIVATE
+            NatronGui
+            Python3::Python
+    )
+else()
+    target_link_libraries(Natron
+        PRIVATE
+            NatronGui
+            Python3::Python
     )
 endif()
-
 target_include_directories(Natron
     PRIVATE
         ..

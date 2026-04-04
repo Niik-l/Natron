@@ -21,7 +21,7 @@ file(GLOB NatronEngine_HEADERS ../Engine/*.h)
 file(GLOB NatronGui_HEADERS *.h)
 file(GLOB NatronGui_SOURCES *.cpp)
 
-# ImGui + ImGuizmo (MIT license) — 3D viewport gizmos
+# ImGui + ImGuizmo (MIT license)
 list(APPEND NatronGui_SOURCES
     ImGuizmo/imgui.cpp
     ImGuizmo/imgui_draw.cpp
@@ -97,8 +97,8 @@ target_include_directories(NatronGui
         ../Global
         ../libs/SequenceParsing
         ../libs/qhttpserver/src
-        ${CMAKE_BINARY_DIR}/Engine/Qt${QT_VERSION_MAJOR}/NatronEngine
         ImGuizmo
+        ${CMAKE_BINARY_DIR}/Engine/Qt${QT_VERSION_MAJOR}/NatronEngine
 )
 # Non-Qt includes — mark as SYSTEM to exclude from AUTOMOC/moc
 target_include_directories(NatronGui SYSTEM PRIVATE

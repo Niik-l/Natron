@@ -24,6 +24,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <set>
 
 // Cycles headers — must be included BEFORE CCL_NAMESPACE_BEGIN block below
 #include "device/device.h"
@@ -31,6 +33,10 @@
 #include "scene/light.h"
 #include "scene/mesh.h"
 #include "scene/object.h"
+#include "scene/pointcloud.h"
+#include "scene/volume.h"
+#include "scene/image.h"
+#include "scene/image_vdb.h"
 #include "scene/scene.h"
 #include "scene/attribute.h"
 #include "scene/shader.h"
@@ -58,6 +64,11 @@
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
+#include "Engine/Dev/Scene3D/RenderPass.h"
+#include "Engine/Dev/Scene3D/ReadVDB.h"
+#include "Engine/Dev/Scene3D/Volume3D.h"
+#include "Engine/Dev/Particles/ParticleEmitter.h"
+#include "Engine/Dev/Particles/ParticleGravity.h"
 #include "Engine/Knob.h"
 #include "Engine/KnobTypes.h"
 #include "Engine/Node.h"
@@ -101,6 +112,69 @@ private:
     int width_, height_;
 };
 
+// Output driver that captures multiple AOV passes to memory buffers
+class NatronMultiPassOutputDriver : public OutputDriver {
+public:
+    NatronMultiPassOutputDriver(std::map<std::string, std::vector<float>>* passBuffers,
+                                const std::vector<std::string>& passNames,
+                                int width, int height)
+        : passBuffers_(passBuffers), passNames_(passNames), width_(width), height_(height) {}
+
+    void write_render_tile(const Tile& tile) override
+    {
+        if (!(tile.size == tile.full_size)) return;
+
+        const int w = tile.size.x;
+        const int h = tile.size.y;
+
+        printf("[Cycles AOV] write_render_tile %dx%d, requesting %d passes\n", w, h, (int)passNames_.size());
+        for (const auto& passName : passNames_) {
+            // Depth and AO are 1-channel passes; request native channels then expand to 4
+            bool is1ch = (passName == "Depth" || passName == "AO");
+            int nch = is1ch ? 1 : 4;
+
+            std::vector<float> rawBuf(w * h * nch, 0.0f);
+            bool ok = tile.get_pass_pixels(passName, nch, rawBuf.data());
+            printf("[Cycles AOV]   pass '%s' (%dch): get_pass_pixels=%s\n", passName.c_str(), nch, ok ? "OK" : "FAILED");
+            if (ok) {
+                // Expand to 4-channel buffer for uniform handling
+                std::vector<float> buf(w * h * 4, 0.0f);
+                if (is1ch) {
+                    for (int p = 0; p < w * h; ++p) {
+                        buf[p * 4 + 0] = rawBuf[p];
+                        buf[p * 4 + 1] = rawBuf[p];
+                        buf[p * 4 + 2] = rawBuf[p];
+                        buf[p * 4 + 3] = 1.0f;
+                    }
+                } else {
+                    buf = std::move(rawBuf);
+                }
+
+                // Debug: print channel 0 stats
+                float ch0Min = 1e30f, ch0Max = -1e30f;
+                int nonZeroCount = 0;
+                for (int p = 0; p < w * h; ++p) {
+                    float v = buf[p * 4];
+                    if (v != 0.0f) nonZeroCount++;
+                    if (v > 0.001f && v < 1e9f) {
+                        if (v < ch0Min) ch0Min = v;
+                        if (v > ch0Max) ch0Max = v;
+                    }
+                }
+                printf("[Cycles AOV]   pass '%s': ch0 range=[%.4f, %.4f] nonZero=%d/%d\n",
+                       passName.c_str(), ch0Min, ch0Max, nonZeroCount, w * h);
+
+                (*passBuffers_)[passName] = std::move(buf);
+            }
+        }
+    }
+
+private:
+    std::map<std::string, std::vector<float>>* passBuffers_;
+    std::vector<std::string> passNames_;
+    int width_, height_;
+};
+
 // Output driver that writes to a file via OIIO
 class NatronOutputDriver : public OutputDriver {
 public:
@@ -109,32 +183,19 @@ public:
 
     void write_render_tile(const Tile& tile) override
     {
-        FILE* dbg = fopen("D:/cycles_output_debug.log", "w");
-
         if (!(tile.size == tile.full_size)) {
-            if (dbg) { fprintf(dbg, "Skipping partial tile\n"); fclose(dbg); }
             return;
         }
 
         const int width = tile.size.x;
         const int height = tile.size.y;
-        if (dbg) fprintf(dbg, "write_render_tile: %dx%d to %s\n", width, height, filepath_.c_str());
 
         std::vector<float> pixels(width * height * 4);
         bool gotPixels = tile.get_pass_pixels("Combined", 4, pixels.data());
-        if (dbg) fprintf(dbg, "get_pass_pixels(Combined): %s\n", gotPixels ? "YES" : "NO");
 
         if (!gotPixels) {
-            if (dbg) fclose(dbg);
             return;
         }
-
-        // Check if pixels are all zero
-        float maxVal = 0;
-        for (size_t i = 0; i < pixels.size(); ++i) {
-            if (pixels[i] > maxVal) maxVal = pixels[i];
-        }
-        if (dbg) fprintf(dbg, "Max pixel value: %f\n", maxVal);
 
         // Flip vertically (Cycles is bottom-up, files are top-down)
         std::vector<float> flipped(width * height * 4);
@@ -158,22 +219,49 @@ public:
         OIIO::ImageSpec spec(width, height, 4, OIIO::TypeDesc::FLOAT);
         auto image_output = OIIO::ImageOutput::create(filepath_);
         if (!image_output) {
-            if (dbg) { fprintf(dbg, "OIIO::ImageOutput::create FAILED\n"); fclose(dbg); }
             return;
         }
         if (!image_output->open(filepath_, spec)) {
-            if (dbg) { fprintf(dbg, "image_output->open FAILED\n"); fclose(dbg); }
             return;
         }
 
         image_output->write_image(OIIO::TypeDesc::FLOAT, flipped.data());
         image_output->close();
-
-        if (dbg) { fprintf(dbg, "Image written successfully!\n"); fclose(dbg); }
     }
 
 private:
     std::string filepath_;
+};
+
+// Dense volume loader — subclasses VDBImageLoader to use grid_from_dense_voxels(),
+// which converts raw floats → OpenVDB grid → NanoVDB binary (required by Cycles kernel).
+class DenseVolumeLoader : public VDBImageLoader {
+public:
+    DenseVolumeLoader(const std::vector<float>& data, int res,
+                      Transform transform_3d = transform_identity())
+        : VDBImageLoader("density")
+        , data_(data), resolution_(res), transform_3d_(transform_3d)
+        , loaded_(false) {}
+
+    string name() const override { return "dense_volume"; }
+    bool equals(const ImageLoader& other) const override { return this == &other; }
+
+protected:
+    void load_grid() override
+    {
+        if (!loaded_ && !data_.empty() && resolution_ > 0) {
+            grid_from_dense_voxels(
+                (size_t)resolution_, (size_t)resolution_, (size_t)resolution_,
+                1, data_.data(), transform_3d_);
+            loaded_ = true;
+        }
+    }
+
+private:
+    std::vector<float> data_;
+    int resolution_;
+    Transform transform_3d_;
+    bool loaded_;
 };
 
 CCL_NAMESPACE_END
@@ -439,6 +527,10 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     if (!texFile.empty()) {
         ccl::ImageTextureNode* imgTex = graph->create_node<ccl::ImageTextureNode>();
         imgTex->set_filename(ccl::ustring(texFile));
+        std::string diffCS = mat->getMaterialDiffuseColorspace();
+        if (diffCS == "Raw") diffCS = "Non-Color";
+        if (diffCS == "Linear") diffCS = "__builtin_raw";
+        imgTex->set_colorspace(ccl::ustring(diffCS));
         graph->connect(texCoord->output("UV"), imgTex->input("Vector"));
         graph->connect(imgTex->output("Color"), principled->input("Base Color"));
     }
@@ -481,6 +573,10 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     if (!emissionFile.empty()) {
         ccl::ImageTextureNode* emissionTex = graph->create_node<ccl::ImageTextureNode>();
         emissionTex->set_filename(ccl::ustring(emissionFile));
+        std::string emCS = mat->getMaterialEmissionColorspace();
+        if (emCS == "Raw") emCS = "Non-Color";
+        if (emCS == "Linear") emCS = "__builtin_raw";
+        emissionTex->set_colorspace(ccl::ustring(emCS));
         graph->connect(texCoord->output("UV"), emissionTex->input("Vector"));
         graph->connect(emissionTex->output("Color"), principled->input("Emission Color"));
     }
@@ -589,7 +685,13 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                                      double camTX, double camTY, double camTZ,
                                      double camRX, double camRY, double camRZ,
                                      double focalLength, double hAperture,
-                                     double time)
+                                     double time,
+                                     const std::vector<std::string>& requestedPasses,
+                                     const std::map<std::string, ObjectVisibility>* visibilityMap,
+                                     const std::set<std::string>* activeLights,
+                                     const DOFParams* dof,
+                                     const MotionBlurParams* motionBlur,
+                                     const IntegratorParams* integrator)
 {
     if (!_impl->initialized) return;
 
@@ -624,11 +726,9 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     // --- Background + Lights ---
     // First scan for dome lights to set the background shader.
     // Then process other light types.
+    bool hasDome = false;
     {
-        FILE* ldbg = fopen("D:/cycles_light_debug.log", "w");
-
         // === First pass: find dome lights and set background ===
-        bool hasDome = false;
         const std::vector<SceneNode>& lightScan = sg.nodes();
         for (size_t i = 0; i < lightScan.size(); ++i) {
             const SceneNode& sn = lightScan[i];
@@ -637,6 +737,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             if (!node) continue;
             Light3D* light3d = dynamic_cast<Light3D*>(node->getEffectInstance().get());
             if (!light3d || light3d->getLightType() != Light3D::eLightDome) continue;
+            if (!light3d->isRenderable()) continue;
 
             double ltx, lty, ltz, lr, lg, lb, lint, lexp;
             light3d->getLightParams(time, ltx, lty, ltz, lr, lg, lb, lint, lexp);
@@ -651,6 +752,43 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 // HDRI environment map
                 ccl::EnvironmentTextureNode* envTex = bgGraph->create_node<ccl::EnvironmentTextureNode>();
                 envTex->set_filename(ccl::ustring(envMap));
+                envTex->set_colorspace(ccl::ustring("__builtin_raw")); // HDRIs are linear
+
+                // Rotation via Mapping node (read light's rotateX/Y/Z)
+                float lrx = 0, lry = 0, lrz = 0;
+                {
+                    EffectInstancePtr eff = node->getEffectInstance();
+                    if (eff) {
+                        KnobIPtr k;
+                        k = eff->getKnobByName("rotateX"); if (k) lrx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+                        k = eff->getKnobByName("rotateY"); if (k) lry = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+                        k = eff->getKnobByName("rotateZ"); if (k) lrz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+                    }
+                }
+                // Cycles env texture uses Z-up, our scene is Y-up.
+                // Swap Y↔Z via SeparateXYZ/CombineXYZ so rotations work in Y-up space.
+                ccl::TextureCoordinateNode* texCoord = bgGraph->create_node<ccl::TextureCoordinateNode>();
+                ccl::SeparateXYZNode* sepXYZ = bgGraph->create_node<ccl::SeparateXYZNode>();
+                ccl::CombineXYZNode* combXYZ = bgGraph->create_node<ccl::CombineXYZNode>();
+
+                bgGraph->connect(texCoord->output("Generated"), sepXYZ->input("Vector"));
+                // Remap: new_X = old_X, new_Y = old_Z, new_Z = old_Y (Y↔Z swap)
+                bgGraph->connect(sepXYZ->output("X"), combXYZ->input("X"));
+                bgGraph->connect(sepXYZ->output("Z"), combXYZ->input("Y"));
+                bgGraph->connect(sepXYZ->output("Y"), combXYZ->input("Z"));
+
+                // Apply user rotation — axes are swapped in this space (Y↔Z),
+                // so user's rotateY (horizontal spin) maps to MappingNode Z,
+                // and user's rotateZ maps to MappingNode Y.
+                ccl::MappingNode* mapping = bgGraph->create_node<ccl::MappingNode>();
+                mapping->set_mapping_type(ccl::NODE_MAPPING_TYPE_POINT);
+                mapping->set_rotation(ccl::make_float3(
+                    lrx * (float)M_PI / 180.0f,
+                    lrz * (float)M_PI / 180.0f,
+                    lry * (float)M_PI / 180.0f));
+                bgGraph->connect(combXYZ->output("Vector"), mapping->input("Vector"));
+                bgGraph->connect(mapping->output("Vector"), envTex->input("Vector"));
+
                 ccl::BackgroundNode* bgNode = bgGraph->create_node<ccl::BackgroundNode>();
                 bgNode->set_strength(strengthScale);
                 bgGraph->connect(envTex->output("Color"), bgNode->input("Color"));
@@ -665,9 +803,22 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
             bgShader->set_graph(std::move(bgGraph));
             bgShader->tag_update(scene);
+
+            // Create a background Light object for HDRI importance sampling (MIS).
+            // Without this, Cycles samples the HDRI uniformly → excessive noise.
+            ccl::Light* bgLight = scene->create_node<ccl::Light>();
+            bgLight->set_light_type(ccl::LIGHT_BACKGROUND);
+            bgLight->set_use_mis(true);
+            bgLight->set_map_resolution(2048);
+            bgLight->set_strength(ccl::make_float3(1.0f, 1.0f, 1.0f));
+            bgLight->set_is_enabled(true);
+            // Assign the background shader so Cycles can importance-sample the HDRI
+            ccl::array<ccl::Node*> bgLightShaders;
+            bgLightShaders.push_back_slow(bgShader);
+            bgLight->set_used_shaders(bgLightShaders);
+            bgLight->tag_update(scene);
+
             hasDome = true;
-            if (ldbg) fprintf(ldbg, "Dome light: env='%s' color=(%.2f,%.2f,%.2f) strength=%.1f\n",
-                              envMap.c_str(), lr, lg, lb, strengthScale);
             break; // only one dome light
         }
 
@@ -684,20 +835,17 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         }
 
         // === Second pass: process non-dome lights ===
-        if (ldbg) fprintf(ldbg, "Scanning %d scene nodes for lights...\n", (int)lightScan.size());
-
         for (size_t i = 0; i < lightScan.size(); ++i) {
             const SceneNode& sn = lightScan[i];
-            if (ldbg) fprintf(ldbg, "  node[%d] type=%d name='%s' visible=%d\n",
-                              (int)i, (int)sn.type, sn.name.c_str(), sn.visible);
 
             if (sn.type != eSceneNodeLight || !sn.visible) continue;
 
             NodePtr node = sn.sourceNode.lock();
-            if (!node) { if (ldbg) fprintf(ldbg, "    -> sourceNode expired\n"); continue; }
+            if (!node) continue;
 
             Light3D* light3d = dynamic_cast<Light3D*>(node->getEffectInstance().get());
-            if (!light3d) { if (ldbg) fprintf(ldbg, "    -> not a Light3D\n"); continue; }
+            if (!light3d) continue;
+            if (!light3d->isRenderable()) continue;
 
             Light3D::LightType ltype = light3d->getLightType();
             // Skip dome lights — already handled as background
@@ -707,9 +855,6 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             light3d->getLightParams(time, ltx, lty, ltz, lr, lg, lb, lint, lexp);
             // Apply exposure: multiply intensity by 2^exposure
             lint *= pow(2.0, lexp);
-
-            if (ldbg) fprintf(ldbg, "    -> Light3D: type=%d pos=(%.1f,%.1f,%.1f) color=(%.2f,%.2f,%.2f) intensity=%.2f\n",
-                              (int)ltype, ltx, lty, ltz, lr, lg, lb, lint);
 
             ccl::Light* light = scene->create_node<ccl::Light>();
             light->set_light_type(mapLightType(ltype));
@@ -738,6 +883,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             if (ltype == Light3D::eLightDome && !envMap.empty()) {
                 ccl::EnvironmentTextureNode* envTex = lGraph->create_node<ccl::EnvironmentTextureNode>();
                 envTex->set_filename(ccl::ustring(envMap));
+                envTex->set_colorspace(ccl::ustring("__builtin_raw")); // HDRIs are linear
                 ccl::BackgroundNode* bgNode = lGraph->create_node<ccl::BackgroundNode>();
                 bgNode->set_strength(strengthScale);
                 lGraph->connect(envTex->output("Color"), bgNode->input("Color"));
@@ -774,14 +920,27 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     k = eff->getKnobByName("rotateZ"); if (k) lrz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
                 }
             }
+            // Apply active lights filter if provided
+            if (activeLights && !activeLights->empty()) {
+                if (activeLights->find(sn.name) == activeLights->end()) {
+                    // Light not in active set — skip it entirely
+                    continue;
+                }
+            }
+
             ccl::Object* obj = scene->create_node<ccl::Object>();
             obj->set_geometry(light);
             obj->set_visibility(ccl::PATH_RAY_ALL_VISIBILITY & ~ccl::PATH_RAY_CAMERA);
             obj->set_tfm(buildLightTransform((float)ltx, (float)lty, (float)ltz, lrx, lry, lrz));
+
+            // Set light group on the object (Cycles uses Object::lightgroup)
+            std::string lgName = light3d->getLightGroup();
+            if (!lgName.empty()) {
+                obj->set_lightgroup(ccl::ustring(lgName));
+            }
+
             obj->tag_update(scene);
         }
-
-        if (ldbg) fclose(ldbg);
     }
 
     // --- Camera from Euler angles ---
@@ -826,44 +985,133 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         float fovRad = 2.0f * atanf((float)hAperture / (2.0f * (float)focalLength));
         if (fovRad < 0.01f || fovRad > 3.0f) fovRad = 45.0f * (float)M_PI / 180.0f;
 
-        // DEBUG: log camera transform and FOV
-        {
-            FILE* cdbg = fopen("D:/cycles_camera_matrix.log", "w");
-            if (cdbg) {
-                fprintf(cdbg, "Camera pos: (%.2f, %.2f, %.2f)\n", camTX, camTY, camTZ);
-                fprintf(cdbg, "Camera rot: (%.2f, %.2f, %.2f)\n", camRX, camRY, camRZ);
-                fprintf(cdbg, "FOV: %.2f deg (focal=%.1f, aperture=%.4f)\n",
-                        fovRad * 180.0f / (float)M_PI, focalLength, hAperture);
-                fprintf(cdbg, "Camera matrix:\n");
-                fprintf(cdbg, "  row0: [%.4f %.4f %.4f %.4f]\n", cameraTfm.x.x, cameraTfm.x.y, cameraTfm.x.z, cameraTfm.x.w);
-                fprintf(cdbg, "  row1: [%.4f %.4f %.4f %.4f]\n", cameraTfm.y.x, cameraTfm.y.y, cameraTfm.y.z, cameraTfm.y.w);
-                fprintf(cdbg, "  row2: [%.4f %.4f %.4f %.4f]\n", cameraTfm.z.x, cameraTfm.z.y, cameraTfm.z.z, cameraTfm.z.w);
-                fclose(cdbg);
-            }
-        }
-
         scene->camera->set_fov(fovRad);
 
         scene->camera->set_full_width(_impl->width);
         scene->camera->set_full_height(_impl->height);
         scene->camera->set_nearclip(0.1f);
         scene->camera->set_farclip(10000.0f);
+
+        // Depth of Field
+        if (dof && dof->enabled) {
+            scene->camera->set_aperturesize(dof->apertureSize);
+            scene->camera->set_focaldistance(dof->focusDistance);
+            scene->camera->set_blades(dof->blades);
+            scene->camera->set_bladesrotation(dof->bladeRotation);
+        }
+
+        // Motion blur camera shutter
+        if (motionBlur && motionBlur->enabled) {
+            scene->camera->set_shuttertime(motionBlur->shutterTime);
+            scene->camera->set_motion_position(
+                (ccl::MotionPosition)motionBlur->shutterPosition);
+        }
+
         scene->camera->update(scene);
     }
 
     // --- Render passes ---
     {
-        ccl::Pass* pass = scene->create_node<ccl::Pass>();
-        pass->set_name(ccl::ustring("Combined"));
-        pass->set_type(ccl::PASS_COMBINED);
+        // Standard AOV pass definitions
+        struct PassDef { const char* name; ccl::PassType type; };
+        static const PassDef standardPasses[] = {
+            {"Combined",  ccl::PASS_COMBINED},
+            {"DiffDir",   ccl::PASS_DIFFUSE_DIRECT},
+            {"DiffInd",   ccl::PASS_DIFFUSE_INDIRECT},
+            {"DiffCol",   ccl::PASS_DIFFUSE_COLOR},
+            {"GlossDir",  ccl::PASS_GLOSSY_DIRECT},
+            {"GlossInd",  ccl::PASS_GLOSSY_INDIRECT},
+            {"GlossCol",  ccl::PASS_GLOSSY_COLOR},
+            {"TransDir",  ccl::PASS_TRANSMISSION_DIRECT},
+            {"TransInd",  ccl::PASS_TRANSMISSION_INDIRECT},
+            {"TransCol",  ccl::PASS_TRANSMISSION_COLOR},
+            {"Emit",      ccl::PASS_EMISSION},
+            {"Env",       ccl::PASS_BACKGROUND},
+            {"AO",        ccl::PASS_AO},
+            {"Normal",    ccl::PASS_NORMAL},
+            {"UV",        ccl::PASS_UV},
+            {"Depth",     ccl::PASS_DEPTH},
+        };
+
+        // Build the set of passes to create. Always include "Combined".
+        std::set<std::string> passesToCreate;
+        passesToCreate.insert("Combined");
+        for (const auto& pn : requestedPasses) {
+            passesToCreate.insert(pn);
+        }
+
+        // Create requested standard passes
+        printf("[Cycles AOV] Creating passes. Requested: %d\n", (int)passesToCreate.size());
+        for (const auto& pd : standardPasses) {
+            if (passesToCreate.find(pd.name) != passesToCreate.end()) {
+                ccl::Pass* pass = scene->create_node<ccl::Pass>();
+                pass->set_name(ccl::ustring(pd.name));
+                pass->set_type(pd.type);
+                printf("[Cycles AOV]   Created pass '%s' type=%d\n", pd.name, (int)pd.type);
+            }
+        }
+
+        // --- Light group passes ---
+        // Collect unique light group names from all lights in the scene
+        std::set<std::string> lightGroupNames;
+        const std::vector<SceneNode>& lgScan = sg.nodes();
+        for (size_t li = 0; li < lgScan.size(); ++li) {
+            const SceneNode& lsn = lgScan[li];
+            if (lsn.type != eSceneNodeLight || !lsn.visible) continue;
+            NodePtr lgNode = lsn.sourceNode.lock();
+            if (!lgNode) continue;
+            Light3D* lg3d = dynamic_cast<Light3D*>(lgNode->getEffectInstance().get());
+            if (!lg3d) continue;
+            std::string grp = lg3d->getLightGroup();
+            if (!grp.empty()) {
+                lightGroupNames.insert(grp);
+            }
+        }
+
+        // Register light groups with the scene and create per-group Combined passes
+        int nextLightGroupId = 0;
+        for (const auto& groupName : lightGroupNames) {
+            scene->lightgroups[ccl::ustring(groupName)] = nextLightGroupId++;
+
+            // Create a Combined pass for this light group
+            std::string lgPassName = "Combined_" + groupName;
+            ccl::Pass* lgPass = scene->create_node<ccl::Pass>();
+            lgPass->set_name(ccl::ustring(lgPassName));
+            lgPass->set_type(ccl::PASS_COMBINED);
+            lgPass->set_lightgroup(ccl::ustring(groupName));
+            printf("[Cycles AOV]   Created lightgroup pass '%s' group='%s' id=%d\n",
+                   lgPassName.c_str(), groupName.c_str(), nextLightGroupId - 1);
+        }
     }
 
     scene->film->set_exposure(1.0f);
+    // Transparent bg when no dome light (proper alpha for comp over).
+    // When dome light present, show HDRI as visible background.
+    scene->background->set_transparent(!hasDome);
 
     // --- Integrator ---
-    scene->integrator->set_max_bounce(4);
-    scene->integrator->set_max_diffuse_bounce(4);
-    scene->integrator->set_max_glossy_bounce(4);
+    IntegratorParams integ;
+    if (integrator) integ = *integrator;
+
+    scene->integrator->set_max_bounce(integ.maxBounces);
+    scene->integrator->set_max_diffuse_bounce(integ.diffuseBounces);
+    scene->integrator->set_max_glossy_bounce(integ.glossyBounces);
+    scene->integrator->set_max_transmission_bounce(integ.transmissionBounces);
+
+    if (integ.aoFactor > 0.0f) {
+        scene->integrator->set_ao_factor(integ.aoFactor);
+        scene->integrator->set_ao_bounces(integ.aoBounces);
+        scene->integrator->set_ao_distance(integ.aoDistance);
+    }
+
+    // Light sampling — reduces noise especially with HDRI environments
+    scene->integrator->set_use_light_tree(true);
+
+    // Motion blur
+    if (motionBlur && motionBlur->enabled) {
+        scene->integrator->set_motion_blur(true);
+    }
+
     scene->integrator->tag_update(scene, ccl::Integrator::UPDATE_ALL);
 
     // --- Sync geometry from SceneGraph ---
@@ -871,6 +1119,313 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     for (size_t i = 0; i < sceneNodes.size(); ++i) {
         const SceneNode& sn = sceneNodes[i];
         if (!sn.visible) continue;
+
+        // --- Particles: render as PointCloud, skip mesh path ---
+        if (sn.type == eSceneNodeParticles) {
+            NodePtr srcNode = sn.sourceNode.lock();
+            if (!srcNode) continue;
+            EffectInstancePtr effect = srcNode->getEffectInstance();
+            if (!effect) continue;
+
+            ParticleDataPtr particleData;
+            ParticleEmitter* pEmitter = dynamic_cast<ParticleEmitter*>(effect.get());
+            ParticleGravity* pGravity = dynamic_cast<ParticleGravity*>(effect.get());
+            if (pEmitter) particleData = pEmitter->getParticleData(time);
+            else if (pGravity) particleData = pGravity->getParticleData(time);
+
+            if (!particleData || particleData->numParticles() == 0) continue;
+
+            int count = particleData->numParticles();
+
+            // Create PointCloud geometry
+            ccl::PointCloud* pc = scene->create_node<ccl::PointCloud>();
+            pc->reserve(count);
+
+            for (int pi = 0; pi < count; ++pi) {
+                const Particle& p = particleData->particles[pi];
+                pc->add_point(ccl::make_float3(p.px, p.py, p.pz),
+                              p.size > 0.001f ? p.size : 0.01f,
+                              0);
+            }
+
+            // Motion blur: evaluate particles at a second time step
+            if (motionBlur && motionBlur->enabled) {
+                // Compute shutter open/close times
+                float shutterOpen = 0, shutterClose = 0;
+                float st = motionBlur->shutterTime;
+                switch (motionBlur->shutterPosition) {
+                    case 0: // Start
+                        shutterOpen = 0; shutterClose = st; break;
+                    case 1: // Center
+                        shutterOpen = -st * 0.5f; shutterClose = st * 0.5f; break;
+                    case 2: // End
+                        shutterOpen = -st; shutterClose = 0; break;
+                }
+
+                // Get particle data at shutter open time
+                ParticleDataPtr dataOpen;
+                double timeOpen = time + shutterOpen;
+                if (pEmitter) dataOpen = pEmitter->getParticleData(timeOpen);
+                else if (pGravity) dataOpen = pGravity->getParticleData(timeOpen);
+
+                // Get particle data at shutter close time
+                ParticleDataPtr dataClose;
+                double timeClose = time + shutterClose;
+                if (pEmitter) dataClose = pEmitter->getParticleData(timeClose);
+                else if (pGravity) dataClose = pGravity->getParticleData(timeClose);
+
+                if (dataOpen && dataClose &&
+                    dataOpen->numParticles() > 0 && dataClose->numParticles() > 0) {
+                    // Use 3 motion steps: open, center (implicit), close
+                    pc->set_motion_steps(3);
+                    pc->set_use_motion_blur(true);
+
+                    // Motion attribute stores positions for step 0 (open) and step 1 (close)
+                    // Center (step at index motion_steps/2) is the main points array
+                    ccl::Attribute* motionAttr = pc->attributes.add(
+                        ccl::ATTR_STD_MOTION_VERTEX_POSITION);
+                    ccl::float4* motionData = motionAttr->data_float4();
+
+                    // Step 0 = shutter open positions
+                    int openCount = std::min(count, dataOpen->numParticles());
+                    for (int pi = 0; pi < count; ++pi) {
+                        if (pi < openCount) {
+                            const Particle& po = dataOpen->particles[pi];
+                            float r = po.size > 0.001f ? po.size : 0.01f;
+                            motionData[pi] = ccl::make_float4(po.px, po.py, po.pz, r);
+                        } else {
+                            // Particle didn't exist at shutter open — use center position
+                            const Particle& p = particleData->particles[pi];
+                            float r = p.size > 0.001f ? p.size : 0.01f;
+                            motionData[pi] = ccl::make_float4(p.px, p.py, p.pz, r);
+                        }
+                    }
+
+                    // Step 1 = shutter close positions
+                    int closeCount = std::min(count, dataClose->numParticles());
+                    for (int pi = 0; pi < count; ++pi) {
+                        if (pi < closeCount) {
+                            const Particle& pc2 = dataClose->particles[pi];
+                            float r = pc2.size > 0.001f ? pc2.size : 0.01f;
+                            motionData[count + pi] = ccl::make_float4(pc2.px, pc2.py, pc2.pz, r);
+                        } else {
+                            const Particle& p = particleData->particles[pi];
+                            float r = p.size > 0.001f ? p.size : 0.01f;
+                            motionData[count + pi] = ccl::make_float4(p.px, p.py, p.pz, r);
+                        }
+                    }
+                }
+            }
+
+            // Create a simple emissive-ish shader using particle color
+            // Use the first particle's color as a base (per-point color via attribute)
+            ccl::Shader* pShader = scene->create_node<ccl::Shader>();
+            auto pGraph = ccl::make_unique<ccl::ShaderGraph>();
+            ccl::PrincipledBsdfNode* pBsdf = pGraph->create_node<ccl::PrincipledBsdfNode>();
+
+            // Use vertex color attribute for per-particle color
+            ccl::AttributeNode* colorAttr = pGraph->create_node<ccl::AttributeNode>();
+            colorAttr->set_attribute(ccl::ustring("vertex_color"));
+            pGraph->connect(colorAttr->output("Color"), pBsdf->input("Base Color"));
+            pGraph->connect(colorAttr->output("Color"), pBsdf->input("Emission Color"));
+            pBsdf->set_emission_strength(1.0f);
+            pBsdf->set_roughness(0.5f);
+
+            pGraph->connect(pBsdf->output("BSDF"), pGraph->output()->input("Surface"));
+            pShader->set_graph(std::move(pGraph));
+            pShader->tag_update(scene);
+
+            ccl::array<ccl::Node*> used_shaders;
+            used_shaders.push_back_slow(pShader);
+            pc->set_used_shaders(used_shaders);
+
+            // Set per-point color attribute
+            ccl::Attribute* vcol = pc->attributes.add(ccl::ustring("vertex_color"),
+                                                       ccl::TypeRGBA,
+                                                       ccl::ATTR_ELEMENT_VERTEX);
+            ccl::float4* colorData = vcol->data_float4();
+            for (int pi = 0; pi < count; ++pi) {
+                const Particle& p = particleData->particles[pi];
+                float ageFrac = (p.life > 0) ? (p.age / p.life) : 1.0f;
+                float alpha = p.a * (1.0f - ageFrac);
+                colorData[pi] = ccl::make_float4(p.r, p.g, p.b, alpha);
+            }
+
+            // Create object
+            ccl::Object* obj = scene->create_node<ccl::Object>();
+            obj->set_geometry(pc);
+            obj->set_tfm(ccl::transform_identity());
+
+            // Apply RenderPass visibility if provided
+            if (visibilityMap) {
+                auto it = visibilityMap->find(sn.name);
+                if (it != visibilityMap->end()) {
+                    const ObjectVisibility& vis = it->second;
+                    if (vis.isExcluded) {
+                        obj->set_visibility(0);
+                    } else {
+                        obj->set_visibility(vis.rayVisibility);
+                    }
+                } else {
+                    obj->set_visibility(0);
+                }
+            }
+
+            obj->tag_update(scene);
+            continue; // Skip mesh path
+        }
+
+        // --- Volumes: render via ccl::Volume ---
+        if (sn.type == eSceneNodeVolume) {
+            NodePtr srcNode = sn.sourceNode.lock();
+            if (!srcNode) continue;
+            EffectInstancePtr effect = srcNode->getEffectInstance();
+            if (!effect) continue;
+
+            std::vector<float> densityData;
+            int volRes = 0;
+            float bboxMin[3] = {-1,-1,-1}, bboxMax[3] = {1,1,1};
+            float volColorR = 1, volColorG = 1, volColorB = 1;
+            float volDensity = 1.0f;
+
+            ReadVDB* readVdb = dynamic_cast<ReadVDB*>(effect.get());
+            Volume3D* vol3d = dynamic_cast<Volume3D*>(effect.get());
+
+            if (readVdb) {
+                ReadVDB::VDBVolumeData vd;
+                if (!readVdb->getVolumeData(time, vd) || vd.densityData.empty()) continue;
+                densityData = std::move(vd.densityData);
+                volRes = vd.resolution;
+                bboxMin[0] = vd.bboxMinX; bboxMin[1] = vd.bboxMinY; bboxMin[2] = vd.bboxMinZ;
+                bboxMax[0] = vd.bboxMaxX; bboxMax[1] = vd.bboxMaxY; bboxMax[2] = vd.bboxMaxZ;
+                volColorR = vd.colorR; volColorG = vd.colorG; volColorB = vd.colorB;
+                volDensity = vd.density;
+            } else if (vol3d) {
+                vol3d->generateVolumeData(time, densityData, volRes);
+                if (densityData.empty() || volRes <= 0) continue;
+                Volume3D::VolumeParams vp = vol3d->getVolumeParams(time);
+                volColorR = vp.colorR; volColorG = vp.colorG; volColorB = vp.colorB;
+                volDensity = vp.density;
+            } else {
+                continue;
+            }
+
+            printf("[Cycles Volume] Creating volume '%s': res=%d density=%.2f\n",
+                   sn.name.c_str(), volRes, volDensity);
+
+            // Create Cycles Volume geometry (requires WITH_OPENVDB build)
+            ccl::Volume* volume = scene->create_node<ccl::Volume>();
+
+            float extentX = bboxMax[0] - bboxMin[0];
+            float extentY = bboxMax[1] - bboxMin[1];
+            float extentZ = bboxMax[2] - bboxMin[2];
+            if (extentX < 0.001f) extentX = 2.0f;
+            if (extentY < 0.001f) extentY = 2.0f;
+            if (extentZ < 0.001f) extentZ = 2.0f;
+            float voxelSize = std::max({extentX, extentY, extentZ}) / (float)volRes;
+            volume->set_step_size(voxelSize * 0.5f);
+            volume->set_object_space(true);
+
+            // Bounding box mesh (8 verts, 12 tris)
+            int numVerts = 8;
+            int numTris = 12;
+            volume->reserve_mesh(numVerts, numTris);
+            float x0 = bboxMin[0], y0 = bboxMin[1], z0 = bboxMin[2];
+            float x1 = bboxMax[0], y1 = bboxMax[1], z1 = bboxMax[2];
+            volume->add_vertex(ccl::make_float3(x0, y0, z0));
+            volume->add_vertex(ccl::make_float3(x1, y0, z0));
+            volume->add_vertex(ccl::make_float3(x1, y1, z0));
+            volume->add_vertex(ccl::make_float3(x0, y1, z0));
+            volume->add_vertex(ccl::make_float3(x0, y0, z1));
+            volume->add_vertex(ccl::make_float3(x1, y0, z1));
+            volume->add_vertex(ccl::make_float3(x1, y1, z1));
+            volume->add_vertex(ccl::make_float3(x0, y1, z1));
+            volume->add_triangle(0,1,2, 0, false); volume->add_triangle(0,2,3, 0, false);
+            volume->add_triangle(4,6,5, 0, false); volume->add_triangle(4,7,6, 0, false);
+            volume->add_triangle(0,4,5, 0, false); volume->add_triangle(0,5,1, 0, false);
+            volume->add_triangle(2,6,7, 0, false); volume->add_triangle(2,7,3, 0, false);
+            volume->add_triangle(0,3,7, 0, false); volume->add_triangle(0,7,4, 0, false);
+            volume->add_triangle(1,5,6, 0, false); volume->add_triangle(1,6,2, 0, false);
+
+            // Volume shader: homogeneous absorption + scatter + emission
+            // Using basic nodes (not PrincipledVolume) to avoid voxel attribute dependency
+            ccl::Shader* volShader = scene->create_node<ccl::Shader>();
+            {
+                auto volGraph = ccl::make_unique<ccl::ShaderGraph>();
+
+                ccl::AbsorptionVolumeNode* absNode = volGraph->create_node<ccl::AbsorptionVolumeNode>();
+                absNode->set_color(ccl::make_float3(volColorR, volColorG, volColorB));
+                absNode->set_density(volDensity);
+
+                ccl::ScatterVolumeNode* scatNode = volGraph->create_node<ccl::ScatterVolumeNode>();
+                scatNode->set_color(ccl::make_float3(volColorR, volColorG, volColorB));
+                scatNode->set_density(volDensity * 0.5f);
+                scatNode->set_anisotropy(0.0f);
+
+                // Add both closures via an AddClosureNode
+                ccl::AddClosureNode* addNode = volGraph->create_node<ccl::AddClosureNode>();
+                volGraph->connect(absNode->output("Volume"), addNode->input("Closure1"));
+                volGraph->connect(scatNode->output("Volume"), addNode->input("Closure2"));
+                volGraph->connect(addNode->output("Closure"), volGraph->output()->input("Volume"));
+
+                volShader->set_graph(std::move(volGraph));
+                volShader->tag_update(scene);
+            }
+
+            ccl::array<ccl::Node*> volShaders;
+            volShaders.push_back_slow(volShader);
+            volume->set_used_shaders(volShaders);
+
+            // Load density voxel data via DenseVolumeLoader (→ OpenVDB → NanoVDB)
+            // Build voxel-to-world transform: maps [0,res)^3 → world bbox
+            float voxSizeX = extentX / (float)volRes;
+            float voxSizeY = extentY / (float)volRes;
+            float voxSizeZ = extentZ / (float)volRes;
+            ccl::Transform voxelToWorld = ccl::transform_identity();
+            voxelToWorld.x.x = voxSizeX; voxelToWorld.x.w = bboxMin[0];
+            voxelToWorld.y.y = voxSizeY; voxelToWorld.y.w = bboxMin[1];
+            voxelToWorld.z.z = voxSizeZ; voxelToWorld.z.w = bboxMin[2];
+
+            ccl::Attribute* densityAttr = volume->attributes.add(
+                ccl::ustring("density"), ccl::TypeFloat, ccl::ATTR_ELEMENT_VOXEL);
+            auto loader = ccl::unique_ptr<ccl::ImageLoader>(
+                new ccl::DenseVolumeLoader(densityData, volRes, voxelToWorld));
+            ccl::ImageParams imgParams;
+            imgParams.interpolation = ccl::INTERPOLATION_LINEAR;
+            ccl::ImageHandle handle = scene->image_manager->add_image(
+                std::move(loader), imgParams, true);
+            densityAttr->data_voxel() = handle;
+
+            volume->tag_update(scene, true);
+
+            printf("[Cycles Volume] Volume created: %d verts, %d tris, step=%.4f density=%.2f\n",
+                   numVerts, numTris, voxelSize * 0.5f, volDensity);
+
+            // Create object with world transform from scene node
+            ccl::Object* obj = scene->create_node<ccl::Object>();
+            obj->set_geometry(volume);
+
+            ccl::Transform objTfm;
+            memcpy(&objTfm, sn.worldMatrix, sizeof(float) * 12);
+            obj->set_tfm(objTfm);
+
+            printf("[Cycles Volume] bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f] density=%.2f\n",
+                   x0, y0, z0, x1, y1, z1, volDensity);
+
+            // Apply RenderPass visibility if provided
+            if (visibilityMap) {
+                auto it = visibilityMap->find(sn.name);
+                if (it != visibilityMap->end()) {
+                    const ObjectVisibility& vis = it->second;
+                    obj->set_visibility(vis.isExcluded ? 0 : vis.rayVisibility);
+                } else {
+                    obj->set_visibility(0);
+                }
+            }
+
+            obj->tag_update(scene);
+            continue; // Skip mesh path
+        }
 
         std::vector<ccl::float3> verts;
         std::vector<int> triVerts;
@@ -1035,6 +1590,28 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         ccl::Object* obj = scene->create_node<ccl::Object>();
         obj->set_geometry(mesh);
         obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix));
+
+        // Apply RenderPass visibility if provided
+        if (visibilityMap) {
+            auto it = visibilityMap->find(sn.name);
+            if (it != visibilityMap->end()) {
+                const ObjectVisibility& vis = it->second;
+                if (vis.isExcluded) {
+                    obj->set_visibility(0);
+                } else {
+                    obj->set_visibility(vis.rayVisibility);
+                    obj->set_use_holdout(vis.isHoldout);
+                    obj->set_is_shadow_catcher(vis.isShadowCatcher);
+                    if (vis.isShadowCatcher) {
+                        scene->film->set_use_approximate_shadow_catcher(true);
+                    }
+                }
+            } else {
+                // Object not in any category — excluded
+                obj->set_visibility(0);
+            }
+        }
+
         obj->tag_update(scene);
     }
 }
@@ -1060,6 +1637,64 @@ CyclesRenderer::renderToBufferWithCamera(const SceneGraph& sg,
     return !outPixels.empty();
 }
 
+bool
+CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
+                                                   double camTX, double camTY, double camTZ,
+                                                   double camRX, double camRY, double camRZ,
+                                                   double focalLength, double hAperture,
+                                                   const std::vector<std::string>& requestedPasses,
+                                                   std::map<std::string, std::vector<float>>& outPassBuffers,
+                                                   int width, int height, int samples,
+                                                   double time,
+                                                   const std::map<std::string, ObjectVisibility>* visibilityMap,
+                                                   const std::set<std::string>* activeLights,
+                                                   const DOFParams* dof,
+                                                   const MotionBlurParams* motionBlur,
+                                                   const IntegratorParams* integrator)
+{
+    initialize(width, height, samples);
+    syncSceneWithCamera(sg, camTX, camTY, camTZ, camRX, camRY, camRZ,
+                        focalLength, hAperture, time, requestedPasses,
+                        visibilityMap, activeLights, dof, motionBlur, integrator);
+
+    // Build the full list of pass names for the output driver.
+    // This includes the requested standard passes plus any light group Combined passes.
+    std::vector<std::string> allPassNames;
+
+    // Always include Combined
+    allPassNames.push_back("Combined");
+    for (const auto& pn : requestedPasses) {
+        if (pn != "Combined") {
+            allPassNames.push_back(pn);
+        }
+    }
+
+    // Collect light group pass names from the scene
+    const std::vector<SceneNode>& lgNodes = sg.nodes();
+    std::set<std::string> lgNames;
+    for (size_t i = 0; i < lgNodes.size(); ++i) {
+        const SceneNode& sn = lgNodes[i];
+        if (sn.type != eSceneNodeLight || !sn.visible) continue;
+        NodePtr lgNode = sn.sourceNode.lock();
+        if (!lgNode) continue;
+        Light3D* lg3d = dynamic_cast<Light3D*>(lgNode->getEffectInstance().get());
+        if (!lg3d) continue;
+        std::string grp = lg3d->getLightGroup();
+        if (!grp.empty()) lgNames.insert(grp);
+    }
+    for (const auto& grp : lgNames) {
+        allPassNames.push_back("Combined_" + grp);
+    }
+
+    _impl->session->set_output_driver(
+        ccl::make_unique<ccl::NatronMultiPassOutputDriver>(&outPassBuffers, allPassNames, width, height));
+
+    startRender();
+    waitForRender();
+
+    return !outPassBuffers.empty();
+}
+
 void
 CyclesRenderer::setSamples(int samples)
 {
@@ -1082,6 +1717,91 @@ int
 CyclesRenderer::getHeight() const
 {
     return _impl->height;
+}
+
+bool
+CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
+                                    const std::map<std::string, std::vector<float>>& passBuffers,
+                                    int width, int height)
+{
+    // Map pass names to EXR layer/channel names
+    struct LayerDef { std::string passName; std::string prefix; int nCh; std::vector<std::string> chans; };
+    std::vector<LayerDef> layers;
+
+    auto add = [&](const char* pass, const char* prefix, int n, std::vector<std::string> ch) {
+        if (passBuffers.count(pass)) layers.push_back({pass, prefix, n, ch});
+    };
+
+    add("Combined", "Color",           4, {"R","G","B","A"});
+    add("DiffDir",  "DiffuseDirect",   3, {"R","G","B"});
+    add("DiffInd",  "DiffuseIndirect", 3, {"R","G","B"});
+    add("DiffCol",  "DiffuseColor",    3, {"R","G","B"});
+    add("GlossDir", "GlossyDirect",    3, {"R","G","B"});
+    add("GlossInd", "GlossyIndirect",  3, {"R","G","B"});
+    add("GlossCol", "GlossyColor",     3, {"R","G","B"});
+    add("Emit",     "Emission",        3, {"R","G","B"});
+    add("Env",      "Environment",     3, {"R","G","B"});
+    add("AO",       "AO",             1, {"A"});
+    add("Normal",   "Normal",          3, {"X","Y","Z"});
+    add("Depth",    "depth",           1, {"Z"});
+    add("UV",       "UV",              3, {"U","V","W"});
+
+    // Light group passes
+    for (auto& entry : passBuffers) {
+        if (entry.first.substr(0, 9) == "Combined_") {
+            std::string grp = entry.first.substr(9);
+            layers.push_back({entry.first, "LightGroup_" + grp, 3, {"R","G","B"}});
+        }
+    }
+
+    if (layers.empty()) return false;
+
+    // Build channel list
+    // Combined/beauty uses unprefixed names (R,G,B,A) per EXR convention
+    int totalCh = 0;
+    std::vector<std::string> chanNames;
+    for (auto& l : layers) {
+        bool isBeauty = (l.passName == "Combined");
+        for (auto& c : l.chans) {
+            chanNames.push_back(isBeauty ? c : (l.prefix + "." + c));
+            totalCh++;
+        }
+    }
+
+    OIIO::ImageSpec spec(width, height, totalCh, OIIO::TypeDesc::FLOAT);
+    spec.channelnames = chanNames;
+
+    auto out = OIIO::ImageOutput::create(filepath);
+    if (!out) return false;
+    if (!out->open(filepath, spec)) return false;
+
+    // Interleave all channels
+    std::vector<float> pixels(width * height * totalCh, 0.0f);
+    int offset = 0;
+    for (auto& l : layers) {
+        auto it = passBuffers.find(l.passName);
+        if (it == passBuffers.end()) { offset += l.nCh; continue; }
+        const auto& src = it->second;
+
+        for (int y = 0; y < height; ++y) {
+            int srcY = (height - 1) - y; // flip Y (bottom-up → top-down)
+            for (int x = 0; x < width; ++x) {
+                int si = (srcY * width + x) * 4;
+                int di = (y * width + x) * totalCh + offset;
+                for (int c = 0; c < l.nCh; ++c) {
+                    pixels[di + c] = src[si + c];
+                }
+            }
+        }
+        offset += l.nCh;
+    }
+
+    out->write_image(OIIO::TypeDesc::FLOAT, pixels.data());
+    out->close();
+
+    printf("[CyclesRenderer] Saved EXR: %s (%dx%d, %d ch, %d layers)\n",
+           filepath.c_str(), width, height, totalCh, (int)layers.size());
+    return true;
 }
 
 bool

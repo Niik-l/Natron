@@ -56,7 +56,6 @@
 #include "Gui/GuiApplicationManager.h" // appPTR
 #include "Gui/GuiPrivate.h"
 #include "Gui/Histogram.h"
-#include "Gui/Viewport3D.h"
 #include "Gui/Viewport3DTab.h"
 #include "Gui/Menu.h"
 #include "Gui/NodeGraph.h"

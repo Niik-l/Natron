@@ -52,6 +52,7 @@ struct Card3DPrivate
     KnobDoubleWPtr emissionStrength;
     KnobDoubleWPtr transmission, ior;
     KnobFileWPtr textureFile;
+    KnobChoiceWPtr diffuseColorspace;
 };
 
 
@@ -230,6 +231,19 @@ Card3D::initializeKnobs()
         k->setName("textureFile");
         k->setHintToolTip(tr("Base color / albedo texture. Supports .exr, .hdr, .png, .jpg"));
         texPage->addKnob(k); _imp->textureFile = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Diffuse Colorspace"));
+        k->setName("diffuseColorspace");
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("sRGB", "", "sRGB gamma-encoded (PNG, JPEG)"));
+        entries.push_back(ChoiceOption("Linear", "", "Linear / scene-referred (EXR, HDR)"));
+        entries.push_back(ChoiceOption("ACEScg", "", "ACEScg (AP1 linear, ACES pipeline)"));
+        entries.push_back(ChoiceOption("Raw", "", "Raw data, no conversion"));
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        k->setHintToolTip(tr("Color space of the diffuse texture file."));
+        texPage->addKnob(k); _imp->diffuseColorspace = k;
     }
 }
 
@@ -437,6 +451,14 @@ double Card3D::getMaterialIOR(double time) const
 
 std::string Card3D::getMaterialTextureFile() const
 { KnobFilePtr k = _imp->textureFile.lock(); return k ? k->getValue() : std::string(); }
+
+std::string Card3D::getMaterialDiffuseColorspace() const
+{
+    KnobChoicePtr k = _imp->diffuseColorspace.lock();
+    int idx = k ? k->getValue() : 0;
+    const char* names[] = {"sRGB", "Linear", "ACEScg", "Raw"};
+    return (idx >= 0 && idx < 4) ? names[idx] : "sRGB";
+}
 
 bool Card3D::hasMaterialInput() const
 {

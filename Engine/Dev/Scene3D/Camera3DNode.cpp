@@ -55,6 +55,9 @@ struct Camera3DNodePrivate
 
     // Projection
     KnobChoiceWPtr projectionType; // 0=perspective, 1=orthographic
+
+    // Depth of Field (F-Stop on Lens page; other DOF params on CyclesRender)
+    KnobDoubleWPtr fStop;
 };
 
 
@@ -186,6 +189,15 @@ Camera3DNode::initializeKnobs()
         k->setDefaultValue(0);
         lensPage->addKnob(k); _imp->projectionType = k;
     }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("F-Stop"));
+        k->setName("fStop");
+        k->setDefaultValue(2.8);
+        k->setMinimum(0.1); k->setDisplayMinimum(0.5); k->setDisplayMaximum(32.0);
+        k->setHintToolTip(tr("Lens f-stop. Controls depth of field strength when DOF is enabled on CyclesRender."));
+        k->setAnimationEnabled(true);
+        lensPage->addKnob(k); _imp->fStop = k;
+    }
 }
 
 // ==================== CameraProvider interface ====================
@@ -231,6 +243,13 @@ double
 Camera3DNode::getCameraFar(double time) const
 {
     return _imp->farClip.lock()->getValueAtTime(time);
+}
+
+double
+Camera3DNode::getCameraFStop(double time) const
+{
+    KnobDoublePtr k = _imp->fStop.lock();
+    return k ? k->getValueAtTime(time) : 2.8;
 }
 
 // ==================== RoD / Render ====================

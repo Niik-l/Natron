@@ -105,6 +105,8 @@ public:
     double getAreaSizeU(double time) const;
     double getAreaSizeV(double time) const;
     double getSpread(double time) const;
+    std::string getLightGroup() const;
+    bool isRenderable() const;
 
 private:
 

@@ -1,5 +1,34 @@
 # Natron
 
+## Fork: Natron 3D + Cycles
+
+This fork extends Natron with a full 3D system, Cycles renderer, deep compositing pipeline, and particle system — 39 new built-in nodes.
+
+**Highlights:**
+- 3D viewport with ImGuizmo gizmos (translate/rotate/scale)
+- Cycles renderer integration
+- PBR materials with texture maps (diffuse, normal, roughness, metallic, emission)
+- Alembic mesh + camera import
+- HDRI environment lighting with importance sampling
+- Motion blur, depth of field, AOV render passes
+- Deep compositing (16 nodes)
+- Particle system with Cycles rendering
+- SphericalTransform (8 projection types)
+- ColorChartMatch (color chart matching with matrix export)
+
+**Underlying upgrades:**
+- Qt5 to Qt6 + PySide6/Shiboken6
+- Python 3.14
+- OpenGL 2.0 to OpenGL 4.3 (compatibility profile)
+- Eigen 3.3.7 to 3.4.0
+- C++17
+
+**Platform note:** The OpenGL 4.3 upgrade means this fork currently requires Windows or Linux. macOS is limited to OpenGL 4.1 and is not supported at this time.
+
+See [NODE_REGISTRY.md](NODE_REGISTRY.md) for the full node list, [DEV_3D_SYSTEM_CHANGELOG.md](DEV_3D_SYSTEM_CHANGELOG.md) for technical details, and [BUILDING.md](BUILDING.md) for build instructions.
+
+---
+
 [![GPL2 License](http://img.shields.io/:license-gpl2-blue.svg?)](https://github.com/NatronGitHub/Natron/blob/master/LICENSE.txt) [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-v1.4%20adopted-ff69b4.svg)](CODE_OF_CONDUCT.md) [![Build Status](https://api.travis-ci.org/NatronGitHub/Natron.svg?branch=RB-2.4)](https://travis-ci.org/NatronGitHub/Natron) [![Coverage Status](https://coveralls.io/repos/NatronGitHub/Natron/badge.svg?branch=master)](https://coveralls.io/r/NatronGitHub/Natron?branch=master) [![Documentation Status](https://readthedocs.org/projects/natron/badge/?version=rb-2.4)](http://natron.readthedocs.io/en/rb-2.4/) [![Packaging status](https://repology.org/badge/tiny-repos/natron.svg)](https://repology.org/project/natron/badges) [![OpenHub](https://www.openhub.net/p/natron/widgets/project_thin_badge?format=gif&ref=Thin+badge)](https://www.openhub.net/p/Natron)
 
 ---
@@ -19,7 +48,7 @@ Natron is looking for developers and maintainers! You can help develop and maint
 - [Git](https://en.wikipedia.org/wiki/Git) and [GitHub](https://en.wikipedia.org/wiki/GitHub)
 - [C++](https://en.wikipedia.org/wiki/C%2B%2B) (Natron uses C++17)
 - [Design patterns](https://en.wikipedia.org/wiki/Software_design_pattern)
-- [Qt](https://www.qt.io/) (Natron builds with Qt5 or Qt6 — see [COMPILING_QT6.md](COMPILING_QT6.md) for Qt6 build instructions)
+- [Qt](https://www.qt.io/) (Natron builds with Qt5 or Qt6 — see [BUILDING.md](BUILDING.md) for build instructions)
 - Basic knowledge of [OpenGL](https://en.wikipedia.org/wiki/OpenGL)
 - Basic knowledge of [Python](<https://en.wikipedia.org/wiki/Python_(programming_language)>)
 

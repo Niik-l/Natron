@@ -50,6 +50,11 @@ public:
     virtual std::string getMaterialEmissionMapFile() const { return std::string(); }
     virtual double getMaterialNormalStrength(double /*time*/) const { return 1.0; }
 
+    // Texture colorspace (for color textures — diffuse, emission)
+    // Returns Cycles-compatible colorspace string: "sRGB", "Linear", "ACEScg", "Raw", "Non-Color"
+    virtual std::string getMaterialDiffuseColorspace() const { return "sRGB"; }
+    virtual std::string getMaterialEmissionColorspace() const { return "sRGB"; }
+
     /** @brief Whether this node has a Material3D connected to its material input. */
     virtual bool hasMaterialInput() const { return false; }
 

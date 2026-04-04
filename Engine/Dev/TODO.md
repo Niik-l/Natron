@@ -83,7 +83,7 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ### Files
 - `Engine/CameraTrackerNode.h/cpp`
-- See also: `D:/_vfx_claude_2025/Natron_3d_track/STATUS.md` for detailed status
+- See also: CameraTracker STATUS.md for detailed status
 
 ---
 

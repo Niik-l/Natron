@@ -47,6 +47,8 @@ struct Light3DPrivate
     KnobFileWPtr environmentMap;
     KnobDoubleWPtr shadowDensity;
     KnobIntWPtr shadowSteps;
+    KnobStringWPtr lightGroup;
+    KnobBoolWPtr renderable;
 };
 
 Light3D::Light3D(NodePtr node)
@@ -227,6 +229,23 @@ Light3D::initializeKnobs()
         lightPage->addKnob(k); _imp->shadowSteps = k;
     }
 
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Light Group"));
+        k->setName("lightGroup");
+        k->setDefaultValue(std::string());
+        k->setHintToolTip(tr("Assign this light to a named group for per-light AOV output (e.g., key, fill, rim)."));
+        lightPage->addKnob(k);
+        _imp->lightGroup = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Renderable"));
+        k->setName("renderable");
+        k->setDefaultValue(true);
+        k->setHintToolTip(tr("When disabled, this light is visible in the 3D viewport but excluded from Cycles rendering."));
+        lightPage->addKnob(k);
+        _imp->renderable = k;
+    }
+
     // Set initial visibility based on default light type (Point)
     updateKnobVisibility();
 }
@@ -275,6 +294,12 @@ double Light3D::getAreaSizeV(double time) const
 double Light3D::getSpread(double time) const
 { KnobDoublePtr k = _imp->spread.lock(); return k ? k->getValueAtTime(time) : 180.0; }
 
+std::string Light3D::getLightGroup() const
+{ KnobStringPtr k = _imp->lightGroup.lock(); return k ? k->getValue() : std::string(); }
+
+bool Light3D::isRenderable() const
+{ KnobBoolPtr k = _imp->renderable.lock(); return k ? k->getValue() : true; }
+
 Light3D::LightType
 Light3D::getLightType() const
 {
@@ -293,7 +318,7 @@ Light3D::updateKnobVisibility()
     bool isSpot = (lt == eLightSpot);
     bool isArea = (lt == eLightArea);
     bool isDome = (lt == eLightDome);
-    bool needsRotation = (lt == eLightSpot || lt == eLightArea || lt == eLightDistant);
+    bool needsRotation = (lt == eLightSpot || lt == eLightArea || lt == eLightDistant || lt == eLightDome);
 
     // Rotation knobs — only for directional lights
     if (KnobDoublePtr k = _imp->rotateX.lock()) k->setSecret(!needsRotation);

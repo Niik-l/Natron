@@ -101,6 +101,9 @@ public:
     virtual double getCameraNear(double time) const OVERRIDE;
     virtual double getCameraFar(double time) const OVERRIDE;
 
+    // Depth of Field (F-Stop only — other DOF params on CyclesRender)
+    virtual double getCameraFStop(double time) const OVERRIDE;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;

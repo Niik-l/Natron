@@ -24,6 +24,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <set>
 #include <vector>
 
 #include "CyclesRenderer.h"
@@ -43,6 +45,10 @@
 #include "../../Project.h"
 #include "../Scene3D/Light3D.h"
 #include "../Scene3D/Material3D.h"
+#include "../Scene3D/RenderPass.h"
+#include "../Scene3D/Volume3D.h"
+#include "../Scene3D/ReadVDB.h"
+#include "../../KnobFile.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -52,14 +58,42 @@ NATRON_NAMESPACE_ENTER
 
 struct CyclesRenderPrivate
 {
-    KnobIntWPtr outputWidth, outputHeight;
     KnobIntWPtr samples;
     KnobIntWPtr maxBounces;
+    KnobIntWPtr diffuseBounces;
+    KnobIntWPtr glossyBounces;
+    KnobIntWPtr transmissionBounces;
     KnobBoolWPtr denoise;
-    KnobChoiceWPtr renderMode; // Preview / Final
+    KnobBoolWPtr previewMode; // half-res render, upscaled to full
 
-    // Render cache
-    std::vector<float> cachedPixels;
+    // Depth of Field (render-side params; F-Stop lives on Camera3D Lens tab)
+    KnobBoolWPtr dofEnabled;
+    KnobDoubleWPtr focusDistance;
+    KnobIntWPtr bokehBlades;
+    KnobDoubleWPtr bladeRotation;
+
+    // Motion blur
+    KnobBoolWPtr motionBlur;
+    KnobDoubleWPtr shutterTime;
+    KnobChoiceWPtr shutterPosition;
+
+    // AOV enable knobs
+    KnobBoolWPtr aovDiffDir, aovDiffInd, aovDiffCol;
+    KnobBoolWPtr aovGlossDir, aovGlossInd, aovGlossCol;
+    KnobBoolWPtr aovEmission, aovEnv, aovAO;
+    KnobBoolWPtr aovNormal, aovDepth, aovUV;
+
+    // Focus helper
+    KnobChoiceWPtr focusObject;
+    KnobButtonWPtr refreshFocusBtn;
+    KnobButtonWPtr setFocusBtn;
+
+    // EXR output
+    KnobFileWPtr exrOutputPath;
+    KnobButtonWPtr saveExrBtn;
+
+    // Render cache (multi-pass)
+    std::map<std::string, std::vector<float>> cachedPassBuffers;
     U64 cachedHash = 0;
     int cachedWidth = 0;
     int cachedHeight = 0;
@@ -131,45 +165,44 @@ CyclesRender::initializeKnobs()
     KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Settings"));
 
     {
-        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Render Mode"));
-        k->setName("renderMode");
-        std::vector<ChoiceOption> entries;
-        entries.push_back(ChoiceOption("Preview", "", "Fast preview: 4 samples, quarter resolution"));
-        entries.push_back(ChoiceOption("Final", "", "Full quality: uses Samples and Resolution settings"));
-        k->populateChoices(entries);
-        k->setDefaultValue(0); // Preview by default
-        k->setHintToolTip(tr("Preview: quarter resolution, max 4 samples — fast but noisy.\n"
-                              "Final: full resolution and sample count — clean but slower."));
-        page->addKnob(k);
-        _imp->renderMode = k;
-    }
-    {
-        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Width"));
-        k->setName("outputWidth"); k->setDefaultValue(1920);
-        k->setMinimum(1); k->setDisplayMinimum(320); k->setDisplayMaximum(4096);
-        k->setHintToolTip(tr("Output image width in pixels. Only used in Final mode."));
-        page->addKnob(k); _imp->outputWidth = k;
-    }
-    {
-        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Height"));
-        k->setName("outputHeight"); k->setDefaultValue(1080);
-        k->setMinimum(1); k->setDisplayMinimum(240); k->setDisplayMaximum(4096);
-        k->setHintToolTip(tr("Output image height in pixels. Only used in Final mode."));
-        page->addKnob(k); _imp->outputHeight = k;
-    }
-    {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Samples"));
         k->setName("samples"); k->setDefaultValue(64);
-        k->setMinimum(1); k->setDisplayMinimum(1); k->setDisplayMaximum(4096);
+        k->setMinimum(1); k->setMaximum(8192);
+        k->setDisplayMinimum(1); k->setDisplayMaximum(4096);
         k->setHintToolTip(tr("Number of path tracing samples. Higher = less noise, slower."));
         page->addKnob(k); _imp->samples = k;
     }
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Bounces"));
-        k->setName("maxBounces"); k->setDefaultValue(4);
-        k->setMinimum(0); k->setDisplayMinimum(0); k->setDisplayMaximum(32);
-        k->setHintToolTip(tr("Maximum number of light bounces (diffuse + glossy + transmission)."));
+        k->setName("maxBounces"); k->setDefaultValue(12);
+        k->setMinimum(0); k->setMaximum(128);
+        k->setDisplayMinimum(0); k->setDisplayMaximum(25);
+        k->setHintToolTip(tr("Maximum total light bounces (all types combined)."));
         page->addKnob(k); _imp->maxBounces = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Diffuse Bounces"));
+        k->setName("diffuseBounces"); k->setDefaultValue(4);
+        k->setMinimum(0); k->setMaximum(128);
+        k->setDisplayMinimum(0); k->setDisplayMaximum(16);
+        k->setHintToolTip(tr("Maximum number of diffuse reflection bounces (0 = diffuse off)."));
+        page->addKnob(k); _imp->diffuseBounces = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Glossy Bounces"));
+        k->setName("glossyBounces"); k->setDefaultValue(4);
+        k->setMinimum(0); k->setMaximum(128);
+        k->setDisplayMinimum(0); k->setDisplayMaximum(16);
+        k->setHintToolTip(tr("Maximum number of glossy/specular reflection bounces (0 = glossy off)."));
+        page->addKnob(k); _imp->glossyBounces = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Transmission Bounces"));
+        k->setName("transmissionBounces"); k->setDefaultValue(8);
+        k->setMinimum(0); k->setMaximum(128);
+        k->setDisplayMinimum(0); k->setDisplayMaximum(16);
+        k->setHintToolTip(tr("Maximum number of transmission/refraction bounces (glass, water)."));
+        page->addKnob(k); _imp->transmissionBounces = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Denoise"));
@@ -177,6 +210,161 @@ CyclesRender::initializeKnobs()
         k->setHintToolTip(tr("Apply OpenImageDenoise after rendering."));
         page->addKnob(k); _imp->denoise = k;
     }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Preview (half res)"));
+        k->setName("previewMode"); k->setDefaultValue(true);
+        k->setHintToolTip(tr("Render at half resolution and upscale. Faster for interactive work."));
+        page->addKnob(k); _imp->previewMode = k;
+    }
+
+    // AOV Passes page
+    KnobPagePtr aovPage = AppManager::createKnob<KnobPage>(this, tr("AOV Passes"));
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Direct")); k->setName("aovDiffDir"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovDiffDir = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Indirect")); k->setName("aovDiffInd"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovDiffInd = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Color")); k->setName("aovDiffCol"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovDiffCol = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Direct")); k->setName("aovGlossDir"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovGlossDir = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Indirect")); k->setName("aovGlossInd"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovGlossInd = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Color")); k->setName("aovGlossCol"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovGlossCol = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Emission")); k->setName("aovEmission"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovEmission = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Environment")); k->setName("aovEnv"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovEnv = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Ambient Occlusion")); k->setName("aovAO"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovAO = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Normal")); k->setName("aovNormal"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovNormal = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Depth")); k->setName("aovDepth"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovDepth = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("UV")); k->setName("aovUV"); k->setDefaultValue(false);
+        aovPage->addKnob(k); _imp->aovUV = k;
+    }
+
+    // --- Depth of Field tab ---
+    KnobPagePtr dofPage = AppManager::createKnob<KnobPage>(this, tr("Depth of Field"));
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Enable DOF"));
+        k->setName("dofEnabled"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Enable depth of field. F-Stop is set on Camera3D's Lens tab."));
+        dofPage->addKnob(k); _imp->dofEnabled = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Focus Distance"));
+        k->setName("focusDistance"); k->setDefaultValue(10.0);
+        k->setMinimum(0.001); k->setDisplayMinimum(0.1); k->setDisplayMaximum(1000.0);
+        k->setHintToolTip(tr("Distance from the camera where objects are in perfect focus (world units)."));
+        k->setAnimationEnabled(true);
+        dofPage->addKnob(k); _imp->focusDistance = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Bokeh Blades"));
+        k->setName("bokehBlades"); k->setDefaultValue(0);
+        k->setMinimum(0); k->setDisplayMinimum(0); k->setDisplayMaximum(16);
+        k->setHintToolTip(tr("Number of aperture blades. 0 = circular bokeh, 3+ = polygonal bokeh."));
+        dofPage->addKnob(k); _imp->bokehBlades = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Blade Rotation"));
+        k->setName("bladeRotation"); k->setDefaultValue(0.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(360.0);
+        k->setHintToolTip(tr("Rotation of the aperture blades in degrees."));
+        k->setAnimationEnabled(true);
+        dofPage->addKnob(k); _imp->bladeRotation = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Focus Object"));
+        k->setName("focusObject");
+        k->setHintToolTip(tr("Select a scene object. Click 'Set Focus' to set Focus Distance to this object."));
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("(none)", "", "No object selected"));
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        dofPage->addKnob(k); _imp->focusObject = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Refresh Objects"));
+        k->setName("refreshFocusObjects");
+        k->setHintToolTip(tr("Re-scan the connected Scene for objects."));
+        dofPage->addKnob(k); _imp->refreshFocusBtn = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Set Focus"));
+        k->setName("setFocus");
+        k->setHintToolTip(tr("Compute the distance from the camera to the selected object and set Focus Distance."));
+        dofPage->addKnob(k); _imp->setFocusBtn = k;
+    }
+
+    // --- Motion Blur tab ---
+    KnobPagePtr mbPage = AppManager::createKnob<KnobPage>(this, tr("Motion Blur"));
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Enable Motion Blur"));
+        k->setName("motionBlur"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Enable motion blur. Animated objects and particles will blur based on shutter time."));
+        mbPage->addKnob(k); _imp->motionBlur = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Shutter Time"));
+        k->setName("shutterTime"); k->setDefaultValue(0.5);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(2.0);
+        k->setHintToolTip(tr("Shutter duration in frames. 0.5 = half frame of blur (common). 1.0 = full frame."));
+        k->setAnimationEnabled(true);
+        mbPage->addKnob(k); _imp->shutterTime = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Shutter Position"));
+        k->setName("shutterPosition");
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("Start", "", "Shutter opens at current frame"));
+        entries.push_back(ChoiceOption("Center", "", "Shutter centered on current frame (most common)"));
+        entries.push_back(ChoiceOption("End", "", "Shutter closes at current frame"));
+        k->populateChoices(entries);
+        k->setDefaultValue(1);
+        mbPage->addKnob(k); _imp->shutterPosition = k;
+    }
+
+    KnobPagePtr outPage = AppManager::createKnob<KnobPage>(this, tr("Output"));
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("EXR Output Path"));
+        k->setName("exrOutputPath");
+        k->setHintToolTip(tr("Path to save multi-layer EXR with all enabled AOV passes."));
+        k->setDefaultValue("");
+        outPage->addKnob(k); _imp->exrOutputPath = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Save Multi-Layer EXR"));
+        k->setName("saveExr");
+        k->setHintToolTip(tr("Render and save all enabled passes to a multi-layer EXR file."));
+        outPage->addKnob(k); _imp->saveExrBtn = k;
+    }
+
     {
         // Hidden knob that is always animated — forces Natron's cache to
         // include time in the ImageKey so render() is called every frame.
@@ -202,14 +390,124 @@ CyclesRender::getPreferredMetadata(NodeMetadata& metadata)
     return eStatusOK;
 }
 
+// Helper: collect enabled AOV pass names from knobs
+static std::vector<std::string>
+getEnabledPasses(const CyclesRenderPrivate* imp)
+{
+    std::vector<std::string> passes;
+    passes.push_back("Combined"); // always
+
+    auto check = [&](const KnobBoolWPtr& knob, const char* name) {
+        KnobBoolPtr k = knob.lock();
+        bool valid = (k != nullptr);
+        bool val = valid ? k->getValue() : false;
+        if (valid && val) passes.push_back(name);
+    };
+    check(imp->aovDiffDir,  "DiffDir");
+    check(imp->aovDiffInd,  "DiffInd");
+    check(imp->aovDiffCol,  "DiffCol");
+    check(imp->aovGlossDir, "GlossDir");
+    check(imp->aovGlossInd, "GlossInd");
+    check(imp->aovGlossCol, "GlossCol");
+    check(imp->aovEmission, "Emit");
+    check(imp->aovEnv,      "Env");
+    check(imp->aovAO,       "AO");
+    check(imp->aovNormal,   "Normal");
+    check(imp->aovDepth,    "Depth");
+    check(imp->aovUV,       "UV");
+    return passes;
+}
+
+// Helper: map pass name to an ImagePlaneDesc
+static ImagePlaneDesc
+passNameToPlane(const std::string& name)
+{
+    if (name == "Combined") return ImagePlaneDesc::getRGBAComponents();
+
+    // 3-channel RGB passes
+    static const char* rgb3[] = {"R", "G", "B"};
+    if (name == "DiffDir")  return ImagePlaneDesc("DiffuseDirect",  "Diffuse Direct",  "", rgb3, 3);
+    if (name == "DiffInd")  return ImagePlaneDesc("DiffuseIndirect","Diffuse Indirect", "", rgb3, 3);
+    if (name == "DiffCol")  return ImagePlaneDesc("DiffuseColor",   "Diffuse Color",   "", rgb3, 3);
+    if (name == "GlossDir") return ImagePlaneDesc("GlossyDirect",   "Glossy Direct",   "", rgb3, 3);
+    if (name == "GlossInd") return ImagePlaneDesc("GlossyIndirect", "Glossy Indirect",  "", rgb3, 3);
+    if (name == "GlossCol") return ImagePlaneDesc("GlossyColor",    "Glossy Color",    "", rgb3, 3);
+    if (name == "Emit")     return ImagePlaneDesc("Emission",       "Emission",        "", rgb3, 3);
+    if (name == "Env")      return ImagePlaneDesc("Environment",    "Environment",     "", rgb3, 3);
+    if (name == "Normal")   return ImagePlaneDesc("Normal",         "Normal",          "", rgb3, 3);
+    if (name == "UV")       return ImagePlaneDesc("UV",             "UV",              "", rgb3, 3);
+
+    // 1-channel passes
+    static const char* a1[] = {"A"};
+    if (name == "AO")       return ImagePlaneDesc("AO",    "Ambient Occlusion", "", a1, 1);
+    if (name == "Depth")    return ImagePlaneDesc("Depth", "Depth",             "", a1, 1);
+
+    // Light group passes (Combined_<name>)
+    if (name.substr(0, 9) == "Combined_") {
+        std::string grpName = name.substr(9);
+        return ImagePlaneDesc("LightGroup_" + grpName, "LightGroup " + grpName, "", rgb3, 3);
+    }
+
+    return ImagePlaneDesc::getRGBAComponents();
+}
+
+void
+CyclesRender::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
+                                              EffectInstance::ComponentsNeededMap* comps,
+                                              double* passThroughTime, int* passThroughView,
+                                              int* passThroughInput)
+{
+    // Declare output planes for all enabled AOVs
+    std::list<ImagePlaneDesc> produced;
+    std::vector<std::string> passes = getEnabledPasses(_imp.get());
+    for (const std::string& p : passes) {
+        produced.push_back(passNameToPlane(p));
+    }
+    printf("[CyclesRender] getComponentsNeededAndProduced: declaring %d planes\n", (int)produced.size());
+    for (const auto& pl : produced) {
+        printf("[CyclesRender]   plane: id='%s' nComps=%d\n", pl.getPlaneID().c_str(), pl.getNumComponents());
+    }
+
+    // Scan scene for light groups so they appear as output planes
+    {
+        AppInstancePtr app = getApp();
+        if (app) {
+            ProjectPtr project = app->getProject();
+            if (project) {
+                NodesList allNodes;
+                project->getNodes_recursive(allNodes, true);
+                std::set<std::string> groups;
+                for (const NodePtr& n : allNodes) {
+                    if (!n || !n->isActivated()) continue;
+                    Light3D* light = dynamic_cast<Light3D*>(n->getEffectInstance().get());
+                    if (!light) continue;
+                    std::string grp = light->getLightGroup();
+                    if (!grp.empty()) groups.insert(grp);
+                }
+                for (const std::string& g : groups) {
+                    produced.push_back(passNameToPlane("Combined_" + g));
+                }
+            }
+        }
+    }
+
+    (*comps)[-1] = produced;
+
+    // Pass through background input for non-rendered planes
+    *passThroughTime = 0;
+    *passThroughView = 0;
+    *passThroughInput = 0;
+}
+
 StatusEnum
 CyclesRender::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
                                     ViewIdx /*view*/, RectD* rod)
 {
+    RectI fmt = getOutputFormat();
     rod->x1 = 0;
     rod->y1 = 0;
-    rod->x2 = _imp->outputWidth.lock()->getValue();
-    rod->y2 = _imp->outputHeight.lock()->getValue();
+    rod->x2 = std::max(1, fmt.width());
+    rod->y2 = std::max(1, fmt.height());
     return eStatusOK;
 }
 
@@ -217,29 +515,31 @@ StatusEnum
 CyclesRender::render(const RenderActionArgs& args)
 {
     assert(!args.outputPlanes.empty());
+    printf("[CyclesRender] render() called with %d output planes:\n", (int)args.outputPlanes.size());
+    for (const auto& pp : args.outputPlanes) {
+        printf("[CyclesRender]   plane: id='%s' label='%s' nComps=%d\n",
+               pp.first.getPlaneID().c_str(), pp.first.getPlaneLabel().c_str(),
+               pp.first.getNumComponents());
+    }
     ImagePtr outImg = args.outputPlanes.front().second;
     if (!outImg) return eStatusFailed;
 
-    // --- Render mode: Preview vs Final ---
-    bool isPreview = true;
+    // Resolution from project format (like Nuke's ScanlineRender)
+    RectI projectFormat = getOutputFormat();
+    int outW = projectFormat.width();
+    int outH = projectFormat.height();
+    if (outW <= 0) outW = 1920;
+    if (outH <= 0) outH = 1080;
+
+    // Preview: render at half res, upscale to full RoD for display
+    bool isPreview = false;
     {
-        KnobChoicePtr modeKnob = _imp->renderMode.lock();
-        if (modeKnob) isPreview = (modeKnob->getValue() == 0);
+        KnobBoolPtr pk = _imp->previewMode.lock();
+        if (pk) isPreview = pk->getValue();
     }
-
-    int outW = _imp->outputWidth.lock()->getValue();
-    int outH = _imp->outputHeight.lock()->getValue();
-    int numSamples = _imp->samples.lock()->getValue();
-
-    // Preview mode: quarter res, 4 samples, 2 bounces
-    int renderW = outW;
-    int renderH = outH;
-    int renderSamples = numSamples;
-    if (isPreview) {
-        renderW = std::max(64, outW / 4);
-        renderH = std::max(64, outH / 4);
-        renderSamples = std::min(numSamples, 4);
-    }
+    int renderW = isPreview ? std::max(64, outW / 2) : outW;
+    int renderH = isPreview ? std::max(64, outH / 2) : outH;
+    int renderSamples = _imp->samples.lock()->getValue();
 
     // --- Get camera from input 2 ---
     EffectInstancePtr camEffect = getInput(2);
@@ -255,9 +555,42 @@ CyclesRender::render(const RenderActionArgs& args)
         camHA = cam->getCameraHAperture(args.time);
     }
 
+    // --- DOF params (Enable/Focus/Bokeh from CyclesRender, F-Stop from Camera3D) ---
+    CyclesRenderer::DOFParams dofParams;
+    {
+        KnobBoolPtr dofKnob = _imp->dofEnabled.lock();
+        if (dofKnob && dofKnob->getValue()) {
+            dofParams.enabled = true;
+            double fstop = cam ? cam->getCameraFStop(args.time) : 2.8;
+            if (fstop < 0.1) fstop = 0.1;
+            dofParams.apertureSize = (float)(camFL / (2.0 * fstop) / 1000.0); // mm to meters
+            dofParams.focusDistance = (float)_imp->focusDistance.lock()->getValueAtTime(args.time);
+            dofParams.blades = _imp->bokehBlades.lock() ? _imp->bokehBlades.lock()->getValue() : 0;
+            dofParams.bladeRotation = (float)(_imp->bladeRotation.lock()->getValueAtTime(args.time) * M_PI / 180.0);
+        }
+    }
+
+    // --- Motion Blur params ---
+    CyclesRenderer::MotionBlurParams mbParams;
+    {
+        KnobBoolPtr mbKnob = _imp->motionBlur.lock();
+        if (mbKnob && mbKnob->getValue()) {
+            mbParams.enabled = true;
+            mbParams.shutterTime = (float)_imp->shutterTime.lock()->getValueAtTime(args.time);
+            mbParams.shutterPosition = _imp->shutterPosition.lock() ? _imp->shutterPosition.lock()->getValue() : 1;
+        }
+    }
+
     // --- Build scene graph FIRST (needed for hash) ---
     EffectInstancePtr geoEffect = getInput(1);
     if (!geoEffect) return eStatusFailed;
+
+    // If a RenderPass is connected, follow through to its Scene input
+    RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
+    if (renderPass) {
+        geoEffect = renderPass->getInput(0); // RenderPass input 0 = scene
+        if (!geoEffect) return eStatusFailed;
+    }
 
     NodesList allNodes;
     allNodes.push_back(geoEffect->getNode());
@@ -279,6 +612,9 @@ CyclesRender::render(const RenderActionArgs& args)
 
     SceneGraph sceneGraph;
     sceneGraph.rebuild(allNodes, args.time);
+
+    // Collect enabled passes early (needed for hash)
+    std::vector<std::string> requestedPasses = getEnabledPasses(_imp.get());
 
     if (sceneGraph.size() == 0) return eStatusFailed;
 
@@ -326,6 +662,14 @@ CyclesRender::render(const RenderActionArgs& args)
         sceneHash = hashCombine(sceneHash, (U64)renderH);
         sceneHash = hashCombine(sceneHash, (U64)renderSamples);
         sceneHash = hashCombine(sceneHash, isPreview ? 1ULL : 0ULL);
+
+        // Hash enabled AOV passes so changing checkboxes triggers re-render
+        sceneHash = hashCombine(sceneHash, (U64)requestedPasses.size());
+        for (const auto& pn : requestedPasses) {
+            for (size_t ci = 0; ci < pn.size(); ++ci) {
+                sceneHash = hashCombine(sceneHash, (U64)pn[ci]);
+            }
+        }
 
         // Scene graph: hash all node transforms + types + names + count
         const std::vector<SceneNode>& sgNodes = sceneGraph.nodes();
@@ -399,21 +743,79 @@ CyclesRender::render(const RenderActionArgs& args)
                     }
                 }
             }
+            // Hash volume params if it's a volume
+            if (sn.type == eSceneNodeVolume) {
+                NodePtr node = sn.sourceNode.lock();
+                if (node) {
+                    Volume3D* vol3d = dynamic_cast<Volume3D*>(node->getEffectInstance().get());
+                    if (vol3d) {
+                        Volume3D::VolumeParams vp = vol3d->getVolumeParams(args.time);
+                        hashFloat(vp.density); hashFloat(vp.colorR); hashFloat(vp.colorG); hashFloat(vp.colorB);
+                        sceneHash = hashCombine(sceneHash, (U64)vp.resolution);
+                        sceneHash = hashCombine(sceneHash, (U64)vp.volumeType);
+                        hashFloat(vp.noiseScale); hashFloat(vp.noiseDetail);
+                    }
+                    ReadVDB* readVdb = dynamic_cast<ReadVDB*>(node->getEffectInstance().get());
+                    if (readVdb) {
+                        // Hash the file path and transform
+                        KnobIPtr fk = node->getEffectInstance()->getKnobByName("filePath");
+                        if (fk) {
+                            std::string fp = dynamic_cast<KnobFile*>(fk.get())->getValue();
+                            for (size_t ci = 0; ci < fp.size(); ++ci)
+                                sceneHash = hashCombine(sceneHash, (U64)fp[ci]);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Hash RenderPass visibility state
+        if (renderPass) {
+            renderPass->refreshObjectLists();
+            std::map<std::string, ObjectVisibility> visMap = renderPass->getObjectVisibilityMap();
+            for (const auto& entry : visMap) {
+                for (size_t ci = 0; ci < entry.first.size(); ++ci) {
+                    sceneHash = hashCombine(sceneHash, (U64)entry.first[ci]);
+                }
+                sceneHash = hashCombine(sceneHash, (U64)entry.second.rayVisibility);
+                sceneHash = hashCombine(sceneHash, entry.second.isHoldout ? 1ULL : 0ULL);
+                sceneHash = hashCombine(sceneHash, entry.second.isShadowCatcher ? 1ULL : 0ULL);
+                sceneHash = hashCombine(sceneHash, entry.second.isExcluded ? 1ULL : 0ULL);
+            }
+            std::set<std::string> activeLightSet = renderPass->getActiveLights();
+            for (const auto& ln : activeLightSet) {
+                for (size_t ci = 0; ci < ln.size(); ++ci) {
+                    sceneHash = hashCombine(sceneHash, (U64)ln[ci]);
+                }
+            }
+            // Hash pass name too
+            std::string passName = renderPass->getPassName();
+            for (size_t ci = 0; ci < passName.size(); ++ci) {
+                sceneHash = hashCombine(sceneHash, (U64)passName[ci]);
+            }
+        }
+
+        // Hash DOF params
+        if (dofParams.enabled) {
+            sceneHash = hashCombine(sceneHash, 0xD0FULL);
+            hashFloat(dofParams.apertureSize);
+            hashFloat(dofParams.focusDistance);
+            sceneHash = hashCombine(sceneHash, (U64)dofParams.blades);
+            hashFloat(dofParams.bladeRotation);
+        }
+
+        // Hash motion blur params
+        if (mbParams.enabled) {
+            sceneHash = hashCombine(sceneHash, 0xBB11ULL);
+            hashFloat(mbParams.shutterTime);
+            sceneHash = hashCombine(sceneHash, (U64)mbParams.shutterPosition);
         }
     }
 
     // --- Cache check: skip render if nothing changed ---
-    {
-        FILE* cdbg = fopen("D:/cycles_cache_debug.log", "a");
-        if (cdbg) {
-            fprintf(cdbg, "render() time=%.1f hash=%llu cachedHash=%llu match=%d\n",
-                    args.time, (unsigned long long)sceneHash, (unsigned long long)_imp->cachedHash,
-                    (int)(sceneHash == _imp->cachedHash));
-            fclose(cdbg);
-        }
-    }
+
     if (sceneHash == _imp->cachedHash &&
-        !_imp->cachedPixels.empty() &&
+        !_imp->cachedPassBuffers.empty() &&
         _imp->cachedWidth == renderW &&
         _imp->cachedHeight == renderH) {
         // Use cached pixels — no re-render needed
@@ -424,17 +826,45 @@ CyclesRender::render(const RenderActionArgs& args)
             _imp->activeRenderer.reset();
         }
 
-        // --- Render with Cycles (scene graph already built above) ---
+        // --- Build RenderPass visibility map (if connected) ---
+        std::map<std::string, ObjectVisibility> visMap;
+        std::set<std::string> activeLightSet;
+        const std::map<std::string, ObjectVisibility>* visMapPtr = nullptr;
+        const std::set<std::string>* activeLightsPtr = nullptr;
+        if (renderPass) {
+            renderPass->refreshObjectLists();
+            visMap = renderPass->getObjectVisibilityMap();
+            activeLightSet = renderPass->getActiveLights();
+            if (!visMap.empty()) visMapPtr = &visMap;
+            if (!activeLightSet.empty()) activeLightsPtr = &activeLightSet;
+        }
+
+        // --- Integrator params from knobs ---
+        CyclesRenderer::IntegratorParams integParams;
+        {
+            KnobIntPtr k;
+            k = _imp->maxBounces.lock(); if (k) integParams.maxBounces = k->getValue();
+            k = _imp->diffuseBounces.lock(); if (k) integParams.diffuseBounces = k->getValue();
+            k = _imp->glossyBounces.lock(); if (k) integParams.glossyBounces = k->getValue();
+            k = _imp->transmissionBounces.lock(); if (k) integParams.transmissionBounces = k->getValue();
+        }
+
+        // --- Render with Cycles (multi-pass) ---
         _imp->activeRenderer = std::make_unique<CyclesRenderer>();
-        bool ok = _imp->activeRenderer->renderToBufferWithCamera(
+        bool ok = _imp->activeRenderer->renderToBufferWithCameraMultiPass(
             sceneGraph,
             camTX, camTY, camTZ,
             camRX, camRY, camRZ,
             camFL, camHA,
-            _imp->cachedPixels, renderW, renderH, renderSamples,
-            args.time);
+            requestedPasses,
+            _imp->cachedPassBuffers, renderW, renderH, renderSamples,
+            args.time,
+            visMapPtr, activeLightsPtr,
+            dofParams.enabled ? &dofParams : nullptr,
+            mbParams.enabled ? &mbParams : nullptr,
+            &integParams);
 
-        if (!ok || _imp->cachedPixels.empty()) {
+        if (!ok || _imp->cachedPassBuffers.empty()) {
             _imp->activeRenderer.reset();
             return eStatusFailed;
         }
@@ -444,28 +874,101 @@ CyclesRender::render(const RenderActionArgs& args)
         _imp->cachedHeight = renderH;
     }
 
-    // --- Scale pixels to output resolution if preview ---
-    const std::vector<float>& srcPixels = _imp->cachedPixels;
     int srcW = _imp->cachedWidth;
     int srcH = _imp->cachedHeight;
 
-    // --- Copy pixels to output image (with nearest-neighbor upscale for preview) ---
-    RectI outBounds = outImg->getBounds();
-    {
-        Image::WriteAccess wa(outImg.get());
+    // --- TEST: write gradient for non-Color planes to verify pipeline ---
+    for (auto& planePair : args.outputPlanes) {
+        const ImagePlaneDesc& planeDesc = planePair.first;
+        ImagePtr planeImg = planePair.second;
+        if (!planeImg) continue;
 
-        // Optional: composite over background input
-        ImagePtr bgImg;
-        EffectInstancePtr bgEffect = getInput(0);
-        if (bgEffect) {
-            RectI bgRoi;
-            bgImg = getImage(0, args.time, RenderScale(), args.view,
-                             NULL, NULL, false, true,
-                             eStorageModeRAM, 0, &bgRoi);
+        // If this is NOT the main Color plane, write a test gradient
+        if (planeDesc.getPlaneID() != "uk.co.thefoundry.OfxImagePlaneColour") {
+            RectI testBounds = planeImg->getBounds();
+            int tw = testBounds.width();
+            int th = testBounds.height();
+            int nc = planeDesc.getNumComponents();
+            printf("[TEST] Writing gradient for plane '%s' (%dx%d, %d comps)\n",
+                   planeDesc.getPlaneID().c_str(), tw, th, nc);
+            Image::WriteAccess wa(planeImg.get());
+            for (int y = testBounds.y1; y < testBounds.y2; ++y) {
+                for (int x = testBounds.x1; x < testBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+                    float u = (float)(x - testBounds.x1) / (float)tw;
+                    float v = (float)(y - testBounds.y1) / (float)th;
+                    dst[0] = u; // red = horizontal gradient
+                    if (nc > 1) dst[1] = v; // green = vertical gradient
+                    if (nc > 2) dst[2] = 0.5f;
+                    if (nc > 3) dst[3] = 1.0f;
+                }
+            }
+            continue; // skip normal pass processing for this plane
         }
-        Image::ReadAccess* bgRa = bgImg ? new Image::ReadAccess(bgImg.get()) : NULL;
+    }
+
+    // --- Fill each output plane from its corresponding pass buffer ---
+    for (auto& planePair : args.outputPlanes) {
+        const ImagePlaneDesc& planeDesc = planePair.first;
+        ImagePtr planeImg = planePair.second;
+        if (!planeImg) continue;
+
+        // Find the matching pass buffer
+        std::string passName;
+        for (const std::string& p : requestedPasses) {
+            if (passNameToPlane(p).getPlaneID() == planeDesc.getPlaneID()) {
+                passName = p;
+                break;
+            }
+        }
+        // Also check light group passes in cached buffers
+        if (passName.empty()) {
+            for (auto& cached : _imp->cachedPassBuffers) {
+                if (passNameToPlane(cached.first).getPlaneID() == planeDesc.getPlaneID()) {
+                    passName = cached.first;
+                    break;
+                }
+            }
+        }
+
+        // Default to Combined for the main RGBA output
+        if (passName.empty() && planeDesc.getNumComponents() == 4) {
+            passName = "Combined";
+        }
+        printf("[CyclesRender]   plane '%s' → pass '%s' (found=%s)\n",
+               planeDesc.getPlaneID().c_str(), passName.c_str(),
+               passName.empty() ? "NO" : "YES");
+        if (passName.empty()) continue;
+
+        auto it = _imp->cachedPassBuffers.find(passName);
+        if (it == _imp->cachedPassBuffers.end()) continue;
+        const std::vector<float>& srcPixels = it->second;
+        if (srcPixels.empty()) continue;
+
+        int numOutComps = planeDesc.getNumComponents();
+        RectI outBounds = planeImg->getBounds();
+
+        Image::WriteAccess wa(planeImg.get());
+
+        // Optional: composite Combined over background
+        ImagePtr bgImg;
+        Image::ReadAccess* bgRa = NULL;
         RectI bgBounds;
-        if (bgImg) bgBounds = bgImg->getBounds();
+        bool isCombined = (passName == "Combined");
+        if (isCombined) {
+            EffectInstancePtr bgEffect = getInput(0);
+            if (bgEffect) {
+                RectI bgRoi;
+                bgImg = getImage(0, args.time, RenderScale(), args.view,
+                                 NULL, NULL, false, true,
+                                 eStorageModeRAM, 0, &bgRoi);
+            }
+            if (bgImg) {
+                bgRa = new Image::ReadAccess(bgImg.get());
+                bgBounds = bgImg->getBounds();
+            }
+        }
 
         for (int y = outBounds.y1; y < outBounds.y2; ++y) {
             for (int x = outBounds.x1; x < outBounds.x2; ++x) {
@@ -474,38 +977,43 @@ CyclesRender::render(const RenderActionArgs& args)
 
                 int fbX = x - outBounds.x1;
                 int fbY = y - outBounds.y1;
-
-                // Scale from output coords to render coords (nearest neighbor)
-                int srcX = (srcW == outW) ? fbX : (fbX * srcW / outW);
-                int srcY = (srcH == outH) ? fbY : (fbY * srcH / outH);
+                int dstW = outBounds.width();
+                int dstH = outBounds.height();
+                int srcX = (srcW == dstW) ? fbX : (fbX * srcW / dstW);
+                int srcY = (srcH == dstH) ? fbY : (fbY * srcH / dstH);
                 srcX = std::min(srcX, srcW - 1);
                 srcY = std::min(srcY, srcH - 1);
 
-                float fgR = 0, fgG = 0, fgB = 0, fgA = 0;
-                if (srcX >= 0 && srcY >= 0) {
-                    int idx = (srcY * srcW + srcX) * 4;
-                    fgR = srcPixels[idx + 0];
-                    fgG = srcPixels[idx + 1];
-                    fgB = srcPixels[idx + 2];
-                    fgA = srcPixels[idx + 3];
+                // All pass buffers are stored as 4 channels from Cycles
+                int idx = (srcY * srcW + srcX) * 4;
+                float r = srcPixels[idx + 0];
+                float g = srcPixels[idx + 1];
+                float b = srcPixels[idx + 2];
+                float a = srcPixels[idx + 3];
+
+                // Depth pass: output raw camera-space Z as grayscale
+                // Use Grade node in comp to remap range
+                if (passName == "Depth") {
+                    if (r >= 1e9f) r = 0.0f; // infinity → black
+                    g = b = r;
+                    a = 1.0f;
                 }
 
-                // Over composite: fg over bg
-                if (bgRa && bgBounds.contains(x, y)) {
+                if (isCombined && bgRa && bgBounds.contains(x, y)) {
                     const float* bgPix = (const float*)bgRa->pixelAt(x, y);
                     if (bgPix) {
-                        dst[0] = fgR + bgPix[0] * (1.0f - fgA);
-                        dst[1] = fgG + bgPix[1] * (1.0f - fgA);
-                        dst[2] = fgB + bgPix[2] * (1.0f - fgA);
-                        dst[3] = fgA + bgPix[3] * (1.0f - fgA);
+                        dst[0] = r + bgPix[0] * (1.0f - a);
+                        if (numOutComps > 1) dst[1] = g + bgPix[1] * (1.0f - a);
+                        if (numOutComps > 2) dst[2] = b + bgPix[2] * (1.0f - a);
+                        if (numOutComps > 3) dst[3] = a + bgPix[3] * (1.0f - a);
                         continue;
                     }
                 }
 
-                dst[0] = fgR;
-                dst[1] = fgG;
-                dst[2] = fgB;
-                dst[3] = fgA;
+                dst[0] = r;
+                if (numOutComps > 1) dst[1] = g;
+                if (numOutComps > 2) dst[2] = b;
+                if (numOutComps > 3) dst[3] = a;
             }
         }
 
@@ -515,7 +1023,146 @@ CyclesRender::render(const RenderActionArgs& args)
     return eStatusOK;
 }
 
+bool
+CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
+                           ViewSpec /*view*/, double time, bool /*originatedFromMainThread*/)
+{
+    // --- Focus Helper: Set Focus button ---
+    if (_imp->setFocusBtn.lock().get() == k) {
+        // Get camera
+        EffectInstancePtr camEffect = getInput(2);
+        CameraProvider* cam = camEffect ? dynamic_cast<CameraProvider*>(camEffect.get()) : NULL;
+        if (!cam) {
+            setPersistentMessage(eMessageTypeError, "No camera connected to input 2.");
+            return true;
+        }
+
+        // Get selected object name
+        KnobChoicePtr focusKnob = _imp->focusObject.lock();
+        if (!focusKnob || focusKnob->getValue() == 0) {
+            setPersistentMessage(eMessageTypeError, "Select an object first.");
+            return true;
+        }
+        ChoiceOption selected = focusKnob->getActiveEntry();
+        std::string objName = selected.id;
+
+        // Get scene and find the object's position
+        EffectInstancePtr geoEffect = getInput(1);
+        if (!geoEffect) {
+            setPersistentMessage(eMessageTypeError, "No scene connected.");
+            return true;
+        }
+
+        // Follow through RenderPass if present
+        RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
+        if (renderPass) {
+            geoEffect = renderPass->getInput(0);
+            if (!geoEffect) { setPersistentMessage(eMessageTypeError, "RenderPass has no scene."); return true; }
+        }
+
+        // Find the object in scene inputs
+        double objTX = 0, objTY = 0, objTZ = 0;
+        bool found = false;
+        Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
+        Group3D* group3d = dynamic_cast<Group3D*>(geoEffect.get());
+        int numInputs = scene3d ? scene3d->getNInputs() : (group3d ? group3d->getNInputs() : 0);
+        EffectInstance* sceneNode = scene3d ? (EffectInstance*)scene3d : (EffectInstance*)group3d;
+
+        for (int i = 0; i < numInputs && !found; ++i) {
+            EffectInstancePtr inp = sceneNode->getInput(i);
+            if (!inp) continue;
+            NodePtr node = inp->getNode();
+            if (!node || node->getScriptName_mt_safe() != objName) continue;
+
+            // Read translate knobs from the object
+            KnobIPtr kTX = inp->getKnobByName("translateX");
+            KnobIPtr kTY = inp->getKnobByName("translateY");
+            KnobIPtr kTZ = inp->getKnobByName("translateZ");
+            if (kTX) objTX = dynamic_cast<KnobDouble*>(kTX.get())->getValueAtTime(time);
+            if (kTY) objTY = dynamic_cast<KnobDouble*>(kTY.get())->getValueAtTime(time);
+            if (kTZ) objTZ = dynamic_cast<KnobDouble*>(kTZ.get())->getValueAtTime(time);
+            found = true;
+        }
+
+        if (!found) {
+            setPersistentMessage(eMessageTypeError, "Object '" + objName + "' not found in scene.");
+            return true;
+        }
+
+        // Get camera position
+        double camTX = 0, camTY = 0, camTZ = 0, camRX = 0, camRY = 0, camRZ = 0;
+        cam->getCameraPosition(time, camTX, camTY, camTZ, camRX, camRY, camRZ);
+
+        // Compute distance
+        double dx = objTX - camTX;
+        double dy = objTY - camTY;
+        double dz = objTZ - camTZ;
+        double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+        if (dist < 0.001) dist = 0.001;
+
+        // Set this node's focusDistance knob
+        KnobDoublePtr fd = _imp->focusDistance.lock();
+        if (fd) {
+            fd->setValue(dist);
+            clearPersistentMessage(false);
+        }
+        return true;
+    }
+
+    // --- Focus Helper: Refresh Objects button ---
+    if (_imp->refreshFocusBtn.lock().get() == k) {
+        KnobChoicePtr focusKnob = _imp->focusObject.lock();
+        if (!focusKnob) return true;
+
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("(none)", "", "No object selected"));
+
+        EffectInstancePtr geoEffect = getInput(1);
+        if (geoEffect) {
+            RenderPass* rp = dynamic_cast<RenderPass*>(geoEffect.get());
+            if (rp) geoEffect = rp->getInput(0);
+        }
+        if (geoEffect) {
+            Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
+            Group3D* group3d = dynamic_cast<Group3D*>(geoEffect.get());
+            int numInputs = scene3d ? scene3d->getNInputs() : (group3d ? group3d->getNInputs() : 0);
+            EffectInstance* scn = scene3d ? (EffectInstance*)scene3d : (EffectInstance*)group3d;
+            for (int i = 0; i < numInputs; ++i) {
+                EffectInstancePtr inp = scn ? scn->getInput(i) : EffectInstancePtr();
+                if (!inp) continue;
+                NodePtr node = inp->getNode();
+                if (!node) continue;
+                std::string name = node->getScriptName_mt_safe();
+                entries.push_back(ChoiceOption(name, "", name));
+            }
+        }
+        focusKnob->populateChoices(entries);
+        return true;
+    }
+
+    if (_imp->saveExrBtn.lock().get() == k) {
+        std::string outPath = _imp->exrOutputPath.lock()->getValue();
+        if (outPath.empty()) {
+            setPersistentMessage(eMessageTypeError, "Set EXR output path first.");
+            return true;
+        }
+        if (_imp->cachedPassBuffers.empty() || _imp->cachedWidth <= 0) {
+            setPersistentMessage(eMessageTypeError, "No render cached. Render first, then save.");
+            return true;
+        }
+
+        bool ok = CyclesRenderer::saveMultiLayerEXR(outPath, _imp->cachedPassBuffers,
+                                                      _imp->cachedWidth, _imp->cachedHeight);
+        if (ok) {
+            clearPersistentMessage(false);
+        } else {
+            setPersistentMessage(eMessageTypeError, "Failed to write EXR: " + outPath);
+        }
+        return true;
+    }
+    return false;
+}
+
 NATRON_NAMESPACE_EXIT
-NATRON_NAMESPACE_USING
 
 #include "moc_CyclesRender.cpp"

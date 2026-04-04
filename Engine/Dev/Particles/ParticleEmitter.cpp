@@ -56,6 +56,8 @@ struct ParticleEmitterPrivate
     KnobDoubleWPtr startSize;
     KnobDoubleWPtr sizeVariance;
     KnobIntWPtr seed;
+    KnobChoiceWPtr emitterShape;
+    KnobDoubleWPtr shapeSize;
 
     // Transform
     KnobDoubleWPtr translateX, translateY, translateZ;
@@ -194,6 +196,27 @@ ParticleEmitter::initializeKnobs()
         k->setMinimum(0); k->setDisplayMinimum(0); k->setDisplayMaximum(10000);
         k->setAnimationEnabled(false);
         emissionPage->addKnob(k); _imp->seed = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Emitter Shape"));
+        k->setName("emitterShape");
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("Point", "", "Emit from a single point"));
+        entries.push_back(ChoiceOption("Sphere", "", "Emit from random positions within a sphere"));
+        entries.push_back(ChoiceOption("Box", "", "Emit from random positions within a box"));
+        entries.push_back(ChoiceOption("Disc", "", "Emit from random positions on a flat disc (XZ plane)"));
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        k->setHintToolTip(tr("Shape of the emission region."));
+        emissionPage->addKnob(k); _imp->emitterShape = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Shape Size"));
+        k->setName("shapeSize"); k->setDefaultValue(1.0);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(10.0);
+        k->setHintToolTip(tr("Radius (Sphere/Disc) or half-extent (Box) of the emitter shape."));
+        k->setAnimationEnabled(true);
+        emissionPage->addKnob(k); _imp->shapeSize = k;
     }
 
     // Transform page
@@ -435,6 +458,9 @@ ParticleEmitter::getParticleData(double time)
     double emPosY = _imp->translateY.lock()->getValueAtTime(time);
     double emPosZ = _imp->translateZ.lock()->getValueAtTime(time);
 
+    int shapeType = _imp->emitterShape.lock() ? _imp->emitterShape.lock()->getValue() : 0;
+    float shapeSize = _imp->shapeSize.lock() ? (float)_imp->shapeSize.lock()->getValueAtTime(time) : 1.0f;
+
     double edx = _imp->emitDirX.lock()->getValueAtTime(time);
     double edy = _imp->emitDirY.lock()->getValueAtTime(time);
     double edz = _imp->emitDirZ.lock()->getValueAtTime(time);
@@ -486,10 +512,39 @@ ParticleEmitter::getParticleData(double time)
         for (int i = 0; i < rateVal; ++i) {
             Particle p;
 
-            // Position at emitter location
-            p.px = (float)emPosX;
-            p.py = (float)emPosY;
-            p.pz = (float)emPosZ;
+            // Position based on emitter shape
+            float offX = 0, offY = 0, offZ = 0;
+            switch (shapeType) {
+                case 1: { // Sphere
+                    float u = dist01(rng) * 2.0f - 1.0f;
+                    float t = dist01(rng) * 2.0f * (float)M_PI;
+                    float r = std::cbrt(dist01(rng)) * shapeSize;
+                    float s = std::sqrt(1.0f - u * u);
+                    offX = r * s * std::cos(t);
+                    offY = r * u;
+                    offZ = r * s * std::sin(t);
+                    break;
+                }
+                case 2: { // Box
+                    offX = (dist01(rng) * 2.0f - 1.0f) * shapeSize;
+                    offY = (dist01(rng) * 2.0f - 1.0f) * shapeSize;
+                    offZ = (dist01(rng) * 2.0f - 1.0f) * shapeSize;
+                    break;
+                }
+                case 3: { // Disc (XZ plane)
+                    float angle = dist01(rng) * 2.0f * (float)M_PI;
+                    float rad = std::sqrt(dist01(rng)) * shapeSize;
+                    offX = rad * std::cos(angle);
+                    offY = 0;
+                    offZ = rad * std::sin(angle);
+                    break;
+                }
+                default: // Point
+                    break;
+            }
+            p.px = (float)emPosX + offX;
+            p.py = (float)emPosY + offY;
+            p.pz = (float)emPosZ + offZ;
 
             // Random direction within cone of `spread` degrees around emitDir
             float theta = spreadRad * std::sqrt(dist01(rng)); // uniform on disk

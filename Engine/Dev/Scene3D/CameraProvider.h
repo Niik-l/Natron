@@ -41,6 +41,13 @@ public:
     virtual double getCameraVAperture(double time) const { (void)time; return 18.672; }
     virtual double getCameraNear(double time) const { (void)time; return 0.1; }
     virtual double getCameraFar(double time) const { (void)time; return 10000.0; }
+
+    // Depth of Field
+    virtual bool getCameraDOFEnabled(double /*time*/) const { return false; }
+    virtual double getCameraFStop(double /*time*/) const { return 2.8; }
+    virtual double getCameraFocusDistance(double /*time*/) const { return 10.0; }
+    virtual int getCameraBokehBlades(double /*time*/) const { return 0; }
+    virtual double getCameraBladeRotation(double /*time*/) const { return 0.0; }
 };
 
 #endif // NATRON_ENGINE_CAMERAPROVIDER_H

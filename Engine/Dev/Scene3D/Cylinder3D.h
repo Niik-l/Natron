@@ -135,6 +135,7 @@ public:
     virtual double getMaterialTransmission(double time) const OVERRIDE;
     virtual double getMaterialIOR(double time) const OVERRIDE;
     virtual std::string getMaterialTextureFile() const OVERRIDE;
+    virtual std::string getMaterialDiffuseColorspace() const OVERRIDE;
     virtual bool hasMaterialInput() const OVERRIDE;
     virtual MaterialProvider* getConnectedMaterial() const OVERRIDE;
 

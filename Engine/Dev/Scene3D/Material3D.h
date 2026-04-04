@@ -103,6 +103,8 @@ public:
     virtual std::string getMaterialMetallicMapFile() const OVERRIDE;
     virtual std::string getMaterialEmissionMapFile() const OVERRIDE;
     virtual double getMaterialNormalStrength(double time) const OVERRIDE;
+    virtual std::string getMaterialDiffuseColorspace() const OVERRIDE;
+    virtual std::string getMaterialEmissionColorspace() const OVERRIDE;
 
     /**
      * @brief Render connected 2D inputs to temp files for Cycles.

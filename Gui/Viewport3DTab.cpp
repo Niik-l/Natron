@@ -38,7 +38,7 @@
 #include "Gui/GuiApplicationManager.h"
 #include "Gui/SpinBox.h"
 #include "Gui/TimeLineGui.h"
-#include "Gui/Viewport3D.h"
+#include "Gui/DevViewport3D.h"
 #include "Engine/TimeLine.h"
 #include "Engine/Project.h"
 #include "Engine/Node.h"
@@ -161,7 +161,7 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
     mainLayout->addWidget(toolbar);
 
     // ==================== 3D Viewport ====================
-    _viewport = new Viewport3D(gui);
+    _viewport = new DevViewport3D(gui);
     mainLayout->addWidget(_viewport, 1); // stretch factor 1 = takes all remaining space
 
     // ==================== Timeline Scrubber ====================
@@ -293,7 +293,7 @@ Viewport3DTab::onCyclesRender()
         QString::fromUtf8("PNG (*.png);;EXR (*.exr)"));
     if (savePath.isEmpty()) return;
 
-    // TODO: Viewport3D uses demo-style camera, not Camera3D.
+    // TODO: DevViewport3D uses demo-style camera, not Camera3D.
     // Viewport Render button needs updating to use the new camera matrices.
     // For now, CyclesRender node is the primary render path.
     bool ok = false;

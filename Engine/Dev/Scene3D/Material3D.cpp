@@ -51,6 +51,10 @@ struct Material3DPrivate
     KnobFileWPtr metallicMapFile;
     KnobFileWPtr emissionMapFile;
 
+    // Texture colorspace
+    KnobChoiceWPtr diffuseColorspace;
+    KnobChoiceWPtr emissionColorspace;
+
     // Baked input texture temp file paths (from connected 2D nodes)
     std::string bakedDiffusePath;
     std::string bakedMetallicPath;
@@ -186,6 +190,19 @@ Material3D::initializeKnobs()
         texPage->addKnob(k); _imp->textureFile = k;
     }
     {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Diffuse Colorspace"));
+        k->setName("diffuseColorspace");
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("sRGB", "", "sRGB gamma-encoded (PNG, JPEG)"));
+        entries.push_back(ChoiceOption("Linear", "", "Linear / scene-referred (EXR, HDR)"));
+        entries.push_back(ChoiceOption("ACEScg", "", "ACEScg (AP1 linear, ACES pipeline)"));
+        entries.push_back(ChoiceOption("Raw", "", "Raw data, no conversion"));
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        k->setHintToolTip(tr("Color space of the diffuse texture file. Cycles converts to scene linear at load time."));
+        texPage->addKnob(k); _imp->diffuseColorspace = k;
+    }
+    {
         KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Metallic Map"));
         k->setName("metallicMapFile");
         k->setHintToolTip(tr("Grayscale metallic texture. Overrides the Metallic slider."));
@@ -202,6 +219,19 @@ Material3D::initializeKnobs()
         k->setName("emissionMapFile");
         k->setHintToolTip(tr("RGB emission texture. Multiplied by Emission Strength."));
         texPage->addKnob(k); _imp->emissionMapFile = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Emission Colorspace"));
+        k->setName("emissionColorspace");
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("sRGB", "", "sRGB gamma-encoded (PNG, JPEG)"));
+        entries.push_back(ChoiceOption("Linear", "", "Linear / scene-referred (EXR, HDR)"));
+        entries.push_back(ChoiceOption("ACEScg", "", "ACEScg (AP1 linear, ACES pipeline)"));
+        entries.push_back(ChoiceOption("Raw", "", "Raw data, no conversion"));
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        k->setHintToolTip(tr("Color space of the emission texture file."));
+        texPage->addKnob(k); _imp->emissionColorspace = k;
     }
     {
         KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Normal Map"));
@@ -285,6 +315,29 @@ std::string Material3D::getMaterialEmissionMapFile() const
 {
     if (!_imp->bakedEmissionPath.empty()) return _imp->bakedEmissionPath;
     KnobFilePtr k = _imp->emissionMapFile.lock(); return k ? k->getValue() : std::string();
+}
+
+static const char* colorspaceIndexToString(int idx)
+{
+    switch (idx) {
+        case 0: return "sRGB";
+        case 1: return "Linear";
+        case 2: return "ACEScg";
+        case 3: return "Raw";
+        default: return "sRGB";
+    }
+}
+
+std::string Material3D::getMaterialDiffuseColorspace() const
+{
+    KnobChoicePtr k = _imp->diffuseColorspace.lock();
+    return colorspaceIndexToString(k ? k->getValue() : 0);
+}
+
+std::string Material3D::getMaterialEmissionColorspace() const
+{
+    KnobChoicePtr k = _imp->emissionColorspace.lock();
+    return colorspaceIndexToString(k ? k->getValue() : 0);
 }
 
 // ==================== Input Texture Baking ====================

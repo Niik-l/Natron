@@ -89,12 +89,22 @@ public:
     virtual bool supportsMultiResolution() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
+    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
+
+    // Multi-plane AOV support
+    virtual bool isMultiPlanar() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
+    virtual PassThroughEnum isPassThroughForNonRenderedPlanes() const OVERRIDE FINAL WARN_UNUSED_RETURN
+    { return ePassThroughPassThroughNonRenderedPlanes; }
 
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual void getComponentsNeededAndProduced(double time, ViewIdx view,
+                                                 EffectInstance::ComponentsNeededMap* comps,
+                                                 double* passThroughTime, int* passThroughView,
+                                                 int* passThroughInput) OVERRIDE FINAL;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     std::unique_ptr<CyclesRenderPrivate> _imp;
