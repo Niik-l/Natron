@@ -165,16 +165,10 @@ ViewerTabPrivate::getOverlayTransform(double time,
                                       EffectInstance* currentNode,
                                       Transform::Matrix3x3* transform) const
 {
-    if (!target) {
-        return false;
-    }
     EffectInstance* targetNode = target->getEffectInstance().get();
     NodeGroup* isGroupNode = dynamic_cast<NodeGroup*>(targetNode);
     if (isGroupNode) {
         NodePtr output = isGroupNode->getOutputNodeInput(false);
-        if (!output) {
-            return false;
-        }
         return getOverlayTransform(time, view, output, currentNode, transform);
     }
     if ( currentNode == targetNode  ) {
@@ -295,16 +289,11 @@ ViewerTabPrivate::getTimeTransform(double time,
     if (!currentNode) {
         return false;
     }
-    if (!target) {
-        return false;
-    }
     EffectInstance* targetNode = target->getEffectInstance().get();
     NodeGroup* isGroupNode = dynamic_cast<NodeGroup*>(targetNode);
     if (isGroupNode) {
         NodePtr output = isGroupNode->getOutputNodeInput(false);
-        if (!output) {
-            return false;
-        }
+        EffectInstance* outputNode = output->getEffectInstance().get();
         return getTimeTransform(time, view, output, currentNode, newTime);
     }
     if ( currentNode == targetNode  ) {
