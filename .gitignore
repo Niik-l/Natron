@@ -301,3 +301,15 @@ moc_predefs.h
 # shiboken-generated files
 Engine/Qt5
 Gui/Qt5
+# Qt6/Qt5 build directories
+build-qt6/
+build-qt5/
+# Internal research/design docs (keep local only)
+Engine/Dev/Research_*.md
+
+# Internal research/design docs (keep local only)
+Engine/Dev/Research_*.md
+
+# Dev-only tools (local)
+tools/particle_testbed/
+tools/abc_dump.cpp
