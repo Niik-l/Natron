@@ -46,13 +46,15 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/AppInstance.h"
 #include "Engine/Dev/Scene3D/CameraProvider.h"
 #include "Engine/Dev/Scene3D/Card3D.h"
-#include "Engine/Dev/Particles/ParticleEmitter.h"
-#include "Engine/Dev/Particles/ParticleGravity.h"
+#include "Engine/Dev/Particles/ParticleProvider.h"
+#include "Engine/Dev/Particles/ParticleInstance.h"
+#include "Engine/Dev/Particles/ParticleSolver.h"
 #include "Engine/Dev/Scene3D/ReadVDB.h"
 #include "Engine/Dev/Scene3D/Volume3D.h"
 #include "Engine/Dev/Scene3D/Cube3D.h"
 #include "Engine/Dev/Scene3D/Cylinder3D.h"
 #include "Engine/Dev/Scene3D/ReadAlembicCamera.h"
+#include "Engine/Dev/Scene3D/ReadAlembicTransform.h"
 #include "Engine/Dev/Scene3D/Sphere3D.h"
 #include "Engine/Dev/Scene3D/Group3D.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
@@ -348,7 +350,8 @@ struct DevViewport3DPrivate
 
     // Mouse
     int lastMouseX, lastMouseY;
-    bool orbiting, panning;
+    bool orbiting, panning, zooming;
+    float orbitPivot[3];  // pivot point for orbiting (set from depth buffer on orbit start)
     int viewW, viewH;
 
     // Scene graph (rebuilt each frame)
@@ -384,7 +387,9 @@ struct DevViewport3DPrivate
         , lastMouseY(0)
         , orbiting(false)
         , panning(false)
+        , zooming(false)
         , viewW(100)
+        , orbitPivot{0, 0, 0}
         , viewH(100)
         , pointSize(2.0f)
         , gizmoDragging(false)
@@ -722,9 +727,39 @@ DevViewport3D::paintGL()
             case eSceneNodeSphere:     drawSphereNode(sn); break;
             case eSceneNodeCube:       drawCubeNode(sn); break;
             case eSceneNodeCylinder:   drawCylinderNode(sn); break;
-            case eSceneNodeParticles:  drawParticlesNode(sn); break;
+            case eSceneNodeParticles: {
+                // Only draw particles for the viewed/selected particle node.
+                // If a particle node is selected, draw only that one.
+                // If no particle node is selected, draw the last one in the list (terminal).
+                bool isSelected = (sn.name == _imp->selectedNodeName);
+                bool noParticleSelected = true;
+                for (size_t pi = 0; pi < sceneNodes.size(); ++pi) {
+                    if (sceneNodes[pi].type == eSceneNodeParticles &&
+                        sceneNodes[pi].name == _imp->selectedNodeName) {
+                        noParticleSelected = false;
+                        break;
+                    }
+                }
+                if (isSelected || noParticleSelected) {
+                    // If no particle node is selected, only draw the last particle node
+                    if (noParticleSelected) {
+                        bool isLast = true;
+                        for (size_t pi = i + 1; pi < sceneNodes.size(); ++pi) {
+                            if (sceneNodes[pi].type == eSceneNodeParticles) {
+                                isLast = false;
+                                break;
+                            }
+                        }
+                        if (isLast) drawParticlesNode(sn);
+                    } else {
+                        drawParticlesNode(sn);
+                    }
+                }
+                break;
+            }
             case eSceneNodeVolume:     drawVolumeNode(sn); break;
             case eSceneNodeLight:      drawLightNode(sn); break;
+            case eSceneNodeTransform:  drawTransformNode(sn); break;
         }
 
         glPopMatrix();
@@ -772,6 +807,9 @@ DevViewport3D::paintGL()
                 if (!node) break;
                 EffectInstancePtr effect = node->getEffectInstance();
                 if (!effect) break;
+
+                // Skip ImGuizmo for read-only transform nodes (Alembic imports)
+                if (sn.type == eSceneNodeTransform) break;
 
                 // Read T/R/S from knobs, build matrix using ImGuizmo's Recompose
                 float translation[3], rotation[3], scale[3];
@@ -879,16 +917,42 @@ DevViewport3D::mousePressEvent(QMouseEvent* e)
     if (ImGuizmo::IsOver() || ImGuizmo::IsUsing()) return;
 
     if (e->button() == Qt::MiddleButton) {
-        if (e->modifiers() & Qt::ShiftModifier) {
+        if ((e->modifiers() & Qt::AltModifier) || (e->modifiers() & Qt::ShiftModifier)) {
             _imp->panning = true;
         } else {
             _imp->orbiting = true;
+            // Maya-style: orbit around selected object center
+            if (!_imp->selectedNodeName.empty()) {
+                const std::vector<SceneNode>& nodes = _imp->sceneGraph.nodes();
+                for (size_t si = 0; si < nodes.size(); ++si) {
+                    if (nodes[si].name == _imp->selectedNodeName) {
+                        // Use the selected node's transform position as orbit target
+                        _imp->camTarget[0] = nodes[si].localMatrix[12];
+                        _imp->camTarget[1] = nodes[si].localMatrix[13];
+                        _imp->camTarget[2] = nodes[si].localMatrix[14];
+                        // Recalculate distance from eye to new target
+                        float eye[3];
+                        eye[0] = cosf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[0];
+                        eye[1] = sinf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[1];
+                        eye[2] = sinf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[2];
+                        float dx = eye[0] - _imp->camTarget[0];
+                        float dy = eye[1] - _imp->camTarget[1];
+                        float dz = eye[2] - _imp->camTarget[2];
+                        _imp->camDistance = sqrtf(dx*dx + dy*dy + dz*dz);
+                        break;
+                    }
+                }
+            }
         }
     } else if (e->button() == Qt::LeftButton) {
         if (e->modifiers() & Qt::AltModifier) {
             _imp->orbiting = true;
         } else {
             selectObjectAtPosition(e->x(), e->y());
+        }
+    } else if (e->button() == Qt::RightButton) {
+        if (e->modifiers() & Qt::AltModifier) {
+            _imp->zooming = true;
         }
     }
 }
@@ -931,9 +995,15 @@ DevViewport3D::mouseMoveEvent(QMouseEvent* e)
         float upY = _imp->cameraView[5];
         float upZ = _imp->cameraView[9];
 
-        _imp->camTarget[0] -= (dx * rightX + dy * upX) * panSpeed;
-        _imp->camTarget[1] -= (dx * rightY + dy * upY) * panSpeed;
-        _imp->camTarget[2] -= (dx * rightZ + dy * upZ) * panSpeed;
+        _imp->camTarget[0] -= (dx * rightX - dy * upX) * panSpeed;
+        _imp->camTarget[1] -= (dx * rightY - dy * upY) * panSpeed;
+        _imp->camTarget[2] -= (dx * rightZ - dy * upZ) * panSpeed;
+        update();
+    } else if (_imp->zooming) {
+        // Alt+RMB zoom: drag right/up = zoom in, left/down = zoom out
+        float zoomSpeed = _imp->camDistance * 0.005f;
+        _imp->camDistance -= (dx + dy) * zoomSpeed;
+        if (_imp->camDistance < 0.1f) _imp->camDistance = 0.1f;
         update();
     }
 }
@@ -952,6 +1022,7 @@ DevViewport3D::mouseReleaseEvent(QMouseEvent* e)
 
     _imp->orbiting = false;
     _imp->panning = false;
+    _imp->zooming = false;
 }
 
 void
@@ -1913,6 +1984,51 @@ DevViewport3D::drawLightNode(const SceneNode& sn) const
 }
 
 void
+DevViewport3D::drawTransformNode(const SceneNode& sn) const
+{
+    bool selected = (sn.name == _imp->selectedNodeName);
+    float axisLen = 0.8f;
+    float lineW = selected ? 3.0f : 2.0f;
+
+    glPushMatrix();
+    glMultMatrixf(sn.localMatrix);
+
+    glLineWidth(lineW);
+    glBegin(GL_LINES);
+
+    // X axis — red
+    glColor3f(1.0f, 0.2f, 0.2f);
+    glVertex3f(0, 0, 0); glVertex3f(axisLen, 0, 0);
+
+    // Y axis — green
+    glColor3f(0.2f, 1.0f, 0.2f);
+    glVertex3f(0, 0, 0); glVertex3f(0, axisLen, 0);
+
+    // Z axis — blue
+    glColor3f(0.3f, 0.3f, 1.0f);
+    glVertex3f(0, 0, 0); glVertex3f(0, 0, axisLen);
+
+    glEnd();
+
+    // Draw a small diamond/cross at the origin to mark the null
+    glColor3f(1.0f, 0.8f, 0.0f); // yellow
+    float d = 0.12f;
+    glBegin(GL_LINES);
+    glVertex3f(-d, 0, 0); glVertex3f(d, 0, 0);
+    glVertex3f(0, -d, 0); glVertex3f(0, d, 0);
+    glVertex3f(0, 0, -d); glVertex3f(0, 0, d);
+    // Diamond shape in XY plane
+    glVertex3f(0, d, 0); glVertex3f(d, 0, 0);
+    glVertex3f(d, 0, 0); glVertex3f(0, -d, 0);
+    glVertex3f(0, -d, 0); glVertex3f(-d, 0, 0);
+    glVertex3f(-d, 0, 0); glVertex3f(0, d, 0);
+    glEnd();
+
+    glLineWidth(1.0f);
+    glPopMatrix();
+}
+
+void
 DevViewport3D::drawParticlesNode(const SceneNode& sn) const
 {
     NodePtr node = sn.sourceNode.lock();
@@ -1927,13 +2043,60 @@ DevViewport3D::drawParticlesNode(const SceneNode& sn) const
     if (!app) return;
     double time = app->getTimeLine()->currentFrame();
 
+    // If this is a ParticleInstance node, draw instanced geo wireframes
+    ParticleInstance* instancer = dynamic_cast<ParticleInstance*>(effect.get());
+    if (instancer) {
+        std::vector<ParticleInstance::GeoInstance> instances;
+        instancer->getInstances(time, instances);
+        if (instances.empty()) return;
+
+        // Limit viewport preview to avoid slowdown
+        int maxPreview = std::min((int)instances.size(), 2000);
+
+        glEnable(GL_DEPTH_TEST);
+        glLineWidth(1.0f);
+
+        for (int i = 0; i < maxPreview; ++i) {
+            const ParticleInstance::GeoInstance& inst = instances[i];
+
+            glPushMatrix();
+            glTranslatef(inst.px, inst.py, inst.pz);
+            if (inst.ry != 0) glRotatef(inst.ry, 0, 1, 0);
+            if (inst.rx != 0) glRotatef(inst.rx, 1, 0, 0);
+            if (inst.rz != 0) glRotatef(inst.rz, 0, 0, 1);
+            glScalef(inst.sx, inst.sy, inst.sz);
+
+            glColor4f(inst.r * 0.8f, inst.g * 0.8f, inst.b * 0.8f, 0.6f);
+
+            // Draw a simple wireframe box as proxy for any geo type
+            float s = 0.5f;
+            glBegin(GL_LINES);
+            // Bottom
+            glVertex3f(-s,-s,-s); glVertex3f( s,-s,-s);
+            glVertex3f( s,-s,-s); glVertex3f( s,-s, s);
+            glVertex3f( s,-s, s); glVertex3f(-s,-s, s);
+            glVertex3f(-s,-s, s); glVertex3f(-s,-s,-s);
+            // Top
+            glVertex3f(-s, s,-s); glVertex3f( s, s,-s);
+            glVertex3f( s, s,-s); glVertex3f( s, s, s);
+            glVertex3f( s, s, s); glVertex3f(-s, s, s);
+            glVertex3f(-s, s, s); glVertex3f(-s, s,-s);
+            // Verticals
+            glVertex3f(-s,-s,-s); glVertex3f(-s, s,-s);
+            glVertex3f( s,-s,-s); glVertex3f( s, s,-s);
+            glVertex3f( s,-s, s); glVertex3f( s, s, s);
+            glVertex3f(-s,-s, s); glVertex3f(-s, s, s);
+            glEnd();
+
+            glPopMatrix();
+        }
+        return;
+    }
+
     ParticleDataPtr data;
-    ParticleEmitter* emitter = dynamic_cast<ParticleEmitter*>(effect.get());
-    ParticleGravity* gravity = dynamic_cast<ParticleGravity*>(effect.get());
-    if (emitter) {
-        data = emitter->getParticleData(time);
-    } else if (gravity) {
-        data = gravity->getParticleData(time);
+    ParticleProvider* provider = dynamic_cast<ParticleProvider*>(effect.get());
+    if (provider) {
+        data = provider->getParticleData(time);
     }
 
     if (!data || data->numParticles() == 0) return;
@@ -2014,6 +2177,94 @@ DevViewport3D::drawParticlesNode(const SceneNode& sn) const
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glDeleteBuffers(1, &vbo);
+
+    // --- Draw collision shape wireframe if this is a ParticleSolver node ---
+    {
+        ParticleSolver* collider = dynamic_cast<ParticleSolver*>(effect.get());
+        if (collider) {
+            glColor3f(0.0f, 1.0f, 0.5f); // green wireframe
+            glLineWidth(1.5f);
+
+            KnobIPtr shapeKnob = effect->getKnobByName("shape");
+            int shapeMode = shapeKnob ? dynamic_cast<KnobChoice*>(shapeKnob.get())->getValue() : 0;
+
+            if (shapeMode == 0) {
+                // Plane: draw a grid at plane height
+                KnobIPtr hKnob = effect->getKnobByName("planeHeight");
+                float h = hKnob ? (float)dynamic_cast<KnobDouble*>(hKnob.get())->getValueAtTime(time) : 0.0f;
+                float sz = 5.0f;
+                glBegin(GL_LINE_LOOP);
+                glVertex3f(-sz, h, -sz);
+                glVertex3f( sz, h, -sz);
+                glVertex3f( sz, h,  sz);
+                glVertex3f(-sz, h,  sz);
+                glEnd();
+                // Cross lines
+                glBegin(GL_LINES);
+                glVertex3f(-sz, h, 0); glVertex3f(sz, h, 0);
+                glVertex3f(0, h, -sz); glVertex3f(0, h, sz);
+                glEnd();
+            } else if (shapeMode == 1) {
+                // Box wireframe
+                KnobIPtr k;
+                k = effect->getKnobByName("boxMinX"); float mnx = k ? (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) : -2;
+                k = effect->getKnobByName("boxMinY"); float mny = k ? (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) : 0;
+                k = effect->getKnobByName("boxMinZ"); float mnz = k ? (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) : -2;
+                k = effect->getKnobByName("boxMaxX"); float mxx = k ? (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) : 2;
+                k = effect->getKnobByName("boxMaxY"); float mxy = k ? (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) : 4;
+                k = effect->getKnobByName("boxMaxZ"); float mxz = k ? (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) : 2;
+
+                glBegin(GL_LINES);
+                // Bottom face
+                glVertex3f(mnx,mny,mnz); glVertex3f(mxx,mny,mnz);
+                glVertex3f(mxx,mny,mnz); glVertex3f(mxx,mny,mxz);
+                glVertex3f(mxx,mny,mxz); glVertex3f(mnx,mny,mxz);
+                glVertex3f(mnx,mny,mxz); glVertex3f(mnx,mny,mnz);
+                // Top face
+                glVertex3f(mnx,mxy,mnz); glVertex3f(mxx,mxy,mnz);
+                glVertex3f(mxx,mxy,mnz); glVertex3f(mxx,mxy,mxz);
+                glVertex3f(mxx,mxy,mxz); glVertex3f(mnx,mxy,mxz);
+                glVertex3f(mnx,mxy,mxz); glVertex3f(mnx,mxy,mnz);
+                // Verticals
+                glVertex3f(mnx,mny,mnz); glVertex3f(mnx,mxy,mnz);
+                glVertex3f(mxx,mny,mnz); glVertex3f(mxx,mxy,mnz);
+                glVertex3f(mxx,mny,mxz); glVertex3f(mxx,mxy,mxz);
+                glVertex3f(mnx,mny,mxz); glVertex3f(mnx,mxy,mxz);
+                glEnd();
+            } else if (shapeMode == 2) {
+                // Sphere wireframe (3 circles)
+                KnobIPtr k;
+                k = effect->getKnobByName("sphereCenterX"); float cx = k ? (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) : 0;
+                k = effect->getKnobByName("sphereCenterY"); float cy = k ? (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) : 2;
+                k = effect->getKnobByName("sphereCenterZ"); float cz = k ? (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) : 0;
+                k = effect->getKnobByName("sphereRadius"); float rad = k ? (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) : 3;
+
+                const int segs = 32;
+                // XY circle
+                glBegin(GL_LINE_LOOP);
+                for (int s = 0; s < segs; ++s) {
+                    float a = (float)s / segs * 6.2831853f;
+                    glVertex3f(cx + rad * cosf(a), cy + rad * sinf(a), cz);
+                }
+                glEnd();
+                // XZ circle
+                glBegin(GL_LINE_LOOP);
+                for (int s = 0; s < segs; ++s) {
+                    float a = (float)s / segs * 6.2831853f;
+                    glVertex3f(cx + rad * cosf(a), cy, cz + rad * sinf(a));
+                }
+                glEnd();
+                // YZ circle
+                glBegin(GL_LINE_LOOP);
+                for (int s = 0; s < segs; ++s) {
+                    float a = (float)s / segs * 6.2831853f;
+                    glVertex3f(cx, cy + rad * cosf(a), cz + rad * sinf(a));
+                }
+                glEnd();
+            }
+            glLineWidth(1.0f);
+        }
+    }
 }
 
 void
