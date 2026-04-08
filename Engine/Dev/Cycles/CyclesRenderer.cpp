@@ -708,6 +708,16 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     sessionParams.samples = _impl->samples;
     sessionParams.threads = 0;
 
+    // Explicitly select CPU device (required for NanoVDB volume support).
+    // Without this, volumes render as empty/black.
+    {
+        std::vector<ccl::DeviceInfo> devices = ccl::Device::available_devices(
+            (uint)ccl::DEVICE_MASK_CPU);
+        if (!devices.empty()) {
+            sessionParams.device = devices.front();
+        }
+    }
+
     ccl::SceneParams sceneParams;
     _impl->session = ccl::make_unique<ccl::Session>(sessionParams, sceneParams);
     ccl::Scene* scene = _impl->session->scene.get();
@@ -1431,149 +1441,296 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             EffectInstancePtr effect = srcNode->getEffectInstance();
             if (!effect) continue;
 
-            std::vector<float> densityData;
-            int volRes = 0;
-            float bboxMin[3] = {-1,-1,-1}, bboxMax[3] = {1,1,1};
-            float volColorR = 1, volColorG = 1, volColorB = 1;
-            float volDensity = 1.0f;
-
-            ReadVDB* readVdb = dynamic_cast<ReadVDB*>(effect.get());
             Volume3D* vol3d = dynamic_cast<Volume3D*>(effect.get());
+            ReadVDB* readVdb = dynamic_cast<ReadVDB*>(effect.get());
 
+            // === ReadVDB: multi-grid VDB → PrincipledVolumeNode (fire/smoke) ===
             if (readVdb) {
-                ReadVDB::VDBVolumeData vd;
-                if (!readVdb->getVolumeData(time, vd) || vd.densityData.empty()) continue;
-                densityData = std::move(vd.densityData);
-                volRes = vd.resolution;
-                bboxMin[0] = vd.bboxMinX; bboxMin[1] = vd.bboxMinY; bboxMin[2] = vd.bboxMinZ;
-                bboxMax[0] = vd.bboxMaxX; bboxMax[1] = vd.bboxMaxY; bboxMax[2] = vd.bboxMaxZ;
-                volColorR = vd.colorR; volColorG = vd.colorG; volColorB = vd.colorB;
-                volDensity = vd.density;
-            } else if (vol3d) {
-                vol3d->generateVolumeData(time, densityData, volRes);
-                if (densityData.empty() || volRes <= 0) continue;
-                Volume3D::VolumeParams vp = vol3d->getVolumeParams(time);
-                volColorR = vp.colorR; volColorG = vp.colorG; volColorB = vp.colorB;
-                volDensity = vp.density;
-            } else {
+                ReadVDB::VDBDirectData vd;
+                if (!readVdb->getVDBDirect(time, vd) || vd.grids.empty()) continue;
+
+                // 1. PrincipledVolume shader — handles density, temperature, blackbody natively
+                ccl::Shader* volShader = scene->create_node<ccl::Shader>();
+                {
+                    auto g = ccl::make_unique<ccl::ShaderGraph>();
+                    ccl::PrincipledVolumeNode* pvol = g->create_node<ccl::PrincipledVolumeNode>();
+
+                    pvol->set_density_attribute(ccl::ustring(vd.bindDensity));
+                    pvol->set_temperature_attribute(ccl::ustring(vd.bindTemperature));
+                    pvol->set_color(ccl::make_float3(vd.colorR, vd.colorG, vd.colorB));
+                    pvol->set_absorption_color(ccl::make_float3(
+                        vd.absorptionR, vd.absorptionG, vd.absorptionB));
+                    pvol->set_anisotropy(vd.anisotropy);
+                    pvol->set_blackbody_intensity(vd.blackbodyIntensity);
+                    pvol->set_blackbody_tint(ccl::make_float3(
+                        vd.blackbodyTintR, vd.blackbodyTintG, vd.blackbodyTintB));
+                    pvol->set_temperature(vd.temperatureScale);
+
+                    // Density: ValueNode × remap curve → Density input
+                    // CRITICAL: never call pvol->set_density() — that marks the socket
+                    // constant and blocks the volume attribute from being read.
+                    ccl::ValueNode* densVal = g->create_node<ccl::ValueNode>();
+                    densVal->set_value(vd.density > 0.01f ? vd.density : 1.0f);
+
+                    // Density remap curve (FloatCurveNode)
+                    bool densRemapIsIdentity = true;
+                    if ((int)vd.densityRemap.size() >= ReadVDB::VDBDirectData::REMAP_SAMPLES) {
+                        const int N = ReadVDB::VDBDirectData::REMAP_SAMPLES;
+                        for (int i = 0; i < N; ++i) {
+                            float expected = (float)i / (float)(N - 1);
+                            if (std::abs(vd.densityRemap[i] - expected) > 0.001f) {
+                                densRemapIsIdentity = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (!densRemapIsIdentity) {
+                        ccl::FloatCurveNode* densityCurve = g->create_node<ccl::FloatCurveNode>();
+                        ccl::array<float> curveData;
+                        curveData.resize(vd.densityRemap.size());
+                        for (size_t i = 0; i < vd.densityRemap.size(); ++i)
+                            curveData[i] = vd.densityRemap[i];
+                        densityCurve->set_curve(curveData);
+                        densityCurve->set_min_x(0.0f);
+                        densityCurve->set_max_x(1.0f);
+                        // Attribute("density") → FloatCurve → multiply by density knob → Density
+                        ccl::AttributeNode* densAttr = g->create_node<ccl::AttributeNode>();
+                        densAttr->set_attribute(ccl::ustring(vd.bindDensity));
+                        g->connect(densAttr->output("Fac"), densityCurve->input("Value"));
+                        ccl::MathNode* mul = g->create_node<ccl::MathNode>();
+                        mul->set_math_type(ccl::NODE_MATH_MULTIPLY);
+                        g->connect(densityCurve->output("Value"), mul->input("Value1"));
+                        g->connect(densVal->output("Value"), mul->input("Value2"));
+                        g->connect(mul->output("Value"), pvol->input("Density"));
+                        printf("[Cycles Volume] Density remap curve active\n");
+                    } else {
+                        g->connect(densVal->output("Value"), pvol->input("Density"));
+                    }
+
+                    // Temperature remap curve (FloatCurveNode)
+                    bool tempRemapIsIdentity = true;
+                    if ((int)vd.temperatureRemap.size() >= ReadVDB::VDBDirectData::REMAP_SAMPLES) {
+                        const int N = ReadVDB::VDBDirectData::REMAP_SAMPLES;
+                        for (int i = 0; i < N; ++i) {
+                            float expected = (float)i / (float)(N - 1);
+                            if (std::abs(vd.temperatureRemap[i] - expected) > 0.001f) {
+                                tempRemapIsIdentity = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (!tempRemapIsIdentity) {
+                        ccl::FloatCurveNode* tempCurve = g->create_node<ccl::FloatCurveNode>();
+                        ccl::array<float> curveData;
+                        curveData.resize(vd.temperatureRemap.size());
+                        for (size_t i = 0; i < vd.temperatureRemap.size(); ++i)
+                            curveData[i] = vd.temperatureRemap[i];
+                        tempCurve->set_curve(curveData);
+                        tempCurve->set_min_x(0.0f);
+                        tempCurve->set_max_x(1.0f);
+                        ccl::AttributeNode* tempAttr = g->create_node<ccl::AttributeNode>();
+                        tempAttr->set_attribute(ccl::ustring(vd.bindTemperature));
+                        g->connect(tempAttr->output("Fac"), tempCurve->input("Value"));
+                        g->connect(tempCurve->output("Value"), pvol->input("Temperature"));
+                        printf("[Cycles Volume] Temperature remap curve active\n");
+                    }
+
+                    g->connect(pvol->output("Volume"), g->output()->input("Volume"));
+                    volShader->set_graph(std::move(g));
+                    volShader->tag_update(scene);
+                }
+
+                // 2. Create ccl::Volume
+                ccl::Volume* volume = scene->create_node<ccl::Volume>();
+                if (vd.stepSize > 0.001f) {
+                    volume->set_step_size(vd.stepSize);
+                }
+
+                // 3. Assign shader + volume bounces
+                ccl::array<ccl::Node*> shaders;
+                shaders.push_back_slow(volShader);
+                volume->set_used_shaders(shaders);
+                scene->integrator->set_max_volume_bounce(vd.volumeBounces);
+
+                // 4. Load ALL VDB grids as Cycles attributes
+                ccl::ImageParams imgParams;
+                imgParams.frame = 0.0f;
+
+                for (const auto& gi : vd.grids) {
+                    // Map grid name to standard Cycles attribute using user bindings
+                    ccl::AttributeStandard std = ccl::ATTR_STD_NONE;
+                    if (gi.name == vd.bindDensity) std = ccl::ATTR_STD_VOLUME_DENSITY;
+                    else if (gi.name == vd.bindTemperature) std = ccl::ATTR_STD_VOLUME_TEMPERATURE;
+                    else if (gi.name == vd.bindFlame) std = ccl::ATTR_STD_VOLUME_FLAME;
+                    else if (gi.name == vd.bindColor) std = ccl::ATTR_STD_VOLUME_COLOR;
+
+                    auto loader = ccl::make_unique<ccl::VDBImageLoader>(gi.grid, gi.name);
+                    ccl::ImageHandle handle = scene->image_manager->add_image(
+                        std::move(loader), imgParams, true);
+
+                    if (std != ccl::ATTR_STD_NONE) {
+                        ccl::Attribute* attr = volume->attributes.add(std);
+                        attr->data_voxel() = handle;
+                    } else {
+                        ccl::Attribute* attr = volume->attributes.add(
+                            ccl::ustring(gi.name), ccl::TypeFloat, ccl::ATTR_ELEMENT_VOXEL);
+                        attr->data_voxel() = handle;
+                    }
+
+                    printf("[Cycles Volume]   grid '%s' loaded\n", gi.name.c_str());
+                }
+
+                // 5. Merge grids (velocity)
+                volume->merge_grids(scene);
+
+                // 6. Create object
+                ccl::Object* obj = scene->create_node<ccl::Object>();
+                obj->set_geometry(volume);
+                obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix));
+
+                if (visibilityMap) {
+                    auto it = visibilityMap->find(sn.name);
+                    if (it != visibilityMap->end())
+                        obj->set_visibility(it->second.isExcluded ? 0 : it->second.rayVisibility);
+                    else obj->set_visibility(0);
+                }
+                obj->tag_update(scene);
+                printf("[Cycles Volume] ReadVDB '%s': %d grids, density=%.1f bb=%.1f temp=%.0fK\n",
+                       sn.name.c_str(), (int)vd.grids.size(), vd.density,
+                       vd.blackbodyIntensity, vd.temperatureScale);
                 continue;
             }
 
-            printf("[Cycles Volume] Creating volume '%s': res=%d density=%.2f\n",
-                   sn.name.c_str(), volRes, volDensity);
+            // === Volume3D path: ccl::Mesh with procedural shader ===
+            if (!vol3d) continue;
 
-            // Create Cycles Volume geometry (requires WITH_OPENVDB build)
-            ccl::Volume* volume = scene->create_node<ccl::Volume>();
+            ccl::Mesh* mesh = scene->create_node<ccl::Mesh>();
+            ccl::Object* obj = scene->create_node<ccl::Object>();
+            obj->set_geometry(mesh);
+            obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix));
 
-            float extentX = bboxMax[0] - bboxMin[0];
-            float extentY = bboxMax[1] - bboxMin[1];
-            float extentZ = bboxMax[2] - bboxMin[2];
-            if (extentX < 0.001f) extentX = 2.0f;
-            if (extentY < 0.001f) extentY = 2.0f;
-            if (extentZ < 0.001f) extentZ = 2.0f;
-            float voxelSize = std::max({extentX, extentY, extentZ}) / (float)volRes;
-            volume->set_step_size(voxelSize * 0.5f);
-            volume->set_object_space(true);
+            // Unit cube vertices [-1,1]^3
+            ccl::array<ccl::float3> P;
+            P.resize(8);
+            P[0] = ccl::make_float3( 1, 1,-1); P[1] = ccl::make_float3( 1,-1,-1);
+            P[2] = ccl::make_float3(-1,-1,-1); P[3] = ccl::make_float3(-1, 1,-1);
+            P[4] = ccl::make_float3( 1, 1, 1); P[5] = ccl::make_float3( 1,-1, 1);
+            P[6] = ccl::make_float3(-1,-1, 1); P[7] = ccl::make_float3(-1, 1, 1);
+            mesh->set_verts(P);
+            mesh->reserve_mesh(8, 12);
+            const bool smooth = true;
+            mesh->add_triangle(0,1,2, 0, smooth); mesh->add_triangle(0,2,3, 0, smooth);
+            mesh->add_triangle(4,7,6, 0, smooth); mesh->add_triangle(4,6,5, 0, smooth);
+            mesh->add_triangle(0,4,5, 0, smooth); mesh->add_triangle(0,5,1, 0, smooth);
+            mesh->add_triangle(1,5,6, 0, smooth); mesh->add_triangle(1,6,2, 0, smooth);
+            mesh->add_triangle(2,6,7, 0, smooth); mesh->add_triangle(2,7,3, 0, smooth);
+            mesh->add_triangle(4,0,3, 0, smooth); mesh->add_triangle(4,3,7, 0, smooth);
 
-            // Bounding box mesh (8 verts, 12 tris)
-            int numVerts = 8;
-            int numTris = 12;
-            volume->reserve_mesh(numVerts, numTris);
-            float x0 = bboxMin[0], y0 = bboxMin[1], z0 = bboxMin[2];
-            float x1 = bboxMax[0], y1 = bboxMax[1], z1 = bboxMax[2];
-            volume->add_vertex(ccl::make_float3(x0, y0, z0));
-            volume->add_vertex(ccl::make_float3(x1, y0, z0));
-            volume->add_vertex(ccl::make_float3(x1, y1, z0));
-            volume->add_vertex(ccl::make_float3(x0, y1, z0));
-            volume->add_vertex(ccl::make_float3(x0, y0, z1));
-            volume->add_vertex(ccl::make_float3(x1, y0, z1));
-            volume->add_vertex(ccl::make_float3(x1, y1, z1));
-            volume->add_vertex(ccl::make_float3(x0, y1, z1));
-            volume->add_triangle(0,1,2, 0, false); volume->add_triangle(0,2,3, 0, false);
-            volume->add_triangle(4,6,5, 0, false); volume->add_triangle(4,7,6, 0, false);
-            volume->add_triangle(0,4,5, 0, false); volume->add_triangle(0,5,1, 0, false);
-            volume->add_triangle(2,6,7, 0, false); volume->add_triangle(2,7,3, 0, false);
-            volume->add_triangle(0,3,7, 0, false); volume->add_triangle(0,7,4, 0, false);
-            volume->add_triangle(1,5,6, 0, false); volume->add_triangle(1,6,2, 0, false);
+            // Get Volume3D params
+            Volume3D::VolumeParams vp = vol3d->getVolumeParams(time);
+            float volDensity = vp.density;
+            float volColorR = vp.colorR, volColorG = vp.colorG, volColorB = vp.colorB;
+            int volType = vp.volumeType;
+            float noiseScale = vp.noiseScale, noiseDetail = vp.noiseDetail;
+            float stepSize = vp.stepSize;
+            int volumeBounces = vp.volumeBounces;
 
-            // Volume shader: homogeneous absorption + scatter + emission
-            // Using basic nodes (not PrincipledVolume) to avoid voxel attribute dependency
+            scene->integrator->set_max_volume_bounce(volumeBounces);
+
+            // Procedural volume shader — shapes built from shader nodes (no VDB)
             ccl::Shader* volShader = scene->create_node<ccl::Shader>();
-            {
-                auto volGraph = ccl::make_unique<ccl::ShaderGraph>();
+            if (stepSize > 0.001f) {
+                volShader->set_volume_step_rate(stepSize);
+            }
+            auto volGraph = ccl::make_unique<ccl::ShaderGraph>();
 
-                ccl::AbsorptionVolumeNode* absNode = volGraph->create_node<ccl::AbsorptionVolumeNode>();
-                absNode->set_color(ccl::make_float3(volColorR, volColorG, volColorB));
-                absNode->set_density(volDensity);
+            ccl::TextureCoordinateNode* texCoord = volGraph->create_node<ccl::TextureCoordinateNode>();
 
-                ccl::ScatterVolumeNode* scatNode = volGraph->create_node<ccl::ScatterVolumeNode>();
-                scatNode->set_color(ccl::make_float3(volColorR, volColorG, volColorB));
-                scatNode->set_density(volDensity * 0.5f);
-                scatNode->set_anisotropy(0.0f);
+            ccl::MathNode* mul = volGraph->create_node<ccl::MathNode>();
+            mul->set_math_type(ccl::NODE_MATH_MULTIPLY);
+            mul->set_value2(volDensity);
 
-                // Add both closures via an AddClosureNode
-                ccl::AddClosureNode* addNode = volGraph->create_node<ccl::AddClosureNode>();
-                volGraph->connect(absNode->output("Volume"), addNode->input("Closure1"));
-                volGraph->connect(scatNode->output("Volume"), addNode->input("Closure2"));
-                volGraph->connect(addNode->output("Closure"), volGraph->output()->input("Volume"));
+            if (volType == 0) {
+                // Sphere: max(0, 1 - length(pos))
+                ccl::VectorMathNode* len = volGraph->create_node<ccl::VectorMathNode>();
+                len->set_math_type(ccl::NODE_VECTOR_MATH_LENGTH);
+                volGraph->connect(texCoord->output("Object"), len->input("Vector1"));
 
-                volShader->set_graph(std::move(volGraph));
-                volShader->tag_update(scene);
+                ccl::MathNode* sub = volGraph->create_node<ccl::MathNode>();
+                sub->set_math_type(ccl::NODE_MATH_SUBTRACT);
+                sub->set_value1(1.0f);
+                volGraph->connect(len->output("Value"), sub->input("Value2"));
+
+                ccl::MathNode* clampMin = volGraph->create_node<ccl::MathNode>();
+                clampMin->set_math_type(ccl::NODE_MATH_MAXIMUM);
+                clampMin->set_value2(0.0f);
+                volGraph->connect(sub->output("Value"), clampMin->input("Value1"));
+
+                if (noiseScale > 0.01f) {
+                    ccl::NoiseTextureNode* noise = volGraph->create_node<ccl::NoiseTextureNode>();
+                    noise->set_dimensions(3);
+                    noise->set_scale(noiseScale);
+                    noise->set_detail(noiseDetail);
+                    volGraph->connect(texCoord->output("Object"), noise->input("Vector"));
+
+                    ccl::MathNode* noiseMul = volGraph->create_node<ccl::MathNode>();
+                    noiseMul->set_math_type(ccl::NODE_MATH_MULTIPLY);
+                    volGraph->connect(clampMin->output("Value"), noiseMul->input("Value1"));
+                    volGraph->connect(noise->output("Fac"), noiseMul->input("Value2"));
+
+                    volGraph->connect(noiseMul->output("Value"), mul->input("Value1"));
+                } else {
+                    volGraph->connect(clampMin->output("Value"), mul->input("Value1"));
+                }
+            } else {
+                // Box: uniform density, optionally modulated by noise
+                if (noiseScale > 0.01f) {
+                    ccl::NoiseTextureNode* noise = volGraph->create_node<ccl::NoiseTextureNode>();
+                    noise->set_dimensions(3);
+                    noise->set_scale(noiseScale);
+                    noise->set_detail(noiseDetail);
+                    volGraph->connect(texCoord->output("Object"), noise->input("Vector"));
+                    volGraph->connect(noise->output("Fac"), mul->input("Value1"));
+                } else {
+                    mul->set_value1(1.0f);
+                }
             }
 
-            ccl::array<ccl::Node*> volShaders;
-            volShaders.push_back_slow(volShader);
-            volume->set_used_shaders(volShaders);
+            ccl::ScatterVolumeNode* scatter = volGraph->create_node<ccl::ScatterVolumeNode>();
+            scatter->set_color(ccl::make_float3(volColorR, volColorG, volColorB));
+            volGraph->connect(mul->output("Value"), scatter->input("Density"));
 
-            // Load density voxel data via DenseVolumeLoader (→ OpenVDB → NanoVDB)
-            // Build voxel-to-world transform: maps [0,res)^3 → world bbox
-            float voxSizeX = extentX / (float)volRes;
-            float voxSizeY = extentY / (float)volRes;
-            float voxSizeZ = extentZ / (float)volRes;
-            ccl::Transform voxelToWorld = ccl::transform_identity();
-            voxelToWorld.x.x = voxSizeX; voxelToWorld.x.w = bboxMin[0];
-            voxelToWorld.y.y = voxSizeY; voxelToWorld.y.w = bboxMin[1];
-            voxelToWorld.z.z = voxSizeZ; voxelToWorld.z.w = bboxMin[2];
+            ccl::AbsorptionVolumeNode* absorb = volGraph->create_node<ccl::AbsorptionVolumeNode>();
+            absorb->set_color(ccl::make_float3(volColorR, volColorG, volColorB));
+            volGraph->connect(mul->output("Value"), absorb->input("Density"));
 
-            ccl::Attribute* densityAttr = volume->attributes.add(
-                ccl::ustring("density"), ccl::TypeFloat, ccl::ATTR_ELEMENT_VOXEL);
-            auto loader = ccl::unique_ptr<ccl::ImageLoader>(
-                new ccl::DenseVolumeLoader(densityData, volRes, voxelToWorld));
-            ccl::ImageParams imgParams;
-            imgParams.interpolation = ccl::INTERPOLATION_LINEAR;
-            ccl::ImageHandle handle = scene->image_manager->add_image(
-                std::move(loader), imgParams, true);
-            densityAttr->data_voxel() = handle;
+            ccl::AddClosureNode* addCl = volGraph->create_node<ccl::AddClosureNode>();
+            volGraph->connect(scatter->output("Volume"), addCl->input("Closure1"));
+            volGraph->connect(absorb->output("Volume"), addCl->input("Closure2"));
+            volGraph->connect(addCl->output("Closure"), volGraph->output()->input("Volume"));
 
-            volume->tag_update(scene, true);
+            volShader->set_graph(std::move(volGraph));
+            volShader->tag_update(scene);
 
-            printf("[Cycles Volume] Volume created: %d verts, %d tris, step=%.4f density=%.2f\n",
-                   numVerts, numTris, voxelSize * 0.5f, volDensity);
+            ccl::array<ccl::Node*> used_shaders;
+            used_shaders.push_back_slow(volShader);
+            mesh->set_used_shaders(used_shaders);
 
-            // Create object with world transform from scene node
-            ccl::Object* obj = scene->create_node<ccl::Object>();
-            obj->set_geometry(volume);
+            const char* typeNames[] = {"sphere", "box"};
+            printf("[Cycles Volume] Created '%s' type=%s density=%.1f noise=%.1f\n",
+                   sn.name.c_str(), typeNames[std::min(volType, 1)], volDensity, noiseScale);
 
-            ccl::Transform objTfm;
-            memcpy(&objTfm, sn.worldMatrix, sizeof(float) * 12);
-            obj->set_tfm(objTfm);
-
-            printf("[Cycles Volume] bbox=[%.2f,%.2f,%.2f]-[%.2f,%.2f,%.2f] density=%.2f\n",
-                   x0, y0, z0, x1, y1, z1, volDensity);
-
-            // Apply RenderPass visibility if provided
             if (visibilityMap) {
                 auto it = visibilityMap->find(sn.name);
                 if (it != visibilityMap->end()) {
-                    const ObjectVisibility& vis = it->second;
-                    obj->set_visibility(vis.isExcluded ? 0 : vis.rayVisibility);
+                    obj->set_visibility(it->second.isExcluded ? 0 : it->second.rayVisibility);
                 } else {
                     obj->set_visibility(0);
                 }
             }
 
             obj->tag_update(scene);
-            continue; // Skip mesh path
+            continue;
         }
 
         std::vector<ccl::float3> verts;

@@ -26,6 +26,13 @@
 #include "../../../Global/Macros.h"
 
 #include <vector>
+#include <string>
+
+#ifdef NATRON_HAVE_OPENVDB
+#ifndef Q_MOC_RUN
+#include <openvdb/openvdb.h>
+#endif
+#endif
 
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
@@ -99,6 +106,44 @@ public:
     };
 
     bool getVolumeData(double time, VDBVolumeData& outData);
+
+    // Lightweight bbox-only query — reads VDB grid metadata (no voxel data).
+    // Returns world-space bounds of the density grid (or first available grid).
+    // Used by the 3D viewport for wireframe display.
+    bool getVDBBounds(double time,
+                      float& outMinX, float& outMinY, float& outMinZ,
+                      float& outMaxX, float& outMaxY, float& outMaxZ);
+
+    // Direct VDB grid access for Cycles (skips dense conversion)
+    // Returns the OpenVDB grid and render params without converting to dense array.
+    // REVERT NOTE: if this causes issues, use getVolumeData() instead (dense path).
+#ifndef Q_MOC_RUN
+#ifdef NATRON_HAVE_OPENVDB
+    struct VDBGridInfo {
+        openvdb::GridBase::ConstPtr grid;
+        std::string name;
+    };
+    struct VDBDirectData {
+        std::vector<VDBGridInfo> grids;  // All grids from the file
+        float density;
+        float colorR, colorG, colorB;
+        float absorptionR, absorptionG, absorptionB;
+        float stepSize;
+        int volumeBounces;
+        float anisotropy;
+        float blackbodyIntensity;
+        float blackbodyTintR, blackbodyTintG, blackbodyTintB;
+        float temperatureScale;
+        // Grid name bindings (user-configurable)
+        std::string bindDensity, bindTemperature, bindFlame, bindColor, bindVelocity;
+        // Remap curves — sampled at 256 points from KnobParametric
+        static const int REMAP_SAMPLES = 256;
+        std::vector<float> densityRemap;      // 256 floats, maps [0,1] input → output
+        std::vector<float> temperatureRemap;  // 256 floats, maps [0,1] input → output
+    };
+    bool getVDBDirect(double time, VDBDirectData& outData);
+#endif
+#endif
 
     void getTransform(double time,
                       double& tx, double& ty, double& tz,

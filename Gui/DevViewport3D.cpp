@@ -1804,8 +1804,16 @@ DevViewport3D::drawVolumeNode(const SceneNode& sn) const
             glDisable(GL_BLEND);
         }
     } else if (vdb) {
-        bboxMinX = -2.0f; bboxMinY = -1.0f; bboxMinZ = -2.0f;
-        bboxMaxX = 2.0f; bboxMaxY = 2.0f; bboxMaxZ = 2.0f;
+        // Read actual VDB bounds from the grid (cached per-path)
+        float minX, minY, minZ, maxX, maxY, maxZ;
+        if (vdb->getVDBBounds(time, minX, minY, minZ, maxX, maxY, maxZ)) {
+            bboxMinX = minX; bboxMinY = minY; bboxMinZ = minZ;
+            bboxMaxX = maxX; bboxMaxY = maxY; bboxMaxZ = maxZ;
+        } else {
+            // Fallback if no file loaded yet
+            bboxMinX = -1.0f; bboxMinY = -1.0f; bboxMinZ = -1.0f;
+            bboxMaxX = 1.0f;  bboxMaxY = 1.0f;  bboxMaxZ = 1.0f;
+        }
         colR = 0.5f; colG = 0.7f; colB = 1.0f;
     }
 

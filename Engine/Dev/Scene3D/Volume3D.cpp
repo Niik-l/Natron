@@ -42,14 +42,17 @@ struct Volume3DPrivate
 {
     // Transform
     KnobDoubleWPtr centerX, centerY, centerZ;
+    KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobDoubleWPtr scaleX, scaleY, scaleZ;
 
     // Volume
-    KnobChoiceWPtr volumeType; // 0=sphere, 1=noise cloud, 2=box
+    KnobChoiceWPtr volumeType; // 0=sphere, 1=box
     KnobIntWPtr resolution;
     KnobDoubleWPtr density;
     KnobDoubleWPtr noiseScale;
     KnobDoubleWPtr noiseDetail;
+    KnobDoubleWPtr stepSize;
+    KnobIntWPtr volumeBounces;
 
     // Color
     KnobDoubleWPtr colorR, colorG, colorB;
@@ -103,22 +106,40 @@ Volume3D::initializeKnobs()
     KnobPagePtr xformPage = AppManager::createKnob<KnobPage>(this, tr("Transform"));
 
     {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Center X"));
-        k->setName("centerX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
-        k->setDisplayMinimum(-10.0); k->setDisplayMaximum(10.0);
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate X"));
+        k->setName("translateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-100.0); k->setDisplayMaximum(100.0);
         xformPage->addKnob(k); _imp->centerX = k;
     }
     {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Center Y"));
-        k->setName("centerY"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
-        k->setDisplayMinimum(-10.0); k->setDisplayMaximum(10.0);
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate Y"));
+        k->setName("translateY"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-100.0); k->setDisplayMaximum(100.0);
         xformPage->addKnob(k); _imp->centerY = k;
     }
     {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Center Z"));
-        k->setName("centerZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
-        k->setDisplayMinimum(-10.0); k->setDisplayMaximum(10.0);
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate Z"));
+        k->setName("translateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-100.0); k->setDisplayMaximum(100.0);
         xformPage->addKnob(k); _imp->centerZ = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate X"));
+        k->setName("rotateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateX = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Y"));
+        k->setName("rotateY"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateY = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Z"));
+        k->setName("rotateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateZ = k;
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale X"));
@@ -147,10 +168,9 @@ Volume3D::initializeKnobs()
         k->setName("volumeType");
         std::vector<ChoiceOption> entries;
         entries.push_back(ChoiceOption("sphere", "Sphere", "Spherical density falloff"));
-        entries.push_back(ChoiceOption("cloud", "Noise Cloud", "Perlin noise based cloud"));
         entries.push_back(ChoiceOption("box", "Box", "Uniform density box"));
         k->populateChoices(entries);
-        k->setDefaultValue(1); // cloud by default
+        k->setDefaultValue(0); // sphere by default
         volPage->addKnob(k); _imp->volumeType = k;
     }
     {
@@ -176,6 +196,20 @@ Volume3D::initializeKnobs()
         k->setName("noiseDetail"); k->setDefaultValue(4.0); k->setAnimationEnabled(true);
         k->setMinimum(1.0); k->setDisplayMinimum(1.0); k->setDisplayMaximum(8.0);
         volPage->addKnob(k); _imp->noiseDetail = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Step Size"));
+        k->setName("stepSize"); k->setDefaultValue(0.1);
+        k->setMinimum(0.001); k->setDisplayMinimum(0.01); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Ray marching step size. Smaller = smoother/slower. 0 = auto."));
+        volPage->addKnob(k); _imp->stepSize = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Volume Bounces"));
+        k->setName("volumeBounces"); k->setDefaultValue(2);
+        k->setMinimum(0); k->setDisplayMinimum(0); k->setDisplayMaximum(8);
+        k->setHintToolTip(tr("Max light bounces inside volume. 0 = single scatter only."));
+        volPage->addKnob(k); _imp->volumeBounces = k;
     }
 
     // Color
@@ -219,6 +253,8 @@ Volume3D::getVolumeParams(double time) const
     vp.volumeType = _imp->volumeType.lock()->getValueAtTime(time);
     vp.noiseScale = (float)_imp->noiseScale.lock()->getValueAtTime(time);
     vp.noiseDetail = (float)_imp->noiseDetail.lock()->getValueAtTime(time);
+    vp.stepSize = (float)_imp->stepSize.lock()->getValueAtTime(time);
+    vp.volumeBounces = _imp->volumeBounces.lock()->getValueAtTime(time);
     return vp;
 }
 
@@ -276,14 +312,25 @@ static float fbm3D(float x, float y, float z, int octaves)
 void
 Volume3D::generateVolumeData(double time, std::vector<float>& outData, int& res) const
 {
-    // Return cached data if same time
-    if (_cachedVolTime == time && _cachedVolRes > 0 && !_cachedVolData.empty()) {
+    VolumeParams vp = getVolumeParams(time);
+
+    // Cache key includes all params, not just time
+    U64 paramHash = 0;
+    {
+        auto hc = [](U64 s, U64 v) -> U64 { return s ^ (v * 0x9e3779b97f4a7c15ULL + (s << 6) + (s >> 2)); };
+        union { double d; U64 u; } conv;
+        conv.d = time; paramHash = hc(paramHash, conv.u);
+        paramHash = hc(paramHash, (U64)vp.volumeType);
+        paramHash = hc(paramHash, (U64)vp.resolution);
+        conv.d = vp.density; paramHash = hc(paramHash, conv.u);
+        conv.d = vp.noiseScale; paramHash = hc(paramHash, conv.u);
+        conv.d = vp.noiseDetail; paramHash = hc(paramHash, conv.u);
+    }
+    if (paramHash == _cachedVolHash && _cachedVolRes > 0 && !_cachedVolData.empty()) {
         outData = _cachedVolData;
         res = _cachedVolRes;
         return;
     }
-
-    VolumeParams vp = getVolumeParams(time);
     res = std::max(8, std::min(128, vp.resolution));
 
     outData.resize(res * res * res, 0.0f);
@@ -333,6 +380,7 @@ Volume3D::generateVolumeData(double time, std::vector<float>& outData, int& res)
     _cachedVolData = outData;
     _cachedVolRes = res;
     _cachedVolTime = time;
+    _cachedVolHash = paramHash;
 }
 
 StatusEnum

@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
+#include <fstream>
 
 #include <iostream>
 
@@ -52,10 +53,27 @@ struct ReadVDBPrivate
     KnobIntWPtr maxResolution;
     KnobDoubleWPtr density;
     KnobDoubleWPtr colorR, colorG, colorB;
+    KnobDoubleWPtr absorptionR, absorptionG, absorptionB;
     KnobIntWPtr frameOffset;
+
+    // Render settings
+    KnobDoubleWPtr stepSize;
+    KnobIntWPtr volumeBounces;
+    KnobDoubleWPtr anisotropy;
+    KnobDoubleWPtr blackbodyIntensity;
+    KnobDoubleWPtr blackbodyTintR, blackbodyTintG, blackbodyTintB;
+    KnobDoubleWPtr temperatureScale;
+
+    // Remap curves
+    KnobParametricWPtr densityRemap;
+    KnobParametricWPtr temperatureRemap;
+
+    // Grid bindings
+    KnobStringWPtr bindDensity, bindTemperature, bindFlame, bindColor, bindVelocity;
 
     // Transform
     KnobDoubleWPtr translateX, translateY, translateZ;
+    KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobDoubleWPtr scaleX, scaleY, scaleZ;
 
     // Cached data
@@ -65,7 +83,16 @@ struct ReadVDBPrivate
     ReadVDB::VDBVolumeData cachedData;
     bool hasCachedData;
 
-    ReadVDBPrivate() : hasCachedData(false) {}
+    // Cached bbox (keyed by resolved frame path)
+    std::string lastBoundsPath;
+    float bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ;
+    bool hasCachedBounds;
+
+    ReadVDBPrivate()
+    : hasCachedData(false)
+    , bMinX(-1), bMinY(-1), bMinZ(-1), bMaxX(1), bMaxY(1), bMaxZ(1)
+    , hasCachedBounds(false)
+    {}
 };
 
 // Resolve frame number in a VDB filename
@@ -174,7 +201,7 @@ ReadVDB::initializeKnobs()
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Density"));
-        k->setName("density"); k->setDefaultValue(10.0); k->setAnimationEnabled(true);
+        k->setName("density"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
         k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(50.0);
         mainPage->addKnob(k);
         _imp->density = k;
@@ -208,6 +235,24 @@ ReadVDB::initializeKnobs()
         xformPage->addKnob(k); _imp->translateZ = k;
     }
     {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate X"));
+        k->setName("rotateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateX = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Y"));
+        k->setName("rotateY"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateY = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Z"));
+        k->setName("rotateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateZ = k;
+    }
+    {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale X"));
         k->setName("scaleX"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
         k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
@@ -228,22 +273,165 @@ ReadVDB::initializeKnobs()
 
     KnobPagePtr colorPage = AppManager::createKnob<KnobPage>(this, tr("Color"));
     {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Color R"));
-        k->setName("colorR"); k->setDefaultValue(0.8);
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scatter Color R"));
+        k->setName("colorR"); k->setDefaultValue(0.1); k->setAnimationEnabled(true);
         k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Smoke scatter color. Low values = dark smoke."));
         colorPage->addKnob(k); _imp->colorR = k;
     }
     {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Color G"));
-        k->setName("colorG"); k->setDefaultValue(0.8);
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scatter Color G"));
+        k->setName("colorG"); k->setDefaultValue(0.1); k->setAnimationEnabled(true);
         k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
         colorPage->addKnob(k); _imp->colorG = k;
     }
     {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Color B"));
-        k->setName("colorB"); k->setDefaultValue(0.9);
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scatter Color B"));
+        k->setName("colorB"); k->setDefaultValue(0.1); k->setAnimationEnabled(true);
         k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
         colorPage->addKnob(k); _imp->colorB = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Absorption Color R"));
+        k->setName("absorptionR"); k->setDefaultValue(0.02); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Light absorption color. Low values = smoke absorbs most light (dark)."));
+        colorPage->addKnob(k); _imp->absorptionR = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Absorption Color G"));
+        k->setName("absorptionG"); k->setDefaultValue(0.02); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        colorPage->addKnob(k); _imp->absorptionG = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Absorption Color B"));
+        k->setName("absorptionB"); k->setDefaultValue(0.025); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        colorPage->addKnob(k); _imp->absorptionB = k;
+    }
+    // Density remap curve
+    {
+        KnobParametricPtr k = AppManager::createKnob<KnobParametric>(this, tr("Density Remap"), 1, false);
+        k->setName("densityRemap");
+        k->setParametricRange(0.0, 1.0);
+        k->setCurveColor(0, 0.8, 0.8, 0.8);
+        k->setHintToolTip(tr("Remap density values. X = input density (0-1), Y = output density. "
+                              "Default is linear (no change). Use to sharpen edges or clamp low values."));
+        // Default: linear identity curve (0,0) → (1,1)
+        k->addControlPoint(eValueChangedReasonNatronInternalEdited, 0, 0.0, 0.0, eKeyframeTypeLinear);
+        k->addControlPoint(eValueChangedReasonNatronInternalEdited, 0, 1.0, 1.0, eKeyframeTypeLinear);
+        k->setDefaultCurvesFromCurves();
+        colorPage->addKnob(k);
+        _imp->densityRemap = k;
+    }
+
+    // Fire / Blackbody
+    KnobPagePtr firePage = AppManager::createKnob<KnobPage>(this, tr("Fire"));
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Blackbody Intensity"));
+        k->setName("blackbodyIntensity"); k->setDefaultValue(0.005); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(0.1);
+        k->setHintToolTip(tr("Fire rendering intensity. 0 = smoke only. Very small values (0.001-0.01) for EmberGen/Houdini VDBs."));
+        firePage->addKnob(k); _imp->blackbodyIntensity = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Temperature Scale"));
+        k->setName("temperatureScale"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(100.0);
+        k->setHintToolTip(tr("Temperature multiplier for blackbody color. EmberGen VDBs have high values, use low scale (0.1-10)."));
+        firePage->addKnob(k); _imp->temperatureScale = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Blackbody Tint R"));
+        k->setName("blackbodyTintR"); k->setDefaultValue(1.0);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        firePage->addKnob(k); _imp->blackbodyTintR = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Blackbody Tint G"));
+        k->setName("blackbodyTintG"); k->setDefaultValue(0.7);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        firePage->addKnob(k); _imp->blackbodyTintG = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Blackbody Tint B"));
+        k->setName("blackbodyTintB"); k->setDefaultValue(0.4);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        firePage->addKnob(k); _imp->blackbodyTintB = k;
+    }
+
+    // Temperature remap curve
+    {
+        KnobParametricPtr k = AppManager::createKnob<KnobParametric>(this, tr("Temperature Remap"), 1, false);
+        k->setName("temperatureRemap");
+        k->setParametricRange(0.0, 1.0);
+        k->setCurveColor(0, 1.0, 0.4, 0.1);  // orange for fire
+        k->setHintToolTip(tr("Remap temperature values before blackbody conversion. X = input temp (0-1), Y = output. "
+                              "Use to control fire shape and color transitions."));
+        k->addControlPoint(eValueChangedReasonNatronInternalEdited, 0, 0.0, 0.0, eKeyframeTypeLinear);
+        k->addControlPoint(eValueChangedReasonNatronInternalEdited, 0, 1.0, 1.0, eKeyframeTypeLinear);
+        k->setDefaultCurvesFromCurves();
+        firePage->addKnob(k);
+        _imp->temperatureRemap = k;
+    }
+
+    // Grid Bindings — user maps VDB grid names to Cycles attributes
+    KnobPagePtr bindPage = AppManager::createKnob<KnobPage>(this, tr("Bindings"));
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Density Grid"));
+        k->setName("bindDensity"); k->setDefaultValue("density");
+        k->setHintToolTip(tr("VDB grid name for smoke density."));
+        bindPage->addKnob(k); _imp->bindDensity = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Temperature Grid"));
+        k->setName("bindTemperature"); k->setDefaultValue("temperature");
+        k->setHintToolTip(tr("VDB grid name for fire temperature (drives blackbody color)."));
+        bindPage->addKnob(k); _imp->bindTemperature = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Flame Grid"));
+        k->setName("bindFlame"); k->setDefaultValue("flames");
+        k->setHintToolTip(tr("VDB grid name for flame intensity."));
+        bindPage->addKnob(k); _imp->bindFlame = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Color Grid"));
+        k->setName("bindColor"); k->setDefaultValue("Cd");
+        k->setHintToolTip(tr("VDB grid name for per-voxel color."));
+        bindPage->addKnob(k); _imp->bindColor = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Velocity Grid"));
+        k->setName("bindVelocity"); k->setDefaultValue("vel");
+        k->setHintToolTip(tr("VDB grid name for velocity (motion blur)."));
+        bindPage->addKnob(k); _imp->bindVelocity = k;
+    }
+
+    // Render settings
+    KnobPagePtr renderPage = AppManager::createKnob<KnobPage>(this, tr("Render"));
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Step Size"));
+        k->setName("stepSize"); k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Ray marching step size. 0 = auto from voxel size."));
+        renderPage->addKnob(k); _imp->stepSize = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Volume Bounces"));
+        k->setName("volumeBounces"); k->setDefaultValue(6);
+        k->setMinimum(0); k->setDisplayMinimum(0); k->setDisplayMaximum(8);
+        k->setHintToolTip(tr("Max light bounces inside volume."));
+        renderPage->addKnob(k); _imp->volumeBounces = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Anisotropy"));
+        k->setName("anisotropy"); k->setDefaultValue(0.3); k->setAnimationEnabled(true);
+        k->setMinimum(-1.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(-1.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Scattering direction. 0=isotropic, +1=forward, -1=backward."));
+        renderPage->addKnob(k); _imp->anisotropy = k;
     }
 }
 
@@ -292,6 +480,7 @@ ReadVDB::loadVDBFile(const std::string& path)
 
         _imp->lastLoadedPath = path;
         _imp->hasCachedData = false;
+        _imp->hasCachedBounds = false;
     } catch (...) {
         // VDB load failed
     }
@@ -319,6 +508,172 @@ ReadVDB::getPreferredMetadata(NodeMetadata& metadata)
     metadata.setIsFrameVarying(true);
     return eStatusOK;
 }
+
+bool
+ReadVDB::getVDBBounds(double time,
+                      float& outMinX, float& outMinY, float& outMinZ,
+                      float& outMaxX, float& outMaxY, float& outMaxZ)
+{
+#ifdef NATRON_HAVE_OPENVDB
+    KnobFilePtr fileKnob = _imp->filePath.lock();
+    if (!fileKnob) return false;
+    std::string templatePath = fileKnob->getValue();
+    if (templatePath.empty()) return false;
+
+    int frame = (int)time + _imp->frameOffset.lock()->getValueAtTime(time);
+    if (frame < 0) frame = 0;
+    std::string path = resolveFramePath(templatePath, frame);
+
+    // Cache hit — return stored bounds
+    if (_imp->hasCachedBounds && _imp->lastBoundsPath == path) {
+        outMinX = _imp->bMinX; outMinY = _imp->bMinY; outMinZ = _imp->bMinZ;
+        outMaxX = _imp->bMaxX; outMaxY = _imp->bMaxY; outMaxZ = _imp->bMaxZ;
+        return true;
+    }
+
+    // If resolved frame file doesn't exist, fall back to the template path
+    // (sim domain is stable across frames, so any frame's bounds work for display)
+    {
+        std::ifstream testFile(path.c_str());
+        if (!testFile.good()) {
+            path = templatePath;
+        }
+    }
+
+    try {
+        openvdb::initialize();
+        openvdb::io::File file(path);
+        file.open();
+
+        // Read full grid (cached), prefer density, fall back to first available
+        openvdb::GridBase::Ptr grid;
+        std::string preferName = "density";
+        for (auto it = file.beginName(); it != file.endName(); ++it) {
+            if (*it == preferName) { grid = file.readGrid(preferName); break; }
+        }
+        if (!grid) {
+            for (auto it = file.beginName(); it != file.endName(); ++it) {
+                grid = file.readGrid(*it);
+                if (grid) break;
+            }
+        }
+        file.close();
+
+        if (!grid) return false;
+
+        openvdb::CoordBBox bbox = grid->evalActiveVoxelBoundingBox();
+        if (bbox.empty()) return false;
+
+        openvdb::Vec3d wsMin = grid->transform().indexToWorld(bbox.min().asVec3d());
+        openvdb::Vec3d wsMax = grid->transform().indexToWorld(bbox.max().asVec3d());
+
+        _imp->bMinX = outMinX = (float)wsMin.x();
+        _imp->bMinY = outMinY = (float)wsMin.y();
+        _imp->bMinZ = outMinZ = (float)wsMin.z();
+        _imp->bMaxX = outMaxX = (float)wsMax.x();
+        _imp->bMaxY = outMaxY = (float)wsMax.y();
+        _imp->bMaxZ = outMaxZ = (float)wsMax.z();
+        _imp->lastBoundsPath = path;
+        _imp->hasCachedBounds = true;
+        return true;
+    } catch (...) {
+        return false;
+    }
+#else
+    (void)time;
+    (void)outMinX; (void)outMinY; (void)outMinZ;
+    (void)outMaxX; (void)outMaxY; (void)outMaxZ;
+    return false;
+#endif
+}
+
+#ifdef NATRON_HAVE_OPENVDB
+bool
+ReadVDB::getVDBDirect(double time, VDBDirectData& outData)
+{
+    // Direct VDB grid access for Cycles — no dense conversion.
+    // Reads the OpenVDB grid directly from the file and returns it.
+    // REVERT: if issues, switch CyclesRenderer back to getVolumeData() (dense path).
+    KnobFilePtr fileKnob = _imp->filePath.lock();
+    std::string templatePath = fileKnob->getValue();
+    if (templatePath.empty()) return false;
+
+    int frame = (int)time + _imp->frameOffset.lock()->getValueAtTime(time);
+    if (frame < 0) frame = 0;
+    std::string path = resolveFramePath(templatePath, frame);
+
+    try {
+        openvdb::initialize();
+        openvdb::io::File file(path);
+        file.open();
+
+        int gridIdx = _imp->gridName.lock()->getValue();
+        std::string selectedGrid;
+        if (gridIdx >= 0 && gridIdx < (int)_imp->gridNames.size()) {
+            selectedGrid = _imp->gridNames[gridIdx];
+        } else if (!_imp->gridNames.empty()) {
+            selectedGrid = _imp->gridNames[0];
+        }
+
+        // Load ALL grids from the file
+        for (auto it = file.beginName(); it != file.endName(); ++it) {
+            openvdb::GridBase::Ptr grid = file.readGrid(*it);
+            if (grid) {
+                VDBGridInfo gi;
+                gi.grid = grid;
+                gi.name = *it;
+                outData.grids.push_back(gi);
+            }
+        }
+        file.close();
+
+        if (outData.grids.empty()) return false;
+
+        outData.density = (float)_imp->density.lock()->getValueAtTime(time);
+        outData.colorR = (float)_imp->colorR.lock()->getValueAtTime(time);
+        outData.colorG = (float)_imp->colorG.lock()->getValueAtTime(time);
+        outData.colorB = (float)_imp->colorB.lock()->getValueAtTime(time);
+        outData.absorptionR = (float)_imp->absorptionR.lock()->getValueAtTime(time);
+        outData.absorptionG = (float)_imp->absorptionG.lock()->getValueAtTime(time);
+        outData.absorptionB = (float)_imp->absorptionB.lock()->getValueAtTime(time);
+        outData.stepSize = (float)_imp->stepSize.lock()->getValueAtTime(time);
+        outData.volumeBounces = _imp->volumeBounces.lock()->getValueAtTime(time);
+        outData.anisotropy = (float)_imp->anisotropy.lock()->getValueAtTime(time);
+        outData.blackbodyIntensity = (float)_imp->blackbodyIntensity.lock()->getValueAtTime(time);
+        outData.blackbodyTintR = (float)_imp->blackbodyTintR.lock()->getValueAtTime(time);
+        outData.blackbodyTintG = (float)_imp->blackbodyTintG.lock()->getValueAtTime(time);
+        outData.blackbodyTintB = (float)_imp->blackbodyTintB.lock()->getValueAtTime(time);
+        outData.temperatureScale = (float)_imp->temperatureScale.lock()->getValueAtTime(time);
+        outData.bindDensity = _imp->bindDensity.lock()->getValue();
+        outData.bindTemperature = _imp->bindTemperature.lock()->getValue();
+        outData.bindFlame = _imp->bindFlame.lock()->getValue();
+        outData.bindColor = _imp->bindColor.lock()->getValue();
+        outData.bindVelocity = _imp->bindVelocity.lock()->getValue();
+
+        // Sample remap curves at REMAP_SAMPLES points
+        const int N = VDBDirectData::REMAP_SAMPLES;
+        outData.densityRemap.resize(N);
+        outData.temperatureRemap.resize(N);
+        {
+            KnobParametricPtr densRemap = _imp->densityRemap.lock();
+            KnobParametricPtr tempRemap = _imp->temperatureRemap.lock();
+            for (int i = 0; i < N; ++i) {
+                double t = (double)i / (double)(N - 1);
+                double dVal = t, tVal = t;  // default: identity
+                if (densRemap) densRemap->getValue(0, t, &dVal);
+                if (tempRemap) tempRemap->getValue(0, t, &tVal);
+                outData.densityRemap[i] = (float)dVal;
+                outData.temperatureRemap[i] = (float)tVal;
+            }
+        }
+
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[ReadVDB] Error reading VDB: " << e.what() << std::endl;
+        return false;
+    }
+}
+#endif
 
 bool
 ReadVDB::getVolumeData(double time, VDBVolumeData& outData)

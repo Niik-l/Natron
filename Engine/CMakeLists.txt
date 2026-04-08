@@ -189,6 +189,9 @@ if(NATRON_CYCLES)
         WITH_OCIO
         WITH_PUGIXML
         WITH_SYSTEM_PUGIXML
+        WITH_OPENVDB
+        WITH_NANOVDB
+        NATRON_HAVE_OPENVDB
     )
     # Cycles needs _USE_MATH_DEFINES on Windows for M_PI in OpenSubdiv headers
     if(WIN32)

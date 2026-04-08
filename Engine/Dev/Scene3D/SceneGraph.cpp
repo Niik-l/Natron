@@ -399,12 +399,21 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             double tx, ty, tz, sx, sy, sz;
             readVdb->getTransform(time, tx, ty, tz, sx, sy, sz);
 
+            // Read rotation from knobs
+            float rx = 0, ry = 0, rz = 0;
+            {
+                KnobIPtr k;
+                k = effect->getKnobByName("rotateX"); if (k) rx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+                k = effect->getKnobByName("rotateY"); if (k) ry = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+                k = effect->getKnobByName("rotateZ"); if (k) rz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            }
+
             SceneNode sn;
             sn.type = eSceneNodeVolume;
             sn.name = nodeName;
             sn.sourceNode = node;
             buildTRS((float)tx, (float)ty, (float)tz,
-                     0, 0, 0,
+                     rx, ry, rz,
                      (float)sx, (float)sy, (float)sz, sn.localMatrix);
 
             nameToIndex[nodeName] = (int)_nodes.size();
@@ -416,12 +425,22 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         Volume3D* vol3d = dynamic_cast<Volume3D*>(effect.get());
         if (vol3d) {
             Volume3D::VolumeParams vp = vol3d->getVolumeParams(time);
+
+            // Read rotation from knobs
+            float rx = 0, ry = 0, rz = 0;
+            {
+                KnobIPtr k;
+                k = effect->getKnobByName("rotateX"); if (k) rx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+                k = effect->getKnobByName("rotateY"); if (k) ry = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+                k = effect->getKnobByName("rotateZ"); if (k) rz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            }
+
             SceneNode sn;
             sn.type = eSceneNodeVolume;
             sn.name = nodeName;
             sn.sourceNode = node;
             buildTRS(vp.centerX, vp.centerY, vp.centerZ,
-                     0, 0, 0,
+                     rx, ry, rz,
                      vp.scaleX, vp.scaleY, vp.scaleZ, sn.localMatrix);
 
             nameToIndex[nodeName] = (int)_nodes.size();

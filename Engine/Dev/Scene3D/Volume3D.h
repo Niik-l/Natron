@@ -96,9 +96,11 @@ public:
         float density;
         float colorR, colorG, colorB;
         int resolution;
-        int volumeType; // 0=sphere, 1=noise cloud, 2=box
+        int volumeType; // 0=sphere, 1=box
         float noiseScale;
         float noiseDetail;
+        float stepSize;
+        int volumeBounces;
     };
 
     VolumeParams getVolumeParams(double time) const;
@@ -116,6 +118,7 @@ private:
     mutable std::vector<float> _cachedVolData;
     mutable int _cachedVolRes;
     mutable double _cachedVolTime;
+    mutable uint64_t _cachedVolHash = 0;
 };
 
 NATRON_NAMESPACE_EXIT
