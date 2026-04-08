@@ -168,6 +168,17 @@
 // Dev nodes — Particles
 #include "Dev/Particles/ParticleEmitter.h"
 #include "Dev/Particles/ParticleGravity.h"
+#include "Dev/Particles/ParticleDrag.h"
+#include "Dev/Particles/ParticleTurbulence.h"
+#include "Dev/Particles/ParticleTurbulence2D.h"
+#include "Dev/Particles/ParticleWind.h"
+#include "Dev/Particles/ParticleKillBox.h"
+#include "Dev/Particles/ParticleAttract.h"
+#include "Dev/Particles/ParticleVortex.h"
+#include "Dev/Particles/ParticleSpawn.h"
+#include "Dev/Particles/ParticleSolver.h"
+#include "Dev/Particles/ParticleInstance.h"
+#include "Dev/Particles/ParticleMerge.h"
 
 // Dev nodes — 3D System
 #include "Dev/Scene3D/Camera3DNode.h"
@@ -187,6 +198,7 @@
 #include "Dev/Scene3D/Volume3D.h"
 #include "Dev/Scene3D/ReadVDB.h"
 #include "Dev/Scene3D/ReadAlembicCamera.h"
+#include "Dev/Scene3D/ReadAlembicTransform.h"
 #include "Dev/Scene3D/ReadGeo.h"
 #include "Dev/Scene3D/RenderPass.h"
 
@@ -1646,6 +1658,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<Volume3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadVDB>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadAlembicCamera>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ReadAlembicTransform>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadGeo>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<RenderPass>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
@@ -1655,6 +1668,17 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     // Dev nodes — Particles
     registerBuiltInPlugin<ParticleEmitter>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ParticleGravity>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleDrag>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleTurbulence>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleTurbulence2D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleWind>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleKillBox>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleAttract>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleVortex>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleSpawn>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleSolver>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleInstance>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleMerge>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
     // Dev nodes — Transform
     registerBuiltInPlugin<SphericalTransform>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/transform_grouping_2.png"), false, false);

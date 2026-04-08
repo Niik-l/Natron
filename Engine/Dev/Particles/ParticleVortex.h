@@ -17,8 +17,8 @@
  * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef NATRON_ENGINE_PARTICLEGRAVITY_H
-#define NATRON_ENGINE_PARTICLEGRAVITY_H
+#ifndef NATRON_ENGINE_PARTICLEVORTEX_H
+#define NATRON_ENGINE_PARTICLEVORTEX_H
 
 // ***** BEGIN PYTHON BLOCK *****
 #include <Python.h>
@@ -31,16 +31,18 @@
 
 NATRON_NAMESPACE_ENTER
 
-struct ParticleGravityPrivate;
+struct ParticleVortexPrivate;
 
 /**
- * @brief Applies gravity force to particles.
+ * @brief Creates a spiral/vortex force around an axis, spinning particles
+ * in a whirlpool pattern.
  *
  * Input 0: Particle source (ParticleEmitter or another particle modifier)
  *
- * Modifies particle velocities by adding gravity acceleration each frame.
+ * Applies a tangential spinning force around a configurable axis,
+ * with optional inward pull toward or push away from the axis.
  */
-class ParticleGravity
+class ParticleVortex
     : public ParticleModifier
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
@@ -49,19 +51,19 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
 
-    static EffectInstance* BuildEffect(NodePtr n) { return new ParticleGravity(n); }
+    static EffectInstance* BuildEffect(NodePtr n) { return new ParticleVortex(n); }
 
-    ParticleGravity(NodePtr node);
-    virtual ~ParticleGravity();
+    ParticleVortex(NodePtr node);
+    virtual ~ParticleVortex();
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return PLUGINID_NATRON_PARTICLEGRAVITY; }
+    { return PLUGINID_NATRON_PARTICLEVORTEX; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "ParticleGravity"; }
+    { return "ParticleVortex"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
@@ -71,9 +73,9 @@ private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
 
-    std::unique_ptr<ParticleGravityPrivate> _imp;
+    std::unique_ptr<ParticleVortexPrivate> _imp;
 };
 
 NATRON_NAMESPACE_EXIT
 
-#endif // NATRON_ENGINE_PARTICLEGRAVITY_H
+#endif // NATRON_ENGINE_PARTICLEVORTEX_H

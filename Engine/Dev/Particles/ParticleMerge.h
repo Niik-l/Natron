@@ -17,8 +17,8 @@
  * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef NATRON_ENGINE_PARTICLEEMITTER_H
-#define NATRON_ENGINE_PARTICLEEMITTER_H
+#ifndef NATRON_ENGINE_PARTICLEMERGE_H
+#define NATRON_ENGINE_PARTICLEMERGE_H
 
 // ***** BEGIN PYTHON BLOCK *****
 #include <Python.h>
@@ -37,22 +37,15 @@
 
 NATRON_NAMESPACE_ENTER
 
-struct ParticleEmitterPrivate;
-
 /**
- * @brief Particle emitter node — spawns particles each frame and simulates them forward.
+ * @brief Merges multiple particle streams into one.
  *
- * No inputs — this is the source node for a particle system.
+ * Inputs 0-3: Particle sources (A, B, C, D) — all optional.
  *
- * Spawns `rate` particles per frame with randomized velocity within an emission cone,
- * then advances all particles (position += velocity * dt, age += 1) and removes
- * expired particles each frame.
- *
- * Call getParticleData(time) to retrieve the simulated ParticleDataPtr at a given frame.
- *
- * Grouping: Particles
+ * Connect different particle chains to combine their particles into
+ * a single unified stream.
  */
-class ParticleEmitter
+class ParticleMerge
     : public EffectInstance
     , public ParticleProvider
 {
@@ -62,21 +55,21 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
 
-    static EffectInstance* BuildEffect(NodePtr n) { return new ParticleEmitter(n); }
+    static EffectInstance* BuildEffect(NodePtr n) { return new ParticleMerge(n); }
 
-    ParticleEmitter(NodePtr node);
-    virtual ~ParticleEmitter();
+    ParticleMerge(NodePtr node);
+    virtual ~ParticleMerge();
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 2; }
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 4; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return PLUGINID_NATRON_PARTICLEEMITTER; }
+    { return PLUGINID_NATRON_PARTICLEMERGE; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "ParticleEmitter"; }
+    { return "ParticleMerge"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
@@ -100,28 +93,17 @@ public:
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
     /**
-     * @brief Returns the simulated particle data at the given time.
-     *
-     * Simulates from frame 1 to `time`, spawning and advancing particles each frame.
-     * Results are cached — repeated calls with the same time return the cached data.
+     * @brief Returns merged particle data from all connected inputs.
      */
-    ParticleDataPtr getParticleData(double time);
-
-    virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL;
+    ParticleDataPtr getParticleData(double time) OVERRIDE;
 
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
-
-    std::unique_ptr<ParticleEmitterPrivate> _imp;
-
-    // Simulation cache
-    ParticleDataPtr _lastParticleData;
-    double _lastSimFrame;
 };
 
 NATRON_NAMESPACE_EXIT
 
-#endif // NATRON_ENGINE_PARTICLEEMITTER_H
+#endif // NATRON_ENGINE_PARTICLEMERGE_H
