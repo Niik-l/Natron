@@ -4,6 +4,23 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ---
 
+## My TODO (user priorities)
+
+- [ ] Test all deep nodes
+- [ ] Create deep sample picker
+- [ ] Think about material assignment — particles / instances and attributes
+- [ ] Point clouds
+- [ ] Scatter node
+- [ ] ParticleInstance works on scatter / point clouds
+- [ ] Material ramps / expressions / variations
+- [ ] Shader updates for volumes
+- [ ] Fully test VDBs
+- [ ] Use backplate in Cycles renders
+- [ ] Blender deep?
+- [ ] Denoise
+
+---
+
 ## DevShuffle (Channel Routing)
 
 ### Known Issues
@@ -104,15 +121,71 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ## Particles
 
+**Status: Phase 2 complete (12 nodes). Solver architecture refactored. Collision with geometry working.**
+
+### Architecture (2026-04-06 refactor)
+
+- **Force nodes are stateless** — `applyForce()` modifies velocities in-place, no cached positions. Viewing from a force node shows emitter positions with velocity tweaks (preview only, no accumulation).
+- **ParticleSolver is the solver** — walks upstream with `collectUpstreamForces()` to find the emitter and all force nodes. Runs the single simulation loop each frame: spawn → forces → integrate → collide → expire. Only node that owns position/velocity state.
+- **Works without geo** — if no geometry is connected to the `geo` input, ParticleSolver acts as a pure solver (forces + integration, no collision). Always put ParticleSolver at the end of the chain.
+- **OBB collision** — reads rotateX/Y/Z from connected Cube3D, transforms particles into local space for AABB test, transforms back. Standard technique (Unity/Unreal/Blender).
+- This matches the standard pattern used by Blender, Unity, Unreal, and Houdini. See `Research_Particle_Sim_Loop.md`.
+
 ### Known Issues
 
-- None currently — ParticleEmitter and ParticleGravity compile and register.
+- **No substeps in solver** — one integration step per frame. Fast particles can tunnel through thin colliders. Testbed has 4 substeps. Adding substeps to the solver loop is straightforward but not yet done.
+- **Force preview is velocity-only** — viewing from a force node (e.g. Gravity) shows emitter positions, not accumulated force positions. Must view from ParticleSolver for proper simulation.
+- **Node renamed** — ParticleCollide → ParticleSolver (2026-04-06). Plugin ID is now `ParticleSolver`.
 
-### TODO
+### Completed (2026-04-06)
 
-- Particle rendering in ScanlineRender needs testing
-- No particle caching — simulation re-runs on every frame scrub
-- Turbulence force could use Perlin noise improvement
+- **Solver architecture refactor** — force nodes stateless, ParticleSolver owns simulation loop. Bounced velocity persists correctly (particles roll off surfaces during playback).
+- **OBB collision** — rotation support for Cube3D colliders (inverse-transform to local space)
+- **Show Collisions debug** — checkbox tints collided particles red
+- **Removed built-in shape knobs** — no more Plane/Box/Sphere dropdown. Collision shape comes from connected Cube3D/Sphere3D geo.
+- **Collision math from testbed** — `bounceParticle`, `rayAABB`, `collideGeoBox`, `collideGeoSphere`, `pushOutOfBox`, `pushOutOfSphere`
+- **`prevPx/prevPy/prevPz`** on Particle struct, `size` knob fix
+- **Standalone testbed** (`tools/particle_testbed/`) with real-time viz, sliders, multiple shapes, animated colliders, substeps
+- **Shiboken crash recovery**
+- **ParticleCollide → ParticleSolver rename** — node, class, plugin ID, all references
+- **ParticleSpawn "On Collision" working** — Emitter → Gravity → Solver (Cube3D geo) → Spawn (On Collision) → Merge pipeline tested and working
+- **ReadAlembicTransform** — reads IXform (null/locator) from Alembic files. Dropdown to select transform, FPS knob, frame offset. Outputs animated translateX/Y/Z, rotateX/Y/Z, scaleX/Y/Z.
+- **ParticleEmitter transform input** — new "transform" input (input 1). Connect ReadAlembicTransform directly — emitter position and emit direction automatically follow the null. No expression linking needed.
+- **Substeps knob** on ParticleSolver (default 4, range 1-32)
+- **Full particle node audit** — all 12 nodes clean, no issues found
+- **3D viewport axis handle** for ReadAlembicTransform — RGB axis cross + yellow diamond at null position, rotates with animation, gizmo suppressed (read-only)
+
+### Completed (2026-04-07)
+
+- **ScanlineRender particle modes** — Point, Disc, Sphere, Sprite + Additive/Over blend + global scale knob
+- **ScanlineRender 4x MSAA** — multisampled FBO + blit-to-resolve pattern for proper anti-aliasing
+- **Multi-sample motion blur (ScanlineRender)** — physically-accurate via sub-frame accumulation. Works on all particle modes and instances. Samples + Shutter knobs. Stretch cheat mode is mutually exclusive.
+- **ParticleInstance** — instances Cube3D/Sphere3D geo at particle positions. Working in both ScanlineRender and CyclesRender.
+- **Cycles particle instancing** — native Cycles instancing (shared ccl::Mesh, one ccl::Object per instance). Motion blur via set_motion() with 3 transform steps extrapolated from velocity.
+- **maxBounces** — bounceCount on Particle struct, kills particle when exceeded
+- **Color variance** — per-particle random color variation on emitter (deterministic by particle ID)
+- **Sphere/instance smoothing** — bumped sphere tessellation (16×24 instance, 10×14 particle mode), disc segments (32), added back-face culling for 3D geo
+
+### Still TODO
+
+- **Material system redesign** — see `Research_Material_System.md`. Current state is further along than expected:
+  - `Material3D` already exists as authoring node with 5 texture inputs
+  - Cube3D etc. already have `mat` input (input 1) for direct Material3D connection
+  - CyclesRenderer uses `MaterialProvider` to build shader graphs
+  - ScanlineRender does NOT consume materials (raw image textures only)
+  - **Gaps:** ParticleInstance is hardcoded orange, no AssignMaterial node, no Cycles shader caching, ScanlineRender doesn't do PBR
+  - **Recommended: Hybrid (Option C)** — direct input for simple cases + AssignMaterial node for scene-wide/pattern-based
+  - **Phase 1:** `resolveMaterial()` helper + `MaterialBindingTable` on MaterialProvider.h
+  - **Phase 2 (biggest win):** Extend ParticleInstance to 9 inputs (4 geo + 4 mat + 1 master override). Precedence: `masterOverride > pairedMat > geo->getConnectedMaterial() > geo inline knobs`. Kill the orange hardcode. Add per-material shader cache in Cycles.
+  - **Phase 3:** `AssignMaterial` node (scene passthrough + material input + name pattern). Downstream overrides upstream.
+  - **Phase 4:** Face groups / collections / ScanlineRender PBR (deferred)
+- **Per-instance color in Cycles shader** — use `ObjectInfoNode` to pipe per-particle color from `obj->set_color()` into the Principled BSDF base color (partial fix for the hardcoded orange, before full material system)
+- **Particle caching** — simulation re-runs on every frame scrub (should cache per-frame)
+- **Color ramp UI** — pick a gradient of colors for per-particle random sampling (see `Research_Particle_Color_And_MotionBlur.md`)
+- **ReadAlembicTransform animation path** — draw the motion trail in the viewport
+- **Mesh collision** — per-triangle ray intersection for Alembic geo (requires ReadAlembicGeo)
+- **Vertex selection in 3D viewport** — click on mesh vertex (see `Research_Vertex_Selection_3DViewport.md`)
+- **ParticleExpression** — per-particle scripting for custom forces/behaviors
 
 ---
 

@@ -486,6 +486,28 @@ Note: `-j4` or higher generally works fine for the main Natron build on 16GB+ ma
 
 ---
 
+## 10. Particle Collision Testbed (optional)
+
+A standalone real-time app for developing and testing particle collision physics, separate from Natron.
+
+```bash
+# Install dependencies
+pacman -S --noconfirm mingw-w64-x86_64-glfw mingw-w64-x86_64-glew
+
+# Build
+cd tools/particle_testbed
+mkdir build && cd build
+cmake .. -G "MinGW Makefiles"
+mingw32-make
+
+# Run
+./particle_testbed.exe
+```
+
+Controls: left-drag to orbit, scroll to zoom, 1/3/4/5/6 to switch collision shapes, A to animate collider, sliders on left for velocity/gravity/elasticity/friction.
+
+---
+
 ## Technical Details
 
 For a complete list of all code changes, API migrations, and architectural decisions,

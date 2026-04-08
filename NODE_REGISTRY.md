@@ -23,8 +23,8 @@ Updated: 2026-04-03
 |------|-----------|--------|-------------|
 | **Scene3D** | `fr.inria.built-in.Scene3D` | Registered | Aggregates 3D objects for rendering |
 | **RenderPass** | `fr.inria.built-in.RenderPass` | Registered | Multi-pass filter: object visibility, holdout, shadow catcher, light selection |
-| **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | Registered | CPU rasterizer, outputs 2D |
-| **CyclesRender** | `fr.inria.built-in.CyclesRender` | Registered | Cycles path tracer (requires NATRON_CYCLES) |
+| **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | Registered | OpenGL rasterizer with 4x MSAA, particle render modes (Point/Disc/Sphere/Sprite), multi-sample motion blur, geo instancing |
+| **CyclesRender** | `fr.inria.built-in.CyclesRender` | Registered | Cycles path tracer (requires NATRON_CYCLES). Native particle support (PointCloud) + ParticleInstance with Cycles instancing + motion blur via set_motion() |
 | **Project3D** | `fr.inria.built-in.Project3D` | Registered | Camera projection onto geometry |
 
 ## Camera & Lighting (3 nodes)
@@ -33,6 +33,7 @@ Updated: 2026-04-03
 |------|-----------|--------|-------------|
 | **Camera3D** | `fr.inria.built-in.Camera3D` | Registered | Camera with T/R, focal length, aperture, DOF |
 | **ReadAlembicCamera** | `fr.inria.built-in.ReadAlembicCamera` | Registered | Import animated camera from .abc |
+| **ReadAlembicTransform** | `fr.inria.built-in.ReadAlembicTransform` | Registered | Import animated transform/null/locator from .abc. Outputs translate/rotate/scale. Connect to ParticleEmitter transform input. |
 | **Light3D** | `fr.inria.built-in.Light3D` | Registered | Point/Spot/Area/Distant/Dome light with HDRI |
 
 ## Materials (2 nodes)
@@ -93,6 +94,17 @@ Updated: 2026-04-03
 |------|-----------|--------|-------------|
 | **ParticleEmitter** | `fr.inria.built-in.ParticleEmitter` | Registered | Emitter with Point/Sphere/Box/Disc shapes |
 | **ParticleGravity** | `fr.inria.built-in.ParticleGravity` | Registered | Gravity force for particles |
+| **ParticleDrag** | `fr.inria.built-in.ParticleDrag` | Registered | Velocity damping |
+| **ParticleTurbulence** | `fr.inria.built-in.ParticleTurbulence` | Registered | 3D curl noise turbulence (volumetric swirling) |
+| **ParticleTurbulence2D** | `fr.inria.built-in.ParticleTurbulence2D` | Registered | Planar curl noise turbulence (sheet-like flow) |
+| **ParticleWind** | `fr.inria.built-in.ParticleWind` | Registered | Directional wind force with gustiness |
+| **ParticleKillBox** | `fr.inria.built-in.ParticleKillBox` | Registered | Bounding box particle kill zone (inside/outside) |
+| **ParticleAttract** | `fr.inria.built-in.ParticleAttract` | Registered | Attract/repel from a point (linear/inverse square falloff) |
+| **ParticleVortex** | `fr.inria.built-in.ParticleVortex` | Registered | Spiral vortex force around an axis with inward pull |
+| **ParticleSpawn** | `fr.inria.built-in.ParticleSpawn` | Registered | Secondary particle emitter (trails, sparks) — On Birth/Death/Collision triggers |
+| **ParticleSolver** | `fr.inria.built-in.ParticleSolver` | Registered | Particle solver + collision. Owns simulation loop (forces → integrate → collide). Reads Cube3D/Sphere3D geo for collision (OBB with rotation). Works without geo as pure solver. Elasticity, friction, spawn-inside push-out. |
+| **ParticleInstance** | `fr.inria.built-in.ParticleInstance` | Registered | Instance geo at particle positions. 4 geo inputs (A-D). Distribution: Sequential/Random/ByID. Orient to velocity, scale multiplier, max instances. |
+| **ParticleMerge** | `fr.inria.built-in.ParticleMerge` | Registered | Combine multiple particle streams (4 inputs) |
 
 ## Channel (1 node)
 
@@ -130,9 +142,9 @@ Updated: 2026-04-03
 | Materials | 2 | 0 | 2 |
 | Deep (Tier 1+2) | 16 | 0 | 16 |
 | Deep (Tier 3) | 0 | 19 | 19 |
-| Particles | 2 | 0 | 2 |
+| Particles | 12 | 0 | 12 |
 | Channel | 1 | 0 | 1 |
 | Transform | 1 | 0 | 1 |
 | Color | 1 | 0 | 1 |
 | Other | 1 | 0 | 1 |
-| **Total** | **39** | **19** | **58** |
+| **Total** | **49** | **19** | **68** |
