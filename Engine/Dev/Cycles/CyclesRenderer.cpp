@@ -67,8 +67,10 @@
 #include "Engine/Dev/Scene3D/RenderPass.h"
 #include "Engine/Dev/Scene3D/ReadVDB.h"
 #include "Engine/Dev/Scene3D/Volume3D.h"
-#include "Engine/Dev/Particles/ParticleEmitter.h"
-#include "Engine/Dev/Particles/ParticleGravity.h"
+#include "Engine/Dev/Particles/ParticleProvider.h"
+#include "Engine/Dev/Particles/ParticleInstance.h"
+#include "Engine/Dev/Scene3D/Cube3D.h"
+#include "Engine/Dev/Scene3D/Sphere3D.h"
 #include "Engine/Knob.h"
 #include "Engine/KnobTypes.h"
 #include "Engine/Node.h"
@@ -1120,18 +1122,167 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         const SceneNode& sn = sceneNodes[i];
         if (!sn.visible) continue;
 
-        // --- Particles: render as PointCloud, skip mesh path ---
+        // --- Particles: render as PointCloud or instanced geo ---
         if (sn.type == eSceneNodeParticles) {
             NodePtr srcNode = sn.sourceNode.lock();
             if (!srcNode) continue;
             EffectInstancePtr effect = srcNode->getEffectInstance();
             if (!effect) continue;
 
+            // If the source is a ParticleInstance, render the instanced geo via Cycles native instancing
+            ParticleInstance* particleInstancer = dynamic_cast<ParticleInstance*>(effect.get());
+            if (particleInstancer) {
+                std::vector<ParticleInstance::GeoInstance> instances;
+                particleInstancer->getInstances(time, instances);
+                if (instances.empty()) continue;
+
+                // Build prototype meshes once per geo source (Cycles instancing = shared ccl::Mesh)
+                ccl::Mesh* protoMeshes[4] = {nullptr, nullptr, nullptr, nullptr};
+                for (int g = 0; g < 4; ++g) {
+                    EffectInstancePtr geoInput = particleInstancer->getInput(g + 1);
+                    if (!geoInput) continue;
+
+                    std::vector<ccl::float3> verts;
+                    std::vector<int> tris;
+
+                    // Cube3D: unit cube
+                    if (dynamic_cast<Cube3D*>(geoInput.get())) {
+                        float s = 0.5f;
+                        verts = {
+                            {-s,-s,-s}, {s,-s,-s}, {s,s,-s}, {-s,s,-s},
+                            {-s,-s, s}, {s,-s, s}, {s,s, s}, {-s,s, s}
+                        };
+                        tris = {
+                            0,1,2, 0,2,3, // back
+                            4,6,5, 4,7,6, // front
+                            0,4,5, 0,5,1, // bottom
+                            2,6,7, 2,7,3, // top
+                            0,3,7, 0,7,4, // left
+                            1,5,6, 1,6,2  // right
+                        };
+                    }
+                    // Sphere3D: simple sphere
+                    else if (dynamic_cast<Sphere3D*>(geoInput.get())) {
+                        const int rings = 16, sectors = 24;
+                        float rad = 0.5f;
+                        for (int r = 0; r <= rings; ++r) {
+                            float phi = (float)M_PI * r / rings;
+                            for (int s = 0; s <= sectors; ++s) {
+                                float theta = 2.0f * (float)M_PI * s / sectors;
+                                verts.push_back(ccl::make_float3(
+                                    rad * std::sin(phi) * std::cos(theta),
+                                    rad * std::cos(phi),
+                                    rad * std::sin(phi) * std::sin(theta)));
+                            }
+                        }
+                        for (int r = 0; r < rings; ++r) {
+                            for (int s = 0; s < sectors; ++s) {
+                                int i0 = r * (sectors + 1) + s;
+                                int i1 = i0 + sectors + 1;
+                                tris.push_back(i0); tris.push_back(i1); tris.push_back(i0 + 1);
+                                tris.push_back(i0 + 1); tris.push_back(i1); tris.push_back(i1 + 1);
+                            }
+                        }
+                    }
+                    else {
+                        continue; // unsupported geo type
+                    }
+
+                    // Create the prototype mesh
+                    ccl::Mesh* mesh = scene->create_node<ccl::Mesh>();
+                    mesh->reserve_mesh((int)verts.size(), (int)tris.size() / 3);
+                    for (const auto& v : verts) mesh->add_vertex(v);
+                    for (size_t t = 0; t < tris.size(); t += 3) {
+                        mesh->add_triangle(tris[t], tris[t+1], tris[t+2], 0, true);
+                    }
+
+                    // Use the particle color shader (created per-instance below)
+                    protoMeshes[g] = mesh;
+                }
+
+                // Create a shared particle shader
+                ccl::Shader* instShader = scene->create_node<ccl::Shader>();
+                auto instGraph = ccl::make_unique<ccl::ShaderGraph>();
+                ccl::PrincipledBsdfNode* instBsdf = instGraph->create_node<ccl::PrincipledBsdfNode>();
+                instBsdf->set_base_color(ccl::make_float3(0.8f, 0.5f, 0.2f));
+                instBsdf->set_roughness(0.5f);
+                instGraph->connect(instBsdf->output("BSDF"), instGraph->output()->input("Surface"));
+                instShader->set_graph(std::move(instGraph));
+                instShader->tag_update(scene);
+
+                ccl::array<ccl::Node*> shaders;
+                shaders.push_back_slow(instShader);
+                for (int g = 0; g < 4; ++g) {
+                    if (protoMeshes[g]) protoMeshes[g]->set_used_shaders(shaders);
+                }
+
+                // Motion blur setup — compute shutter open/close offsets
+                bool mbEnabled = motionBlur && motionBlur->enabled;
+                float shutterOpen = 0, shutterClose = 0;
+                if (mbEnabled) {
+                    float st = motionBlur->shutterTime;
+                    switch (motionBlur->shutterPosition) {
+                        case 0: shutterOpen = 0; shutterClose = st; break;           // Start
+                        case 1: shutterOpen = -st * 0.5f; shutterClose = st * 0.5f; break; // Center
+                        case 2: shutterOpen = -st; shutterClose = 0; break;          // End
+                    }
+                }
+
+                // Enable motion blur on all prototype meshes so Cycles allocates motion attribute space
+                if (mbEnabled) {
+                    for (int g = 0; g < 4; ++g) {
+                        if (protoMeshes[g]) {
+                            protoMeshes[g]->set_use_motion_blur(true);
+                            protoMeshes[g]->set_motion_steps(3);
+                        }
+                    }
+                }
+
+                // Create one ccl::Object per instance (shared mesh = native Cycles instancing)
+                for (const auto& inst : instances) {
+                    if (inst.geoSourceIndex < 0 || inst.geoSourceIndex >= 4) continue;
+                    ccl::Mesh* proto = protoMeshes[inst.geoSourceIndex];
+                    if (!proto) continue;
+
+                    // Helper to build a transform at a time offset (extrapolate position from velocity)
+                    auto buildInstTfm = [&](float dt) -> ccl::Transform {
+                        ccl::Transform t = ccl::transform_identity();
+                        t = t * ccl::transform_translate(
+                            inst.px + inst.vx * dt,
+                            inst.py + inst.vy * dt,
+                            inst.pz + inst.vz * dt);
+                        if (inst.ry != 0) t = t * ccl::transform_rotate(inst.ry * (float)M_PI / 180.0f, ccl::make_float3(0, 1, 0));
+                        if (inst.rx != 0) t = t * ccl::transform_rotate(inst.rx * (float)M_PI / 180.0f, ccl::make_float3(1, 0, 0));
+                        if (inst.rz != 0) t = t * ccl::transform_rotate(inst.rz * (float)M_PI / 180.0f, ccl::make_float3(0, 0, 1));
+                        t = t * ccl::transform_scale(inst.sx, inst.sy, inst.sz);
+                        return t;
+                    };
+
+                    ccl::Object* instObj = scene->create_node<ccl::Object>();
+                    instObj->set_geometry(proto);
+                    instObj->set_tfm(buildInstTfm(0.0f)); // center (current frame)
+
+                    if (mbEnabled) {
+                        // 3 motion steps: open, center, close
+                        // (set_use_motion_blur is on the Mesh, already enabled above)
+                        ccl::array<ccl::Transform> motionTfms;
+                        motionTfms.resize(3);
+                        motionTfms[0] = buildInstTfm(shutterOpen);
+                        motionTfms[1] = buildInstTfm(0.0f);
+                        motionTfms[2] = buildInstTfm(shutterClose);
+                        instObj->set_motion(motionTfms);
+                    }
+
+                    instObj->set_color(ccl::make_float3(inst.r, inst.g, inst.b));
+                    instObj->tag_update(scene);
+                }
+
+                continue; // done with this node
+            }
+
             ParticleDataPtr particleData;
-            ParticleEmitter* pEmitter = dynamic_cast<ParticleEmitter*>(effect.get());
-            ParticleGravity* pGravity = dynamic_cast<ParticleGravity*>(effect.get());
-            if (pEmitter) particleData = pEmitter->getParticleData(time);
-            else if (pGravity) particleData = pGravity->getParticleData(time);
+            ParticleProvider* provider = dynamic_cast<ParticleProvider*>(effect.get());
+            if (provider) particleData = provider->getParticleData(time);
 
             if (!particleData || particleData->numParticles() == 0) continue;
 
@@ -1165,14 +1316,12 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 // Get particle data at shutter open time
                 ParticleDataPtr dataOpen;
                 double timeOpen = time + shutterOpen;
-                if (pEmitter) dataOpen = pEmitter->getParticleData(timeOpen);
-                else if (pGravity) dataOpen = pGravity->getParticleData(timeOpen);
+                if (provider) dataOpen = provider->getParticleData(timeOpen);
 
                 // Get particle data at shutter close time
                 ParticleDataPtr dataClose;
                 double timeClose = time + shutterClose;
-                if (pEmitter) dataClose = pEmitter->getParticleData(timeClose);
-                else if (pGravity) dataClose = pGravity->getParticleData(timeClose);
+                if (provider) dataClose = provider->getParticleData(timeClose);
 
                 if (dataOpen && dataClose &&
                     dataOpen->numParticles() > 0 && dataClose->numParticles() > 0) {
