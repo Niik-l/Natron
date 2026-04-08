@@ -65,13 +65,13 @@ struct ParticleEmitterPrivate
 
     // Color
     KnobDoubleWPtr startColorR, startColorG, startColorB, startColorA;
+    KnobDoubleWPtr colorVariance;
 
-    // Built-in forces
-    KnobDoubleWPtr gravityX, gravityY, gravityZ;
-    KnobDoubleWPtr drag;
-    KnobDoubleWPtr turbulenceStrength;
-    KnobDoubleWPtr turbulenceScale;
-    KnobDoubleWPtr turbulenceSpeed;
+    // Image Mask
+    KnobDoubleWPtr maskThreshold;
+    KnobDoubleWPtr maskPlaneScale;
+    KnobChoiceWPtr maskPlaneOrientation;
+    KnobBoolWPtr maskColorFromImage;
 
     // Age-based appearance
     KnobDoubleWPtr endSize;
@@ -96,15 +96,17 @@ std::string
 ParticleEmitter::getPluginDescription() const
 {
     return tr("Particle emitter — spawns particles each frame and simulates them forward.\n\n"
-              "No inputs — this is the source node for a particle system.\n"
+              "Optional mask input: connect an image to use as an emission mask.\n"
               "Spawns particles with randomized velocity within an emission cone.\n"
               "Connect downstream to ParticleForce, ParticleMerge, or ParticleRender nodes.\n\n"
               "Equivalent to Nuke's ParticleEmitter node.").toStdString();
 }
 
 std::string
-ParticleEmitter::getInputLabel(int /*inputNb*/) const
+ParticleEmitter::getInputLabel(int inputNb) const
 {
+    if (inputNb == 0) return "mask";
+    if (inputNb == 1) return "transform";
     return "";
 }
 
@@ -157,15 +159,15 @@ ParticleEmitter::initializeKnobs()
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Velocity"));
-        k->setName("velocity"); k->setDefaultValue(2.0);
-        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(50.0);
+        k->setName("velocity"); k->setDefaultValue(0.5);
+        k->setMinimum(0.001); k->setDisplayMinimum(0.001); k->setDisplayMaximum(5.0);
         k->setAnimationEnabled(true);
         emissionPage->addKnob(k); _imp->velocity = k;
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Velocity Variance"));
-        k->setName("velocityVariance"); k->setDefaultValue(0.5);
-        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(10.0);
+        k->setName("velocityVariance"); k->setDefaultValue(0.1);
+        k->setMinimum(0.001); k->setDisplayMinimum(0.001); k->setDisplayMaximum(5.0);
         k->setAnimationEnabled(true);
         emissionPage->addKnob(k); _imp->velocityVariance = k;
     }
@@ -205,6 +207,7 @@ ParticleEmitter::initializeKnobs()
         entries.push_back(ChoiceOption("Sphere", "", "Emit from random positions within a sphere"));
         entries.push_back(ChoiceOption("Box", "", "Emit from random positions within a box"));
         entries.push_back(ChoiceOption("Disc", "", "Emit from random positions on a flat disc (XZ plane)"));
+        entries.push_back(ChoiceOption("ImageMask", "", "Emit from bright regions of a connected image mask"));
         k->populateChoices(entries);
         k->setDefaultValue(0);
         k->setHintToolTip(tr("Shape of the emission region."));
@@ -217,6 +220,40 @@ ParticleEmitter::initializeKnobs()
         k->setHintToolTip(tr("Radius (Sphere/Disc) or half-extent (Box) of the emitter shape."));
         k->setAnimationEnabled(true);
         emissionPage->addKnob(k); _imp->shapeSize = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Mask Threshold"));
+        k->setName("maskThreshold"); k->setDefaultValue(0.5);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Minimum pixel brightness to allow emission (Image Mask mode)."));
+        k->setAnimationEnabled(true);
+        emissionPage->addKnob(k); _imp->maskThreshold = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Plane Scale"));
+        k->setName("maskPlaneScale"); k->setDefaultValue(10.0);
+        k->setMinimum(0.1); k->setDisplayMinimum(0.1); k->setDisplayMaximum(100.0);
+        k->setHintToolTip(tr("Size of the emission plane in world units (Image Mask mode)."));
+        k->setAnimationEnabled(true);
+        emissionPage->addKnob(k); _imp->maskPlaneScale = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Plane Orientation"));
+        k->setName("maskPlaneOrientation");
+        std::vector<ChoiceOption> orientEntries;
+        orientEntries.push_back(ChoiceOption("XY", "", "Map image onto XY plane (Z=0)"));
+        orientEntries.push_back(ChoiceOption("XZ", "", "Map image onto XZ plane (Y=0)"));
+        orientEntries.push_back(ChoiceOption("YZ", "", "Map image onto YZ plane (X=0)"));
+        k->populateChoices(orientEntries);
+        k->setDefaultValue(1); // XZ default
+        k->setHintToolTip(tr("Which plane to map image pixels onto (Image Mask mode)."));
+        emissionPage->addKnob(k); _imp->maskPlaneOrientation = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Color From Image"));
+        k->setName("maskColorFromImage"); k->setDefaultValue(true);
+        k->setHintToolTip(tr("When enabled, particle color is set from the image pixel color (Image Mask mode)."));
+        emissionPage->addKnob(k); _imp->maskColorFromImage = k;
     }
 
     // Transform page
@@ -291,54 +328,14 @@ ParticleEmitter::initializeKnobs()
         colorPage->addKnob(k); _imp->startColorA = k;
     }
 
-    // Forces page
-    KnobPagePtr forcesPage = AppManager::createKnob<KnobPage>(this, tr("Forces"));
-
     {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Gravity X"));
-        k->setName("gravityX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
-        k->setDisplayMinimum(-20.0); k->setDisplayMaximum(20.0);
-        forcesPage->addKnob(k); _imp->gravityX = k;
-    }
-    {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Gravity Y"));
-        k->setName("gravityY"); k->setDefaultValue(-2.0); k->setAnimationEnabled(true);
-        k->setDisplayMinimum(-20.0); k->setDisplayMaximum(20.0);
-        forcesPage->addKnob(k); _imp->gravityY = k;
-    }
-    {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Gravity Z"));
-        k->setName("gravityZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
-        k->setDisplayMinimum(-20.0); k->setDisplayMaximum(20.0);
-        forcesPage->addKnob(k); _imp->gravityZ = k;
-    }
-    {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Drag"));
-        k->setName("drag"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
-        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
-        k->setHintToolTip(QString::fromUtf8("Velocity damping per frame. 0 = no drag, 1 = full stop."));
-        forcesPage->addKnob(k); _imp->drag = k;
-    }
-    {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Turbulence"));
-        k->setName("turbulenceStrength"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
-        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(5.0);
-        k->setHintToolTip(QString::fromUtf8("Noise-based displacement strength."));
-        forcesPage->addKnob(k); _imp->turbulenceStrength = k;
-    }
-    {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Turb Scale"));
-        k->setName("turbulenceScale"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
-        k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
-        k->setHintToolTip(QString::fromUtf8("Spatial scale of turbulence noise."));
-        forcesPage->addKnob(k); _imp->turbulenceScale = k;
-    }
-    {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Turb Speed"));
-        k->setName("turbulenceSpeed"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
-        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(5.0);
-        k->setHintToolTip(QString::fromUtf8("Time evolution speed of turbulence."));
-        forcesPage->addKnob(k); _imp->turbulenceSpeed = k;
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Color Variance"));
+        k->setName("colorVariance"); k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Per-particle random color variation. 0 = all same color, 1 = fully random per particle. Uses particle ID as seed."));
+        k->setAnimationEnabled(true);
+        colorPage->addKnob(k); _imp->colorVariance = k;
     }
 
     // Over Life page (age-based appearance)
@@ -465,6 +462,33 @@ ParticleEmitter::getParticleData(double time)
     double edy = _imp->emitDirY.lock()->getValueAtTime(time);
     double edz = _imp->emitDirZ.lock()->getValueAtTime(time);
 
+    // Override position + emit direction from transform input (input 1)
+    EffectInstancePtr xformInput = getInput(1);
+    if (xformInput) {
+        KnobIPtr k;
+        k = xformInput->getKnobByName("translateX"); if (k) emPosX = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+        k = xformInput->getKnobByName("translateY"); if (k) emPosY = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+        k = xformInput->getKnobByName("translateZ"); if (k) emPosZ = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+
+        // Read rotation and convert emit direction from local Y-up to rotated direction
+        double rx = 0, ry = 0, rz = 0;
+        k = xformInput->getKnobByName("rotateX"); if (k) rx = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) * M_PI / 180.0;
+        k = xformInput->getKnobByName("rotateY"); if (k) ry = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) * M_PI / 180.0;
+        k = xformInput->getKnobByName("rotateZ"); if (k) rz = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) * M_PI / 180.0;
+
+        // Build rotation matrix (ZYX order) and rotate the emit direction
+        double cx = std::cos(rx), sx = std::sin(rx);
+        double cy = std::cos(ry), sy = std::sin(ry);
+        double cz = std::cos(rz), sz = std::sin(rz);
+
+        // Rotate the local emit direction by the transform's rotation
+        double ldx = edx, ldy = edy, ldz = edz;
+        // Apply rotation matrix to emit direction
+        edx = (cy*cz) * ldx + (sx*sy*cz - cx*sz) * ldy + (cx*sy*cz + sx*sz) * ldz;
+        edy = (cy*sz) * ldx + (sx*sy*sz + cx*cz) * ldy + (cx*sy*sz - sx*cz) * ldz;
+        edz = (-sy) * ldx + (sx*cy) * ldy + (cx*cy) * ldz;
+    }
+
     float colR = (float)_imp->startColorR.lock()->getValueAtTime(time);
     float colG = (float)_imp->startColorG.lock()->getValueAtTime(time);
     float colB = (float)_imp->startColorB.lock()->getValueAtTime(time);
@@ -489,6 +513,37 @@ ParticleEmitter::getParticleData(double time)
     // even with incremental simulation
     std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
 
+    // Image Mask: fetch mask image once before the simulation loop
+    ImagePtr maskImg;
+    RectI maskBounds;
+    int maskWidth = 0, maskHeight = 0;
+    float maskThresholdVal = 0.5f;
+    float maskPlaneScaleVal = 10.0f;
+    int maskOrientVal = 1; // XZ
+    bool maskColorFromImg = true;
+
+    if (shapeType == 4) {
+        maskThresholdVal = (float)_imp->maskThreshold.lock()->getValueAtTime(time);
+        maskPlaneScaleVal = (float)_imp->maskPlaneScale.lock()->getValueAtTime(time);
+        maskOrientVal = _imp->maskPlaneOrientation.lock() ? _imp->maskPlaneOrientation.lock()->getValue() : 1;
+        maskColorFromImg = _imp->maskColorFromImage.lock() ? _imp->maskColorFromImage.lock()->getValue() : true;
+
+        // Fetch the mask image from input 0
+        RectI srcRoi;
+        maskImg = getImage(0, time, RenderScale(), ViewIdx(0),
+                           NULL, NULL, false, true,
+                           eStorageModeRAM, 0, &srcRoi);
+        if (maskImg) {
+            maskBounds = maskImg->getBounds();
+            maskWidth = maskBounds.x2 - maskBounds.x1;
+            maskHeight = maskBounds.y2 - maskBounds.y1;
+        }
+        // If no image, fall back to Point shape
+        if (!maskImg || maskWidth <= 0 || maskHeight <= 0) {
+            shapeType = 0; // fallback to Point
+        }
+    }
+
     if (!data) {
         data = std::make_shared<ParticleData>();
     }
@@ -500,6 +555,12 @@ ParticleEmitter::getParticleData(double time)
     if (startFrame > endFrame + 1) {
         startFrame = 1;
         data->particles.clear();
+    }
+
+    // Pre-create mask read access outside the loop for efficiency
+    std::unique_ptr<Image::ReadAccess> maskRaPtr;
+    if (shapeType == 4 && maskImg) {
+        maskRaPtr.reset(new Image::ReadAccess(maskImg.get()));
     }
 
     // Simulate from startFrame to endFrame (incremental when going forward)
@@ -539,12 +600,58 @@ ParticleEmitter::getParticleData(double time)
                     offZ = rad * std::sin(angle);
                     break;
                 }
+                case 4: { // Image Mask
+                    bool accepted = false;
+                    for (int retry = 0; retry < 10; ++retry) {
+                        int px = maskBounds.x1 + (int)(dist01(rng) * (float)maskWidth);
+                        int py = maskBounds.y1 + (int)(dist01(rng) * (float)maskHeight);
+                        if (px >= maskBounds.x2) px = maskBounds.x2 - 1;
+                        if (py >= maskBounds.y2) py = maskBounds.y2 - 1;
+
+                        const float* pix = (const float*)maskRaPtr->pixelAt(px, py);
+                        if (!pix) continue;
+
+                        float lum = 0.2126f * pix[0] + 0.7152f * pix[1] + 0.0722f * pix[2];
+                        if (lum < maskThresholdVal) continue;
+
+                        // Map pixel to 3D position based on plane orientation
+                        float u = ((float)(px - maskBounds.x1) / (float)maskWidth - 0.5f) * maskPlaneScaleVal;
+                        float v = ((float)(py - maskBounds.y1) / (float)maskHeight - 0.5f) * maskPlaneScaleVal;
+
+                        switch (maskOrientVal) {
+                            case 0: // XY
+                                offX = u; offY = v; offZ = 0;
+                                break;
+                            case 1: // XZ
+                                offX = u; offY = 0; offZ = v;
+                                break;
+                            case 2: // YZ
+                                offX = 0; offY = u; offZ = v;
+                                break;
+                        }
+
+                        // Set color from image if enabled
+                        if (maskColorFromImg) {
+                            colR = pix[0];
+                            colG = pix[1];
+                            colB = pix[2];
+                        }
+
+                        accepted = true;
+                        break;
+                    }
+                    if (!accepted) continue; // skip this particle
+                    break;
+                }
                 default: // Point
                     break;
             }
             p.px = (float)emPosX + offX;
             p.py = (float)emPosY + offY;
             p.pz = (float)emPosZ + offZ;
+            p.prevPx = p.px;
+            p.prevPy = p.py;
+            p.prevPz = p.pz;
 
             // Random direction within cone of `spread` degrees around emitDir
             float theta = spreadRad * std::sqrt(dist01(rng)); // uniform on disk
@@ -586,20 +693,33 @@ ParticleEmitter::getParticleData(double time)
 
             p.age = 0.0f;
             p.mass = 1.0f;
+            p.id = (uint32_t)(frame * 100000 + i + seedVal * 7919);
+
+            // Per-particle color variance (deterministic by ID)
+            float cVar = _imp->colorVariance.lock() ? (float)_imp->colorVariance.lock()->getValueAtTime(time) : 0.0f;
+            if (cVar > 0.001f) {
+                // Hash particle ID to get 3 random values in [0,1]
+                uint32_t h = p.id;
+                h ^= h >> 16; h *= 0x45d9f3b; h ^= h >> 16; h *= 0x45d9f3b; h ^= h >> 16;
+                float rndR = (float)(h & 0xFFFF) / 65535.0f;
+                h = h * 2654435761u;
+                float rndG = (float)(h & 0xFFFF) / 65535.0f;
+                h = h * 2654435761u;
+                float rndB = (float)(h & 0xFFFF) / 65535.0f;
+                p.r = p.r + (rndR - 0.5f) * 2.0f * cVar;
+                p.g = p.g + (rndG - 0.5f) * 2.0f * cVar;
+                p.b = p.b + (rndB - 0.5f) * 2.0f * cVar;
+                // Clamp
+                if (p.r < 0) p.r = 0; if (p.r > 1) p.r = 1;
+                if (p.g < 0) p.g = 0; if (p.g > 1) p.g = 1;
+                if (p.b < 0) p.b = 0; if (p.b > 1) p.b = 1;
+            }
 
             data->particles.push_back(p);
         }
 
-        // Read all force/appearance knobs ONCE per frame (outside particle loop)
+        // Read appearance knobs ONCE per frame (outside particle loop)
         float dt = 1.0f;
-        float gx = (float)_imp->gravityX.lock()->getValueAtTime(frame);
-        float gy = (float)_imp->gravityY.lock()->getValueAtTime(frame);
-        float gz = (float)_imp->gravityZ.lock()->getValueAtTime(frame);
-        float dragAmt = (float)_imp->drag.lock()->getValueAtTime(frame);
-        float turbStr = (float)_imp->turbulenceStrength.lock()->getValueAtTime(frame);
-        float turbScale = (float)_imp->turbulenceScale.lock()->getValueAtTime(frame);
-        float turbSpeed = (float)_imp->turbulenceSpeed.lock()->getValueAtTime(frame);
-        float turbTime = frame * turbSpeed * 0.01f;
 
         // Over-life knobs (read once per frame, NOT per particle)
         float startSz = (float)_imp->startSize.lock()->getValueAtTime(frame);
@@ -616,39 +736,10 @@ ParticleEmitter::getParticleData(double time)
         for (size_t j = 0; j < data->particles.size(); ++j) {
             Particle& p = data->particles[j];
 
-            // Gravity
-            p.vx += gx * dt * 0.01f;
-            p.vy += gy * dt * 0.01f;
-            p.vz += gz * dt * 0.01f;
-
-            // Drag (velocity damping)
-            if (dragAmt > 0.0f) {
-                float damping = 1.0f - dragAmt;
-                p.vx *= damping;
-                p.vy *= damping;
-                p.vz *= damping;
-            }
-
-            // Turbulence (simple hash-based noise)
-            if (turbStr > 0.0f) {
-                float invScale = 1.0f / std::max(0.01f, turbScale);
-                // Hash-based pseudo noise using position
-                float nx = p.px * invScale + turbTime;
-                float ny = p.py * invScale + turbTime * 0.7f;
-                float nz = p.pz * invScale + turbTime * 1.3f;
-
-                // Simple noise using sin combinations
-                float noiseX = sinf(nx * 12.9898f + ny * 78.233f) * 43758.5453f;
-                noiseX = noiseX - floorf(noiseX);
-                float noiseY = sinf(ny * 12.9898f + nz * 78.233f) * 43758.5453f;
-                noiseY = noiseY - floorf(noiseY);
-                float noiseZ = sinf(nz * 12.9898f + nx * 78.233f) * 43758.5453f;
-                noiseZ = noiseZ - floorf(noiseZ);
-
-                p.vx += (noiseX - 0.5f) * turbStr * 0.1f;
-                p.vy += (noiseY - 0.5f) * turbStr * 0.1f;
-                p.vz += (noiseZ - 0.5f) * turbStr * 0.1f;
-            }
+            // Save previous position for collision ray tests
+            p.prevPx = p.px;
+            p.prevPy = p.py;
+            p.prevPz = p.pz;
 
             // Update position
             p.px += p.vx * dt;
@@ -663,10 +754,27 @@ ParticleEmitter::getParticleData(double time)
             // Size: lerp start→end
             p.size = startSz + (endSz - startSz) * ageFrac;
 
-            // Color: lerp start→end
+            // Color: lerp start→end + per-particle variance
             p.r = sr + (er - sr) * ageFrac;
             p.g = sg + (eg - sg) * ageFrac;
             p.b = sb + (eb - sb) * ageFrac;
+
+            float cVar = _imp->colorVariance.lock() ? (float)_imp->colorVariance.lock()->getValueAtTime(frame) : 0.0f;
+            if (cVar > 0.001f) {
+                uint32_t h = p.id;
+                h ^= h >> 16; h *= 0x45d9f3b; h ^= h >> 16; h *= 0x45d9f3b; h ^= h >> 16;
+                float rndR = (float)(h & 0xFFFF) / 65535.0f;
+                h = h * 2654435761u;
+                float rndG = (float)(h & 0xFFFF) / 65535.0f;
+                h = h * 2654435761u;
+                float rndB = (float)(h & 0xFFFF) / 65535.0f;
+                p.r += (rndR - 0.5f) * 2.0f * cVar;
+                p.g += (rndG - 0.5f) * 2.0f * cVar;
+                p.b += (rndB - 0.5f) * 2.0f * cVar;
+                if (p.r < 0) p.r = 0; if (p.r > 1) p.r = 1;
+                if (p.g < 0) p.g = 0; if (p.g > 1) p.g = 1;
+                if (p.b < 0) p.b = 0; if (p.b > 1) p.b = 1;
+            }
 
             // Alpha: fade in/out
             float alpha = 1.0f;

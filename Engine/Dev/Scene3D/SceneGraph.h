@@ -48,7 +48,8 @@ enum SceneNodeType {
     eSceneNodeCylinder,
     eSceneNodeParticles,
     eSceneNodeVolume,
-    eSceneNodeLight
+    eSceneNodeLight,
+    eSceneNodeTransform
 };
 
 /**

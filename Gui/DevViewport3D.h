@@ -122,6 +122,7 @@ private:
     void drawParticlesNode(const SceneNode& sn) const;
     void drawVolumeNode(const SceneNode& sn) const;
     void drawLightNode(const SceneNode& sn) const;
+    void drawTransformNode(const SceneNode& sn) const;
 
     Gui* _gui;
     std::unique_ptr<DevViewport3DPrivate> _imp;

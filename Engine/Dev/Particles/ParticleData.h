@@ -20,28 +20,38 @@
 #ifndef NATRON_ENGINE_PARTICLEDATA_H
 #define NATRON_ENGINE_PARTICLEDATA_H
 
+#include <cstdint>
 #include <memory>
 #include <vector>
+#include <unordered_set>
 
 /**
  * @brief Single particle.
  */
 struct Particle {
     float px, py, pz;       // position
+    float prevPx, prevPy, prevPz; // previous frame position (for collision ray tests)
     float vx, vy, vz;       // velocity
     float r, g, b, a;       // color + alpha
     float size;             // display size
     float age;              // current age in frames
     float life;             // total lifetime in frames
     float mass;             // mass (affects how forces act)
+    uint32_t id;            // unique particle ID for tracking across frames
+    int bounceCount;        // number of times this particle has bounced
+    bool collided;          // set true by ParticleSolver on bounce frame
 
     Particle()
         : px(0), py(0), pz(0)
+        , prevPx(0), prevPy(0), prevPz(0)
         , vx(0), vy(0), vz(0)
         , r(1), g(1), b(1), a(1)
         , size(0.1f)
         , age(0), life(50)
         , mass(1.0f)
+        , id(0)
+        , bounceCount(0)
+        , collided(false)
     {}
 };
 

@@ -17,8 +17,8 @@
  * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef NATRON_ENGINE_PARTICLEEMITTER_H
-#define NATRON_ENGINE_PARTICLEEMITTER_H
+#ifndef NATRON_ENGINE_READALEMBICTRANSFORM_H
+#define NATRON_ENGINE_READALEMBICTRANSFORM_H
 
 // ***** BEGIN PYTHON BLOCK *****
 #include <Python.h>
@@ -26,35 +26,26 @@
 
 #include "../../../Global/Macros.h"
 
-#include <memory>
-#include <vector>
-
 #include "../../EffectInstance.h"
-#include "ParticleData.h"
-#include "ParticleProvider.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 
 NATRON_NAMESPACE_ENTER
 
-struct ParticleEmitterPrivate;
+struct ReadAlembicTransformPrivate;
 
 /**
- * @brief Particle emitter node — spawns particles each frame and simulates them forward.
+ * @brief Import animated transforms (nulls/locators) from Alembic (.abc) files.
  *
- * No inputs — this is the source node for a particle system.
+ * Reads any IXform node from an Alembic file — typically a null/locator
+ * exported from Maya, Houdini, or Blender. Exposes translate, rotate, and
+ * scale as animated knob values.
  *
- * Spawns `rate` particles per frame with randomized velocity within an emission cone,
- * then advances all particles (position += velocity * dt, age += 1) and removes
- * expired particles each frame.
- *
- * Call getParticleData(time) to retrieve the simulated ParticleDataPtr at a given frame.
- *
- * Grouping: Particles
+ * Primary use case: expression-link ParticleEmitter position to a locator
+ * parented to geometry (e.g. jet engine exhaust point).
  */
-class ParticleEmitter
+class ReadAlembicTransform
     : public EffectInstance
-    , public ParticleProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -62,28 +53,26 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
 
-    static EffectInstance* BuildEffect(NodePtr n) { return new ParticleEmitter(n); }
+    static EffectInstance* BuildEffect(NodePtr n) { return new ReadAlembicTransform(n); }
 
-    ParticleEmitter(NodePtr node);
-    virtual ~ParticleEmitter();
+    ReadAlembicTransform(NodePtr node);
+    virtual ~ReadAlembicTransform();
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 2; }
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return PLUGINID_NATRON_PARTICLEEMITTER; }
+    { return PLUGINID_NATRON_READALEMBICTRANSFORM; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "ParticleEmitter"; }
+    { return "ReadAlembicTransform"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
-    { grouping->push_back("Particles"); }
-
-    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    { grouping->push_back("3D"); }
 
     virtual bool isInputOptional(int /*inputNb*/) const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return true; }
@@ -99,29 +88,18 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
-    /**
-     * @brief Returns the simulated particle data at the given time.
-     *
-     * Simulates from frame 1 to `time`, spawning and advancing particles each frame.
-     * Results are cached — repeated calls with the same time return the cached data.
-     */
-    ParticleDataPtr getParticleData(double time);
-
-    virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL;
-
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
+    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
-    std::unique_ptr<ParticleEmitterPrivate> _imp;
+    void loadAlembicFile(const std::string& path);
 
-    // Simulation cache
-    ParticleDataPtr _lastParticleData;
-    double _lastSimFrame;
+    std::unique_ptr<ReadAlembicTransformPrivate> _imp;
 };
 
 NATRON_NAMESPACE_EXIT
 
-#endif // NATRON_ENGINE_PARTICLEEMITTER_H
+#endif // NATRON_ENGINE_READALEMBICTRANSFORM_H

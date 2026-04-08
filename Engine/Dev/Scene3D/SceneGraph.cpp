@@ -34,8 +34,7 @@
 #include "Cylinder3D.h"
 #include "../Deep/DeepToPoints.h"
 #include "Light3D.h"
-#include "../Particles/ParticleEmitter.h"
-#include "../Particles/ParticleGravity.h"
+#include "../Particles/ParticleProvider.h"
 #include "ReadVDB.h"
 #include "Volume3D.h"
 #include "Sphere3D.h"
@@ -43,6 +42,7 @@
 #include "../../Node.h"
 #include "../Deep/PointCloudData.h"
 #include "ReadAlembicCamera.h"
+#include "ReadAlembicTransform.h"
 #include "ReadGeo.h"
 #include "../../KnobTypes.h"
 
@@ -273,6 +273,32 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             continue;
         }
 
+        // --- ReadAlembicTransform (null/locator) ---
+        ReadAlembicTransform* abcXform = dynamic_cast<ReadAlembicTransform*>(effect.get());
+        if (abcXform) {
+            KnobIPtr k;
+            float tx = 0, ty = 0, tz = 0, rx = 0, ry = 0, rz = 0, sx = 1, sy = 1, sz = 1;
+            k = abcXform->getKnobByName("translateX"); if (k) tx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            k = abcXform->getKnobByName("translateY"); if (k) ty = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            k = abcXform->getKnobByName("translateZ"); if (k) tz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            k = abcXform->getKnobByName("rotateX"); if (k) rx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            k = abcXform->getKnobByName("rotateY"); if (k) ry = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            k = abcXform->getKnobByName("rotateZ"); if (k) rz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            k = abcXform->getKnobByName("scaleX"); if (k) sx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            k = abcXform->getKnobByName("scaleY"); if (k) sy = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            k = abcXform->getKnobByName("scaleZ"); if (k) sz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+
+            SceneNode sn;
+            sn.type = eSceneNodeTransform;
+            sn.name = nodeName;
+            sn.sourceNode = node;
+            buildTRS(tx, ty, tz, rx, ry, rz, sx, sy, sz, sn.localMatrix);
+
+            nameToIndex[nodeName] = (int)_nodes.size();
+            _nodes.push_back(sn);
+            continue;
+        }
+
         // --- Sphere3D ---
         Sphere3D* sphere3d = dynamic_cast<Sphere3D*>(effect.get());
         if (sphere3d) {
@@ -403,10 +429,9 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             continue;
         }
 
-        // --- ParticleEmitter / ParticleGravity ---
-        ParticleEmitter* pEmitter = dynamic_cast<ParticleEmitter*>(effect.get());
-        ParticleGravity* pGravity = dynamic_cast<ParticleGravity*>(effect.get());
-        if (pEmitter || pGravity) {
+        // --- Particle nodes (emitter, gravity, drag, etc.) ---
+        ParticleProvider* pProvider = dynamic_cast<ParticleProvider*>(effect.get());
+        if (pProvider) {
             SceneNode sn;
             sn.type = eSceneNodeParticles;
             sn.name = nodeName;

@@ -2,7 +2,7 @@
 
 ## Fork: Natron 3D + Cycles
 
-This fork extends Natron with a full 3D system, Cycles renderer, deep compositing pipeline, and particle system — 39 new built-in nodes.
+This fork extends Natron with a full 3D system, Cycles renderer, deep compositing pipeline, and particle system — 49 new built-in nodes.
 
 **Highlights:**
 - 3D viewport with ImGuizmo gizmos (translate/rotate/scale)
@@ -12,7 +12,7 @@ This fork extends Natron with a full 3D system, Cycles renderer, deep compositin
 - HDRI environment lighting with importance sampling
 - Motion blur, depth of field, AOV render passes
 - Deep compositing (16 nodes)
-- Particle system with Cycles rendering
+- Particle system (12 nodes: emitter, gravity, drag, turbulence, wind, attract, vortex, spawn, collide, killbox, merge)
 - SphericalTransform (8 projection types)
 - ColorChartMatch (color chart matching with matrix export)
 

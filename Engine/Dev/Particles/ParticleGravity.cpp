@@ -24,12 +24,8 @@
 #include "ParticleGravity.h"
 
 #include "../../AppManager.h"
-#include "../../Image.h"
-#include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
-#include "ParticleEmitter.h"
-#include "../../ViewIdx.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -40,10 +36,9 @@ struct ParticleGravityPrivate
 };
 
 ParticleGravity::ParticleGravity(NodePtr node)
-    : EffectInstance(node)
+    : ParticleModifier(node)
     , _imp(new ParticleGravityPrivate())
 {
-    setSupportsRenderScaleMaybe(eSupportsNo);
 }
 
 ParticleGravity::~ParticleGravity()
@@ -54,33 +49,8 @@ std::string
 ParticleGravity::getPluginDescription() const
 {
     return tr("Applies gravity force to particles.\n\n"
-              "Connect to a ParticleEmitter or another particle node.\n"
+              "Connect to a ParticleEmitter or another particle modifier.\n"
               "Gravity modifies particle velocities each frame during simulation.").toStdString();
-}
-
-std::string
-ParticleGravity::getInputLabel(int inputNb) const
-{
-    if (inputNb == 0) return "particles";
-    return "";
-}
-
-void
-ParticleGravity::addAcceptedComponents(int /*inputNb*/, std::list<ImagePlaneDesc>* comps)
-{
-    comps->push_back(ImagePlaneDesc::getRGBAComponents());
-}
-
-void
-ParticleGravity::addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const
-{
-    depths->push_back(eImageBitDepthFloat);
-}
-
-bool
-ParticleGravity::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
-{
-    return false;
 }
 
 void
@@ -114,86 +84,23 @@ ParticleGravity::initializeKnobs()
     }
 }
 
-ParticleDataPtr
-ParticleGravity::getParticleData(double time)
+void
+ParticleGravity::applyForce(ParticleDataPtr data, double time)
 {
-    // Get particles from input
-    EffectInstancePtr input = getInput(0);
-    if (!input) return ParticleDataPtr();
+    if (!data) return;
 
-    // Try ParticleEmitter
-    ParticleEmitter* emitter = dynamic_cast<ParticleEmitter*>(input.get());
-    if (emitter) {
-        ParticleDataPtr data = emitter->getParticleData(time);
-        if (!data) return data;
+    float gx = (float)_imp->gravityX.lock()->getValueAtTime(time);
+    float gy = (float)_imp->gravityY.lock()->getValueAtTime(time);
+    float gz = (float)_imp->gravityZ.lock()->getValueAtTime(time);
+    float str = (float)_imp->strength.lock()->getValueAtTime(time);
 
-        // Apply gravity to all particles
-        float gx = (float)_imp->gravityX.lock()->getValueAtTime(time);
-        float gy = (float)_imp->gravityY.lock()->getValueAtTime(time);
-        float gz = (float)_imp->gravityZ.lock()->getValueAtTime(time);
-        float str = (float)_imp->strength.lock()->getValueAtTime(time);
-
-        for (size_t i = 0; i < data->particles.size(); ++i) {
-            Particle& p = data->particles[i];
-            float invMass = (p.mass > 0.001f) ? (1.0f / p.mass) : 1.0f;
-            p.vx += gx * str * invMass;
-            p.vy += gy * str * invMass;
-            p.vz += gz * str * invMass;
-        }
-
-        return data;
+    for (size_t i = 0; i < data->particles.size(); ++i) {
+        Particle& p = data->particles[i];
+        float invMass = (p.mass > 0.001f) ? (1.0f / p.mass) : 1.0f;
+        p.vx += gx * str * invMass;
+        p.vy += gy * str * invMass;
+        p.vz += gz * str * invMass;
     }
-
-    // Try another ParticleGravity in the chain
-    ParticleGravity* prevGrav = dynamic_cast<ParticleGravity*>(input.get());
-    if (prevGrav) {
-        ParticleDataPtr data = prevGrav->getParticleData(time);
-        if (!data) return data;
-
-        float gx = (float)_imp->gravityX.lock()->getValueAtTime(time);
-        float gy = (float)_imp->gravityY.lock()->getValueAtTime(time);
-        float gz = (float)_imp->gravityZ.lock()->getValueAtTime(time);
-        float str = (float)_imp->strength.lock()->getValueAtTime(time);
-
-        for (size_t i = 0; i < data->particles.size(); ++i) {
-            Particle& p = data->particles[i];
-            float invMass = (p.mass > 0.001f) ? (1.0f / p.mass) : 1.0f;
-            p.vx += gx * str * invMass;
-            p.vy += gy * str * invMass;
-            p.vz += gz * str * invMass;
-        }
-
-        return data;
-    }
-
-    return ParticleDataPtr();
-}
-
-StatusEnum
-ParticleGravity::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
-                                       ViewIdx /*view*/, RectD* rod)
-{
-    rod->x1 = 0; rod->y1 = 0;
-    rod->x2 = 1; rod->y2 = 1;
-    return eStatusOK;
-}
-
-StatusEnum
-ParticleGravity::render(const RenderActionArgs& args)
-{
-    if (args.outputPlanes.empty()) return eStatusOK;
-    ImagePtr outImg = args.outputPlanes.front().second;
-    if (!outImg) return eStatusOK;
-
-    RectI bounds = outImg->getBounds();
-    Image::WriteAccess wa(outImg.get());
-    for (int y = bounds.y1; y < bounds.y2; ++y) {
-        for (int x = bounds.x1; x < bounds.x2; ++x) {
-            float* pix = (float*)wa.pixelAt(x, y);
-            if (pix) { pix[0] = pix[1] = pix[2] = pix[3] = 0.0f; }
-        }
-    }
-    return eStatusOK;
 }
 
 NATRON_NAMESPACE_EXIT

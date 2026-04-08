@@ -17,8 +17,8 @@
  * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef NATRON_ENGINE_PARTICLEGRAVITY_H
-#define NATRON_ENGINE_PARTICLEGRAVITY_H
+#ifndef NATRON_ENGINE_PARTICLEKILLBOX_H
+#define NATRON_ENGINE_PARTICLEKILLBOX_H
 
 // ***** BEGIN PYTHON BLOCK *****
 #include <Python.h>
@@ -31,16 +31,17 @@
 
 NATRON_NAMESPACE_ENTER
 
-struct ParticleGravityPrivate;
+struct ParticleKillBoxPrivate;
 
 /**
- * @brief Applies gravity force to particles.
+ * @brief Kills particles that enter or leave a bounding box region.
  *
  * Input 0: Particle source (ParticleEmitter or another particle modifier)
  *
- * Modifies particle velocities by adding gravity acceleration each frame.
+ * Particles matching the kill condition have their life set to age,
+ * causing removeExpired() to remove them at end of frame.
  */
-class ParticleGravity
+class ParticleKillBox
     : public ParticleModifier
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
@@ -49,19 +50,19 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
 
-    static EffectInstance* BuildEffect(NodePtr n) { return new ParticleGravity(n); }
+    static EffectInstance* BuildEffect(NodePtr n) { return new ParticleKillBox(n); }
 
-    ParticleGravity(NodePtr node);
-    virtual ~ParticleGravity();
+    ParticleKillBox(NodePtr node);
+    virtual ~ParticleKillBox();
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return PLUGINID_NATRON_PARTICLEGRAVITY; }
+    { return PLUGINID_NATRON_PARTICLEKILLBOX; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "ParticleGravity"; }
+    { return "ParticleKillBox"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
@@ -71,9 +72,9 @@ private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
 
-    std::unique_ptr<ParticleGravityPrivate> _imp;
+    std::unique_ptr<ParticleKillBoxPrivate> _imp;
 };
 
 NATRON_NAMESPACE_EXIT
 
-#endif // NATRON_ENGINE_PARTICLEGRAVITY_H
+#endif // NATRON_ENGINE_PARTICLEKILLBOX_H
