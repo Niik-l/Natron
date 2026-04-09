@@ -13,8 +13,8 @@ Tracking known bugs, incomplete features, and planned improvements.
 - [ ] Scatter node
 - [ ] ParticleInstance works on scatter / point clouds
 - [ ] Material ramps / expressions / variations
-- [ ] Shader updates for volumes
-- [ ] Fully test VDBs
+- [ ] Shader updates for volumes (WIP — PrincipledVolume path works, remap curves in, needs more iteration)
+- [x] Fully test VDBs (basic fire/smoke rendering verified with EmberGen + Houdini VDBs via Cycles)
 - [ ] Use backplate in Cycles renders
 - [ ] Blender deep?
 - [ ] Denoise
@@ -110,12 +110,20 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
 
+### Completed (2026-04-08)
+
+- **ReadVDB OpenVDB support enabled** — `NATRON_HAVE_OPENVDB` defined under `NATRON_CYCLES` build. VDB grids load directly via `VDBImageLoader` (no dense conversion).
+- **ReadVDB PrincipledVolume fire rendering** — density, temperature, flame, color grids bound to Cycles PrincipledVolumeNode. Absorption color, density/temperature remap curves (FloatCurveNode). Defaults dialed for EmberGen/Houdini fire VDBs.
+- **ReadVDB viewport wireframe bbox** — dynamic bounds from `getVDBBounds()` instead of hardcoded cube. Cached per resolved frame path.
+- **Volume3D rotation** — Rotate X/Y/Z knobs added, SceneGraph reads them into `buildTRS()`. Also added stepSize and volumeBounces knobs.
+- **Cycles CPU device for NanoVDB** — explicit CPU device selection required for volume rendering. Without it, volumes render empty.
+
 ### TODO
 
-- ReadVDB requires OpenVDB library (optional dependency, not tested on this build)
 - ReadGeo/ReadAlembicCamera require Alembic library (optional, not tested)
-- ScanlineRender output quality is basic — no anti-aliasing, no shadows
+- ScanlineRender shadows not implemented
 - Light3D shadow ray marching is functional but slow for dense volumes
+- Volume shader workflow still WIP — needs more iteration on user-facing controls
 
 ---
 
@@ -210,14 +218,21 @@ CyclesRender node with path tracing, PBR materials, lights, animation. Optional 
 
 ### Files
 - `Engine/Dev/Cycles/CyclesRender.h/cpp` — Natron node interface
-- `Engine/Dev/Cycles/CyclesRenderer.h/cpp` — Cycles bridge (scene sync, materials, lights)
+- `Engine/Dev/Cycles/CyclesRenderer.h/cpp` — Cycles bridge (scene sync, materials, lights, volumes)
 - `patches/cycles-mingw.patch` — 2 MinGW fixes for upstream Cycles source
 - `App/CMakeLists.txt` — Cycles library linking (10 Cycles libs + 17 deps)
+
+### Completed (2026-04-08)
+
+- **PrincipledVolume VDB rendering** — ReadVDB grids loaded via `VDBImageLoader`, bound to Cycles standard attributes (density/temperature/flame/color). PrincipledVolumeNode with ValueNode density (never `set_density()` — blocks attribute reads). FloatCurveNode remap for density and temperature.
+- **Volume3D procedural shader** — sphere/box shapes via Cycles shader graph (TextureCoordinate → shape math → ScatterVolume + AbsorptionVolume). No dense ccl::Volume needed.
+- **Explicit CPU device** — required for NanoVDB volume support. Set automatically in session creation.
 
 ### TODO
 - GPU rendering (CUDA/OptiX) — not built yet
 - Deep EXR output — WIP in Cycles upstream
 - Viewport rendered mode (live progressive) — future phase
+- Volume shader workflow WIP — absorption/scatter/blackbody/remap exposure needs iteration
 
 ---
 

@@ -1,7 +1,7 @@
 # Natron Node Registry
 
 All custom built-in nodes added to Natron beyond the original upstream codebase.
-Updated: 2026-04-03
+Updated: 2026-04-09
 
 ---
 
@@ -14,7 +14,7 @@ Updated: 2026-04-03
 | **Cube3D** | `fr.inria.built-in.Cube3D` | Registered | 24-vertex cube with per-face UVs |
 | **Cylinder3D** | `fr.inria.built-in.Cylinder3D` | Registered | Tessellated cylinder with caps |
 | **ReadGeo** | `fr.inria.built-in.ReadGeo` | Registered | Alembic .abc mesh loader (requires NATRON_HAVE_ALEMBIC) |
-| **ReadVDB** | `fr.inria.built-in.ReadVDB` | Registered | OpenVDB volume loader (requires OpenVDB) |
+| **ReadVDB** | `fr.inria.built-in.ReadVDB` | Registered | OpenVDB volume loader. PrincipledVolume fire rendering via Cycles (density/temperature/flame grids, absorption, remap curves). Animated sequences with frame padding. Viewport wireframe bbox from grid bounds. |
 | **Group3D** | `fr.inria.built-in.Group3D` | Registered | Groups 3D objects with unified transform |
 
 ## 3D Scene & Render (5 nodes)
@@ -24,10 +24,10 @@ Updated: 2026-04-03
 | **Scene3D** | `fr.inria.built-in.Scene3D` | Registered | Aggregates 3D objects for rendering |
 | **RenderPass** | `fr.inria.built-in.RenderPass` | Registered | Multi-pass filter: object visibility, holdout, shadow catcher, light selection |
 | **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | Registered | OpenGL rasterizer with 4x MSAA, particle render modes (Point/Disc/Sphere/Sprite), multi-sample motion blur, geo instancing |
-| **CyclesRender** | `fr.inria.built-in.CyclesRender` | Registered | Cycles path tracer (requires NATRON_CYCLES). Native particle support (PointCloud) + ParticleInstance with Cycles instancing + motion blur via set_motion() |
+| **CyclesRender** | `fr.inria.built-in.CyclesRender` | Registered | Cycles path tracer (requires NATRON_CYCLES). PrincipledVolume VDB rendering (fire/smoke), native particle instancing + motion blur, PBR materials via Material3D. Requires CPU device for NanoVDB volume support. |
 | **Project3D** | `fr.inria.built-in.Project3D` | Registered | Camera projection onto geometry |
 
-## Camera & Lighting (3 nodes)
+## Camera & Lighting (4 nodes)
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
@@ -41,7 +41,7 @@ Updated: 2026-04-03
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
 | **Material3D** | `fr.inria.built-in.Material3D` | Registered | Standalone PBR material with texture map inputs |
-| **Volume3D** | `fr.inria.built-in.Volume3D` | Registered | Procedural volume (sphere, noise, box) |
+| **Volume3D** | `fr.inria.built-in.Volume3D` | Registered | Procedural volume (sphere, box). Translate/Rotate/Scale knobs, stepSize, volumeBounces. Renders via Cycles procedural shader graph. |
 
 ## Deep Compositing — Tier 1+2 (16 nodes, registered)
 
@@ -88,7 +88,7 @@ Updated: 2026-04-03
 | **DeepSplit** | `fr.inria.built-in.DeepSplit` | Not registered | Split deep by criteria |
 | **DeepVelocityMatte** | `fr.inria.built-in.DeepVelocityMatte` | Not registered | Velocity-based deep matte |
 
-## Particles (2 nodes)
+## Particles (13 nodes)
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
@@ -138,13 +138,13 @@ Updated: 2026-04-03
 |----------|-----------|----------------|-------|
 | 3D Geometry | 7 | 0 | 7 |
 | 3D Scene & Render | 5 | 0 | 5 |
-| Camera & Lighting | 3 | 0 | 3 |
+| Camera & Lighting | 4 | 0 | 4 |
 | Materials | 2 | 0 | 2 |
 | Deep (Tier 1+2) | 16 | 0 | 16 |
 | Deep (Tier 3) | 0 | 19 | 19 |
-| Particles | 12 | 0 | 12 |
+| Particles | 13 | 0 | 13 |
 | Channel | 1 | 0 | 1 |
 | Transform | 1 | 0 | 1 |
 | Color | 1 | 0 | 1 |
 | Other | 1 | 0 | 1 |
-| **Total** | **49** | **19** | **68** |
+| **Total** | **51** | **19** | **70** |
