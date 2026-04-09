@@ -93,7 +93,7 @@ cd build-qt6
 export PATH="/c/msys64/mingw64/bin:$PATH"
 export LLVM_INSTALL_DIR=C:/msys64/mingw64
 
-# Configure
+# Configure (without Cycles)
 cmake .. -G "MinGW Makefiles" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DNATRON_QT6=ON \
@@ -106,6 +106,23 @@ cmake .. -G "MinGW Makefiles" \
   -DPython3_ROOT_DIR=/c/msys64/mingw64 \
   -DPython_ROOT_DIR=/c/msys64/mingw64 \
   -DNATRON_LLVM_INSTALL_DIR=C:/msys64/mingw64
+
+# Or configure with Cycles enabled (requires Cycles built first — see step 9):
+cmake .. -G "MinGW Makefiles" \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DNATRON_QT6=ON \
+  -DNATRON_BUILD_TESTS=OFF \
+  -DCMAKE_C_COMPILER=/c/msys64/mingw64/bin/gcc.exe \
+  -DCMAKE_CXX_COMPILER=/c/msys64/mingw64/bin/g++.exe \
+  -DCMAKE_MAKE_PROGRAM=/c/msys64/mingw64/bin/mingw32-make.exe \
+  -DPython3_EXECUTABLE=/c/msys64/mingw64/bin/python3.exe \
+  -DPython_EXECUTABLE=/c/msys64/mingw64/bin/python3.exe \
+  -DPython3_ROOT_DIR=/c/msys64/mingw64 \
+  -DPython_ROOT_DIR=/c/msys64/mingw64 \
+  -DNATRON_LLVM_INSTALL_DIR=C:/msys64/mingw64 \
+  -DNATRON_CYCLES=ON \
+  -DNATRON_CYCLES_DIR=/d/projects/cycles \
+  -DNATRON_CYCLES_BUILD_DIR=/d/projects/cycles/build
 ```
 
 You should see output ending with:
@@ -295,6 +312,8 @@ After this, you can double-click `Natron.exe` from Windows Explorer without need
 1. **Python:** Open Script Editor, type `import NatronEngine; print(NatronEngine.natron.getNatronVersionString())`
 2. **Nodes:** Press Tab in the node graph, type "Blur" — should find DirBlur, GodRays, etc.
 3. **Read files:** Create a Read node and load an EXR or PNG image
+
+> See `NODE_REGISTRY.md` for a full list of registered plugin IDs (including Dev nodes like ReadVDB, ParticleSolver, CyclesRender, etc.).
 
 ---
 
