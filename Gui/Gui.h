@@ -579,6 +579,11 @@ public Q_SLOTS:
     void exportProjectAsGroup();
     void saveAndIncrVersion();
 
+    // Templates
+    void createTemplate3DBasic();
+    void createTemplateVDBFire();
+    void createTemplateParticles();
+
     void autoSave();
 
     void createNewViewer();

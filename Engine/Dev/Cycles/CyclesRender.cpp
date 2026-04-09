@@ -166,7 +166,7 @@ CyclesRender::initializeKnobs()
 
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Samples"));
-        k->setName("samples"); k->setDefaultValue(64);
+        k->setName("samples"); k->setDefaultValue(6);
         k->setMinimum(1); k->setMaximum(8192);
         k->setDisplayMinimum(1); k->setDisplayMaximum(4096);
         k->setHintToolTip(tr("Number of path tracing samples. Higher = less noise, slower."));
@@ -174,7 +174,7 @@ CyclesRender::initializeKnobs()
     }
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Bounces"));
-        k->setName("maxBounces"); k->setDefaultValue(12);
+        k->setName("maxBounces"); k->setDefaultValue(8);
         k->setMinimum(0); k->setMaximum(128);
         k->setDisplayMinimum(0); k->setDisplayMaximum(25);
         k->setHintToolTip(tr("Maximum total light bounces (all types combined)."));

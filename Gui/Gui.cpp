@@ -449,6 +449,7 @@ Gui::createMenuActions()
     _imp->viewerInputsBMenu = new Menu(tr("Connect to B Side"), _imp->viewersMenu);
     _imp->viewersViewMenu = new Menu(tr("View"), _imp->viewersMenu);
     _imp->cacheMenu = new Menu(tr("Cache"), _imp->menubar);
+    _imp->menuTemplates = new Menu(tr("Templates"), _imp->menubar);
     _imp->menuHelp = new Menu(tr("Help"), _imp->menubar);
 
 
@@ -633,6 +634,7 @@ Gui::createMenuActions()
     _imp->menubar->addAction( _imp->menuDisplay->menuAction() );
     _imp->menubar->addAction( _imp->menuRender->menuAction() );
     _imp->menubar->addAction( _imp->cacheMenu->menuAction() );
+    _imp->menubar->addAction( _imp->menuTemplates->menuAction() );
     _imp->menubar->addAction( _imp->menuHelp->menuAction() );
 
 #ifdef __APPLE__
@@ -698,6 +700,25 @@ Gui::createMenuActions()
     _imp->cacheMenu->addAction(_imp->actionClearAllCaches);
     _imp->cacheMenu->addSeparator();
     _imp->cacheMenu->addAction(_imp->actionClearPluginsLoadingCache);
+
+    // Templates menu
+    {
+        QAction* a;
+        a = new QAction(tr("Basic 3D Scene"), this);
+        a->setStatusTip(tr("Create Sphere + Light + Scene + Camera + CyclesRender + Viewer"));
+        QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplate3DBasic()));
+        _imp->menuTemplates->addAction(a);
+
+        a = new QAction(tr("VDB Fire / Smoke"), this);
+        a->setStatusTip(tr("Create ReadVDB + Dome Light + Scene + Camera + CyclesRender + Viewer"));
+        QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateVDBFire()));
+        _imp->menuTemplates->addAction(a);
+
+        a = new QAction(tr("Particle System"), this);
+        a->setStatusTip(tr("Create Emitter + Gravity + Solver + Scene + Camera + ScanlineRender + Viewer"));
+        QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateParticles()));
+        _imp->menuTemplates->addAction(a);
+    }
 
     // Help menu
     _imp->actionHelpDocumentation = new QAction(this);

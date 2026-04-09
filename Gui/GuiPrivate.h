@@ -213,6 +213,7 @@ public:
     Menu *viewerInputsBMenu;
     Menu *viewersViewMenu;
     Menu *cacheMenu;
+    Menu *menuTemplates;
     Menu *menuHelp;
 
 

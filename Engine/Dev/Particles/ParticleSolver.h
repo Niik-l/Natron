@@ -76,7 +76,7 @@ public:
     virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN
     {
         if (inputNb == 0) return "particles";
-        if (inputNb == 1) return "geo";
+        if (inputNb == 1) return "collision geo";
         return std::string();
     }
 

@@ -636,6 +636,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                 ParticleProvider* sProvider = dynamic_cast<ParticleProvider*>(sceneInput.get());
                 if (sProvider) {
                     particleData = sProvider->getParticleData(args.time);
+                    motionBlurPData = particleData;
                 } else {
                     GeoData geo;
                     if (extractGeometry(sceneInput, args.time, args.view, geo)) {
