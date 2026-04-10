@@ -37,6 +37,7 @@
 #include "../../KnobTypes.h"
 #include "../../Node.h"
 #include "../../ViewIdx.h"
+#include "../../NodeMetadata.h"
 
 #ifdef NATRON_HAVE_OPENIMAGEIO
 #include <OpenImageIO/imageio.h>
@@ -161,7 +162,8 @@ DeepRead::knobChanged(KnobI* k,
 
         const OIIO::ImageSpec& spec = input->spec();
         std::ostringstream info;
-        info << "Resolution: " << spec.width << " x " << spec.height << "\n";
+        info << "Resolution: " << spec.full_width << " x " << spec.full_height
+             << " (data: " << spec.width << " x " << spec.height << ")\n";
         info << "Channels: " << spec.nchannels << "\n";
         info << "Deep: " << (spec.deep ? "Yes" : "No") << "\n";
         if (spec.deep) {
@@ -182,6 +184,39 @@ DeepRead::knobChanged(KnobI* k,
     }
 
     return false;
+}
+
+StatusEnum
+DeepRead::getPreferredMetadata(NodeMetadata& metadata)
+{
+#ifdef NATRON_HAVE_OPENIMAGEIO
+    KnobFilePtr fileKnob = _imp->filePath.lock();
+    if (!fileKnob) return eStatusOK;
+    std::string path = fileKnob->getValue();
+    if (path.empty()) return eStatusOK;
+
+    auto input = OIIO::ImageInput::open(path);
+    if (!input) return eStatusOK;
+
+    const OIIO::ImageSpec& spec = input->spec();
+
+    // Read PAR from EXR file (defaults to 1.0 if not present)
+    double par = spec.get_float_attribute("PixelAspectRatio", 1.0f);
+    metadata.setPixelAspectRatio(-1, par);
+
+    // Set output format from display window
+    RectI format;
+    format.x1 = spec.full_x;
+    format.y1 = spec.full_y;
+    format.x2 = spec.full_x + spec.full_width;
+    format.y2 = spec.full_y + spec.full_height;
+    metadata.setOutputFormat(format);
+
+    input->close();
+#else
+    Q_UNUSED(metadata);
+#endif
+    return eStatusOK;
 }
 
 StatusEnum
@@ -208,11 +243,12 @@ DeepRead::getRegionOfDefinition(U64 /*hash*/,
         return eStatusFailed;
     }
 
-    // The data window defines the RoD
-    rod->x1 = spec.x;
-    rod->y1 = spec.y;
-    rod->x2 = spec.x + spec.width;
-    rod->y2 = spec.y + spec.height;
+    // Use the display window (full canvas) for the RoD, not the data window.
+    // The data window may be cropped smaller than the full image.
+    rod->x1 = spec.full_x;
+    rod->y1 = spec.full_y;
+    rod->x2 = spec.full_x + spec.full_width;
+    rod->y2 = spec.full_y + spec.full_height;
 
     input->close();
     return eStatusOK;
