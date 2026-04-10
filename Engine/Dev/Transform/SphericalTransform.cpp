@@ -200,7 +200,7 @@ SphericalTransform::SphericalTransform(NodePtr node)
     : EffectInstance(node)
     , _imp(new SphericalTransformPrivate())
 {
-    setSupportsRenderScaleMaybe(eSupportsNo);
+    setSupportsRenderScaleMaybe(eSupportsYes);
 }
 
 SphericalTransform::~SphericalTransform()
@@ -1038,9 +1038,9 @@ SphericalTransform::knobChanged(KnobI* k,
 
 StatusEnum
 SphericalTransform::getRegionOfDefinition(U64 /*hash*/,
-                                           double /*time*/,
-                                           const RenderScale& /*scale*/,
-                                           ViewIdx /*view*/,
+                                           double time,
+                                           const RenderScale& scale,
+                                           ViewIdx view,
                                            RectD* rod)
 {
     EffectInstancePtr input = getInput(0);
@@ -1048,7 +1048,7 @@ SphericalTransform::getRegionOfDefinition(U64 /*hash*/,
 
     RectD inputRod;
     bool isProjectFormat = false;
-    StatusEnum st = input->getRegionOfDefinition_public(input->getHash(), 0, RenderScale(), ViewIdx(0), &inputRod, &isProjectFormat);
+    StatusEnum st = input->getRegionOfDefinition_public(input->getHash(), time, scale, view, &inputRod, &isProjectFormat);
     if (st != eStatusOK) return st;
 
     double inputW = inputRod.x2 - inputRod.x1;
@@ -1164,8 +1164,8 @@ SphericalTransform::render(const RenderActionArgs& args)
     // Get source image
     auto fetchStart = std::chrono::high_resolution_clock::now();
     RectI srcRoi;
-    ImagePtr srcImg = getImage(0, args.time, RenderScale(), args.view,
-                               NULL, NULL, false, true,
+    ImagePtr srcImg = getImage(0, args.time, args.mappedScale, args.view,
+                               NULL, NULL, false, false,
                                eStorageModeRAM, 0, &srcRoi);
     if (!srcImg) return eStatusFailed;
     auto fetchEnd = std::chrono::high_resolution_clock::now();

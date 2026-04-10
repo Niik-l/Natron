@@ -661,8 +661,8 @@ DevShuffle::render(const RenderActionArgs& args)
     }
 
     RectI roiPixelB;
-    ImagePtr srcImgB = getImage(0, args.time, RenderScale(), args.view,
-                                NULL, requestedPlane, false, true,
+    ImagePtr srcImgB = getImage(0, args.time, args.mappedScale, args.view,
+                                NULL, requestedPlane, false, false,
                                 eStorageModeRAM, 0, &roiPixelB);
 
     // --- Get Row 2 source image (input A = 1) ---
@@ -674,8 +674,8 @@ DevShuffle::render(const RenderActionArgs& args)
     }
 
     RectI roiPixelA;
-    ImagePtr srcImgA = getImage(1, args.time, RenderScale(), args.view,
-                                NULL, requestedPlane2, false, true,
+    ImagePtr srcImgA = getImage(1, args.time, args.mappedScale, args.view,
+                                NULL, requestedPlane2, false, false,
                                 eStorageModeRAM, 0, &roiPixelA);
 
     // Must have at least one source

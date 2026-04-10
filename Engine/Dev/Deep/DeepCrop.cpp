@@ -110,8 +110,8 @@ DeepCrop::initializeKnobs()
 }
 
 StatusEnum
-DeepCrop::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
-                                ViewIdx /*view*/, RectD* rod)
+DeepCrop::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale& scale,
+                                ViewIdx view, RectD* rod)
 {
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
@@ -120,7 +120,7 @@ DeepCrop::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale
     RectD upstreamRoD;
     bool isProjectFormat = false;
     StatusEnum status = input->getRegionOfDefinition_public(
-        input->getHash(), 0, RenderScale(), ViewIdx(0), &upstreamRoD, &isProjectFormat);
+        input->getHash(), time, scale, view, &upstreamRoD, &isProjectFormat);
     if (status != eStatusOK) return status;
 
     int x1 = _imp->cropX1.lock()->getValue();

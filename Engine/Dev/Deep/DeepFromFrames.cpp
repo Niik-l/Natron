@@ -148,15 +148,15 @@ DeepFromFrames::knobChanged(KnobI* k,
 
 StatusEnum
 DeepFromFrames::getRegionOfDefinition(U64 /*hash*/,
-                                      double /*time*/,
-                                      const RenderScale& /*scale*/,
-                                      ViewIdx /*view*/,
+                                      double time,
+                                      const RenderScale& scale,
+                                      ViewIdx view,
                                       RectD* rod)
 {
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
     bool isProjectFormat = false;
-    return input->getRegionOfDefinition_public(input->getHash(), 0, RenderScale(), ViewIdx(0), rod, &isProjectFormat);
+    return input->getRegionOfDefinition_public(input->getHash(), time, scale, view, rod, &isProjectFormat);
 }
 
 DeepImagePtr
@@ -188,8 +188,8 @@ DeepFromFrames::render(const RenderActionArgs& args)
 
     // Fetch the input image using standard getImage()
     RectI srcRoI;
-    ImagePtr srcImg = getImage(0, args.time, RenderScale(), args.view,
-                               NULL, NULL, false, true,
+    ImagePtr srcImg = getImage(0, args.time, args.mappedScale, args.view,
+                               NULL, NULL, false, false,
                                eStorageModeRAM, 0, &srcRoI);
     if (!srcImg) {
         return eStatusFailed;

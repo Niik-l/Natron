@@ -161,13 +161,13 @@ DeepColorCorrect::initializeKnobs()
 }
 
 StatusEnum
-DeepColorCorrect::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
-                                        ViewIdx /*view*/, RectD* rod)
+DeepColorCorrect::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale& scale,
+                                        ViewIdx view, RectD* rod)
 {
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
     bool isProjectFormat = false;
-    return input->getRegionOfDefinition_public(input->getHash(), 0, RenderScale(), ViewIdx(0), rod, &isProjectFormat);
+    return input->getRegionOfDefinition_public(input->getHash(), time, scale, view, rod, &isProjectFormat);
 }
 
 DeepImagePtr

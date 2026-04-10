@@ -136,8 +136,8 @@ DeepTransform::initializeKnobs()
 }
 
 StatusEnum
-DeepTransform::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
-                                     ViewIdx /*view*/, RectD* rod)
+DeepTransform::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale& scale,
+                                     ViewIdx view, RectD* rod)
 {
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
@@ -146,7 +146,7 @@ DeepTransform::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const Render
     RectD upstreamRoD;
     bool isProjectFormat = false;
     StatusEnum st = input->getRegionOfDefinition_public(
-        input->getHash(), 0, RenderScale(), ViewIdx(0), &upstreamRoD, &isProjectFormat);
+        input->getHash(), time, scale, view, &upstreamRoD, &isProjectFormat);
     if (st != eStatusOK) return st;
 
     double tx = _imp->translateX.lock()->getValue();

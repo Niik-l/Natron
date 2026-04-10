@@ -147,9 +147,9 @@ DeepDifference::knobChanged(KnobI* k,
 
 StatusEnum
 DeepDifference::getRegionOfDefinition(U64 /*hash*/,
-                                      double /*time*/,
-                                      const RenderScale& /*scale*/,
-                                      ViewIdx /*view*/,
+                                      double time,
+                                      const RenderScale& scale,
+                                      ViewIdx view,
                                       RectD* rod)
 {
     // Union of both inputs
@@ -162,12 +162,12 @@ DeepDifference::getRegionOfDefinition(U64 /*hash*/,
     bool hasA = false, hasB = false;
 
     if (inputA) {
-        if (inputA->getRegionOfDefinition_public(inputA->getHash(), 0, RenderScale(), ViewIdx(0), &rodA, &isProjectFormat) == eStatusOK) {
+        if (inputA->getRegionOfDefinition_public(inputA->getHash(), time, scale, view, &rodA, &isProjectFormat) == eStatusOK) {
             hasA = true;
         }
     }
     if (inputB) {
-        if (inputB->getRegionOfDefinition_public(inputB->getHash(), 0, RenderScale(), ViewIdx(0), &rodB, &isProjectFormat) == eStatusOK) {
+        if (inputB->getRegionOfDefinition_public(inputB->getHash(), time, scale, view, &rodB, &isProjectFormat) == eStatusOK) {
             hasB = true;
         }
     }

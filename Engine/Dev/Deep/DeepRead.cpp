@@ -186,9 +186,9 @@ DeepRead::knobChanged(KnobI* k,
 
 StatusEnum
 DeepRead::getRegionOfDefinition(U64 /*hash*/,
-                                double /*time*/,
-                                const RenderScale& /*scale*/,
-                                ViewIdx /*view*/,
+                                double time,
+                                const RenderScale& scale,
+                                ViewIdx view,
                                 RectD* rod)
 {
 #ifdef NATRON_HAVE_OPENIMAGEIO

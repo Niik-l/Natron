@@ -123,7 +123,7 @@ DeepLayerBreak::initializeKnobs()
 
 bool
 DeepLayerBreak::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
-                             ViewSpec /*view*/, double /*time*/, bool /*originatedFromMainThread*/)
+                             ViewSpec /*view*/, double time, bool /*originatedFromMainThread*/)
 {
     if (_imp->nearDepth.lock().get() == k || _imp->farDepth.lock().get() == k) {
         return true;
@@ -132,13 +132,13 @@ DeepLayerBreak::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
 }
 
 StatusEnum
-DeepLayerBreak::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
-                                      ViewIdx /*view*/, RectD* rod)
+DeepLayerBreak::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale& scale,
+                                      ViewIdx view, RectD* rod)
 {
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
     bool isProjectFormat = false;
-    return input->getRegionOfDefinition_public(input->getHash(), 0, RenderScale(), ViewIdx(0), rod, &isProjectFormat);
+    return input->getRegionOfDefinition_public(input->getHash(), time, scale, view, rod, &isProjectFormat);
 }
 
 StatusEnum

@@ -102,15 +102,15 @@ DeepRecolor::initializeKnobs()
 
 StatusEnum
 DeepRecolor::getRegionOfDefinition(U64 /*hash*/,
-                                   double /*time*/,
-                                   const RenderScale& /*scale*/,
-                                   ViewIdx /*view*/,
+                                   double time,
+                                   const RenderScale& scale,
+                                   ViewIdx view,
                                    RectD* rod)
 {
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
     bool isProjectFormat = false;
-    return input->getRegionOfDefinition_public(input->getHash(), 0, RenderScale(), ViewIdx(0), rod, &isProjectFormat);
+    return input->getRegionOfDefinition_public(input->getHash(), time, scale, view, rod, &isProjectFormat);
 }
 
 DeepImagePtr
@@ -156,8 +156,8 @@ DeepRecolor::render(const RenderActionArgs& args)
     ImagePtr colorImg;
     if (colorInput) {
         RectI roiPixel;
-        colorImg = getImage(1, args.time, RenderScale(), args.view,
-                            NULL, NULL, false, true,
+        colorImg = getImage(1, args.time, args.mappedScale, args.view,
+                            NULL, NULL, false, false,
                             eStorageModeRAM, 0, &roiPixel);
     }
 

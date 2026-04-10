@@ -235,7 +235,7 @@ DeepGodRays::initializeKnobs()
 
 bool
 DeepGodRays::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
-                          ViewSpec /*view*/, double /*time*/, bool /*originatedFromMainThread*/)
+                          ViewSpec /*view*/, double time, bool /*originatedFromMainThread*/)
 {
     if (_imp->lightPosX.lock().get() == k ||
         _imp->lightPosY.lock().get() == k ||
@@ -250,13 +250,13 @@ DeepGodRays::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
 }
 
 StatusEnum
-DeepGodRays::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
-                                   ViewIdx /*view*/, RectD* rod)
+DeepGodRays::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale& scale,
+                                   ViewIdx view, RectD* rod)
 {
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
     bool isProjectFormat = false;
-    return input->getRegionOfDefinition_public(input->getHash(), 0, RenderScale(), ViewIdx(0), rod, &isProjectFormat);
+    return input->getRegionOfDefinition_public(input->getHash(), time, scale, view, rod, &isProjectFormat);
 }
 
 StatusEnum

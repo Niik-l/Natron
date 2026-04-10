@@ -215,8 +215,8 @@ resolveOutputSize(int formatChoice, int customW, int customH, int srcW, int srcH
 }
 
 StatusEnum
-DeepReformat::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
-                                    ViewIdx /*view*/, RectD* rod)
+DeepReformat::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale& scale,
+                                    ViewIdx view, RectD* rod)
 {
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
@@ -225,7 +225,7 @@ DeepReformat::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderS
     RectD upstreamRoD;
     bool isProjectFormat = false;
     StatusEnum status = input->getRegionOfDefinition_public(
-        input->getHash(), 0, RenderScale(), ViewIdx(0), &upstreamRoD, &isProjectFormat);
+        input->getHash(), time, scale, view, &upstreamRoD, &isProjectFormat);
     if (status != eStatusOK) return status;
 
     int srcW = (int)(upstreamRoD.x2 - upstreamRoD.x1);
