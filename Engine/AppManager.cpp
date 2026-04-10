@@ -164,6 +164,8 @@
 
 // Dev nodes — Color
 #include "Dev/Color/ColorChartMatch.h"
+#include "Dev/Color/ColorMatrix.h"
+#include "Dev/Color/Exposure.h"
 
 // Dev nodes — Particles
 #include "Dev/Particles/ParticleEmitter.h"
@@ -1685,6 +1687,8 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
 
     // Dev nodes — Color
     registerBuiltInPlugin<ColorChartMatch>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/color_grouping_2.png"), false, false);
+    registerBuiltInPlugin<ColorMatrix>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/color_grouping_2.png"), false, false);
+    registerBuiltInPlugin<Exposure>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/color_grouping_2.png"), false, false);
 }
 
 bool

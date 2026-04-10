@@ -105,7 +105,7 @@ ColorChartMatch::ColorChartMatch(NodePtr node)
     , _imp(new ColorChartMatchPrivate())
 {
     _imp->draggingCorner = -1;
-    setSupportsRenderScaleMaybe(eSupportsNo);
+    setSupportsRenderScaleMaybe(eSupportsYes);
 }
 
 ColorChartMatch::~ColorChartMatch()
@@ -399,7 +399,7 @@ ColorChartMatch::initializeKnobs()
     {
         KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Export to ColorMatrix Node"));
         k->setName("exportMatrix");
-        k->setHintToolTip(tr("Create a ColorMatrix OFX node in the graph with the computed matrix values. "
+        k->setHintToolTip(tr("Create a ColorMatrix node in the graph with the computed matrix values. "
                               "The matrix is also stored in this node's parameters."));
         mainPage->addKnob(k);
         _imp->exportButton = k;
@@ -528,29 +528,27 @@ ColorChartMatch::knobChanged(KnobI* k,
         }
 
         try {
-            CreateNodeArgs args("net.sf.openfx.ColorMatrixPlugin",
+            CreateNodeArgs args(PLUGINID_NATRON_COLORMATRIX,
                                 thisNode->getGroup());
             args.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
             args.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
 
             NodePtr cmNode = thisNode->getApp()->createNode(args);
             if (!cmNode) {
-                _imp->info.lock()->setValue("Error: failed to create ColorMatrix node. "
-                                            "Is the openfx-misc plugin loaded?");
+                _imp->info.lock()->setValue("Error: failed to create ColorMatrix node.");
                 return true;
             }
 
-            // Set matrix values: outputRed, outputGreen, outputBlue are RGBA Color knobs
+            // Set matrix values on our built-in ColorMatrix knobs
             const char* rowNames[3] = {"outputRed", "outputGreen", "outputBlue"};
             for (int r = 0; r < 3; ++r) {
                 KnobIPtr knob = cmNode->getKnobByName(rowNames[r]);
                 if (!knob) continue;
                 KnobColorPtr colorK = std::dynamic_pointer_cast<KnobColor>(knob);
                 if (!colorK) continue;
-                colorK->setValue(m[r][0], ViewSpec::all(), 0);  // R
-                colorK->setValue(m[r][1], ViewSpec::all(), 1);  // G
-                colorK->setValue(m[r][2], ViewSpec::all(), 2);  // B
-                colorK->setValue(0.0,     ViewSpec::all(), 3);  // A
+                colorK->setValue(m[r][0], ViewSpec::all(), 0);
+                colorK->setValue(m[r][1], ViewSpec::all(), 1);
+                colorK->setValue(m[r][2], ViewSpec::all(), 2);
             }
 
             // Connect ColorMatrix input to whatever is connected to our input
@@ -771,15 +769,15 @@ ColorChartMatch::calculateMatrix()
 
 StatusEnum
 ColorChartMatch::getRegionOfDefinition(U64 /*hash*/,
-                                        double /*time*/,
-                                        const RenderScale& /*scale*/,
-                                        ViewIdx /*view*/,
+                                        double time,
+                                        const RenderScale& scale,
+                                        ViewIdx view,
                                         RectD* rod)
 {
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
     bool isProjectFormat = false;
-    return input->getRegionOfDefinition_public(input->getHash(), 0, RenderScale(), ViewIdx(0), rod, &isProjectFormat);
+    return input->getRegionOfDefinition_public(input->getHash(), time, scale, view, rod, &isProjectFormat);
 }
 
 
@@ -790,8 +788,8 @@ ColorChartMatch::render(const RenderActionArgs& args)
 {
     // Get source image
     RectI srcRoi;
-    ImagePtr srcImg = getImage(0, args.time, RenderScale(), args.view,
-                               NULL, NULL, false, true,
+    ImagePtr srcImg = getImage(0, args.time, args.mappedScale, args.view,
+                               NULL, NULL, false, false,
                                eStorageModeRAM, 0, &srcRoi);
     if (!srcImg) return eStatusFailed;
 

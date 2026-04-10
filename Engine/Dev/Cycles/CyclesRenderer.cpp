@@ -739,6 +739,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     // First scan for dome lights to set the background shader.
     // Then process other light types.
     bool hasDome = false;
+    bool hasDomeCameraVisible = false;
     {
         // === First pass: find dome lights and set background ===
         const std::vector<SceneNode>& lightScan = sg.nodes();
@@ -749,7 +750,9 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             if (!node) continue;
             Light3D* light3d = dynamic_cast<Light3D*>(node->getEffectInstance().get());
             if (!light3d || light3d->getLightType() != Light3D::eLightDome) continue;
-            if (!light3d->isRenderable()) continue;
+            // Dome light ALWAYS contributes to lighting.
+            // "Renderable" controls camera visibility only (like Arnold's skydome Camera flag).
+            bool domeVisibleInCamera = light3d->isRenderable();
 
             double ltx, lty, ltz, lr, lg, lb, lint, lexp;
             light3d->getLightParams(time, ltx, lty, ltz, lr, lg, lb, lint, lexp);
@@ -803,7 +806,19 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
                 ccl::BackgroundNode* bgNode = bgGraph->create_node<ccl::BackgroundNode>();
                 bgNode->set_strength(strengthScale);
-                bgGraph->connect(envTex->output("Color"), bgNode->input("Color"));
+
+                // Tint HDRI by Light Color (if not white)
+                bool isWhite = (std::abs(lr - 1.0) < 0.001 && std::abs(lg - 1.0) < 0.001 && std::abs(lb - 1.0) < 0.001);
+                if (!isWhite) {
+                    ccl::MixNode* tint = bgGraph->create_node<ccl::MixNode>();
+                    tint->set_mix_type(ccl::NODE_MIX_MUL);
+                    tint->set_fac(1.0f);
+                    tint->set_color2(ccl::make_float3((float)lr, (float)lg, (float)lb));
+                    bgGraph->connect(envTex->output("Color"), tint->input("Color1"));
+                    bgGraph->connect(tint->output("Color"), bgNode->input("Color"));
+                } else {
+                    bgGraph->connect(envTex->output("Color"), bgNode->input("Color"));
+                }
                 bgGraph->connect(bgNode->output("Background"), bgGraph->output()->input("Surface"));
             } else {
                 // Solid color dome
@@ -831,6 +846,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             bgLight->tag_update(scene);
 
             hasDome = true;
+            hasDomeCameraVisible = domeVisibleInCamera;
             break; // only one dome light
         }
 
@@ -1099,7 +1115,10 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     scene->film->set_exposure(1.0f);
     // Transparent bg when no dome light (proper alpha for comp over).
     // When dome light present, show HDRI as visible background.
-    scene->background->set_transparent(!hasDome);
+    // Transparent bg controls whether HDRI is visible in camera.
+    // Dome light ALWAYS contributes lighting (scatter, reflections, etc).
+    // "Renderable" on dome = camera visibility only (like Arnold's skydome Camera flag).
+    scene->background->set_transparent(!hasDomeCameraVisible);
 
     // --- Integrator ---
     IntegratorParams integ;
