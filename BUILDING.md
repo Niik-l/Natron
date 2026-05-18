@@ -10,9 +10,10 @@ A step-by-step guide to building Natron from source with Qt6, PySide6, and Pytho
 
 **Do this first.** If Strawberry Perl is installed, its bundled GCC will silently conflict with MSYS2's GCC and cause confusing build failures (shiboken crashes, moc crashes, wrong headers).
 
-Either:
-- **Uninstall Strawberry Perl**, or
-- **Remove it from PATH** before building: Settings → Environment Variables → remove any `C:\Strawberry\...` entries from `Path`
+Pick one of:
+- **Uninstall Strawberry Perl**
+- **Remove it from Windows PATH** before building: Settings → Environment Variables → remove any `C:\Strawberry\...` entries from `Path`
+- **Leave it installed and on PATH, but always prepend `/c/msys64/mingw64/bin` to `PATH` inside the MINGW64 shell** so MSYS2's GCC wins lookup. Step 4 already does this with `export PATH="/c/msys64/mingw64/bin:$PATH"` — extend the same pattern to any extra build scripts you write.
 
 ---
 
@@ -93,7 +94,9 @@ cd build-qt6
 export PATH="/c/msys64/mingw64/bin:$PATH"
 export LLVM_INSTALL_DIR=C:/msys64/mingw64
 
-# Configure (without Cycles)
+# Configure
+# To enable Cycles, append the three -DNATRON_CYCLES_* lines below
+# (requires Cycles built first — see step 10):
 cmake .. -G "MinGW Makefiles" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DNATRON_QT6=ON \
@@ -106,23 +109,10 @@ cmake .. -G "MinGW Makefiles" \
   -DPython3_ROOT_DIR=/c/msys64/mingw64 \
   -DPython_ROOT_DIR=/c/msys64/mingw64 \
   -DNATRON_LLVM_INSTALL_DIR=C:/msys64/mingw64
-
-# Or configure with Cycles enabled (requires Cycles built first — see step 9):
-cmake .. -G "MinGW Makefiles" \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DNATRON_QT6=ON \
-  -DNATRON_BUILD_TESTS=OFF \
-  -DCMAKE_C_COMPILER=/c/msys64/mingw64/bin/gcc.exe \
-  -DCMAKE_CXX_COMPILER=/c/msys64/mingw64/bin/g++.exe \
-  -DCMAKE_MAKE_PROGRAM=/c/msys64/mingw64/bin/mingw32-make.exe \
-  -DPython3_EXECUTABLE=/c/msys64/mingw64/bin/python3.exe \
-  -DPython_EXECUTABLE=/c/msys64/mingw64/bin/python3.exe \
-  -DPython3_ROOT_DIR=/c/msys64/mingw64 \
-  -DPython_ROOT_DIR=/c/msys64/mingw64 \
-  -DNATRON_LLVM_INSTALL_DIR=C:/msys64/mingw64 \
-  -DNATRON_CYCLES=ON \
-  -DNATRON_CYCLES_DIR=/d/projects/cycles \
-  -DNATRON_CYCLES_BUILD_DIR=/d/projects/cycles/build
+  # Optional — enable Cycles:
+  # -DNATRON_CYCLES=ON \
+  # -DNATRON_CYCLES_DIR=/d/projects/cycles \
+  # -DNATRON_CYCLES_BUILD_DIR=/d/projects/cycles/build
 ```
 
 You should see output ending with:
@@ -271,11 +261,37 @@ cp /d/projects/openfx-io/build/IO.ofx \
 
 ---
 
-## 8. Bundle DLLs and Python (standalone launch)
+## 8. Install OpenColorIO Configs (optional)
 
-Natron needs MSYS2's DLLs and Python standard library to run. You can either launch from the MSYS2 terminal (step 8a) or bundle everything so it runs standalone from Windows Explorer (step 8b).
+Natron uses OpenColorIO for color management. The default config presets (nuke-default, blender, natron) ship as a separate tarball. Without them, Natron launches fine — color knobs still work — but you'll see OCIO warnings and lose the named presets.
 
-### 8a. Run from MSYS2 terminal (quick)
+At runtime, Natron searches `<binary>/../Resources/OpenColorIO-Configs/` (see `Engine/Settings.cpp`). For a dev build run from `build-qt6/App/Natron.exe`, that resolves to `build-qt6/Resources/OpenColorIO-Configs/`.
+
+```bash
+cd /d/projects/Natron
+curl -L https://github.com/NatronGitHub/OpenColorIO-Configs/archive/Natron-v2.4.tar.gz \
+  -o ocio-configs.tar.gz
+tar xzf ocio-configs.tar.gz
+mkdir -p build-qt6/Resources
+mv OpenColorIO-Configs-Natron-v2.4 build-qt6/Resources/OpenColorIO-Configs
+rm ocio-configs.tar.gz
+```
+
+> **Note:** If MSYS2's `curl` fails with a TLS or connection error, fall back to PowerShell `Invoke-WebRequest` or `git clone https://github.com/NatronGitHub/OpenColorIO-Configs.git`.
+
+**Alternative — `OCIO` environment variable.** If you have a `config.ocio` elsewhere, set it before launching to override the search path entirely:
+```bash
+export OCIO=/path/to/your/config.ocio
+./Natron.exe
+```
+
+---
+
+## 9. Bundle DLLs and Python (standalone launch)
+
+Natron needs MSYS2's DLLs and Python standard library to run. You can either launch from the MSYS2 terminal (step 9a) or bundle everything so it runs standalone from Windows Explorer (step 9b).
+
+### 9a. Run from MSYS2 terminal (quick)
 
 ```bash
 cd /d/projects/Natron/build-qt6/App
@@ -283,16 +299,34 @@ export PATH="/c/msys64/mingw64/bin:$PATH"
 ./Natron.exe
 ```
 
-### 8b. Bundle for standalone launch (double-click from Explorer)
+### 9b. Bundle for standalone launch (double-click from Explorer)
 
-Copy all MSYS2 DLLs into the App directory. Natron and its dependencies (Qt6, OIIO, FFmpeg, Python, etc.) have deep dependency chains, so the simplest approach is to copy all of them:
+After bundling, you can double-click `Natron.exe` from Windows Explorer without needing the MSYS2 terminal. Two ways to bundle the DLLs — pick one:
+
+#### Option A — Copy all MSYS2 DLLs (brute-force, ~700 DLLs / ~1.5 GB)
+
+Simplest and most reliable — no extra tooling required. Has deep dependency chains (Qt6, OIIO, FFmpeg, Python, etc.) covered by default.
 
 ```bash
 cd /d/projects/Natron/build-qt6/App
-
-# Copy all MSYS2 DLLs (simplest, ~700 DLLs, ~1.5GB)
 cp /c/msys64/mingw64/bin/*.dll .
+```
 
+#### Option B — Trace only required DLLs (leaner)
+
+Use `ntldd` to walk Natron's actual dependency tree and copy only what's needed:
+
+```bash
+pacman -S mingw-w64-x86_64-ntldd
+cd /d/projects/Natron/build-qt6/App
+ntldd -R Natron.exe | grep mingw64 | awk '{print $3}' | xargs -I {} cp {} .
+```
+
+This produces a much smaller bundle, but may miss DLLs loaded dynamically at runtime (Qt plugins, OCIO config plugins, OFX plugins, etc.). If launching fails with a missing-DLL error, fall back to Option A or copy the specific missing DLL by hand.
+
+#### Common steps (both options)
+
+```bash
 # Qt6 platform plugin (required for windowing)
 mkdir -p platforms
 cp /c/msys64/mingw64/share/qt6/plugins/platforms/qwindows.dll platforms/
@@ -304,10 +338,6 @@ cp -r /c/msys64/mingw64/lib/python3.14 ../lib/python3.14
 
 > **Note:** The Python version (3.14) may change when MSYS2 updates. Check with `python3 --version` and adjust the path accordingly.
 
-> **Note:** Copying all DLLs is brute-force but reliable. For a leaner distribution, `ntldd -R Natron.exe` (install with `pacman -S mingw-w64-x86_64-ntldd`) can trace only the required DLLs.
-
-After this, you can double-click `Natron.exe` from Windows Explorer without needing the MSYS2 terminal.
-
 ### Verify it works:
 1. **Python:** Open Script Editor, type `import NatronEngine; print(NatronEngine.natron.getNatronVersionString())`
 2. **Nodes:** Press Tab in the node graph, type "Blur" — should find DirBlur, GodRays, etc.
@@ -317,7 +347,7 @@ After this, you can double-click `Natron.exe` from Windows Explorer without need
 
 ---
 
-## 9. Enable Cycles Renderer (optional)
+## 10. Enable Cycles Renderer (optional)
 
 Natron includes an optional Cycles path tracer integration (the same renderer used by Blender). It's disabled by default.
 
@@ -329,9 +359,12 @@ pacman -S --noconfirm \
   mingw-w64-x86_64-openimagedenoise \
   mingw-w64-x86_64-openpgl \
   mingw-w64-x86_64-opensubdiv \
+  mingw-w64-x86_64-openvdb \
   mingw-w64-x86_64-pugixml \
   mingw-w64-x86_64-libepoxy
 ```
+
+`mingw-w64-x86_64-openvdb` is required: Natron's `Engine/Dev/Cycles/` code calls `ccl::VDBImageLoader` unconditionally, so Cycles must be built **with** OpenVDB for the Natron link to succeed (see `WITH_CYCLES_OPENVDB` below).
 
 ### Build Cycles standalone
 
@@ -360,7 +393,7 @@ cmake .. -G "MinGW Makefiles" \
   -DWITH_CYCLES_OPENIMAGEDENOISE=ON \
   -DWITH_CYCLES_OPENCOLORIO=ON \
   -DWITH_CYCLES_OPENSUBDIV=ON \
-  -DWITH_CYCLES_OPENVDB=OFF \
+  -DWITH_CYCLES_OPENVDB=ON \
   -DWITH_CYCLES_ALEMBIC=OFF \
   -DWITH_CYCLES_LOGGING=OFF \
   -DWITH_LIBS_PRECOMPILED=OFF \
@@ -368,6 +401,8 @@ cmake .. -G "MinGW Makefiles" \
 
 mingw32-make -j2
 ```
+
+> **Why `WITH_CYCLES_OPENVDB=ON`:** Natron's `Engine/Dev/Cycles/CyclesRenderer.cpp` calls `ccl::VDBImageLoader` without `#ifdef` guards (used by ReadVDB → CyclesRender for fire/smoke volumes). Building Cycles with `WITH_CYCLES_OPENVDB=OFF` produces a Cycles library that's missing the symbol, and the subsequent Natron link will fail with `undefined reference to ccl::VDBImageLoader::VDBImageLoader(...)`. Worse, the linker deletes the previous working `Natron.exe` before failing, leaving no binary. Keep `NanoVDB` at its default `ON` — disabling it independently of OpenVDB breaks `cycles/src/util/nanovdb.cpp`.
 
 ### Rebuild Natron with Cycles enabled
 
@@ -399,20 +434,30 @@ GCC 15 changed how it handles C++ template instantiation at `-O2`, which breaks 
 
 **This is already fixed in the repo** — `libs/libmv/CMakeLists.txt`, `libs/ceres/CMakeLists.txt`, and `Engine/CMakeLists.txt` apply `-O1` to Eigen-consuming targets when GCC >= 15 is detected. If you see these errors on a fresh build, make sure you have the latest code.
 
-### Tests fail to link with GCC 15
+### Tests / NatronRenderer fail to link
 
-The test suite (`Tests.exe`) and `NatronRenderer.exe` also hit the Eigen/GCC 15 issue. Disable tests:
+The test suite (`Tests.exe`) can hit the GCC 15 / Eigen issue described above. Disable tests:
 ```bash
 cmake .. -DNATRON_BUILD_TESTS=OFF
 ```
-This only affects the test binary — the main Natron.exe is unaffected.
+This only affects the test binary — the main `Natron.exe` is unaffected.
+
+`NatronRenderer.exe` can fail to link for **two** different reasons. Diagnose by the missing-symbol name:
+
+- **`ccl::VDBImageLoader::VDBImageLoader(...)`** — Cycles was built without OpenVDB. See step 10: `WITH_CYCLES_OPENVDB` must be `ON` for the Natron link to succeed.
+- **Eigen symbols (`evaluator_base`, `triangular_assignment_loop`, etc.)** — same GCC 15 / Eigen issue as `Tests.exe`. Should already be patched in the repo.
+
+After fixing either, retest with:
+```bash
+mingw32-make NatronRenderer -j2
+```
 
 ### "cmake: command not found" or "mingw32-make: command not found"
 
 You opened the wrong MSYS2 terminal. Make sure you're using **"MSYS2 MINGW64"** (not plain "MSYS2"). The prompt should show `MINGW64`, not `MSYS`:
 ```
-nickl@PC MINGW64 ~    <-- correct
-nickl@PC MSYS ~       <-- wrong
+user@host MINGW64 ~    <-- correct
+user@host MSYS ~       <-- wrong
 ```
 
 ### Cycles build: `moc_CyclesRender.cpp: No such file or directory`
@@ -427,7 +472,7 @@ mingw32-make -j2
 ```
 
 ### "libfontconfig-1.dll was not found" (or other DLL errors on double-click)
-The MSYS2 DLLs aren't bundled with the exe. Either launch from the MSYS2 terminal (step 8a) or bundle the DLLs (step 8b).
+The MSYS2 DLLs aren't bundled with the exe. Either launch from the MSYS2 terminal (step 9a) or bundle the DLLs (step 9b).
 
 ### "Failed to import encodings module" on launch
 Python's standard library isn't bundled. Copy it with:
@@ -502,28 +547,6 @@ Note: `-j4` or higher generally works fine for the main Natron build on 16GB+ ma
 | FFmpeg | 7.x / 8.x (MSYS2 may ship either) |
 | GCC | 15.2.0 |
 | Eigen | 3.4.0 (bundled, upgraded from 3.3.7 for GCC 15 compat) |
-
----
-
-## 10. Particle Collision Testbed (optional)
-
-A standalone real-time app for developing and testing particle collision physics, separate from Natron.
-
-```bash
-# Install dependencies
-pacman -S --noconfirm mingw-w64-x86_64-glfw mingw-w64-x86_64-glew
-
-# Build
-cd tools/particle_testbed
-mkdir build && cd build
-cmake .. -G "MinGW Makefiles"
-mingw32-make
-
-# Run
-./particle_testbed.exe
-```
-
-Controls: left-drag to orbit, scroll to zoom, 1/3/4/5/6 to switch collision shapes, A to animate collider, sliders on left for velocity/gravity/elasticity/friction.
 
 ---
 
