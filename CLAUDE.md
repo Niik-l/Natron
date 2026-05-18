@@ -43,7 +43,6 @@ When the user asks to commit/push:
 - `Engine/Dev/Cycles/` — Cycles path tracer integration
 - `Engine/Dev/Deep/` — deep compositing nodes
 - `Gui/` — Qt6 user interface, viewport
-- `tools/particle_testbed/` — standalone particle physics testbed (GLFW + OpenGL)
 
 ## Key Documentation
 

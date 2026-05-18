@@ -151,9 +151,8 @@ Tracking known bugs, incomplete features, and planned improvements.
 - **OBB collision** — rotation support for Cube3D colliders (inverse-transform to local space)
 - **Show Collisions debug** — checkbox tints collided particles red
 - **Removed built-in shape knobs** — no more Plane/Box/Sphere dropdown. Collision shape comes from connected Cube3D/Sphere3D geo.
-- **Collision math from testbed** — `bounceParticle`, `rayAABB`, `collideGeoBox`, `collideGeoSphere`, `pushOutOfBox`, `pushOutOfSphere`
+- **Collision functions** — `bounceParticle`, `rayAABB`, `collideGeoBox`, `collideGeoSphere`, `pushOutOfBox`, `pushOutOfSphere`
 - **`prevPx/prevPy/prevPz`** on Particle struct, `size` knob fix
-- **Standalone testbed** (`tools/particle_testbed/`) with real-time viz, sliders, multiple shapes, animated colliders, substeps
 - **Shiboken crash recovery**
 - **ParticleCollide → ParticleSolver rename** — node, class, plugin ID, all references
 - **ParticleSpawn "On Collision" working** — Emitter → Gravity → Solver (Cube3D geo) → Spawn (On Collision) → Merge pipeline tested and working

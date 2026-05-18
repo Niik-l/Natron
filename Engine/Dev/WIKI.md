@@ -357,15 +357,3 @@ ParticleEmitter → Gravity → Wind → ParticleSolver (Cube3D geo)
                                      Scene → ScanlineRender + Camera3D
 ```
 
----
-
-## Standalone Testbed
-
-A real-time GLFW/OpenGL app for testing collision physics outside Natron.
-
-```bash
-cd tools/particle_testbed/build
-mingw32-make && ./particle_testbed.exe
-```
-
-Controls: left-drag orbit, scroll zoom, R reset, Space pause, 1/3/4/5/6 collision shapes, A animate collider, I/O move emitter inside/outside, Up/Down substeps, sliders for velocity/gravity/elasticity/friction.

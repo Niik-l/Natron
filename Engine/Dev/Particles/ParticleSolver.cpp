@@ -37,7 +37,7 @@
 NATRON_NAMESPACE_ENTER
 
 // ============================================================
-// Collision math — ported from tools/particle_testbed/main.cpp
+// Collision math
 // ============================================================
 
 // Bounce a particle off a surface. hitT is the fraction along the
