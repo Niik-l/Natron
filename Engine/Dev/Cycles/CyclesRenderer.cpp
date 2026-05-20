@@ -24,8 +24,10 @@
 
 #include <cmath>
 #include <cstring>
+#include <iomanip>
 #include <map>
 #include <set>
+#include <sstream>
 
 // Cycles headers — must be included BEFORE CCL_NAMESPACE_BEGIN block below
 #include "device/device.h"
@@ -61,8 +63,8 @@
 
 // Natron headers
 #include "Engine/Dev/Scene3D/CameraMath.h"
-#include "Engine/Dev/Scene3D/SceneGraph.h"
 #include "Engine/Dev/Scene3D/RotationConventions.h"
+#include "Engine/Dev/Scene3D/SceneGraph.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
@@ -494,6 +496,48 @@ static ccl::Transform natronMatrixToCyclesTransform(const float m[16])
 // Material shader creation helper
 // ============================================================================
 
+// Resolve #### or %04d frame patterns in texture paths
+static std::string resolveTextureFrame(const std::string& path, int frame)
+{
+    if (path.empty()) return path;
+
+    std::string result = path;
+
+    // Replace #### with zero-padded frame number
+    size_t hashStart = result.find('#');
+    if (hashStart != std::string::npos) {
+        size_t hashEnd = hashStart;
+        while (hashEnd < result.size() && result[hashEnd] == '#') ++hashEnd;
+        int padding = (int)(hashEnd - hashStart);
+        std::ostringstream ss;
+        ss << std::setfill('0') << std::setw(padding) << frame;
+        result.replace(hashStart, hashEnd - hashStart, ss.str());
+        return result;
+    }
+
+    // Replace %04d style patterns
+    char buf[1024];
+    snprintf(buf, sizeof(buf), result.c_str(), frame);
+    if (std::string(buf) != result) return std::string(buf);
+
+    // Also try: find last digit group before extension and substitute
+    size_t dotPos = result.rfind('.');
+    if (dotPos != std::string::npos && dotPos > 0) {
+        size_t numEnd = dotPos;
+        size_t numStart = numEnd;
+        while (numStart > 0 && result[numStart - 1] >= '0' && result[numStart - 1] <= '9') --numStart;
+        if (numStart < numEnd) {
+            int padding = (int)(numEnd - numStart);
+            std::ostringstream ss;
+            ss << std::setfill('0') << std::setw(padding) << frame;
+            result.replace(numStart, numEnd - numStart, ss.str());
+            return result;
+        }
+    }
+
+    return result;
+}
+
 static ccl::Shader*
 createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double time)
 {
@@ -525,9 +569,10 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
 
     // Shared texture coordinate node (reused for all texture maps)
     ccl::TextureCoordinateNode* texCoord = graph->create_node<ccl::TextureCoordinateNode>();
+    int frame = (int)time;
 
     // Base color texture
-    std::string texFile = mat->getMaterialTextureFile();
+    std::string texFile = resolveTextureFrame(mat->getMaterialTextureFile(), frame);
     if (!texFile.empty()) {
         ccl::ImageTextureNode* imgTex = graph->create_node<ccl::ImageTextureNode>();
         imgTex->set_filename(ccl::ustring(texFile));
@@ -540,7 +585,7 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     }
 
     // Normal map
-    std::string normalFile = mat->getMaterialNormalMapFile();
+    std::string normalFile = resolveTextureFrame(mat->getMaterialNormalMapFile(), frame);
     if (!normalFile.empty()) {
         ccl::ImageTextureNode* normalTex = graph->create_node<ccl::ImageTextureNode>();
         normalTex->set_filename(ccl::ustring(normalFile));
@@ -553,7 +598,7 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     }
 
     // Roughness map
-    std::string roughFile = mat->getMaterialRoughnessMapFile();
+    std::string roughFile = resolveTextureFrame(mat->getMaterialRoughnessMapFile(), frame);
     if (!roughFile.empty()) {
         ccl::ImageTextureNode* roughTex = graph->create_node<ccl::ImageTextureNode>();
         roughTex->set_filename(ccl::ustring(roughFile));
@@ -563,7 +608,7 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     }
 
     // Metallic map
-    std::string metalFile = mat->getMaterialMetallicMapFile();
+    std::string metalFile = resolveTextureFrame(mat->getMaterialMetallicMapFile(), frame);
     if (!metalFile.empty()) {
         ccl::ImageTextureNode* metalTex = graph->create_node<ccl::ImageTextureNode>();
         metalTex->set_filename(ccl::ustring(metalFile));
@@ -573,7 +618,7 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     }
 
     // Emission map
-    std::string emissionFile = mat->getMaterialEmissionMapFile();
+    std::string emissionFile = resolveTextureFrame(mat->getMaterialEmissionMapFile(), frame);
     if (!emissionFile.empty()) {
         ccl::ImageTextureNode* emissionTex = graph->create_node<ccl::ImageTextureNode>();
         emissionTex->set_filename(ccl::ustring(emissionFile));

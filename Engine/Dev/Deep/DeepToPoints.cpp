@@ -36,6 +36,7 @@
 #include "../../KnobTypes.h"
 #include "../../Node.h"
 #include "../../ViewIdx.h"
+#include "../Scene3D/Camera3DNode.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -190,6 +191,23 @@ DeepToPoints::render(const RenderActionArgs& args)
     float centerY = (dw.y1 + dw.y2) * 0.5f;
     float imageScale = 1.0f / std::max(dw.width(), dw.height());
 
+    // Check for camera input (input 1) for world-space unprojection
+    EffectInstancePtr camInput = getInput(1);
+    Camera3DNode* camera = camInput ? dynamic_cast<Camera3DNode*>(camInput.get()) : nullptr;
+    bool hasCamera = (camera != nullptr);
+
+    // Camera parameters for unprojection
+    double camTx = 0, camTy = 0, camTz = 0;
+    double camRx = 0, camRy = 0, camRz = 0;
+    float hAperture = 24.576f, vAperture = 18.672f, focalLength = 50.0f;
+    float imgW = (float)dw.width(), imgH = (float)dw.height();
+    if (hasCamera) {
+        camera->getCameraPosition(args.time, camTx, camTy, camTz, camRx, camRy, camRz);
+        focalLength = (float)camera->getCameraFocalLength(args.time);
+        hAperture = (float)camera->getCameraHAperture(args.time);
+        vAperture = (float)camera->getCameraVAperture(args.time);
+    }
+
     // Density threshold: use deterministic hash-based thinning
     unsigned int densityThreshold = (unsigned int)(densityVal * 4294967295.0);
 
@@ -230,10 +248,30 @@ DeepToPoints::render(const RenderActionArgs& args)
                     }
                 }
 
-                // Position: X = pixel X, Y = pixel Y, Z = depth (into screen)
-                float px = (x - centerX) * imageScale;
-                float py = -(y - centerY) * imageScale;  // negate Y to flip from OIIO top-down to GL convention
-                float pz = -sample[zIdx] * (float)zScaleVal;
+                // Position from depth
+                float depth = sample[zIdx] * (float)zScaleVal;
+                float px, py, pz;
+
+                if (hasCamera) {
+                    // Unproject pixel + depth to world space using camera intrinsics
+                    // NDC: map pixel coords to [-1,1] range
+                    float ndcX = (x - centerX) / (imgW * 0.5f);
+                    float ndcY = -(y - centerY) / (imgH * 0.5f);
+                    // Camera space: NDC * (aperture/2) * (depth / focalLength)
+                    float camX = ndcX * (hAperture * 0.5f) * (depth / focalLength);
+                    float camY = ndcY * (vAperture * 0.5f) * (depth / focalLength);
+                    float camZ = -depth; // camera looks down -Z
+                    // World space: translate by camera position
+                    // (simplified — no camera rotation for now)
+                    px = camX + (float)camTx;
+                    py = camY + (float)camTy;
+                    pz = camZ + (float)camTz;
+                } else {
+                    // Fallback: screen-projected space (original behavior)
+                    px = (x - centerX) * imageScale;
+                    py = -(y - centerY) * imageScale;
+                    pz = -depth;
+                }
 
                 // Color: unpremultiply
                 float r = (rIdx >= 0) ? sample[rIdx] : 0.5f;

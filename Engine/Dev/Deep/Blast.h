@@ -1,7 +1,6 @@
 /* ***** BEGIN LICENSE BLOCK *****
  * This file is part of Natron <https://natrongithub.github.io/>,
  * (C) 2018-2023 The Natron developers
- * (C) 2013-2018 INRIA and Alexandre Gauthier-Foichat
  *
  * Natron is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,8 +16,8 @@
  * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef NATRON_ENGINE_DEEPTOPOINTS_H
-#define NATRON_ENGINE_DEEPTOPOINTS_H
+#ifndef NATRON_ENGINE_BLAST_H
+#define NATRON_ENGINE_BLAST_H
 
 // ***** BEGIN PYTHON BLOCK *****
 #include <Python.h>
@@ -27,24 +26,24 @@
 #include "../../../Global/Macros.h"
 
 #include "../../EffectInstance.h"
-#include "PointCloudData.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
+#include "PointCloudData.h"
 
 NATRON_NAMESPACE_ENTER
 
-struct DeepToPointsPrivate;
+struct BlastPrivate;
 
 /**
- * @brief Convert deep image samples into a 3D point cloud.
+ * @brief Filter/delete points from a point cloud by bounding box,
+ * selection, or expression.
  *
- * Each deep sample becomes a point at (pixel_x, pixel_y, Z) with the
- * sample's RGB color. The resulting PointCloudData can be displayed
- * in the Viewport3D panel.
+ * Similar to Houdini's Blast SOP. Operates on PointCloudData from
+ * upstream DeepToPoints nodes.
  *
- * The node also produces a flat preview (same as DeepFlatten) for the 2D Viewer.
+ * Input 0: Source (deep node producing a point cloud)
  */
-class DeepToPoints
+class Blast
     : public EffectInstance
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
@@ -53,10 +52,10 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
 
-    static EffectInstance* BuildEffect(NodePtr n) { return new DeepToPoints(n); }
+    static EffectInstance* BuildEffect(NodePtr n) { return new Blast(n); }
 
-    DeepToPoints(NodePtr node);
-    virtual ~DeepToPoints();
+    Blast(NodePtr node);
+    virtual ~Blast();
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
@@ -64,20 +63,20 @@ public:
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return PLUGINID_NATRON_DEEPTOPOINTS; }
+    { return PLUGINID_NATRON_BLAST; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "DeepToPoints"; }
+    { return "Blast"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
-    { grouping->push_back(PLUGIN_GROUP_DEEP); }
+    { grouping->push_back("3D"); }
 
     virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN
     {
-        if (inputNb == 0) return "Deep";
-        if (inputNb == 1) return "cam";
+        if (inputNb == 0) return "points";
+        if (inputNb == 1) return "bounds";
         return std::string();
     }
 
@@ -88,28 +87,43 @@ public:
     virtual void addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const OVERRIDE FINAL;
 
     virtual RenderSafetyEnum renderThreadSafety() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return eRenderSafetyFullySafe; }
+    { return eRenderSafetyInstanceSafe; }
 
     virtual bool supportsTiles() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool supportsMultiResolution() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
-    /**
-     * @brief Returns the point cloud data for the 3D viewport.
-     */
+    // Point cloud access for downstream / viewport
     PointCloudDataPtr getPointCloud() const;
+    void computeFilteredCloud(double time);
+
+    // Get current blast bounds as an axis-aligned bbox (encloses the rotated
+    // OBB when a Cube3D is used as bounds input). Useful for ROI / culling.
+    bool getBlastBounds(double time, float outMin[3], float outMax[3]) const;
+
+    // Get current blast region as an oriented bounding box.
+    //   outCenter[3]    — world-space center
+    //   outExtent[3]    — per-axis half-extents in the OBB's local frame
+    //   outMatrix[16]   — column-major 4x4: world = matrix * local. Includes
+    //                     translation + rotation only (NOT scale — scale is
+    //                     baked into extent). Suitable for glMultMatrixf.
+    // Returns false if no valid region (e.g. mode != BoundingBox).
+    bool getBlastOBB(double time,
+                     float outCenter[3], float outExtent[3],
+                     float outMatrix[16]) const;
 
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
+    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
-    std::unique_ptr<DeepToPointsPrivate> _imp;
-    mutable PointCloudDataPtr _lastPointCloud;
+    std::unique_ptr<BlastPrivate> _imp;
+    mutable PointCloudDataPtr _lastOutput;
 };
 
 NATRON_NAMESPACE_EXIT
 
-#endif // NATRON_ENGINE_DEEPTOPOINTS_H
+#endif // NATRON_ENGINE_BLAST_H

@@ -155,6 +155,7 @@
 #include "Dev/Deep/DeepExpression.h"
 #include "Dev/Deep/DeepColorCorrect.h"
 #include "Dev/Deep/DeepDefocus.h"
+#include "Dev/Deep/Blast.h"
 
 // Dev nodes — Channel
 #include "Dev/Channel/DevShuffle.h"
@@ -196,7 +197,6 @@
 #include "Dev/Scene3D/Light3D.h"
 #include "Dev/Scene3D/Material3D.h"
 #include "Dev/Scene3D/Project3D.h"
-#include "Dev/Scene3D/UVProject.h"
 #include "Dev/Scene3D/Group3D.h"
 #include "Dev/Scene3D/Volume3D.h"
 #include "Dev/Scene3D/ReadVDB.h"
@@ -1643,6 +1643,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<DeepExpression>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
     registerBuiltInPlugin<DeepColorCorrect>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
     registerBuiltInPlugin<DeepDefocus>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<Blast>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
     // Dev nodes — 3D System
     registerBuiltInPlugin<Camera3DNode>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
@@ -1658,7 +1659,6 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<Light3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Material3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Project3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
-    registerBuiltInPlugin<UVProject>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Group3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Volume3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadVDB>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);

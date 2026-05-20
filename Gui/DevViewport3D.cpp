@@ -61,6 +61,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/TimeLine.h"
 #include "Engine/Dev/Deep/DeepToPoints.h"
+#include "Engine/Dev/Deep/Blast.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/SceneGraph.h"
 #include "Engine/Knob.h"
@@ -348,6 +349,18 @@ struct DevViewport3DPrivate
     std::string selectedNodeName;
     int selectedCardIndex;
 
+    // Point selection
+    int selectedPointIndex;          // -1 = none
+    std::string selectedPointCloud;  // name of the point cloud node
+    float selectedPointPos[3];       // cached position of selected point
+    float selectedPointCol[3];       // cached color of selected point
+    std::vector<int> selectedPointIndices; // multi-selection
+
+    // Box select
+    bool boxSelecting;
+    int boxStartX, boxStartY;
+    int boxEndX, boxEndY;
+
     // Mouse
     int lastMouseX, lastMouseY;
     bool orbiting, panning, zooming;
@@ -383,6 +396,10 @@ struct DevViewport3DPrivate
         , imguizmoOp(ImGuizmo::TRANSLATE)
         , imguizmoMode(ImGuizmo::WORLD)
         , selectedCardIndex(-1)
+        , selectedPointIndex(-1)
+        , boxSelecting(false)
+        , boxStartX(0), boxStartY(0)
+        , boxEndX(0), boxEndY(0)
         , lastMouseX(0)
         , lastMouseY(0)
         , orbiting(false)
@@ -642,20 +659,32 @@ DevViewport3D::paintGL()
                         if (!(*it)->isActivated()) continue;
                         EffectInstancePtr eff = (*it)->getEffectInstance();
                         if (!eff) continue;
+                        // Scan for Blast and DeepToPoints — prefer Blast (filtered) over raw
+                        Blast* blast = dynamic_cast<Blast*>(eff.get());
                         DeepToPoints* dtp = dynamic_cast<DeepToPoints*>(eff.get());
-                        if (dtp) {
-                            PointCloudDataPtr cloud = dtp->getPointCloud();
-                            if (cloud && cloud->numPoints() > 0) {
-                                float ptSize = 2.0f;
-                                KnobIPtr psKnob = eff->getKnobByName("pointSize");
-                                if (psKnob) {
-                                    KnobDouble* psDbl = dynamic_cast<KnobDouble*>(psKnob.get());
-                                    if (psDbl) ptSize = (float)psDbl->getValue();
+                        if (blast || dtp) {
+                            // Remember candidates but don't break — keep scanning for Blast
+                            if (blast) {
+                                PointCloudDataPtr cloud = blast->getPointCloud();
+                                if (cloud && cloud->numPoints() > 0) {
+                                    QMutexLocker lock(&_imp->cloudMutex);
+                                    _imp->pointCloud = cloud;
+                                    _imp->pointSize = 2.0f;
                                 }
-                                QMutexLocker lock(&_imp->cloudMutex);
-                                _imp->pointCloud = cloud;
-                                _imp->pointSize = ptSize;
-                                break;
+                            } else if (dtp && !_imp->pointCloud) {
+                                // Only use DeepToPoints if no Blast cloud found yet
+                                PointCloudDataPtr cloud = dtp->getPointCloud();
+                                if (cloud && cloud->numPoints() > 0) {
+                                    float ptSize = 2.0f;
+                                    KnobIPtr psKnob = eff->getKnobByName("pointSize");
+                                    if (psKnob) {
+                                        KnobDouble* psDbl = dynamic_cast<KnobDouble*>(psKnob.get());
+                                        if (psDbl) ptSize = (float)psDbl->getValue();
+                                    }
+                                    QMutexLocker lock(&_imp->cloudMutex);
+                                    _imp->pointCloud = cloud;
+                                    _imp->pointSize = ptSize;
+                                }
                             }
                         }
                     }
@@ -698,10 +727,7 @@ DevViewport3D::paintGL()
         }
     }
 
-    // 6. Render scene nodes using the SceneGraph-computed worldMatrix.
-    //    Each SceneNode's worldMatrix already incorporates parent transforms via
-    //    the SceneGraph parent chain — critical for multi-emit nodes like
-    //    ReadAlembicArchive where many SceneNodes share a single source node.
+    // 6. Render scene nodes using ImGuizmo::RecomposeMatrixFromComponents for transforms
     const std::vector<SceneNode>& sceneNodes = _imp->sceneGraph.nodes();
     for (size_t i = 0; i < sceneNodes.size(); ++i) {
         const SceneNode& sn = sceneNodes[i];
@@ -712,6 +738,11 @@ DevViewport3D::paintGL()
         EffectInstancePtr effect = node->getEffectInstance();
         if (!effect) continue;
 
+        // Use the SceneGraph-computed world matrix instead of reading the source
+        // node's TRS knobs. This is required for multi-emit nodes (e.g.
+        // ReadAlembicArchive) where many SceneNodes share one Natron source —
+        // reading knobs from the source would draw them all at the same place.
+        // Also picks up Group3D parent transforms correctly.
         glPushMatrix();
         glMultMatrixf(sn.worldMatrix);
 
@@ -793,6 +824,33 @@ DevViewport3D::paintGL()
         snprintf(dbg, sizeof(dbg), "Mouse: %d, %d  Size: %d x %d",
                  _imp->lastMouseX, _imp->lastMouseY, _imp->viewW, _imp->viewH);
         ImGui::GetForegroundDrawList()->AddText(ImVec2(10, 50), 0xFFFFFFFF, dbg);
+
+        // Box selection rectangle
+        if (_imp->boxSelecting) {
+            ImVec2 p1((float)_imp->boxStartX, (float)_imp->boxStartY);
+            ImVec2 p2((float)_imp->boxEndX, (float)_imp->boxEndY);
+            ImGui::GetForegroundDrawList()->AddRect(p1, p2, 0xFF00FFFF, 0.0f, 0, 1.5f);
+            ImGui::GetForegroundDrawList()->AddRectFilled(p1, p2, 0x2200FFFF);
+        }
+
+        // Selected point info
+        if (!_imp->selectedPointIndices.empty()) {
+            char ptInfo[256];
+            snprintf(ptInfo, sizeof(ptInfo),
+                     "%d points selected  (first: #%d  pos=(%.3f, %.3f, %.3f))",
+                     (int)_imp->selectedPointIndices.size(),
+                     _imp->selectedPointIndex,
+                     _imp->selectedPointPos[0], _imp->selectedPointPos[1], _imp->selectedPointPos[2]);
+            ImGui::GetForegroundDrawList()->AddText(ImVec2(10, 70), 0xFF00FFFF, ptInfo);
+        } else if (_imp->selectedPointIndex >= 0) {
+            char ptInfo[256];
+            snprintf(ptInfo, sizeof(ptInfo),
+                     "Point #%d  pos=(%.3f, %.3f, %.3f)  col=(%.3f, %.3f, %.3f)",
+                     _imp->selectedPointIndex,
+                     _imp->selectedPointPos[0], _imp->selectedPointPos[1], _imp->selectedPointPos[2],
+                     _imp->selectedPointCol[0], _imp->selectedPointCol[1], _imp->selectedPointCol[2]);
+            ImGui::GetForegroundDrawList()->AddText(ImVec2(10, 70), 0xFF00FFFF, ptInfo);
+        }
 
         // ImGuizmo Manipulate for selected node
         if (!_imp->selectedNodeName.empty()) {
@@ -945,7 +1003,13 @@ DevViewport3D::mousePressEvent(QMouseEvent* e)
         if (e->modifiers() & Qt::AltModifier) {
             _imp->orbiting = true;
         } else {
-            selectObjectAtPosition(e->x(), e->y());
+            // Try point picking first, then start box select drag
+            if (!pickPointAtPosition(e->x(), e->y())) {
+                // Start potential box select — if drag is small, treat as click select
+                _imp->boxSelecting = true;
+                _imp->boxStartX = _imp->boxEndX = e->x();
+                _imp->boxStartY = _imp->boxEndY = e->y();
+            }
         }
     } else if (e->button() == Qt::RightButton) {
         if (e->modifiers() & Qt::AltModifier) {
@@ -1002,6 +1066,10 @@ DevViewport3D::mouseMoveEvent(QMouseEvent* e)
         _imp->camDistance -= (dx + dy) * zoomSpeed;
         if (_imp->camDistance < 0.1f) _imp->camDistance = 0.1f;
         update();
+    } else if (_imp->boxSelecting) {
+        _imp->boxEndX = e->x();
+        _imp->boxEndY = e->y();
+        update();
     }
 }
 
@@ -1014,6 +1082,21 @@ DevViewport3D::mouseReleaseEvent(QMouseEvent* e)
         if (e->button() == Qt::LeftButton) io.MouseDown[0] = false;
         if (e->button() == Qt::RightButton) io.MouseDown[1] = false;
         if (e->button() == Qt::MiddleButton) io.MouseDown[2] = false;
+        update();
+    }
+
+    // Finish box select (left-click drag)
+    if (_imp->boxSelecting && e->button() == Qt::LeftButton) {
+        _imp->boxSelecting = false;
+        int bw = std::abs(_imp->boxEndX - _imp->boxStartX);
+        int bh = std::abs(_imp->boxEndY - _imp->boxStartY);
+        if (bw > 5 || bh > 5) {
+            // Real drag — box select points
+            boxSelectPoints();
+        } else {
+            // Tiny drag — treat as click, do object selection
+            selectObjectAtPosition(_imp->boxStartX, _imp->boxStartY);
+        }
         update();
     }
 
@@ -1050,8 +1133,28 @@ DevViewport3D::keyPressEvent(QKeyEvent* e)
         _imp->imguizmoOp = ImGuizmo::SCALE;
         update();
     } else if (e->key() == Qt::Key_F) {
-        // Frame selected
-        if (!_imp->selectedNodeName.empty()) {
+        // Frame selected — try point cloud first, then selected node, then reset
+        bool framed = false;
+
+        // If a point cloud is visible, frame it (F always frames the cloud)
+        {
+            QMutexLocker lock(&_imp->cloudMutex);
+            if (_imp->pointCloud && _imp->pointCloud->numPoints() > 0) {
+                float cx, cy, cz;
+                _imp->pointCloud->getCenter(cx, cy, cz);
+                float radius = _imp->pointCloud->getRadius();
+                if (radius < 0.1f) radius = 2.0f;
+                lock.unlock();
+                _imp->camTarget[0] = cx;
+                _imp->camTarget[1] = cy;
+                _imp->camTarget[2] = cz;
+                _imp->camDistance = radius * 2.5f;
+                framed = true;
+            }
+        }
+
+        // If no point cloud, frame selected node
+        if (!framed && !_imp->selectedNodeName.empty()) {
             const std::vector<SceneNode>& nodes = _imp->sceneGraph.nodes();
             for (size_t i = 0; i < nodes.size(); ++i) {
                 if (nodes[i].name == _imp->selectedNodeName) {
@@ -1064,28 +1167,16 @@ DevViewport3D::keyPressEvent(QKeyEvent* e)
                         _imp->camTarget[1] = t[1];
                         _imp->camTarget[2] = t[2];
                         _imp->camDistance = 5.0f;
+                        framed = true;
                     }
                     break;
                 }
             }
-        } else {
-            // Frame point cloud or reset
-            QMutexLocker lock(&_imp->cloudMutex);
-            if (_imp->pointCloud && _imp->pointCloud->numPoints() > 0) {
-                float cx, cy, cz;
-                _imp->pointCloud->getCenter(cx, cy, cz);
-                float radius = _imp->pointCloud->getRadius();
-                if (radius < 0.1f) radius = 2.0f;
-                lock.unlock();
-                _imp->camTarget[0] = cx;
-                _imp->camTarget[1] = cy;
-                _imp->camTarget[2] = cz;
-                _imp->camDistance = radius * 2.5f;
-            } else {
-                lock.unlock();
-                resetCamera();
-                return;
-            }
+        }
+
+        if (!framed) {
+            resetCamera();
+            return;
         }
         update();
     } else if (e->key() == Qt::Key_A) {
@@ -1145,6 +1236,105 @@ static bool worldToScreenDev(const float cameraView[16], const float cameraProje
     sx = (1.0f + ndcX) * viewW * 0.5f;
     sy = (1.0f - ndcY) * viewH * 0.5f; // Y flipped for Qt screen coords
     return true;
+}
+
+bool
+DevViewport3D::pickPointAtPosition(int screenX, int screenY)
+{
+    QMutexLocker lock(&_imp->cloudMutex);
+    if (!_imp->pointCloud || _imp->pointCloud->numPoints() == 0) {
+        _imp->selectedPointIndex = -1;
+        return false;
+    }
+
+    const float* data = _imp->pointCloud->data();
+    std::size_t numPoints = _imp->pointCloud->numPoints();
+    const int stride = 6; // x,y,z,r,g,b
+
+    float bestDist = 15.0f; // max pick distance in pixels
+    int bestIdx = -1;
+
+    for (std::size_t i = 0; i < numPoints; ++i) {
+        float wx = data[i * stride + 0];
+        float wy = data[i * stride + 1];
+        float wz = data[i * stride + 2];
+
+        float sx, sy;
+        if (!worldToScreenDev(_imp->cameraView, _imp->cameraProjection,
+                              _imp->viewW, _imp->viewH,
+                              wx, wy, wz, sx, sy)) continue;
+
+        float dx = sx - (float)screenX;
+        float dy = sy - (float)screenY;
+        float dist = sqrtf(dx * dx + dy * dy);
+
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIdx = (int)i;
+        }
+    }
+
+    if (bestIdx >= 0) {
+        _imp->selectedPointIndex = bestIdx;
+        _imp->selectedPointPos[0] = data[bestIdx * stride + 0];
+        _imp->selectedPointPos[1] = data[bestIdx * stride + 1];
+        _imp->selectedPointPos[2] = data[bestIdx * stride + 2];
+        _imp->selectedPointCol[0] = data[bestIdx * stride + 3];
+        _imp->selectedPointCol[1] = data[bestIdx * stride + 4];
+        _imp->selectedPointCol[2] = data[bestIdx * stride + 5];
+        update();
+        return true;
+    }
+
+    _imp->selectedPointIndex = -1;
+    return false;
+}
+
+void
+DevViewport3D::boxSelectPoints()
+{
+    QMutexLocker lock(&_imp->cloudMutex);
+    _imp->selectedPointIndices.clear();
+    _imp->selectedPointIndex = -1;
+
+    if (!_imp->pointCloud || _imp->pointCloud->numPoints() == 0) return;
+
+    const float* data = _imp->pointCloud->data();
+    std::size_t numPoints = _imp->pointCloud->numPoints();
+    const int stride = 6;
+
+    // Normalize box coords (drag can go any direction)
+    float minX = (float)std::min(_imp->boxStartX, _imp->boxEndX);
+    float maxX = (float)std::max(_imp->boxStartX, _imp->boxEndX);
+    float minY = (float)std::min(_imp->boxStartY, _imp->boxEndY);
+    float maxY = (float)std::max(_imp->boxStartY, _imp->boxEndY);
+
+    for (std::size_t i = 0; i < numPoints; ++i) {
+        float wx = data[i * stride + 0];
+        float wy = data[i * stride + 1];
+        float wz = data[i * stride + 2];
+
+        float sx, sy;
+        if (!worldToScreenDev(_imp->cameraView, _imp->cameraProjection,
+                              _imp->viewW, _imp->viewH,
+                              wx, wy, wz, sx, sy)) continue;
+
+        if (sx >= minX && sx <= maxX && sy >= minY && sy <= maxY) {
+            _imp->selectedPointIndices.push_back((int)i);
+        }
+    }
+
+    // Set single selection to first point for info display
+    if (!_imp->selectedPointIndices.empty()) {
+        int idx = _imp->selectedPointIndices[0];
+        _imp->selectedPointIndex = idx;
+        _imp->selectedPointPos[0] = data[idx * stride + 0];
+        _imp->selectedPointPos[1] = data[idx * stride + 1];
+        _imp->selectedPointPos[2] = data[idx * stride + 2];
+        _imp->selectedPointCol[0] = data[idx * stride + 3];
+        _imp->selectedPointCol[1] = data[idx * stride + 4];
+        _imp->selectedPointCol[2] = data[idx * stride + 5];
+    }
 }
 
 void
@@ -1281,7 +1471,7 @@ DevViewport3D::drawPointCloud() const
 
     glPointSize(ptSize);
     glEnable(GL_POINT_SMOOTH);
-    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_DEPTH_TEST);
 
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_COLOR_ARRAY);
@@ -1294,15 +1484,108 @@ DevViewport3D::drawPointCloud() const
     glDisableClientState(GL_VERTEX_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
 
+    // Draw multi-selected points (yellow highlight)
+    if (!_imp->selectedPointIndices.empty()) {
+        glPointSize(ptSize * 2.5f);
+        glColor3f(1.0f, 1.0f, 0.0f);
+        glBegin(GL_POINTS);
+        for (int idx : _imp->selectedPointIndices) {
+            if (idx >= 0 && idx < (int)numPoints) {
+                glVertex3f(data[idx * 6 + 0], data[idx * 6 + 1], data[idx * 6 + 2]);
+            }
+        }
+        glEnd();
+    }
+
+    // Draw single selected point (larger + crosshair)
+    if (_imp->selectedPointIndex >= 0 &&
+        _imp->selectedPointIndex < (int)numPoints &&
+        _imp->selectedPointIndices.empty()) {
+        int idx = _imp->selectedPointIndex;
+        float px = data[idx * 6 + 0];
+        float py = data[idx * 6 + 1];
+        float pz = data[idx * 6 + 2];
+
+        glPointSize(ptSize * 3.0f);
+        glColor3f(1.0f, 1.0f, 0.0f);
+        glBegin(GL_POINTS);
+        glVertex3f(px, py, pz);
+        glEnd();
+
+        float cs = 0.05f;
+        glLineWidth(1.5f);
+        glColor3f(1.0f, 1.0f, 1.0f);
+        glBegin(GL_LINES);
+        glVertex3f(px - cs, py, pz); glVertex3f(px + cs, py, pz);
+        glVertex3f(px, py - cs, pz); glVertex3f(px, py + cs, pz);
+        glVertex3f(px, py, pz - cs); glVertex3f(px, py, pz + cs);
+        glEnd();
+        glLineWidth(1.0f);
+    }
+
+    // Draw blast bounds wireframe (red) if a Blast node exists
+    {
+        Gui* gui = getGui();
+        if (gui) {
+            GuiAppInstancePtr app = gui->getApp();
+            if (app) {
+                ProjectPtr p = app->getProject();
+                if (p) {
+                    NodesList allNodes;
+                    p->getNodes_recursive(allNodes, true);
+                    for (NodesList::const_iterator it = allNodes.begin(); it != allNodes.end(); ++it) {
+                        if (!(*it)->isActivated()) continue;
+                        EffectInstancePtr eff = (*it)->getEffectInstance();
+                        if (!eff) continue;
+                        Blast* blast = dynamic_cast<Blast*>(eff.get());
+                        if (blast) {
+                            float bCenter[3], bExtent[3], bMatrix[16];
+                            if (blast->getBlastOBB(0, bCenter, bExtent, bMatrix)) {
+                                glLineWidth(2.0f);
+                                glColor3f(1.0f, 0.2f, 0.2f); // red
+                                // Draw the box in OBB local space — matrix carries
+                                // translation + rotation so the wireframe matches a
+                                // Cube3D bounds input's rotation in the viewport.
+                                glPushMatrix();
+                                glMultMatrixf(bMatrix);
+                                const float ex = bExtent[0], ey = bExtent[1], ez = bExtent[2];
+                                glBegin(GL_LINES);
+                                // Bottom face
+                                glVertex3f(-ex,-ey,-ez); glVertex3f(+ex,-ey,-ez);
+                                glVertex3f(+ex,-ey,-ez); glVertex3f(+ex,-ey,+ez);
+                                glVertex3f(+ex,-ey,+ez); glVertex3f(-ex,-ey,+ez);
+                                glVertex3f(-ex,-ey,+ez); glVertex3f(-ex,-ey,-ez);
+                                // Top face
+                                glVertex3f(-ex,+ey,-ez); glVertex3f(+ex,+ey,-ez);
+                                glVertex3f(+ex,+ey,-ez); glVertex3f(+ex,+ey,+ez);
+                                glVertex3f(+ex,+ey,+ez); glVertex3f(-ex,+ey,+ez);
+                                glVertex3f(-ex,+ey,+ez); glVertex3f(-ex,+ey,-ez);
+                                // Verticals
+                                glVertex3f(-ex,-ey,-ez); glVertex3f(-ex,+ey,-ez);
+                                glVertex3f(+ex,-ey,-ez); glVertex3f(+ex,+ey,-ez);
+                                glVertex3f(+ex,-ey,+ez); glVertex3f(+ex,+ey,+ez);
+                                glVertex3f(-ex,-ey,+ez); glVertex3f(-ex,+ey,+ez);
+                                glEnd();
+                                glPopMatrix();
+                                glLineWidth(1.0f);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     glEnable(GL_DEPTH_TEST);
 }
 
 void
 DevViewport3D::drawMeshNode(const SceneNode& sn) const
 {
-    // Prefer mesh data carried directly on the SceneNode (set by ReadGeo and
-    // ReadAlembicArchive). Fall back to the source-node ReadGeo path for any
-    // older code paths that haven't been updated yet.
+    // Prefer mesh data carried directly on the SceneNode (set by
+    // ReadGeo and ReadAlembicArchive). Fall back to the source-node
+    // dynamic_cast for older code paths that haven't been updated.
     MeshDataPtr mesh = sn.meshData;
     if (!mesh) {
         NodePtr node = sn.sourceNode.lock();

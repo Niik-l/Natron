@@ -108,6 +108,8 @@ private:
     void drawGrid() const;
     void drawAxes() const;
     void drawPointCloud() const;
+    bool pickPointAtPosition(int screenX, int screenY);
+    void boxSelectPoints();
     void selectObjectAtPosition(int screenX, int screenY);
 
     // Per-node draw methods (called from paintGL via SceneGraph traversal)
