@@ -28,6 +28,9 @@
 #include <cstring>
 #include <vector>
 
+#include "CameraMath.h"
+#include "RotationConventions.h"
+
 #include "../../../Global/GLIncludes.h"
 
 #include "../../AppInstance.h"
@@ -168,53 +171,31 @@ Project3D::buildViewMatrix(double tx, double ty, double tz,
                            double rx, double ry, double rz,
                            float out[16])
 {
-    // Inverse camera transform: column-major
-    float crx = cosf((float)rx * (float)M_PI / 180.0f), srx = sinf((float)rx * (float)M_PI / 180.0f);
-    float cry = cosf((float)ry * (float)M_PI / 180.0f), sry = sinf((float)ry * (float)M_PI / 180.0f);
-    float crz = cosf((float)rz * (float)M_PI / 180.0f), srz = sinf((float)rz * (float)M_PI / 180.0f);
+    // View matrix = inverse of camera-to-world transform.
+    // Camera-to-world uses Natron's standard extrinsic XYZ convention
+    // (M = Rz*Ry*Rx column-vector, Maya/Blender/Houdini default, same as
+    // SceneGraph::buildTRS and ImGuizmo). The inverse is M^T.
+    double mInv[3][3];
+    RotationConventions::composeInverse(rx, ry, rz, mInv);
 
-    // Negate angles for inverse
-    float nsrx = -srx, nsry = -sry, nsrz = -srz;
+    const float ntx = -(float)tx, nty = -(float)ty, ntz = -(float)tz;
 
-    // R = Rz(-rz) * Rx(-rx) * Ry(-ry)
-    float r00 = crz * cry + nsrz * nsrx * nsry;
-    float r01 = nsrz * crx;
-    float r02 = -crz * nsry + nsrz * nsrx * cry;
-
-    float r10 = -nsrz * cry + crz * nsrx * nsry;
-    float r11 = crz * crx;
-    float r12 = nsrz * nsry + crz * nsrx * cry;
-
-    float r20 = crx * nsry;
-    float r21 = -nsrx;
-    float r22 = crx * cry;
-
-    float ntx = -(float)tx, nty = -(float)ty, ntz = -(float)tz;
-
-    out[0]  = r00; out[1]  = r10; out[2]  = r20; out[3]  = 0;
-    out[4]  = r01; out[5]  = r11; out[6]  = r21; out[7]  = 0;
-    out[8]  = r02; out[9]  = r12; out[10] = r22; out[11] = 0;
-    out[12] = r00*ntx + r01*nty + r02*ntz;
-    out[13] = r10*ntx + r11*nty + r12*ntz;
-    out[14] = r20*ntx + r21*nty + r22*ntz;
-    out[15] = 1;
+    // Pack into column-major float[16]: out[col*4 + row] = mInv[row][col].
+    out[0]  = (float)mInv[0][0]; out[1]  = (float)mInv[1][0]; out[2]  = (float)mInv[2][0]; out[3]  = 0.f;
+    out[4]  = (float)mInv[0][1]; out[5]  = (float)mInv[1][1]; out[6]  = (float)mInv[2][1]; out[7]  = 0.f;
+    out[8]  = (float)mInv[0][2]; out[9]  = (float)mInv[1][2]; out[10] = (float)mInv[2][2]; out[11] = 0.f;
+    out[12] = (float)(mInv[0][0]*ntx + mInv[0][1]*nty + mInv[0][2]*ntz);
+    out[13] = (float)(mInv[1][0]*ntx + mInv[1][1]*nty + mInv[1][2]*ntz);
+    out[14] = (float)(mInv[2][0]*ntx + mInv[2][1]*nty + mInv[2][2]*ntz);
+    out[15] = 1.f;
 }
 
-void
-Project3D::buildProjectionMatrix(double focalLength, double hAperture,
-                                 float aspect, float nearZ, float farZ,
-                                 float out[16])
-{
-    double fovDeg = 2.0 * std::atan(hAperture / (2.0 * focalLength)) * (180.0 / M_PI);
-    float f = 1.0f / tanf((float)fovDeg * 0.5f * (float)M_PI / 180.0f);
-
-    std::memset(out, 0, 16 * sizeof(float));
-    out[0]  = f / aspect;
-    out[5]  = f;
-    out[10] = (farZ + nearZ) / (nearZ - farZ);
-    out[11] = -1.0f;
-    out[14] = (2.0f * farZ * nearZ) / (nearZ - farZ);
-}
+// Project3D::buildProjectionMatrix removed — projection is now built via
+// CameraMath::composeProjectionMatrix (independent fov_h / fov_v from both
+// apertures). The old single-FOV form forced fy = fx / image_aspect, which
+// produced V scaling tied to the render aspect instead of to the camera's V
+// aperture — causing CG drift under camera motion when sensor aspect != image
+// aspect.
 
 // ==================== RoD ====================
 
@@ -275,6 +256,7 @@ Project3D::render(const RenderActionArgs& args)
     projCam->getCameraPosition(args.time, projTX, projTY, projTZ, projRX, projRY, projRZ);
     double projFL = projCam->getCameraFocalLength(args.time);
     double projHA = projCam->getCameraHAperture(args.time);
+    double projVA = projCam->getCameraVAperture(args.time);
 
     // --- Get render camera from input 3 (optional — falls back to projection camera) ---
     EffectInstancePtr renCamEffect = getInput(3);
@@ -285,6 +267,7 @@ Project3D::render(const RenderActionArgs& args)
     renCam->getCameraPosition(args.time, renTX, renTY, renTZ, renRX, renRY, renRZ);
     double renFL = renCam->getCameraFocalLength(args.time);
     double renHA = renCam->getCameraHAperture(args.time);
+    double renVA = renCam->getCameraVAperture(args.time);
 
     // --- Get input image (input 0) ---
     EffectInstancePtr imgInput = getInput(0);
@@ -342,12 +325,14 @@ Project3D::render(const RenderActionArgs& args)
     if (numVerts == 0 || numTris == 0) return eStatusFailed;
 
     // --- Build projection camera matrices ---
+    // Projection uses both apertures from the projection camera. srcW/srcH are
+    // NOT involved — see CameraMath.h.
     float projView[16], projProj[16], projVP[16];
     buildViewMatrix(projTX, projTY, projTZ, projRX, projRY, projRZ, projView);
-    float projAspect = (float)srcW / std::max(1, srcH);
+    (void)srcW; (void)srcH;
     float projNear = (float)projCam->getCameraNear(args.time);
     float projFar = (float)projCam->getCameraFar(args.time);
-    buildProjectionMatrix(projFL, projHA, projAspect, projNear, projFar, projProj);
+    CameraMath::composeProjectionMatrix(projFL, projHA, projVA, projNear, projFar, projProj);
     mat4Multiply(projProj, projView, projVP);
 
     // --- Compute projective texture coordinates ---
@@ -448,12 +433,14 @@ Project3D::render(const RenderActionArgs& args)
     glEnable(GL_DEPTH_TEST);
 
     // --- Set up render camera ---
+    // Projection uses both apertures from the render camera. outW/outH are
+    // NOT involved.
     float renView[16], renProj[16];
-    float renAspect = (float)outW / std::max(1, outH);
+    (void)outW; (void)outH;
     float renNear = (float)renCam->getCameraNear(args.time);
     float renFar = (float)renCam->getCameraFar(args.time);
     buildViewMatrix(renTX, renTY, renTZ, renRX, renRY, renRZ, renView);
-    buildProjectionMatrix(renFL, renHA, renAspect, renNear, renFar, renProj);
+    CameraMath::composeProjectionMatrix(renFL, renHA, renVA, renNear, renFar, renProj);
 
     glMatrixMode(GL_PROJECTION);
     glLoadMatrixf(renProj);

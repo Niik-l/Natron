@@ -30,6 +30,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../Scene3D/RotationConventions.h"
+
 #include "../../AppManager.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
@@ -548,28 +550,20 @@ ParticleSolver::applyForce(ParticleDataPtr /*data*/, double /*time*/)
 {
 }
 
-// Build a 3x3 rotation matrix from Euler angles (degrees, XYZ order).
-// Stores as row-major: m[row][col].
+// Build a 3x3 rotation matrix from Euler angles (degrees, extrinsic XYZ:
+// M = Rz * Ry * Rx column-vector). Stores as row-major m[row][col]. Matches
+// SceneGraph::buildTRS, ImGuizmo, and Maya/Blender/Houdini's rotateOrder XYZ
+// default, so OBB collision orientation lines up with the viewport.
 static void
 buildRotationMatrix(float rxDeg, float ryDeg, float rzDeg, float m[3][3])
 {
-    float rx = rxDeg * (float)M_PI / 180.0f;
-    float ry = ryDeg * (float)M_PI / 180.0f;
-    float rz = rzDeg * (float)M_PI / 180.0f;
-    float cx = std::cos(rx), sx = std::sin(rx);
-    float cy = std::cos(ry), sy = std::sin(ry);
-    float cz = std::cos(rz), sz = std::sin(rz);
-
-    // ZYX order (standard for Euler XYZ rotations applied in reverse)
-    m[0][0] = cy * cz;
-    m[0][1] = sx * sy * cz - cx * sz;
-    m[0][2] = cx * sy * cz + sx * sz;
-    m[1][0] = cy * sz;
-    m[1][1] = sx * sy * sz + cx * cz;
-    m[1][2] = cx * sy * sz - sx * cz;
-    m[2][0] = -sy;
-    m[2][1] = sx * cy;
-    m[2][2] = cx * cy;
+    double md[3][3];
+    RotationConventions::compose((double)rxDeg, (double)ryDeg, (double)rzDeg, md);
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            m[i][j] = (float)md[i][j];
+        }
+    }
 }
 
 // Apply rotation matrix to a vector

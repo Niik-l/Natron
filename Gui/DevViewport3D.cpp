@@ -698,7 +698,10 @@ DevViewport3D::paintGL()
         }
     }
 
-    // 6. Render scene nodes using ImGuizmo::RecomposeMatrixFromComponents for transforms
+    // 6. Render scene nodes using the SceneGraph-computed worldMatrix.
+    //    Each SceneNode's worldMatrix already incorporates parent transforms via
+    //    the SceneGraph parent chain — critical for multi-emit nodes like
+    //    ReadAlembicArchive where many SceneNodes share a single source node.
     const std::vector<SceneNode>& sceneNodes = _imp->sceneGraph.nodes();
     for (size_t i = 0; i < sceneNodes.size(); ++i) {
         const SceneNode& sn = sceneNodes[i];
@@ -709,14 +712,8 @@ DevViewport3D::paintGL()
         EffectInstancePtr effect = node->getEffectInstance();
         if (!effect) continue;
 
-        // Build object matrix from knobs using ImGuizmo's RecomposeMatrixFromComponents
-        float translation[3], rotation[3], scale[3];
-        readTRSFromNode(effect, translation, rotation, scale);
-        float objMatrix[16];
-        ImGuizmo::RecomposeMatrixFromComponents(translation, rotation, scale, objMatrix);
-
         glPushMatrix();
-        glMultMatrixf(objMatrix);
+        glMultMatrixf(sn.worldMatrix);
 
         switch (sn.type) {
             case eSceneNodeMesh:       drawMeshNode(sn); break;
@@ -1303,16 +1300,19 @@ DevViewport3D::drawPointCloud() const
 void
 DevViewport3D::drawMeshNode(const SceneNode& sn) const
 {
-    NodePtr node = sn.sourceNode.lock();
-    if (!node) return;
-
-    EffectInstancePtr effect = node->getEffectInstance();
-    if (!effect) return;
-
-    ReadGeo* readGeo = dynamic_cast<ReadGeo*>(effect.get());
-    if (!readGeo) return;
-
-    MeshDataPtr mesh = readGeo->getMeshData(-1);
+    // Prefer mesh data carried directly on the SceneNode (set by ReadGeo and
+    // ReadAlembicArchive). Fall back to the source-node ReadGeo path for any
+    // older code paths that haven't been updated yet.
+    MeshDataPtr mesh = sn.meshData;
+    if (!mesh) {
+        NodePtr node = sn.sourceNode.lock();
+        if (!node) return;
+        EffectInstancePtr effect = node->getEffectInstance();
+        if (!effect) return;
+        ReadGeo* readGeo = dynamic_cast<ReadGeo*>(effect.get());
+        if (!readGeo) return;
+        mesh = readGeo->getMeshData(-1);
+    }
     if (!mesh || mesh->numVertices == 0) return;
 
     glColor3f(0.7f, 0.7f, 0.7f);

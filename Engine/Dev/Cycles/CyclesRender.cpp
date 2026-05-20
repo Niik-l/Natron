@@ -66,6 +66,13 @@ struct CyclesRenderPrivate
     KnobBoolWPtr denoise;
     KnobBoolWPtr previewMode; // half-res render, upscaled to full
 
+    // Explicit output size — does NOT come from upstream input format.
+    // (Mirror of ScanlineRender's outputWidth/outputHeight. Required: without
+    // these, getOutputFormat() inherits transitively from input 1 (geometry
+    // chain), so attaching a texture Read to a Sphere3D silently dictated the
+    // Cycles render canvas — the 2K Earth daymap bug.)
+    KnobIntWPtr outputWidth, outputHeight;
+
     // Depth of Field (render-side params; F-Stop lives on Camera3D Lens tab)
     KnobBoolWPtr dofEnabled;
     KnobDoubleWPtr focusDistance;
@@ -215,6 +222,25 @@ CyclesRender::initializeKnobs()
         k->setName("previewMode"); k->setDefaultValue(true);
         k->setHintToolTip(tr("Render at half resolution and upscale. Faster for interactive work."));
         page->addKnob(k); _imp->previewMode = k;
+    }
+
+    // Output size — explicit knobs. Cycles no longer inherits resolution from
+    // upstream input metadata (which used to leak texture-Read sizes through
+    // the geometry chain). Set these to match your plate, or drop a Reformat
+    // upstream and match here.
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Width"));
+        k->setName("outputWidth"); k->setDefaultValue(1920);
+        k->setMinimum(1); k->setDisplayMinimum(320); k->setDisplayMaximum(4096);
+        k->setHintToolTip(tr("Render output width in pixels. Independent of upstream input format."));
+        page->addKnob(k); _imp->outputWidth = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Height"));
+        k->setName("outputHeight"); k->setDefaultValue(1080);
+        k->setMinimum(1); k->setDisplayMinimum(240); k->setDisplayMaximum(4096);
+        k->setHintToolTip(tr("Render output height in pixels. Independent of upstream input format."));
+        page->addKnob(k); _imp->outputHeight = k;
     }
 
     // AOV Passes page
@@ -387,6 +413,20 @@ CyclesRender::getPreferredMetadata(NodeMetadata& metadata)
     // lights, and cameras may be animated.  Force the cache to include time
     // in the ImageKey so every frame triggers a fresh render().
     metadata.setIsFrameVarying(true);
+
+    // Publish the explicit knob-driven output format. Without this override,
+    // EffectInstance falls back to the first-optional-input format, which
+    // transitively walks through the geometry chain and picks up texture-Read
+    // dimensions — making any image plugged into a Sphere3D/Cube3D etc.
+    // silently determine the Cycles render canvas.
+    int w = _imp->outputWidth.lock()->getValue();
+    int h = _imp->outputHeight.lock()->getValue();
+    RectI fmt;
+    fmt.x1 = 0; fmt.y1 = 0;
+    fmt.x2 = std::max(1, w);
+    fmt.y2 = std::max(1, h);
+    metadata.setOutputFormat(fmt);
+
     return eStatusOK;
 }
 
@@ -503,11 +543,13 @@ StatusEnum
 CyclesRender::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
                                     ViewIdx /*view*/, RectD* rod)
 {
-    RectI fmt = getOutputFormat();
+    // RoD from explicit knobs — NOT from upstream input format (see knob comment).
+    int w = _imp->outputWidth.lock()->getValue();
+    int h = _imp->outputHeight.lock()->getValue();
     rod->x1 = 0;
     rod->y1 = 0;
-    rod->x2 = std::max(1, fmt.width());
-    rod->y2 = std::max(1, fmt.height());
+    rod->x2 = std::max(1, w);
+    rod->y2 = std::max(1, h);
     return eStatusOK;
 }
 
@@ -524,10 +566,11 @@ CyclesRender::render(const RenderActionArgs& args)
     ImagePtr outImg = args.outputPlanes.front().second;
     if (!outImg) return eStatusFailed;
 
-    // Resolution from project format (like Nuke's ScanlineRender)
-    RectI projectFormat = getOutputFormat();
-    int outW = projectFormat.width();
-    int outH = projectFormat.height();
+    // Resolution from explicit knobs. Earlier versions used getOutputFormat()
+    // which transitively inherited from input 1's geometry chain — meaning a
+    // 2K texture on a Sphere3D dictated the render canvas. Fixed by the knobs.
+    int outW = _imp->outputWidth.lock()->getValue();
+    int outH = _imp->outputHeight.lock()->getValue();
     if (outW <= 0) outW = 1920;
     if (outH <= 0) outH = 1080;
 
@@ -547,12 +590,13 @@ CyclesRender::render(const RenderActionArgs& args)
 
     double camTX = 0, camTY = 2, camTZ = -8;
     double camRX = 0, camRY = 0, camRZ = 0;
-    double camFL = 50.0, camHA = 24.576;
+    double camFL = 50.0, camHA = 24.576, camVA = 18.672;
 
     if (cam) {
         cam->getCameraPosition(args.time, camTX, camTY, camTZ, camRX, camRY, camRZ);
         camFL = cam->getCameraFocalLength(args.time);
         camHA = cam->getCameraHAperture(args.time);
+        camVA = cam->getCameraVAperture(args.time);
     }
 
     // --- DOF params (Enable/Focus/Bokeh from CyclesRender, F-Stop from Camera3D) ---
@@ -655,7 +699,8 @@ CyclesRender::render(const RenderActionArgs& args)
         // Camera
         hashFloat(camTX); hashFloat(camTY); hashFloat(camTZ);
         hashFloat(camRX); hashFloat(camRY); hashFloat(camRZ);
-        hashFloat(camFL); hashFloat(args.time);
+        hashFloat(camFL); hashFloat(camHA); hashFloat(camVA);
+        hashFloat(args.time);
 
         // Settings
         sceneHash = hashCombine(sceneHash, (U64)renderW);
@@ -855,7 +900,7 @@ CyclesRender::render(const RenderActionArgs& args)
             sceneGraph,
             camTX, camTY, camTZ,
             camRX, camRY, camRZ,
-            camFL, camHA,
+            camFL, camHA, camVA,
             requestedPasses,
             _imp->cachedPassBuffers, renderW, renderH, renderSamples,
             args.time,

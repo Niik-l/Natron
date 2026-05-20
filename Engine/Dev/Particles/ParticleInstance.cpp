@@ -205,12 +205,18 @@ ParticleInstance::getInstances(double time, std::vector<GeoInstance>& outInstanc
         inst.py = p.py;
         inst.pz = p.pz;
 
-        // Rotation from velocity
+        // Rotation from velocity (extrinsic XYZ composition: M = Rz*Ry*Rx col-vec).
+        // Align prototype's +Z forward axis with the velocity direction (dx, dy, dz).
+        // Solving M * (0,0,1) = (dx, dy, dz) with rz=0:
+        //   dx =  sin(ry) * cos(rx)
+        //   dy = -sin(rx)
+        //   dz =  cos(ry) * cos(rx)
+        //   -> rx = -asin(dy)
+        //   -> ry = atan2(dx, dz)
         if (orientVel) {
             float speed = std::sqrt(p.vx * p.vx + p.vy * p.vy + p.vz * p.vz);
             if (speed > 0.001f) {
                 float dx = p.vx / speed, dy = p.vy / speed, dz = p.vz / speed;
-                // Rotation to align Y-up with velocity direction
                 inst.ry = std::atan2(dx, dz) * 180.0f / (float)M_PI;
                 inst.rx = -std::asin(std::max(-1.0f, std::min(1.0f, dy))) * 180.0f / (float)M_PI;
                 inst.rz = 0;

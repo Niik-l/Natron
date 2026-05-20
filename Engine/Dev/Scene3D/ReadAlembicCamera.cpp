@@ -28,6 +28,8 @@
 #include <sstream>
 #include <vector>
 
+#include "RotationConventions.h"
+
 #include "../../AppInstance.h"
 #include "../../ChoiceOption.h"
 #include "../../Image.h"
@@ -76,6 +78,7 @@ struct ReadAlembicCameraPrivate
     KnobChoiceWPtr objectPath;
     KnobButtonWPtr reloadBtn;
     KnobIntWPtr frameOffset;
+    KnobChoiceWPtr timeMode;
 
     // Output knobs (animated)
     KnobDoubleWPtr translateX, translateY, translateZ;
@@ -167,6 +170,21 @@ ReadAlembicCamera::initializeKnobs()
     foff->setHintToolTip(tr("Offset the Alembic animation relative to the Natron timeline."));
     page->addKnob(foff);
     _imp->frameOffset = foff;
+
+    KnobChoicePtr tm = AppManager::createKnob<KnobChoice>(this, tr("Time Mode"));
+    tm->setName("timeMode");
+    {
+        std::vector<ChoiceOption> opts;
+        opts.push_back(ChoiceOption("frame_by_frame", "Frame-by-frame",
+            "Each Alembic sample becomes one keyframe at consecutive integer Natron frames (sample 0 -> frame 1, sample 1 -> frame 2, ...). Use this for frame-accurate matching with Maya/Blender/Houdini regardless of fps."));
+        opts.push_back(ChoiceOption("time_based", "Time-based",
+            "Map Alembic sample times to Natron timeline using the project frame rate. Preserves real-world timing but may interpolate between samples when source and project fps differ."));
+        tm->populateChoices(opts);
+    }
+    tm->setDefaultValue(0);
+    tm->setHintToolTip(tr("How Alembic sample times are mapped onto the Natron timeline."));
+    page->addKnob(tm);
+    _imp->timeMode = tm;
 
     // Camera output page
     KnobPagePtr camPage = AppManager::createKnob<KnobPage>(this, tr("Camera"));
@@ -296,15 +314,35 @@ ReadAlembicCamera::loadAlembicFile(const std::string& path)
 
         ICamera cam(obj);
         ICameraSchema camSchema = cam.getSchema();
-        int frameOffset = _imp->frameOffset.lock()->getValue();
+        const int frameOffset = _imp->frameOffset.lock()->getValue();
+        const int timeMode = _imp->timeMode.lock()->getValue(); // 0=frame-by-frame, 1=time-based
+        const double projectFps = getApp() ? getApp()->getProjectFrameRate() : 24.0;
 
         // Read camera intrinsics (may have fewer samples than Xform)
         size_t numCamSamples = camSchema.getNumSamples();
         Alembic::AbcCoreAbstract::TimeSamplingPtr camTimeSampling = camSchema.getTimeSampling();
 
+        // Detect source fps from the timeSampling (uniform case only; reported in Info field).
+        double sourceFps = 0.0;
+        if (camTimeSampling) {
+            const auto& tst = camTimeSampling->getTimeSamplingType();
+            if (tst.isUniform() && tst.getTimePerCycle() > 0.0) {
+                sourceFps = 1.0 / tst.getTimePerCycle();
+            }
+        }
+
+        auto sampleIndexToNatronFrame = [&](size_t i, double abcTime) -> double {
+            if (timeMode == 1) {
+                // Time-based: map seconds to project frames.
+                return abcTime * projectFps + frameOffset + 1.0;
+            }
+            // Frame-by-frame (default): one keyframe per sample at consecutive integer frames.
+            return (double)i + frameOffset + 1.0;
+        };
+
         for (size_t i = 0; i < numCamSamples; ++i) {
             double abcTime = camTimeSampling->getSampleTime(i);
-            double natronFrame = abcTime * 24.0 + frameOffset + 1.0; // +1 because Natron frames are 1-based
+            double natronFrame = sampleIndexToNatronFrame(i, abcTime);
 
             ISampleSelector sel((Alembic::AbcCoreAbstract::index_t)i);
             CameraSample sample;
@@ -342,9 +380,16 @@ ReadAlembicCamera::loadAlembicFile(const std::string& path)
             numXformSamples = xSchema.getNumSamples();
             Alembic::AbcCoreAbstract::TimeSamplingPtr xformTimeSampling = xSchema.getTimeSampling();
 
+            // If the xform's timeSampling differs from cam's, prefer xform's for fps detection.
+            if (xformTimeSampling) {
+                const auto& tst = xformTimeSampling->getTimeSamplingType();
+                if (tst.isUniform() && tst.getTimePerCycle() > 0.0) {
+                    sourceFps = 1.0 / tst.getTimePerCycle();
+                }
+            }
             for (size_t i = 0; i < numXformSamples; ++i) {
                 double abcTime = xformTimeSampling->getSampleTime(i);
-                double natronFrame = abcTime * 24.0 + frameOffset + 1.0;
+                double natronFrame = sampleIndexToNatronFrame(i, abcTime);
 
                 ISampleSelector sel((Alembic::AbcCoreAbstract::index_t)i);
                 XformSample xSample;
@@ -358,24 +403,23 @@ ReadAlembicCamera::loadAlembicFile(const std::string& path)
                 _imp->translateY.lock()->setValueAtTime(natronFrame, matrix[3][1], ViewSpec::all(), 0);
                 _imp->translateZ.lock()->setValueAtTime(natronFrame, matrix[3][2], ViewSpec::all(), 0);
 
-                // Extract rotation (Euler angles from rotation matrix)
-                // Maya uses XYZ rotation order by default
-                double sy = matrix[0][2];
-                double ry = std::asin(std::max(-1.0, std::min(1.0, sy)));
-                double cosRy = std::cos(ry);
-
-                double rx, rz;
-                if (std::abs(cosRy) > 0.001) {
-                    rx = std::atan2(-matrix[1][2], matrix[2][2]);
-                    rz = std::atan2(-matrix[0][1], matrix[0][0]);
-                } else {
-                    rx = std::atan2(matrix[2][1], matrix[1][1]);
-                    rz = 0.0;
+                // Extract XYZ Euler angles from the rotation matrix using Natron's
+                // standard extrinsic XYZ convention (Maya/Blender/Houdini default).
+                // Imath stores M_col with row-major memory, which means
+                // m_imath[i][j] = M_col[j][i] — so transpose into our column-vector
+                // 3x3 form, then decompose.
+                double mCol[3][3];
+                for (int i = 0; i < 3; ++i) {
+                    for (int j = 0; j < 3; ++j) {
+                        mCol[i][j] = matrix[j][i];
+                    }
                 }
+                double rxDeg = 0, ryDeg = 0, rzDeg = 0;
+                RotationConventions::decompose(mCol, rxDeg, ryDeg, rzDeg);
 
-                _imp->rotateX.lock()->setValueAtTime(natronFrame, rx * 180.0 / M_PI, ViewSpec::all(), 0);
-                _imp->rotateY.lock()->setValueAtTime(natronFrame, ry * 180.0 / M_PI, ViewSpec::all(), 0);
-                _imp->rotateZ.lock()->setValueAtTime(natronFrame, rz * 180.0 / M_PI, ViewSpec::all(), 0);
+                _imp->rotateX.lock()->setValueAtTime(natronFrame, rxDeg, ViewSpec::all(), 0);
+                _imp->rotateY.lock()->setValueAtTime(natronFrame, ryDeg, ViewSpec::all(), 0);
+                _imp->rotateZ.lock()->setValueAtTime(natronFrame, rzDeg, ViewSpec::all(), 0);
             }
         }
 
@@ -385,6 +429,11 @@ ReadAlembicCamera::loadAlembicFile(const std::string& path)
            << " | Xform samples: " << numXformSamples
            << " | Camera samples: " << numCamSamples
            << " | Cameras found: " << _imp->cameraPaths.size();
+        if (sourceFps > 0.0) {
+            ss << " | Source FPS: " << sourceFps;
+        }
+        ss << " | Project FPS: " << projectFps;
+        ss << " | Time mode: " << (timeMode == 1 ? "Time-based" : "Frame-by-frame");
         _imp->info.lock()->setValue(ss.str());
         _imp->loadedFilePath = path;
 
@@ -421,6 +470,12 @@ double
 ReadAlembicCamera::getHAperture(double time) const
 {
     return _imp->hAperture.lock()->getValueAtTime(time);
+}
+
+double
+ReadAlembicCamera::getVAperture(double time) const
+{
+    return _imp->vAperture.lock()->getValueAtTime(time);
 }
 
 StatusEnum

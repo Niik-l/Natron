@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "../../EngineFwd.h"
+#include "MeshData.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -71,6 +72,12 @@ struct SceneNode {
 
     int subIndex;              // For cards: which card (0-3). -1 for others.
     bool visible;
+
+    // Optional mesh geometry. When non-null, renderers read mesh data from here
+    // directly instead of round-tripping through sourceNode (which is required
+    // for nodes like ReadAlembicArchive that emit many mesh SceneNodes from one
+    // Natron source). ReadGeo populates this too so the code path is uniform.
+    MeshDataPtr meshData;
 
     SceneNode()
         : type(eSceneNodeGroup)

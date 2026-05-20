@@ -28,6 +28,8 @@
 #include <algorithm>
 #include <vector>
 
+#include "../Scene3D/RotationConventions.h"
+
 #include "../../AppInstance.h"
 #include "../../AppManager.h"
 #include "../../NodeMetadata.h"
@@ -470,23 +472,20 @@ ParticleEmitter::getParticleData(double time)
         k = xformInput->getKnobByName("translateY"); if (k) emPosY = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
         k = xformInput->getKnobByName("translateZ"); if (k) emPosZ = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
 
-        // Read rotation and convert emit direction from local Y-up to rotated direction
-        double rx = 0, ry = 0, rz = 0;
-        k = xformInput->getKnobByName("rotateX"); if (k) rx = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) * M_PI / 180.0;
-        k = xformInput->getKnobByName("rotateY"); if (k) ry = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) * M_PI / 180.0;
-        k = xformInput->getKnobByName("rotateZ"); if (k) rz = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time) * M_PI / 180.0;
+        // Read rotation (degrees) and rotate emit direction by the parent's transform.
+        double rxDeg = 0, ryDeg = 0, rzDeg = 0;
+        k = xformInput->getKnobByName("rotateX"); if (k) rxDeg = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+        k = xformInput->getKnobByName("rotateY"); if (k) ryDeg = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+        k = xformInput->getKnobByName("rotateZ"); if (k) rzDeg = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
 
-        // Build rotation matrix (ZYX order) and rotate the emit direction
-        double cx = std::cos(rx), sx = std::sin(rx);
-        double cy = std::cos(ry), sy = std::sin(ry);
-        double cz = std::cos(rz), sz = std::sin(rz);
+        // Extrinsic XYZ matrix (M = Rz*Ry*Rx column-vector, Maya/Blender/Houdini default).
+        double m[3][3];
+        RotationConventions::compose(rxDeg, ryDeg, rzDeg, m);
 
-        // Rotate the local emit direction by the transform's rotation
-        double ldx = edx, ldy = edy, ldz = edz;
-        // Apply rotation matrix to emit direction
-        edx = (cy*cz) * ldx + (sx*sy*cz - cx*sz) * ldy + (cx*sy*cz + sx*sz) * ldz;
-        edy = (cy*sz) * ldx + (sx*sy*sz + cx*cz) * ldy + (cx*sy*sz - sx*cz) * ldz;
-        edz = (-sy) * ldx + (sx*cy) * ldy + (cx*cy) * ldz;
+        const double ldx = edx, ldy = edy, ldz = edz;
+        edx = m[0][0]*ldx + m[0][1]*ldy + m[0][2]*ldz;
+        edy = m[1][0]*ldx + m[1][1]*ldy + m[1][2]*ldz;
+        edz = m[2][0]*ldx + m[2][1]*ldy + m[2][2]*ldz;
     }
 
     float colR = (float)_imp->startColorR.lock()->getValueAtTime(time);

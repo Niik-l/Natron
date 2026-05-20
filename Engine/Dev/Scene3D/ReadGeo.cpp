@@ -248,6 +248,7 @@ std::string
 ReadGeo::getInputLabel(int inputNb) const
 {
     if (inputNb == 0) return "Material";
+    if (inputNb == 1) return "Image";
     return std::string();
 }
 

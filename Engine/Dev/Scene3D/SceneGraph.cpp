@@ -43,6 +43,7 @@
 #include "../Deep/PointCloudData.h"
 #include "ReadAlembicCamera.h"
 #include "ReadAlembicTransform.h"
+#include "ReadAlembicArchive.h"
 #include "ReadGeo.h"
 #include "../../KnobTypes.h"
 
@@ -63,12 +64,13 @@ SceneGraph::buildTRS(float tx, float ty, float tz,
                      float out[16])
 {
     // Build TRS matrix matching ImGuizmo::RecomposeMatrixFromComponents exactly.
-    // ImGuizmo uses Rodrigues rotation for each axis, then multiplies Rx*Ry*Rz
-    // using FPU_MatrixF_x_MatrixF. We replicate that exact computation here
-    // so buildTRS and RecomposeMatrixFromComponents produce identical m16 values.
-    //
-    // This means glMultMatrixf(out) renders objects in the same orientation
-    // that ImGuizmo::Manipulate expects — no transposing needed at the boundary.
+    // Convention: extrinsic XYZ (M = Rz*Ry*Rx column-vector, applied to a vector
+    // as v' = M*v means Rx hits first). Same as Maya/Blender/Houdini default.
+    // ImGuizmo's matMul does standard A*B on row-major storage, so its
+    // rot[0]*rot[1]*rot[2] = Rx_rv*Ry_rv*Rz_rv = Rz_col*Ry_col*Rx_col — i.e.,
+    // extrinsic XYZ. We replicate the same multiplication so buildTRS and
+    // ImGuizmo agree on the matrix, and glMultMatrixf(out) renders objects
+    // in the orientation ImGuizmo::Manipulate expects — no boundary transpose.
 
     // Build individual rotation matrices (same as ImGuizmo::RotationAxis)
     // Each is stored as m16[16] in ImGuizmo's layout
@@ -208,6 +210,7 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             sn.type = eSceneNodeMesh;
             sn.name = nodeName;
             sn.sourceNode = node;
+            sn.meshData = mesh; // Renderers can read this directly now.
 
             // Use knob-based T/R/S (same as Sphere3D, Card3D, etc.)
             KnobIPtr kTX = effect->getKnobByName("translateX");
@@ -270,6 +273,58 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
 
             nameToIndex[nodeName] = (int)_nodes.size();
             _nodes.push_back(sn);
+            continue;
+        }
+
+        // --- ReadAlembicArchive (multi-emit: one Natron node → many SceneNodes) ---
+        ReadAlembicArchive* abcArchive = dynamic_cast<ReadAlembicArchive*>(effect.get());
+        if (abcArchive) {
+            const int count = abcArchive->getSceneNodeCount();
+
+            // Always push a root SceneNode for the archive itself, even if it's
+            // currently empty — gives the user something to see and link in the
+            // node graph (and a target for parenting under a Group3D later).
+            SceneNode root;
+            root.type = eSceneNodeGroup;
+            root.name = nodeName;
+            root.sourceNode = node;
+            SceneNode::setIdentity(root.localMatrix);
+            const int rootSgIdx = (int)_nodes.size();
+            nameToIndex[nodeName] = rootSgIdx;
+            _nodes.push_back(root);
+
+            // Append one SceneNode per visible archive entry. Because the archive
+            // walker emits parents before children, an entry's parentLocalIndex
+            // refers to an entry that's already been appended (or -1 for archive-root).
+            const int baseSgIdx = rootSgIdx + 1;
+            for (int i = 0; i < count; ++i) {
+                std::string entryName;
+                int parentLocalIdx = -1;
+                bool isMesh = false;
+                float lm[16];
+                if (!abcArchive->getSceneNodeAt(i, time, entryName, parentLocalIdx, isMesh, lm)) {
+                    continue;
+                }
+                SceneNode sn;
+                if (isMesh) {
+                    MeshDataPtr md = abcArchive->getMeshDataAt(i);
+                    if (md && md->numVertices > 0) {
+                        sn.type = eSceneNodeMesh;
+                        sn.meshData = md;
+                    } else {
+                        // No mesh data (e.g. empty mesh) — fall back to locator.
+                        sn.type = eSceneNodeTransform;
+                    }
+                } else {
+                    sn.type = eSceneNodeTransform;
+                }
+                sn.name = nodeName + entryName; // e.g. "ReadAlembicArchive1/Camera01Trackers/Tracker1"
+                sn.sourceNode = node;
+                std::memcpy(sn.localMatrix, lm, sizeof(lm));
+                sn.parentIndex = (parentLocalIdx < 0) ? rootSgIdx : (baseSgIdx + parentLocalIdx);
+                _nodes[sn.parentIndex].childIndices.push_back((int)_nodes.size());
+                _nodes.push_back(sn);
+            }
             continue;
         }
 

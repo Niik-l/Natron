@@ -33,6 +33,7 @@
 #include <stdexcept>
 
 #include <QStyle>
+#include <QVBoxLayout>
 
 #include "Global/FStreamsSupport.h"
 
@@ -42,7 +43,9 @@
 #include "Engine/NodeSerialization.h"
 #include "Engine/RotoLayer.h"
 #include "Engine/Utils.h" // convertFromPlainText
+#include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
 
+#include "Gui/AlembicTreeWidget.h"
 #include "Gui/Button.h"
 #include "Gui/Gui.h"
 #include "Gui/GuiApplicationManager.h" // appPTR
@@ -160,6 +163,21 @@ NodeSettingsPanel::initializeExtraGui(QVBoxLayout* layout)
 {
     if ( _multiPanel && !_multiPanel->isGuiCreated() ) {
         _multiPanel->createMultiInstanceGui(layout);
+    }
+
+    // Per-node-type custom widgets.
+    NodeGuiPtr nodeUi = getNode();
+    NodePtr node = nodeUi ? nodeUi->getNode() : NodePtr();
+    if (node) {
+        EffectInstancePtr effect = node->getEffectInstance();
+        if (effect) {
+            // ReadAlembicArchive — show a tree view of the archive's contents
+            // with per-entry checkboxes (drives the node's excludedPaths knob).
+            if (ReadAlembicArchive* archive = dynamic_cast<ReadAlembicArchive*>(effect.get())) {
+                AlembicTreeWidget* tree = new AlembicTreeWidget(archive, this);
+                layout->addWidget(tree);
+            }
+        }
     }
 }
 

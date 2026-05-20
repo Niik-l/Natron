@@ -101,9 +101,7 @@ private:
     static void buildViewMatrix(double tx, double ty, double tz,
                                 double rx, double ry, double rz,
                                 float out[16]);
-    static void buildProjectionMatrix(double focalLength, double hAperture,
-                                      float aspect, float nearZ, float farZ,
-                                      float out[16]);
+    // Projection matrix construction lives in CameraMath::composeProjectionMatrix.
 
     std::unique_ptr<Project3DPrivate> _imp;
 };

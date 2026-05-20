@@ -29,10 +29,13 @@
 #include <cstring>
 #include <vector>
 
+#include "RotationConventions.h"
+
 #include "../../../Global/GLIncludes.h"
 
 #include "../../AppInstance.h"
 #include "../../AppManager.h"
+#include "CameraMath.h"
 #include "CameraProvider.h"
 #include "Card3D.h"
 #include "../../GLShader.h"
@@ -41,6 +44,7 @@
 #include "../Particles/ParticleInstance.h"
 #include "../Particles/ParticleProvider.h"
 #include "ReadVDB.h"
+#include "ReadAlembicArchive.h"
 #include "Volume3D.h"
 #include "Cube3D.h"
 #include "Cylinder3D.h"
@@ -229,50 +233,29 @@ buildViewMatrix(double tx, double ty, double tz,
                 double rx, double ry, double rz,
                 float out[16])
 {
-    float crx = cosf((float)rx * (float)M_PI / 180.0f), srx = sinf((float)rx * (float)M_PI / 180.0f);
-    float cry = cosf((float)ry * (float)M_PI / 180.0f), sry = sinf((float)ry * (float)M_PI / 180.0f);
-    float crz = cosf((float)rz * (float)M_PI / 180.0f), srz = sinf((float)rz * (float)M_PI / 180.0f);
+    // View matrix = inverse of camera-to-world transform.
+    // Camera-to-world uses Natron's standard extrinsic XYZ convention
+    // (M = Rz*Ry*Rx column-vector, Maya/Blender/Houdini default, same as
+    // SceneGraph::buildTRS and ImGuizmo). The inverse is M^T.
+    double mInv[3][3];
+    RotationConventions::composeInverse(rx, ry, rz, mInv);
 
-    float nsrx = -srx, nsry = -sry, nsrz = -srz;
+    const float ntx = -(float)tx, nty = -(float)ty, ntz = -(float)tz;
 
-    float r00 = crz * cry + nsrz * nsrx * nsry;
-    float r01 = nsrz * crx;
-    float r02 = -crz * nsry + nsrz * nsrx * cry;
-
-    float r10 = -nsrz * cry + crz * nsrx * nsry;
-    float r11 = crz * crx;
-    float r12 = nsrz * nsry + crz * nsrx * cry;
-
-    float r20 = crx * nsry;
-    float r21 = -nsrx;
-    float r22 = crx * cry;
-
-    float ntx = -(float)tx, nty = -(float)ty, ntz = -(float)tz;
-
-    out[0]  = r00; out[1]  = r10; out[2]  = r20; out[3]  = 0;
-    out[4]  = r01; out[5]  = r11; out[6]  = r21; out[7]  = 0;
-    out[8]  = r02; out[9]  = r12; out[10] = r22; out[11] = 0;
-    out[12] = r00*ntx + r01*nty + r02*ntz;
-    out[13] = r10*ntx + r11*nty + r12*ntz;
-    out[14] = r20*ntx + r21*nty + r22*ntz;
-    out[15] = 1;
+    // Pack into column-major float[16]: out[col*4 + row] = mInv[row][col].
+    out[0]  = (float)mInv[0][0]; out[1]  = (float)mInv[1][0]; out[2]  = (float)mInv[2][0]; out[3]  = 0.f;
+    out[4]  = (float)mInv[0][1]; out[5]  = (float)mInv[1][1]; out[6]  = (float)mInv[2][1]; out[7]  = 0.f;
+    out[8]  = (float)mInv[0][2]; out[9]  = (float)mInv[1][2]; out[10] = (float)mInv[2][2]; out[11] = 0.f;
+    out[12] = (float)(mInv[0][0]*ntx + mInv[0][1]*nty + mInv[0][2]*ntz);
+    out[13] = (float)(mInv[1][0]*ntx + mInv[1][1]*nty + mInv[1][2]*ntz);
+    out[14] = (float)(mInv[2][0]*ntx + mInv[2][1]*nty + mInv[2][2]*ntz);
+    out[15] = 1.f;
 }
 
-static void
-buildProjectionMatrix(double focalLength, double hAperture,
-                      float aspect, float nearZ, float farZ,
-                      float out[16])
-{
-    double fovDeg = 2.0 * std::atan(hAperture / (2.0 * focalLength)) * (180.0 / M_PI);
-    float f = 1.0f / tanf((float)fovDeg * 0.5f * (float)M_PI / 180.0f);
-
-    std::memset(out, 0, 16 * sizeof(float));
-    out[0]  = f / aspect;
-    out[5]  = f;
-    out[10] = (farZ + nearZ) / (nearZ - farZ);
-    out[11] = -1.0f;
-    out[14] = (2.0f * farZ * nearZ) / (nearZ - farZ);
-}
+// Projection matrix is now built via CameraMath::composeProjectionMatrix
+// (independent fov_h / fov_v from both apertures). Image aspect is no longer
+// used to derive the Y FOV — that was a long-standing bug producing CG drift
+// proportional to camera motion when sensor aspect != image aspect.
 
 // ==================== Volume ray marching shaders ====================
 
@@ -463,15 +446,89 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         if (!mesh || mesh->numVertices == 0) return false;
         out.verts = mesh->vertices;
         out.triIndices = mesh->faceIndices;
-        int nv = (int)(out.verts.size() / 3);
-        out.uvs.resize(nv * 2, 0.5f);
+        const int nv = (int)(out.verts.size() / 3);
+
+        // Per-vertex UVs from the per-face-vertex array. First occurrence of each
+        // vertex wins (lossy for UV seams; correct for typical clean DMP meshes).
+        out.uvs.assign(nv * 2, 0.5f);
+        if (mesh->hasUVs && mesh->uvs.size() == mesh->faceIndices.size() * 2) {
+            std::vector<char> set((size_t)nv, 0);
+            for (size_t i = 0; i < mesh->faceIndices.size(); ++i) {
+                const int v = mesh->faceIndices[i];
+                if (v >= 0 && v < nv && !set[v]) {
+                    out.uvs[v * 2 + 0] = mesh->uvs[i * 2 + 0];
+                    out.uvs[v * 2 + 1] = mesh->uvs[i * 2 + 1];
+                    set[v] = 1;
+                }
+            }
+        }
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c)
                 out.localMatrix[c * 4 + r] = mesh->transform[r * 4 + c];
+
+        // Optional Image input (input 1) — per-mesh texture for the scanline.
+        if (readGeo->getInput(1)) {
+            RectI roi;
+            out.texImg = readGeo->getImage(1, time, RenderScale(), view, NULL, NULL, false, true, eStorageModeRAM, 0, &roi);
+        }
         return true;
     }
 
     return false;
+}
+
+// Wrapper that handles both single-emit nodes (one GeoData via the existing
+// extractGeometry) and multi-emit nodes (ReadAlembicArchive — one GeoData per
+// visible mesh entry, world transform composed from the archive's parent chain).
+// Appends 0..N entries to `out`.
+static void
+extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vector<GeoData>& out)
+{
+    if (!effect) return;
+
+    ReadAlembicArchive* abcArchive = dynamic_cast<ReadAlembicArchive*>(effect.get());
+    if (abcArchive) {
+        ImagePtr sharedTex;
+        if (abcArchive->getInput(1)) {
+            RectI roi;
+            sharedTex = abcArchive->getImage(1, time, RenderScale(), view, NULL, NULL, false, true, eStorageModeRAM, 0, &roi);
+        }
+
+        const int count = abcArchive->getSceneNodeCount();
+        for (int i = 0; i < count; ++i) {
+            MeshDataPtr mesh = abcArchive->getMeshDataAt(i);
+            if (!mesh || mesh->numVertices == 0) continue;
+
+            GeoData g;
+            SceneGraph::buildTRS(0,0,0, 0,0,0, 1,1,1, g.localMatrix);
+            if (!abcArchive->getEntryWorldMatrix(i, time, g.localMatrix)) continue;
+
+            g.verts = mesh->vertices;
+            g.triIndices = mesh->faceIndices;
+            const int nv = (int)(g.verts.size() / 3);
+            g.uvs.assign(nv * 2, 0.5f);
+            if (mesh->hasUVs && mesh->uvs.size() == mesh->faceIndices.size() * 2) {
+                std::vector<char> set((size_t)nv, 0);
+                for (size_t k = 0; k < mesh->faceIndices.size(); ++k) {
+                    const int v = mesh->faceIndices[k];
+                    if (v >= 0 && v < nv && !set[v]) {
+                        g.uvs[v * 2 + 0] = mesh->uvs[k * 2 + 0];
+                        g.uvs[v * 2 + 1] = mesh->uvs[k * 2 + 1];
+                        set[v] = 1;
+                    }
+                }
+            }
+            g.texImg = sharedTex;
+            out.push_back(g);
+        }
+        return;
+    }
+
+    // Single-result path: delegate to the existing extractGeometry helper.
+    GeoData g;
+    if (extractGeometry(effect, time, view, g)) {
+        out.push_back(g);
+    }
 }
 
 // Helper: render one GeoData object (must be called within active GL context with camera set up)
@@ -562,13 +619,14 @@ ScanlineRender::render(const RenderActionArgs& args)
     CameraProvider* cam = camEffect ? dynamic_cast<CameraProvider*>(camEffect.get()) : NULL;
 
     double camTX = 0, camTY = 0, camTZ = 5, camRX = 0, camRY = 0, camRZ = 0;
-    double camFL = 50.0, camHA = 24.576;
+    double camFL = 50.0, camHA = 24.576, camVA = 18.672;
     float camNear = 0.1f, camFar = 10000.0f;
 
     if (cam) {
         cam->getCameraPosition(args.time, camTX, camTY, camTZ, camRX, camRY, camRZ);
         camFL = cam->getCameraFocalLength(args.time);
         camHA = cam->getCameraHAperture(args.time);
+        camVA = cam->getCameraVAperture(args.time);
         camNear = (float)cam->getCameraNear(args.time);
         camFar = (float)cam->getCameraFar(args.time);
     }
@@ -638,17 +696,11 @@ ScanlineRender::render(const RenderActionArgs& args)
                     particleData = sProvider->getParticleData(args.time);
                     motionBlurPData = particleData;
                 } else {
-                    GeoData geo;
-                    if (extractGeometry(sceneInput, args.time, args.view, geo)) {
-                        geoObjects.push_back(geo);
-                    }
+                    extractGeometries(sceneInput, args.time, args.view, geoObjects);
                 }
             }
         } else {
-            GeoData geo;
-            if (extractGeometry(geoEffect, args.time, args.view, geo)) {
-                geoObjects.push_back(geo);
-            }
+            extractGeometries(geoEffect, args.time, args.view, geoObjects);
         }
     }
 
@@ -737,10 +789,12 @@ ScanlineRender::render(const RenderActionArgs& args)
     glEnable(GL_MULTISAMPLE); // enable MSAA for multisampled FBO
 
     // --- Set up camera matrices ---
+    // Projection comes from both apertures via CameraMath. Image aspect
+    // (outW/outH) intentionally not used here — fixes CG drift under camera
+    // motion when sensor aspect != image aspect.
     float viewMatrix[16], projMatrix[16];
-    float aspect = (float)outW / std::max(1, outH);
     buildViewMatrix(camTX, camTY, camTZ, camRX, camRY, camRZ, viewMatrix);
-    buildProjectionMatrix(camFL, camHA, aspect, camNear, camFar, projMatrix);
+    CameraMath::composeProjectionMatrix(camFL, camHA, camVA, camNear, camFar, projMatrix);
 
     // --- Motion blur setup ---
     int motionSamples = _imp->motionSamples.lock() ? _imp->motionSamples.lock()->getValue() : 1;

@@ -145,6 +145,14 @@ struct CameraTrackerNodePrivate
     }
 
     // Rotation matrix to Euler XYZ (degrees)
+    // TODO(xyz-conformance): when this file is re-enabled in the build (currently
+    // excluded by Engine/CMakeLists.txt:114 due to libmv/GCC 15 issues), replace
+    // this body with a call to RotationConventions::decompose so the extracted
+    // angles match Natron's standard extrinsic XYZ convention (M = Rz*Ry*Rx
+    // column-vector, Maya/Blender/Houdini default). The current implementation
+    // uses ZYX composition despite the function name — mislabeled, not misimplemented
+    // for its own use, but it will produce wrong angles when feeding any other
+    // extrinsic-XYZ-expecting consumer.
     static void rotationMatrixToEulerXYZ(const libmv::Mat3& R,
                                           double& rx, double& ry, double& rz)
     {

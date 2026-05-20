@@ -60,7 +60,9 @@
 #include <OpenImageIO/imagebufalgo.h>
 
 // Natron headers
+#include "Engine/Dev/Scene3D/CameraMath.h"
 #include "Engine/Dev/Scene3D/SceneGraph.h"
+#include "Engine/Dev/Scene3D/RotationConventions.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
@@ -686,7 +688,7 @@ void
 CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                                      double camTX, double camTY, double camTZ,
                                      double camRX, double camRY, double camRZ,
-                                     double focalLength, double hAperture,
+                                     double focalLength, double hAperture, double vAperture,
                                      double time,
                                      const std::vector<std::string>& requestedPasses,
                                      const std::map<std::string, ObjectVisibility>* visibilityMap,
@@ -978,24 +980,20 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     // Cycles camera convention: camera looks down +Z in local space.
     // So we need to flip the Z axis: negate the forward column of the rotation matrix.
     {
-        float crx = cosf((float)camRX * (float)M_PI / 180.0f);
-        float srx = sinf((float)camRX * (float)M_PI / 180.0f);
-        float cry = cosf((float)camRY * (float)M_PI / 180.0f);
-        float sry = sinf((float)camRY * (float)M_PI / 180.0f);
-        float crz = cosf((float)camRZ * (float)M_PI / 180.0f);
-        float srz = sinf((float)camRZ * (float)M_PI / 180.0f);
-
-        // Rotation matrix Ry * Rx * Rz (same order as SceneGraph::buildTRS)
-        // This gives the camera's local axes in world space.
-        float r00 = cry * crz + sry * srx * srz;     // right.x
-        float r01 = crx * srz;                         // right.y
-        float r02 = -sry * crz + cry * srx * srz;     // right.z
-        float r10 = -cry * srz + sry * srx * crz;     // up.x
-        float r11 = crx * crz;                         // up.y
-        float r12 = sry * srz + cry * srx * crz;      // up.z
-        float r20 = sry * crx;                         // forward.x (Natron -Z)
-        float r21 = -srx;                              // forward.y
-        float r22 = cry * crx;                         // forward.z
+        // Camera-to-world rotation in Natron's standard extrinsic XYZ convention
+        // (M = Rz*Ry*Rx column-vector, matches SceneGraph::buildTRS, ImGuizmo,
+        // and Maya/Blender/Houdini default).
+        double mCam[3][3];
+        RotationConventions::compose(camRX, camRY, camRZ, mCam);
+        const float r00 = (float)mCam[0][0]; // right.x   = M[0][0]
+        const float r01 = (float)mCam[1][0]; // right.y   = M[1][0]
+        const float r02 = (float)mCam[2][0]; // right.z   = M[2][0]
+        const float r10 = (float)mCam[0][1]; // up.x      = M[0][1]
+        const float r11 = (float)mCam[1][1]; // up.y      = M[1][1]
+        const float r12 = (float)mCam[2][1]; // up.z      = M[2][1]
+        const float r20 = (float)mCam[0][2]; // forward.x = M[0][2] (Natron -Z; negated below)
+        const float r21 = (float)mCam[1][2]; // forward.y = M[1][2]
+        const float r22 = (float)mCam[2][2]; // forward.z = M[2][2]
 
         // Cycles camera-to-world transform (row-major 3x4):
         // Column 0 = right axis (X), Column 1 = up axis (Y),
@@ -1009,11 +1007,31 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         scene->camera->set_matrix(cameraTfm);
         scene->camera->set_camera_type(ccl::CAMERA_PERSPECTIVE);
 
-        // FOV from focal length and horizontal aperture
-        float fovRad = 2.0f * atanf((float)hAperture / (2.0f * (float)focalLength));
-        if (fovRad < 0.01f || fovRad > 3.0f) fovRad = 45.0f * (float)M_PI / 180.0f;
+        // Independent fovH/fovV from both apertures via CameraMath. Cycles' default
+        // landscape viewplane is (aspect, 1.0) which makes set_fov() be interpreted
+        // as VERTICAL FOV with horizontal angle derived from render aspect — same
+        // class of bug that bit ScanlineRender. Override the viewplane explicitly
+        // so X extent reflects the camera's actual H aperture, not render aspect.
+        double fovH = 0, fovV = 0;
+        CameraMath::computeFovs(focalLength, hAperture, vAperture, fovH, fovV);
+        float fovHf = (float)fovH;
+        float fovVf = (float)fovV;
+        if (fovVf < 0.01f || fovVf > 3.0f) { fovVf = 45.0f * (float)M_PI / 180.0f; fovHf = fovVf; }
 
-        scene->camera->set_fov(fovRad);
+        scene->camera->set_fov(fovVf); // Cycles uses this as the short-axis FOV.
+
+        // Override viewplane so horizontal extent at z=1 = tan(fovH/2) instead of
+        // aspect * tan(fovV/2). Vertical stays at ±1 (= tan(fovV/2) after fov scale).
+        const float halfRatio = tanf(fovHf * 0.5f) / tanf(fovVf * 0.5f);
+        scene->camera->viewplane.left   = -halfRatio;
+        scene->camera->viewplane.right  =  halfRatio;
+        scene->camera->viewplane.bottom = -1.0f;
+        scene->camera->viewplane.top    =  1.0f;
+
+        // Sensor metadata (in METERS — Cycles defaults are 0.036 / 0.024 for FF35).
+        // Not used in projection math; exposed to OSL/shader Camera Data nodes.
+        scene->camera->set_sensorwidth((float)hAperture * 0.001f);
+        scene->camera->set_sensorheight((float)vAperture * 0.001f);
 
         scene->camera->set_full_width(_impl->width);
         scene->camera->set_full_height(_impl->height);
@@ -1280,9 +1298,12 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                             inst.px + inst.vx * dt,
                             inst.py + inst.vy * dt,
                             inst.pz + inst.vz * dt);
+                        // Extrinsic XYZ: build M = Rz * Ry * Rx (column-vector) so that
+                        // applying M to a vector rotates Rx-then-Ry-then-Rz around world
+                        // axes. Same convention as SceneGraph::buildTRS.
+                        if (inst.rz != 0) t = t * ccl::transform_rotate(inst.rz * (float)M_PI / 180.0f, ccl::make_float3(0, 0, 1));
                         if (inst.ry != 0) t = t * ccl::transform_rotate(inst.ry * (float)M_PI / 180.0f, ccl::make_float3(0, 1, 0));
                         if (inst.rx != 0) t = t * ccl::transform_rotate(inst.rx * (float)M_PI / 180.0f, ccl::make_float3(1, 0, 0));
-                        if (inst.rz != 0) t = t * ccl::transform_rotate(inst.rz * (float)M_PI / 180.0f, ccl::make_float3(0, 0, 1));
                         t = t * ccl::transform_scale(inst.sx, inst.sy, inst.sz);
                         return t;
                     };
@@ -1798,12 +1819,17 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 generateBoxMesh(verts, triVerts);
                 break;
             case eSceneNodeMesh: {
-                // ReadGeo — load actual mesh data from Alembic
-                NodePtr meshSrcNode = sn.sourceNode.lock();
-                if (!meshSrcNode) continue;
-                ReadGeo* readGeo = dynamic_cast<ReadGeo*>(meshSrcNode->getEffectInstance().get());
-                if (!readGeo) continue;
-                MeshDataPtr meshData = readGeo->getMeshData(time);
+                // Prefer mesh data carried directly on the SceneNode (set by
+                // ReadGeo and ReadAlembicArchive). Fall back to the source-node
+                // dynamic_cast for older code paths that haven't been updated.
+                MeshDataPtr meshData = sn.meshData;
+                if (!meshData) {
+                    NodePtr meshSrcNode = sn.sourceNode.lock();
+                    if (!meshSrcNode) continue;
+                    ReadGeo* readGeo = dynamic_cast<ReadGeo*>(meshSrcNode->getEffectInstance().get());
+                    if (!readGeo) continue;
+                    meshData = readGeo->getMeshData(time);
+                }
                 if (!meshData || meshData->numVertices == 0) continue;
 
                 // Copy vertices
@@ -1945,13 +1971,13 @@ bool
 CyclesRenderer::renderToBufferWithCamera(const SceneGraph& sg,
                                           double camTX, double camTY, double camTZ,
                                           double camRX, double camRY, double camRZ,
-                                          double focalLength, double hAperture,
+                                          double focalLength, double hAperture, double vAperture,
                                           std::vector<float>& outPixels,
                                           int width, int height, int samples,
                                           double time)
 {
     initialize(width, height, samples);
-    syncSceneWithCamera(sg, camTX, camTY, camTZ, camRX, camRY, camRZ, focalLength, hAperture, time);
+    syncSceneWithCamera(sg, camTX, camTY, camTZ, camRX, camRY, camRZ, focalLength, hAperture, vAperture, time);
 
     _impl->session->set_output_driver(
         ccl::make_unique<ccl::NatronBufferOutputDriver>(&outPixels, width, height));
@@ -1966,7 +1992,7 @@ bool
 CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
                                                    double camTX, double camTY, double camTZ,
                                                    double camRX, double camRY, double camRZ,
-                                                   double focalLength, double hAperture,
+                                                   double focalLength, double hAperture, double vAperture,
                                                    const std::vector<std::string>& requestedPasses,
                                                    std::map<std::string, std::vector<float>>& outPassBuffers,
                                                    int width, int height, int samples,
@@ -1979,7 +2005,7 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
 {
     initialize(width, height, samples);
     syncSceneWithCamera(sg, camTX, camTY, camTZ, camRX, camRY, camRZ,
-                        focalLength, hAperture, time, requestedPasses,
+                        focalLength, hAperture, vAperture, time, requestedPasses,
                         visibilityMap, activeLights, dof, motionBlur, integrator);
 
     // Build the full list of pass names for the output driver.

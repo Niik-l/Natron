@@ -96,6 +96,7 @@ public:
                             double& rx, double& ry, double& rz) const;
     double getFocalLength(double time) const;
     double getHAperture(double time) const;
+    double getVAperture(double time) const;
 
     // CameraProvider interface
     virtual void getCameraPosition(double time,
@@ -108,6 +109,9 @@ public:
 
     virtual double getCameraHAperture(double time) const OVERRIDE
     { return getHAperture(time); }
+
+    virtual double getCameraVAperture(double time) const OVERRIDE
+    { return getVAperture(time); }
 
 private:
 
