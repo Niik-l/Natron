@@ -34,6 +34,8 @@
 #include "../../../Global/GLIncludes.h"
 
 #include "../../AppInstance.h"
+#include "../../Format.h"
+#include "../../Project.h"
 #include "../../AppManager.h"
 #include "CameraMath.h"
 #include "CameraProvider.h"
@@ -58,6 +60,7 @@
 #include "ReadGeo.h"
 #include "SceneGraph.h"
 #include "Sphere3D.h"
+#include "UVProject.h"
 #include "../../ViewIdx.h"
 
 #ifndef M_PI
@@ -70,6 +73,7 @@ struct ScanlineRenderPrivate
 {
     // Output
     KnobIntWPtr outputWidth, outputHeight;
+    KnobButtonWPtr syncToProject; // copies project default format → width/height
 
     // Particle rendering
     KnobChoiceWPtr particleMode;   // Point, Disc, Sphere, Sprite
@@ -101,7 +105,7 @@ ScanlineRender::getPluginDescription() const
               "Input 2 (cam): Camera (Camera3D or ReadAlembicCamera)\n\n"
               "The geometry's img input provides the texture.\n"
               "The camera defines the viewpoint.\n\n"
-              "Equivalent to Nuke's ScanlineRender node.").toStdString();
+              "Comparable to scanline-render nodes found in other compositing DCCs.").toStdString();
 }
 
 std::string
@@ -156,6 +160,13 @@ ScanlineRender::initializeKnobs()
         k->setName("outputHeight"); k->setDefaultValue(1080);
         k->setMinimum(1); k->setDisplayMinimum(240); k->setDisplayMaximum(4096);
         outPage->addKnob(k); _imp->outputHeight = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Sync to Project"));
+        k->setName("syncToProject");
+        k->setHintToolTip(tr("Copy the current project default format's width and "
+                             "height into the Width/Height knobs above."));
+        outPage->addKnob(k); _imp->syncToProject = k;
     }
 
     // Particle rendering knobs
@@ -213,6 +224,35 @@ ScanlineRender::initializeKnobs()
         k->setHintToolTip(tr("Shutter open duration as fraction of frame time. 0.5 = 180 degree shutter (film standard). Only used when Motion Samples > 1."));
         partPage->addKnob(k); _imp->motionShutter = k;
     }
+}
+
+bool
+ScanlineRender::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
+                             ViewSpec /*view*/, double /*time*/,
+                             bool /*originatedFromMainThread*/)
+{
+    if (!k) return false;
+
+    // Sync to Project — copy project default format → width/height.
+    KnobButtonPtr syncBtn = _imp->syncToProject.lock();
+    if (syncBtn && k == syncBtn.get()) {
+        AppInstancePtr app = getApp();
+        if (app && app->getProject()) {
+            Format fmt;
+            app->getProject()->getProjectDefaultFormat(&fmt);
+            const int pw = fmt.width();
+            const int ph = fmt.height();
+            KnobIntPtr wk = _imp->outputWidth.lock();
+            KnobIntPtr hk = _imp->outputHeight.lock();
+            if (pw > 0 && ph > 0 && wk && hk) {
+                wk->setValue(pw);
+                hk->setValue(ph);
+            }
+        }
+        return true;
+    }
+
+    return false;
 }
 
 StatusEnum
@@ -343,11 +383,51 @@ static const char* volumeFragmentShader =
 
 struct GeoData {
     std::vector<float> verts;    // x,y,z interleaved
-    std::vector<float> uvs;      // u,v interleaved
+    std::vector<float> uvs;      // u,v interleaved (used when stw is empty)
+    std::vector<float> stw;      // s,t,w interleaved — populated by UVProject (Perspective +
+                                 //   Generate Perspective). When non-empty, takes precedence
+                                 //   over uvs and the render loop emits glTexCoord4f(s,t,0,w)
+                                 //   so OpenGL does perspective-correct fragment-level divide.
     std::vector<int> triIndices;
     float localMatrix[16];
     ImagePtr texImg;
 };
+
+// Fan-triangulate a polygon-soup mesh (faceIndices + per-face vertex counts)
+// into a flat triangle index array. Required: most DCC exports (Maya / Houdini /
+// Blender Alembic) store quads or n-gons, NOT triangles. Treating faceIndices
+// as raw triangle indices crosses face boundaries and produces garbage.
+static void
+fanTriangulate(const std::vector<int>& faceIndices,
+               const std::vector<int>& faceCounts,
+               std::vector<int>& outTris)
+{
+    outTris.clear();
+    if (faceCounts.empty()) {
+        // No face-count info — assume input is already triangulated.
+        outTris = faceIndices;
+        return;
+    }
+    // Upper bound: every face contributes (count-2) triangles → (count-2)*3 ints.
+    // For an all-quad mesh that's (4-2)*3 = 6 per face. Reserve generously.
+    outTris.reserve(faceIndices.size() * 2);
+
+    size_t offset = 0;
+    for (size_t f = 0; f < faceCounts.size(); ++f) {
+        const int c = faceCounts[f];
+        if (c < 3 || offset + (size_t)c > faceIndices.size()) {
+            offset += (size_t)std::max(0, c);
+            continue;
+        }
+        const int v0 = faceIndices[offset];
+        for (int i = 1; i + 1 < c; ++i) {
+            outTris.push_back(v0);
+            outTris.push_back(faceIndices[offset + i]);
+            outTris.push_back(faceIndices[offset + i + 1]);
+        }
+        offset += (size_t)c;
+    }
+}
 
 static bool
 extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& out)
@@ -445,7 +525,7 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         MeshDataPtr mesh = readGeo->getMeshData(time);
         if (!mesh || mesh->numVertices == 0) return false;
         out.verts = mesh->vertices;
-        out.triIndices = mesh->faceIndices;
+        fanTriangulate(mesh->faceIndices, mesh->faceCounts, out.triIndices);
         const int nv = (int)(out.verts.size() / 3);
 
         // Per-vertex UVs from the per-face-vertex array. First occurrence of each
@@ -486,6 +566,46 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
 {
     if (!effect) return;
 
+    // UVProject: transparent UV-rewriting wrapper. Walk through to the upstream
+    // geo, extract it normally, then apply the rewrite to every GeoData produced.
+    UVProject* uvProj = dynamic_cast<UVProject*>(effect.get());
+    if (uvProj) {
+        EffectInstancePtr upstream = uvProj->getGeoInput();
+        if (!upstream) return;
+        const size_t prevCount = out.size();
+        extractGeometries(upstream, time, view, out);
+
+        // Optional projection-image override via UVProject's input 2 (img).
+        ImagePtr projImg;
+        if (uvProj->getImgInput()) {
+            RectI roi;
+            projImg = uvProj->getImage(2, time, RenderScale(), view,
+                                       NULL, NULL, false, true,
+                                       eStorageModeRAM, 0, &roi);
+        }
+
+        for (size_t i = prevCount; i < out.size(); ++i) {
+            GeoData& g = out[i];
+            std::vector<float> newUVs;
+            std::vector<float> newSTW;
+            int newComp = 0;
+            uvProj->rewriteUVs(g.verts, g.localMatrix, time, newUVs, newSTW, newComp);
+            if (newComp == 3) {
+                g.stw = std::move(newSTW);
+                g.uvs.clear(); // stw takes precedence
+            } else if (newComp == 2) {
+                g.uvs = std::move(newUVs);
+                g.stw.clear();
+            }
+            // newComp == 0: Mode == Off — keep g.uvs as extracted upstream.
+
+            if (projImg) {
+                g.texImg = projImg; // override upstream texture
+            }
+        }
+        return;
+    }
+
     ReadAlembicArchive* abcArchive = dynamic_cast<ReadAlembicArchive*>(effect.get());
     if (abcArchive) {
         ImagePtr sharedTex;
@@ -504,7 +624,7 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
             if (!abcArchive->getEntryWorldMatrix(i, time, g.localMatrix)) continue;
 
             g.verts = mesh->vertices;
-            g.triIndices = mesh->faceIndices;
+            fanTriangulate(mesh->faceIndices, mesh->faceCounts, g.triIndices);
             const int nv = (int)(g.verts.size() / 3);
             g.uvs.assign(nv * 2, 0.5f);
             if (mesh->hasUVs && mesh->uvs.size() == mesh->faceIndices.size() * 2) {
@@ -578,6 +698,19 @@ renderGeoObject(const GeoData& geo)
 
     if (hasTexture) glEnable(GL_TEXTURE_2D);
 
+    // STW path = UVProject in Perspective + Generate Perspective mode. When
+    // active, we emit (s, t, 0, w) so GL does the perspective divide at the
+    // fragment. Clamp-to-border with transparent border so out-of-frustum
+    // samples come out as zero (matches a Crop-style out-of-frame behavior).
+    const bool useSTW = hasTexture && !geo.stw.empty()
+                        && (int)geo.stw.size() >= numVerts * 3;
+    if (useSTW) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        const float borderColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+    }
+
     glPushMatrix();
     glMultMatrixf(geo.localMatrix);
     glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
@@ -587,7 +720,12 @@ renderGeoObject(const GeoData& geo)
         for (int vi = 0; vi < 3; ++vi) {
             int idx = geo.triIndices[t * 3 + vi];
             if (idx < 0 || idx >= numVerts) continue;
-            if (hasTexture && (int)geo.uvs.size() > idx * 2 + 1) {
+            if (useSTW) {
+                glTexCoord4f(geo.stw[idx * 3 + 0],
+                             geo.stw[idx * 3 + 1],
+                             0.0f,
+                             geo.stw[idx * 3 + 2]);
+            } else if (hasTexture && (int)geo.uvs.size() > idx * 2 + 1) {
                 glTexCoord2f(geo.uvs[idx * 2 + 0], geo.uvs[idx * 2 + 1]);
             }
             glVertex3f(geo.verts[idx * 3 + 0], geo.verts[idx * 3 + 1], geo.verts[idx * 3 + 2]);

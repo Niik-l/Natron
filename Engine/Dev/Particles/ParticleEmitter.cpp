@@ -101,7 +101,7 @@ ParticleEmitter::getPluginDescription() const
               "Optional mask input: connect an image to use as an emission mask.\n"
               "Spawns particles with randomized velocity within an emission cone.\n"
               "Connect downstream to ParticleForce, ParticleMerge, or ParticleRender nodes.\n\n"
-              "Equivalent to Nuke's ParticleEmitter node.").toStdString();
+              "Comparable to particle-emitter nodes found in other compositing DCCs.").toStdString();
 }
 
 std::string

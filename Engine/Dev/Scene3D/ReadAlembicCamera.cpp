@@ -187,7 +187,7 @@ ReadAlembicCamera::initializeKnobs()
             "Map Alembic sample times to Natron timeline using the project frame rate. Preserves real-world timing but may interpolate between samples when source and project fps differ."));
         tm->populateChoices(opts);
     }
-    tm->setDefaultValue(0);
+    tm->setDefaultValue(1); // Default to Time-based — matches Maya/Houdini behaviour.
     tm->setHintToolTip(tr("How Alembic sample times are mapped onto the Natron timeline."));
     page->addKnob(tm);
     _imp->timeMode = tm;
@@ -435,10 +435,14 @@ ReadAlembicCamera::loadAlembicFile(const std::string& path)
 
         auto sampleIndexToNatronFrame = [&](size_t i, double abcTime) -> double {
             if (timeMode == 1) {
-                // Time-based: map seconds to project frames.
-                return abcTime * projectFps + frameOffset + 1.0;
+                // Time-based: abcTime is already absolute time; multiply by project fps
+                // for the absolute Natron frame. No +1 — Maya stores frame N at time N/fps,
+                // so abcTime*fps already equals N. Adding +1 would shift the whole track
+                // by one frame and miss the camera's actual range.
+                return abcTime * projectFps + frameOffset;
             }
-            // Frame-by-frame (default): one keyframe per sample at consecutive integer frames.
+            // Frame-by-frame: one keyframe per sample at consecutive integer frames,
+            // ignoring abcTime. Sample 0 lands on frame frameOffset+1.
             return (double)i + frameOffset + 1.0;
         };
 

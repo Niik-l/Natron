@@ -44,7 +44,7 @@ struct Camera3DNodePrivate;
  * Shows a frustum wireframe in the 3D viewport.
  * All camera knobs are animatable for camera moves.
  *
- * Equivalent to Nuke's Camera node.
+ * Comparable to the camera nodes found in major compositing DCCs.
  */
 class Camera3DNode
     : public EffectInstance

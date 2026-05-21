@@ -42,6 +42,7 @@
 #include "../../KnobTypes.h"
 #include "../../Node.h"
 #include "../../NodeMetadata.h"
+#include "../../Format.h"
 #include "../../Project.h"
 #include "../Scene3D/Light3D.h"
 #include "../Scene3D/Material3D.h"
@@ -72,6 +73,7 @@ struct CyclesRenderPrivate
     // chain), so attaching a texture Read to a Sphere3D silently dictated the
     // Cycles render canvas — the 2K Earth daymap bug.)
     KnobIntWPtr outputWidth, outputHeight;
+    KnobButtonWPtr syncToProject; // copies project default format → width/height
 
     // Depth of Field (render-side params; F-Stop lives on Camera3D Lens tab)
     KnobBoolWPtr dofEnabled;
@@ -241,6 +243,13 @@ CyclesRender::initializeKnobs()
         k->setMinimum(1); k->setDisplayMinimum(240); k->setDisplayMaximum(4096);
         k->setHintToolTip(tr("Render output height in pixels. Independent of upstream input format."));
         page->addKnob(k); _imp->outputHeight = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Sync to Project"));
+        k->setName("syncToProject");
+        k->setHintToolTip(tr("Copy the current project default format's width and "
+                             "height into the Width/Height knobs above."));
+        page->addKnob(k); _imp->syncToProject = k;
     }
 
     // AOV Passes page
@@ -1072,6 +1081,25 @@ bool
 CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
                            ViewSpec /*view*/, double time, bool /*originatedFromMainThread*/)
 {
+    // --- Sync to Project — copy project default format → width/height ---
+    KnobButtonPtr syncBtn = _imp->syncToProject.lock();
+    if (syncBtn && k == syncBtn.get()) {
+        AppInstancePtr app = getApp();
+        if (app && app->getProject()) {
+            Format fmt;
+            app->getProject()->getProjectDefaultFormat(&fmt);
+            const int pw = fmt.width();
+            const int ph = fmt.height();
+            KnobIntPtr wk = _imp->outputWidth.lock();
+            KnobIntPtr hk = _imp->outputHeight.lock();
+            if (pw > 0 && ph > 0 && wk && hk) {
+                wk->setValue(pw);
+                hk->setValue(ph);
+            }
+        }
+        return true;
+    }
+
     // --- Focus Helper: Set Focus button ---
     if (_imp->setFocusBtn.lock().get() == k) {
         // Get camera

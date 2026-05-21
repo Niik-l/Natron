@@ -17,8 +17,8 @@
  * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef NATRON_ENGINE_SCANLINERENDER_H
-#define NATRON_ENGINE_SCANLINERENDER_H
+#ifndef NATRON_ENGINE_UVPROJECT_H
+#define NATRON_ENGINE_UVPROJECT_H
 
 // ***** BEGIN PYTHON BLOCK *****
 #include <Python.h>
@@ -26,28 +26,37 @@
 
 #include "../../../Global/Macros.h"
 
+#include <vector>
+
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 
 NATRON_NAMESPACE_ENTER
 
-struct ScanlineRenderPrivate;
+struct UVProjectPrivate;
 
 /**
- * @brief Render a 3D scene through a camera to produce a 2D output image.
+ * @brief Rewrite UVs on a 3D mesh via projection.
  *
- * Input 0 (bg):      Optional background 2D image (composited behind, sets output resolution)
- * Input 1 (obj/scn): 3D geometry (Sphere3D, Card3D, ReadGeo, or Scene/Group3D)
- * Input 2 (cam):     Camera (Camera3D or ReadAlembicCamera)
+ * Input 0 (geo): Upstream geometry (required).
+ * Input 1 (cam): Projection camera (used in Perspective mode).
+ * Input 2 (img): Optional projection plate; overrides upstream mesh's texture.
  *
- * Output: 2D rendered image.
+ * Modes:
+ *   - Perspective: project from `cam` through the mesh. With Generate Perspective ON,
+ *     UVProject emits 3-component (s, t, w) texture coords — ScanlineRender uses
+ *     glTexCoord4f for perspective-correct fragment-level divide (Mark Kilgard's
+ *     textbook projective-texturing trick).
+ *   - PlanarXY/YZ/ZX: world vert into projection-local frame, then U,V are two of
+ *     the local axes.
+ *   - Spherical: equirectangular u = atan2(z,x)/2π + 0.5, v = asin(y/r)/π + 0.5.
+ *   - Cylindrical: u = atan2(z,x)/2π + 0.5, v = (y + 1) / 2 (user scales V to fit).
  *
- * The geometry's img input provides the texture. The camera defines the viewpoint.
- *
- * Comparable to scanline-render nodes found in other compositing DCCs.
+ * Output: pass-through dummy image — UVProject is a UV rewriter, not a renderer.
+ * Its work is consumed by ScanlineRender via the rewriteUVs() public hook.
  */
-class ScanlineRender
+class UVProject
     : public EffectInstance
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
@@ -56,10 +65,20 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
 
-    static EffectInstance* BuildEffect(NodePtr n) { return new ScanlineRender(n); }
+    enum ProjectionMode {
+        eModeOff = 0,
+        eModePerspective,
+        eModePlanarXY,
+        eModePlanarYZ,
+        eModePlanarZX,
+        eModeSpherical,
+        eModeCylindrical
+    };
 
-    ScanlineRender(NodePtr node);
-    virtual ~ScanlineRender();
+    static EffectInstance* BuildEffect(NodePtr n) { return new UVProject(n); }
+
+    UVProject(NodePtr node);
+    virtual ~UVProject();
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
@@ -67,10 +86,10 @@ public:
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return PLUGINID_NATRON_SCANLINERENDER; }
+    { return PLUGINID_NATRON_UVPROJECT; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "ScanlineRender"; }
+    { return "UVProject"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
@@ -88,20 +107,44 @@ public:
     { return eRenderSafetyInstanceSafe; }
 
     virtual bool supportsTiles() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
+    // UVProject only rewrites mesh texture coords — it doesn't combine images.
+    // Its own output is a 1x1 dummy. Multi-resolution must be true so users
+    // can plug a Read of any size into the 'img' input.
     virtual bool supportsMultiResolution() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
+    // Convenience accessors used by ScanlineRender's extractGeometries.
+    EffectInstancePtr getGeoInput() const { return getInput(0); }
+    EffectInstancePtr getImgInput() const { return getInput(2); }
+
+    /**
+     * Rewrite UVs for the supplied vertex buffer (xyz interleaved) given the
+     * mesh's world matrix. Reads knobs at `time`, returns the rewrite via
+     * outUVs (2 floats per vertex) OR outSTW (3 floats per vertex). The
+     * `outComponents` arg tells the caller which buffer was filled:
+     *
+     *   0 = mode is Off; both output buffers are cleared; caller keeps the
+     *       upstream geo's existing UVs.
+     *   2 = standard (u, v); outUVs is populated.
+     *   3 = projective (s, t, w); outSTW is populated.
+     */
+    void rewriteUVs(const std::vector<float>& verts,
+                    const float worldMatrix[16],
+                    double time,
+                    std::vector<float>& outUVs,
+                    std::vector<float>& outSTW,
+                    int& outComponents) const;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
-    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
-    std::unique_ptr<ScanlineRenderPrivate> _imp;
+    std::unique_ptr<UVProjectPrivate> _imp;
 };
 
 NATRON_NAMESPACE_EXIT
 
-#endif // NATRON_ENGINE_SCANLINERENDER_H
+#endif // NATRON_ENGINE_UVPROJECT_H

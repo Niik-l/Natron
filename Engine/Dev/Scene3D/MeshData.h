@@ -43,13 +43,29 @@ struct MeshData
     std::vector<int> faceIndices;    // flattened polygon-vertex indices
     std::vector<int> faceCounts;     // per-face vertex count (for n-gon support)
     std::vector<int> edgeIndices;    // line index pairs for wireframe
-    std::vector<float> uvs;          // u,v per face-vertex (indexed by faceIndices order)
-    bool hasUVs;
+
+    // Texture coordinates. Two paths depending on what produced the mesh:
+    //
+    //   texCoordComponents == 2 (default): standard (u, v) pairs in `uvs`. All
+    //     existing producers (ReadGeo, ReadAlembicArchive, primitives) use this
+    //     path. ScanlineRender emits glTexCoord2f per vertex.
+    //
+    //   texCoordComponents == 3: projective (s, t, w) triples in `texCoords`.
+    //     Only UVProject in Perspective mode with Generate Perspective ON writes
+    //     this. `uvs` is unused; ScanlineRender emits glTexCoord4f(s, t, 0, w)
+    //     so GL does perspective-correct interpolation + fragment-level divide.
+    //
+    //   texCoordComponents == 0: no texture coords (hasUVs == false).
+    std::vector<float> uvs;          // u,v per face-vertex (texCoordComponents == 2)
+    std::vector<float> texCoords;    // s,t,w per face-vertex (texCoordComponents == 3)
+    int texCoordComponents;          // 0 / 2 / 3
+    bool hasUVs;                     // true when texCoordComponents > 0
+
     float transform[16];             // 4x4 column-major transform
     std::size_t numVertices;
     std::size_t numFaces;
 
-    MeshData() : hasUVs(false), numVertices(0), numFaces(0)
+    MeshData() : texCoordComponents(0), hasUVs(false), numVertices(0), numFaces(0)
     {
         for (int i = 0; i < 16; ++i) transform[i] = (i % 5 == 0) ? 1.0f : 0.0f; // identity
     }
