@@ -22,8 +22,10 @@
 
 #include "Blast.h"
 
+#include <algorithm>
 #include <cmath>
 #include <sstream>
+#include <unordered_set>
 
 #include "Engine/AppManager.h"
 #include "Engine/Image.h"
@@ -32,6 +34,7 @@
 #include "Engine/TimeLine.h"
 #include "Engine/AppInstance.h"
 #include "DeepToPoints.h"
+#include "PointCloudProvider.h"
 #include "../Scene3D/Cube3D.h"
 #include "../Scene3D/RotationConventions.h"
 
@@ -48,6 +51,11 @@ struct BlastPrivate
 
     // Invert: keep matching instead of deleting matching
     KnobBoolWPtr invert;
+
+    // Selection mode — comma-separated indices into the source cloud. Hidden;
+    // populated by the 3D viewport via the right-click context menu
+    // (Blast: Add / Remove / Set / Clear Selected).
+    KnobStringWPtr selectedIndices;
 
     // Info
     KnobStringWPtr info;
@@ -252,6 +260,20 @@ Blast::initializeKnobs()
         page->addKnob(k); _imp->invert = k;
     }
 
+    // Selected indices (hidden; populated by the 3D viewport via
+    // setSelectedIndices). Comma-separated integer indices into the upstream
+    // source cloud. Persists via the project file.
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Selected Indices"));
+        k->setName("selectedIndices");
+        k->setDefaultValue(std::string());
+        k->setHintToolTip(tr("Internal: comma-separated indices selected in the 3D viewport "
+                              "when Mode is Selection. Normally driven by the viewport; "
+                              "users can also type indices here directly."));
+        k->setSecret(true);
+        page->addKnob(k); _imp->selectedIndices = k;
+    }
+
     // Info
     {
         KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Info"));
@@ -265,9 +287,99 @@ Blast::initializeKnobs()
 bool
 Blast::knobChanged(KnobI* /*k*/, ValueChangedReasonEnum /*reason*/, ViewSpec /*view*/, double /*time*/, bool /*originatedFromMainThread*/)
 {
-    // Invalidate cached output — will recompute on next getPointCloud() call
+    // Invalidate cached output — will recompute on next getPointCloud() call.
     _lastOutput.reset();
     return true;
+}
+
+// Internal: serialize a sorted unique set of indices to "1,2,3,..."
+// (sorted form keeps the knob value deterministic across set arithmetic).
+static std::string
+serializeIndices(const std::vector<int>& indices)
+{
+    if (indices.empty()) return std::string();
+    // Sort + dedupe for stable serialization
+    std::vector<int> sorted(indices);
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < sorted.size(); ++i) {
+        if (i > 0) oss << ',';
+        oss << sorted[i];
+    }
+    return oss.str();
+}
+
+void
+Blast::setSelectedIndices(const std::vector<int>& indices)
+{
+    KnobStringPtr k = _imp->selectedIndices.lock();
+    if (!k) return;
+    const std::string s = serializeIndices(indices);
+    // Skip-if-unchanged: avoids firing knobChanged → recompute when the
+    // viewport pushes the same selection twice in a row.
+    if (k->getValue() == s) return;
+    k->setValue(s);
+}
+
+void
+Blast::addToSelection(const std::vector<int>& indices)
+{
+    if (indices.empty()) return;
+    // Union with existing
+    std::vector<int> current = getSelectedIndices();
+    current.insert(current.end(), indices.begin(), indices.end());
+    setSelectedIndices(current); // serialize handles sort+dedupe
+}
+
+void
+Blast::removeFromSelection(const std::vector<int>& indices)
+{
+    if (indices.empty()) return;
+    std::vector<int> current = getSelectedIndices();
+    if (current.empty()) return;
+    std::unordered_set<int> remove(indices.begin(), indices.end());
+    std::vector<int> kept;
+    kept.reserve(current.size());
+    for (int idx : current) {
+        if (remove.count(idx) == 0) kept.push_back(idx);
+    }
+    setSelectedIndices(kept);
+}
+
+void
+Blast::clearSelection()
+{
+    setSelectedIndices(std::vector<int>());
+}
+
+std::vector<int>
+Blast::getSelectedIndices() const
+{
+    std::vector<int> out;
+    KnobStringPtr k = _imp->selectedIndices.lock();
+    if (!k) return out;
+    const std::string raw = k->getValue();
+    if (raw.empty()) return out;
+
+    std::size_t pos = 0;
+    while (pos <= raw.size()) {
+        std::size_t comma = raw.find(',', pos);
+        if (comma == std::string::npos) comma = raw.size();
+        std::string token = raw.substr(pos, comma - pos);
+        // Trim whitespace
+        while (!token.empty() && (token.back() == ' ' || token.back() == '\t' || token.back() == '\r')) token.pop_back();
+        std::size_t lead = 0;
+        while (lead < token.size() && (token[lead] == ' ' || token[lead] == '\t')) ++lead;
+        if (lead) token.erase(0, lead);
+        if (!token.empty()) {
+            try { out.push_back(std::stoi(token)); }
+            catch (...) { /* skip malformed token */ }
+        }
+        if (comma == raw.size()) break;
+        pos = comma + 1;
+    }
+    return out;
 }
 
 bool
@@ -348,12 +460,11 @@ Blast::computeFilteredCloud(double time)
     EffectInstancePtr input = getInput(0);
     if (!input) return;
 
-    // Find upstream point cloud (DeepToPoints or another Blast)
-    PointCloudDataPtr srcCloud;
-    DeepToPoints* d2p = dynamic_cast<DeepToPoints*>(input.get());
-    Blast* upBlast = dynamic_cast<Blast*>(input.get());
-    if (d2p) srcCloud = d2p->getPointCloud();
-    else if (upBlast) srcCloud = upBlast->getPointCloud();
+    // Fetch upstream point cloud via the generic provider interface.
+    // Works for any node implementing PointCloudProvider (DeepToPoints, an
+    // upstream Blast, future Scatter, ParticleInstance-as-cloud, etc.).
+    PointCloudProvider* provider = dynamic_cast<PointCloudProvider*>(input.get());
+    PointCloudDataPtr srcCloud = provider ? provider->getPointCloud() : PointCloudDataPtr();
     if (!srcCloud || srcCloud->numPoints() == 0) return;
 
     int mode = _imp->mode.lock()->getValue();
@@ -409,6 +520,54 @@ Blast::computeFilteredCloud(double time)
         oss << "Input: " << srcCount << " points -> Output: " << keptCount
             << " points (" << (srcCount - keptCount) << " deleted)";
         _imp->info.lock()->setValue(oss.str());
+    } else if (mode == 1) {
+        // Selection mode — build a local set per filter pass. Avoids the
+        // thread-safety pitfalls of a shared mutable cache; the parse cost
+        // (proportional to string length) is dwarfed by the per-point loop.
+        const std::vector<int> indices = getSelectedIndices();
+        const std::unordered_set<int> selected(indices.begin(), indices.end());
+
+        float outMin[3] = {1e30f, 1e30f, 1e30f};
+        float outMax[3] = {-1e30f, -1e30f, -1e30f};
+        int keptCount = 0;
+
+        for (std::size_t i = 0; i < srcCount; ++i) {
+            const bool isSelected = selected.count((int)i) > 0;
+            // invert=false: delete selected (keep unselected)
+            // invert=true:  keep selected (delete unselected)
+            const bool keep = invert ? isSelected : !isSelected;
+            if (keep) {
+                float px = srcData[i * stride + 0];
+                float py = srcData[i * stride + 1];
+                float pz = srcData[i * stride + 2];
+                outCloud->addPoint(px, py, pz,
+                                   srcData[i * stride + 3],
+                                   srcData[i * stride + 4],
+                                   srcData[i * stride + 5]);
+                if (px < outMin[0]) outMin[0] = px;
+                if (py < outMin[1]) outMin[1] = py;
+                if (pz < outMin[2]) outMin[2] = pz;
+                if (px > outMax[0]) outMax[0] = px;
+                if (py > outMax[1]) outMax[1] = py;
+                if (pz > outMax[2]) outMax[2] = pz;
+                ++keptCount;
+            }
+        }
+
+        if (keptCount > 0) {
+            outCloud->setBounds(outMin[0], outMin[1], outMin[2],
+                                outMax[0], outMax[1], outMax[2]);
+        }
+
+        std::ostringstream oss;
+        oss << "Selection: " << selected.size() << " selected -> Output: " << keptCount
+            << " points (" << (srcCount - keptCount) << " deleted)";
+        _imp->info.lock()->setValue(oss.str());
+    } else {
+        // Mode 2 (Expression) not yet implemented — pass through.
+        _imp->info.lock()->setValue("Expression mode not yet implemented — passing through.");
+        _lastOutput = srcCloud;
+        return;
     }
 
     _lastOutput = outCloud;
@@ -417,18 +576,18 @@ Blast::computeFilteredCloud(double time)
 StatusEnum
 Blast::render(const RenderActionArgs& args)
 {
-    // Get upstream point cloud
+    // Get upstream point cloud via the generic provider interface.
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
 
-    // Find the DeepToPoints upstream
-    DeepToPoints* d2p = dynamic_cast<DeepToPoints*>(input.get());
-    if (!d2p) {
-        _imp->info.lock()->setValue("Error: input must be a DeepToPoints node.");
+    PointCloudProvider* provider = dynamic_cast<PointCloudProvider*>(input.get());
+    if (!provider) {
+        _imp->info.lock()->setValue("Error: input must be a point cloud node "
+                                    "(DeepToPoints, Blast, or other PointCloudProvider).");
         return eStatusFailed;
     }
 
-    PointCloudDataPtr srcCloud = d2p->getPointCloud();
+    PointCloudDataPtr srcCloud = provider->getPointCloud();
     if (!srcCloud || srcCloud->numPoints() == 0) {
         _imp->info.lock()->setValue("No input points.");
         _lastOutput.reset();
@@ -491,10 +650,43 @@ Blast::render(const RenderActionArgs& args)
             outCloud->setBounds(outMin[0], outMin[1], outMin[2],
                                 outMax[0], outMax[1], outMax[2]);
         }
+    } else if (mode == 1) {
+        // Selection mode — build a local set per filter pass (thread-safe).
+        const std::vector<int> indices = getSelectedIndices();
+        const std::unordered_set<int> selected(indices.begin(), indices.end());
+
+        float outMin[3] = {1e30f, 1e30f, 1e30f};
+        float outMax[3] = {-1e30f, -1e30f, -1e30f};
+
+        for (std::size_t i = 0; i < srcCount; ++i) {
+            const bool isSelected = selected.count((int)i) > 0;
+            const bool keep = invert ? isSelected : !isSelected;
+            if (keep) {
+                float px = srcData[i * stride + 0];
+                float py = srcData[i * stride + 1];
+                float pz = srcData[i * stride + 2];
+                float r  = srcData[i * stride + 3];
+                float g  = srcData[i * stride + 4];
+                float b  = srcData[i * stride + 5];
+                outCloud->addPoint(px, py, pz, r, g, b);
+                ++keptCount;
+                if (px < outMin[0]) outMin[0] = px;
+                if (py < outMin[1]) outMin[1] = py;
+                if (pz < outMin[2]) outMin[2] = pz;
+                if (px > outMax[0]) outMax[0] = px;
+                if (py > outMax[1]) outMax[1] = py;
+                if (pz > outMax[2]) outMax[2] = pz;
+            }
+        }
+
+        if (keptCount > 0) {
+            outCloud->setBounds(outMin[0], outMin[1], outMin[2],
+                                outMax[0], outMax[1], outMax[2]);
+        }
     } else {
-        // Selection / Expression modes — pass through for now
+        // Mode 2 (Expression) not yet implemented — pass through.
         _lastOutput = srcCloud;
-        _imp->info.lock()->setValue("Mode not yet implemented — passing through.");
+        _imp->info.lock()->setValue("Expression mode not yet implemented — passing through.");
         return eStatusOK;
     }
 

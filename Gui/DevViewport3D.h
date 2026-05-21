@@ -42,6 +42,7 @@ CLANG_DIAG_ON(uninitialized)
 
 NATRON_NAMESPACE_ENTER
 
+class Blast; // forward — full include not needed for the pointer return type
 struct DevViewport3DPrivate;
 
 /**
@@ -94,6 +95,17 @@ public:
     void toggleTransformSpace();
     bool isLocalSpace() const;
 
+    /** Toggle the world-space grid in the viewport. Wired from Viewport3DTab's
+     *  Grid button. */
+    void setShowGrid(bool show);
+
+    /** Look-through-camera mode. Pass null/empty NodePtr to revert to the
+     *  free-orbit camera. Wired from Viewport3DTab's camera dropdown. */
+    void setLookThroughCamera(const NodePtr& cameraNode);
+
+    /** Current look-through camera node (may be null = orbit mode). */
+    NodePtr getLookThroughCamera() const;
+
 private:
 
     virtual void initializeGL() OVERRIDE FINAL;
@@ -111,6 +123,17 @@ private:
     bool pickPointAtPosition(int screenX, int screenY);
     void boxSelectPoints();
     void selectObjectAtPosition(int screenX, int screenY);
+
+    /** Find the active Blast node (set during the render scan when scanning
+     *  for the point cloud to display). Returns nullptr if no Blast is in the
+     *  scene. */
+    Blast* getActiveBlast() const;
+
+    /** Show the Blast context menu at the given global position. Called from
+     *  mouseReleaseEvent on right-button release ONLY when the click had no
+     *  drag (so right-drag for navigation doesn't trigger the menu).
+     *  No-op when there's no active Blast in the scene. */
+    void showBlastContextMenu(const QPoint& globalPos);
 
     // Per-node draw methods (called from paintGL via SceneGraph traversal)
     void drawMeshNode(const SceneNode& sn) const;

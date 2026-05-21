@@ -29,6 +29,7 @@
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 #include "PointCloudData.h"
+#include "PointCloudProvider.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -45,6 +46,7 @@ struct BlastPrivate;
  */
 class Blast
     : public EffectInstance
+    , public PointCloudProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -94,13 +96,36 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
-    // Point cloud access for downstream / viewport
-    PointCloudDataPtr getPointCloud() const;
+    // Point cloud access for downstream / viewport — implements PointCloudProvider.
+    virtual PointCloudDataPtr getPointCloud() const OVERRIDE;
     void computeFilteredCloud(double time);
 
     // Get current blast bounds as an axis-aligned bbox (encloses the rotated
     // OBB when a Cube3D is used as bounds input). Useful for ROI / culling.
     bool getBlastBounds(double time, float outMin[3], float outMax[3]) const;
+
+    // --- Selection mode (Mode 1) API ---
+    // Selected source-cloud indices are stored as a comma-separated string
+    // on a hidden knob, so they persist across project save/load and survive
+    // undo/redo.
+
+    /** Set the selection (replace whatever was there). Used by the viewport
+     *  "Blast: Set as Selection" context-menu action. */
+    void setSelectedIndices(const std::vector<int>& indices);
+
+    /** Add indices to the existing selection (set union). Used by "Blast: Add
+     *  Selected". */
+    void addToSelection(const std::vector<int>& indices);
+
+    /** Remove indices from the existing selection (set difference). Used by
+     *  "Blast: Remove Selected". */
+    void removeFromSelection(const std::vector<int>& indices);
+
+    /** Empty the selection. Used by "Blast: Clear Selection". */
+    void clearSelection();
+
+    /** Get the current selection (parsed from the knob). */
+    std::vector<int> getSelectedIndices() const;
 
     // Get current blast region as an oriented bounding box.
     //   outCenter[3]    — world-space center

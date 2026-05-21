@@ -30,6 +30,9 @@
 #include <QKeyEvent>
 #include <QFrame>
 #include <QSpinBox>
+#include <QMenu>
+#include <QAction>
+#include <QActionGroup>
 
 #include "Gui/Button.h"
 #include "Gui/GuiDefines.h"
@@ -42,6 +45,7 @@
 #include "Engine/TimeLine.h"
 #include "Engine/Project.h"
 #include "Engine/Node.h"
+#include "Engine/Dev/Scene3D/CameraProvider.h"
 
 #ifdef NATRON_CYCLES
 #include "Engine/Dev/Cycles/CyclesRenderer.h"
@@ -147,6 +151,20 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
 
     toolbarLayout->addStretch();
 
+    // Camera dropdown — "Look Through" any CameraProvider node in the scene.
+    // Menu rebuilds on aboutToShow so it always reflects current node graph.
+    {
+        _cameraDropdown = new QToolButton(toolbar);
+        _cameraDropdown->setText(QString::fromUtf8("View: Default"));
+        _cameraDropdown->setToolTip(QString::fromUtf8("Look through a Camera3D / ReadAlembicCamera node"));
+        _cameraDropdown->setFixedHeight(22);
+        _cameraDropdown->setPopupMode(QToolButton::InstantPopup);
+        QMenu* camMenu = new QMenu(_cameraDropdown);
+        _cameraDropdown->setMenu(camMenu);
+        connect(camMenu, SIGNAL(aboutToShow()), this, SLOT(onCameraMenuAboutToShow()));
+        toolbarLayout->addWidget(_cameraDropdown);
+    }
+
 #ifdef NATRON_CYCLES
     // Cycles render button
     QToolButton* renderBtn = new QToolButton(toolbar);
@@ -249,7 +267,85 @@ void
 Viewport3DTab::onToggleGrid()
 {
     _gridVisible = _gridBtn->isChecked();
-    _viewport->update();
+    _viewport->setShowGrid(_gridVisible);
+}
+
+void
+Viewport3DTab::onCameraMenuAboutToShow()
+{
+    QMenu* menu = _cameraDropdown->menu();
+    if (!menu) return;
+    menu->clear();
+
+    NodePtr current = _viewport->getLookThroughCamera();
+
+    // "Default" — free-orbit (no look-through camera).
+    QAction* defaultAct = menu->addAction(QString::fromUtf8("Default (Free Orbit)"));
+    defaultAct->setCheckable(true);
+    defaultAct->setChecked(!current);
+    connect(defaultAct, SIGNAL(triggered()), this, SLOT(onCameraSelected()));
+    defaultAct->setProperty("cameraNodeName", QString());
+
+    menu->addSeparator();
+
+    // Enumerate every CameraProvider node in the project right now.
+    GuiAppInstancePtr app = getGui() ? getGui()->getApp() : GuiAppInstancePtr();
+    if (app) {
+        ProjectPtr proj = app->getProject();
+        if (proj) {
+            NodesList allNodes;
+            proj->getNodes_recursive(allNodes, true);
+            int found = 0;
+            for (NodesList::const_iterator it = allNodes.begin(); it != allNodes.end(); ++it) {
+                if (!(*it)->isActivated()) continue;
+                EffectInstancePtr eff = (*it)->getEffectInstance();
+                if (!eff) continue;
+                if (!dynamic_cast<CameraProvider*>(eff.get())) continue;
+                const std::string scriptName = (*it)->getScriptName();
+                QAction* a = menu->addAction(QString::fromUtf8(scriptName.c_str()));
+                a->setCheckable(true);
+                a->setChecked(current && current->getScriptName() == scriptName);
+                a->setProperty("cameraNodeName", QString::fromUtf8(scriptName.c_str()));
+                connect(a, SIGNAL(triggered()), this, SLOT(onCameraSelected()));
+                ++found;
+            }
+            if (found == 0) {
+                QAction* none = menu->addAction(QString::fromUtf8("(no cameras in scene)"));
+                none->setEnabled(false);
+            }
+        }
+    }
+}
+
+void
+Viewport3DTab::onCameraSelected()
+{
+    QAction* a = qobject_cast<QAction*>(sender());
+    if (!a) return;
+    const QString name = a->property("cameraNodeName").toString();
+    if (name.isEmpty()) {
+        // Default — free orbit
+        _viewport->setLookThroughCamera(NodePtr());
+        _cameraDropdown->setText(QString::fromUtf8("View: Default"));
+        return;
+    }
+
+    // Find the camera node by script name
+    GuiAppInstancePtr app = getGui() ? getGui()->getApp() : GuiAppInstancePtr();
+    if (!app) return;
+    ProjectPtr proj = app->getProject();
+    if (!proj) return;
+    NodesList allNodes;
+    proj->getNodes_recursive(allNodes, true);
+    const std::string nameStd = name.toStdString();
+    for (NodesList::const_iterator it = allNodes.begin(); it != allNodes.end(); ++it) {
+        if (!(*it)->isActivated()) continue;
+        if ((*it)->getScriptName() == nameStd) {
+            _viewport->setLookThroughCamera(*it);
+            _cameraDropdown->setText(QString::fromUtf8("View: ") + name);
+            return;
+        }
+    }
 }
 
 void

@@ -83,6 +83,12 @@ public Q_SLOTS:
     void onFrameSpinChanged(int value);
     void onToggleTransformSpace();
 
+    /** Build the camera dropdown menu by enumerating CameraProvider nodes in
+     *  the project right now. Called on aboutToShow so we always see fresh
+     *  state (without subscribing to node-graph changes). */
+    void onCameraMenuAboutToShow();
+    void onCameraSelected();
+
 private:
 
     virtual void enterEvent(QtCompat::QEnterEvent* e) OVERRIDE FINAL;
@@ -100,6 +106,7 @@ private:
     QToolButton* _scaleBtn;
     QToolButton* _gridBtn;
     QToolButton* _spaceBtn;
+    QToolButton* _cameraDropdown;
     bool _gridVisible;
 };
 

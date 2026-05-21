@@ -36,6 +36,9 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QTimer>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QMenu>
+#include <QAction>
+#include <QContextMenuEvent>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 
@@ -55,6 +58,9 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/Cylinder3D.h"
 #include "Engine/Dev/Scene3D/ReadAlembicCamera.h"
 #include "Engine/Dev/Scene3D/ReadAlembicTransform.h"
+#include "Engine/Dev/Scene3D/CameraMath.h"
+#include "Engine/Dev/Scene3D/RotationConventions.h"
+#include "Engine/Dev/Scene3D/Camera3DNode.h"
 #include "Engine/Dev/Scene3D/Sphere3D.h"
 #include "Engine/Dev/Scene3D/Group3D.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
@@ -356,6 +362,36 @@ struct DevViewport3DPrivate
     float selectedPointCol[3];       // cached color of selected point
     std::vector<int> selectedPointIndices; // multi-selection
 
+    // Active Blast node (set during render loop when we scan for the point
+    // cloud to display). The right-click context menu uses this to target
+    // its Add/Remove/Set/Clear Selection actions.
+    NodeWPtr activeBlastNode;
+
+    // Toggle from the Grid button in Viewport3DTab. Default visible.
+    bool showGrid;
+
+    // Right-click context menu — track the press position so we only show the
+    // menu when the user releases without dragging (otherwise right-drag for
+    // zoom/navigation would constantly trigger the menu). Threshold checked
+    // in mouseReleaseEvent.
+    bool rightButtonDown;
+    int rightPressX, rightPressY;
+
+    // "Look Through" — when set, the viewport view+projection matrices come
+    // from this Camera3D / ReadAlembicCamera instead of the orbit camera.
+    // Same math helpers as ScanlineRender (CameraMath::composeProjectionMatrix
+    // + RotationConventions::composeInverse), so wireframes match the actual
+    // render exactly. Null = orbit/free-fly mode.
+    NodeWPtr lookThroughCam;
+
+    // While the user is dragging in look-through mode AND the camera is a
+    // Camera3D (editable, not Alembic), interactions write directly to the
+    // camera's knobs (orbit / pan / dolly). Set in mousePressEvent, cleared
+    // in mouseReleaseEvent.
+    enum LookThroughEditMode { LT_NONE, LT_ORBIT, LT_PAN, LT_DOLLY };
+    LookThroughEditMode lookThroughEditMode;
+    float lookThroughPivot[3]; // world-space orbit pivot (captured at press)
+
     // Box select
     bool boxSelecting;
     int boxStartX, boxStartY;
@@ -400,6 +436,11 @@ struct DevViewport3DPrivate
         , boxSelecting(false)
         , boxStartX(0), boxStartY(0)
         , boxEndX(0), boxEndY(0)
+        , showGrid(true)
+        , rightButtonDown(false)
+        , rightPressX(0), rightPressY(0)
+        , lookThroughEditMode(LT_NONE)
+        , lookThroughPivot{0, 0, 0}
         , lastMouseX(0)
         , lastMouseY(0)
         , orbiting(false)
@@ -436,6 +477,10 @@ DevViewport3D::DevViewport3D(Gui* gui,
     Q_UNUSED(shareWidget);
     setMouseTracking(true);
     setFocusPolicy(Qt::ClickFocus);
+    // Don't let Qt auto-fire contextMenuEvent on right-click. We trigger the
+    // Blast menu manually from mouseReleaseEvent only when the click had no
+    // drag (so right-drag for navigation doesn't accidentally open the menu).
+    setContextMenuPolicy(Qt::PreventContextMenu);
 }
 
 DevViewport3D::~DevViewport3D()
@@ -613,22 +658,270 @@ static void readTRSFromNode(NATRON_NAMESPACE::EffectInstancePtr effect,
     if (kSZ) scale[2] = (float)dynamic_cast<KnobDouble*>(kSZ.get())->getValue();
 }
 
+// ==================== Look-through camera edit helpers ====================
+// When the viewport is looking through a Camera3D (NOT a ReadAlembicCamera —
+// .abc cameras get overwritten every frame so editing them is pointless), the
+// orbit / pan / dolly drag interactions write directly to that camera's
+// translateX/Y/Z and rotateX/Y/Z knobs. ReadAlembicCamera drags are ignored.
+
+// Returns the look-through camera as a Camera3DNode (writable), or nullptr.
+// All these helpers live in the file's existing NATRON_NAMESPACE block.
+static Camera3DNode*
+getEditableCamera3D(const NodeWPtr& weakNode)
+{
+    NodePtr node = weakNode.lock();
+    if (!node) return nullptr;
+    EffectInstancePtr eff = node->getEffectInstance();
+    if (!eff) return nullptr;
+    return dynamic_cast<Camera3DNode*>(eff.get());
+}
+
+static void
+camPosFromKnobs(Camera3DNode* cam, double time, float pos[3])
+{
+    double tx = 0, ty = 0, tz = 0;
+    KnobIPtr k;
+    k = cam->getKnobByName("translateX"); if (k) tx = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+    k = cam->getKnobByName("translateY"); if (k) ty = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+    k = cam->getKnobByName("translateZ"); if (k) tz = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+    pos[0] = (float)tx; pos[1] = (float)ty; pos[2] = (float)tz;
+}
+
+static void
+camRotFromKnobs(Camera3DNode* cam, double time, double m[3][3])
+{
+    double rx = 0, ry = 0, rz = 0;
+    KnobIPtr k;
+    k = cam->getKnobByName("rotateX"); if (k) rx = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+    k = cam->getKnobByName("rotateY"); if (k) ry = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+    k = cam->getKnobByName("rotateZ"); if (k) rz = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+    RotationConventions::compose(rx, ry, rz, m);
+}
+
+static void
+writeCamPos(Camera3DNode* cam, double tx, double ty, double tz)
+{
+    KnobIPtr k;
+    k = cam->getKnobByName("translateX"); if (k) dynamic_cast<KnobDouble*>(k.get())->setValue(tx);
+    k = cam->getKnobByName("translateY"); if (k) dynamic_cast<KnobDouble*>(k.get())->setValue(ty);
+    k = cam->getKnobByName("translateZ"); if (k) dynamic_cast<KnobDouble*>(k.get())->setValue(tz);
+}
+
+static void
+writeCamRot(Camera3DNode* cam, double rx, double ry, double rz)
+{
+    KnobIPtr k;
+    k = cam->getKnobByName("rotateX"); if (k) dynamic_cast<KnobDouble*>(k.get())->setValue(rx);
+    k = cam->getKnobByName("rotateY"); if (k) dynamic_cast<KnobDouble*>(k.get())->setValue(ry);
+    k = cam->getKnobByName("rotateZ"); if (k) dynamic_cast<KnobDouble*>(k.get())->setValue(rz);
+}
+
+// Compute extrinsic-XYZ Euler angles (degrees) for a camera at `pos` looking
+// at `pivot`. World up is +Y. Camera's local -Z points at the pivot.
+static void
+eulerFromLookAt(const float pos[3], const float pivot[3],
+                double& rxDeg, double& ryDeg, double& rzDeg)
+{
+    double fwd[3] = {
+        (double)pivot[0] - (double)pos[0],
+        (double)pivot[1] - (double)pos[1],
+        (double)pivot[2] - (double)pos[2]
+    };
+    double len = std::sqrt(fwd[0]*fwd[0] + fwd[1]*fwd[1] + fwd[2]*fwd[2]);
+    if (len < 1e-6) { rxDeg = ryDeg = rzDeg = 0; return; }
+    fwd[0] /= len; fwd[1] /= len; fwd[2] /= len;
+
+    double worldUp[3] = { 0.0, 1.0, 0.0 };
+    // right = normalize(cross(fwd, worldUp))
+    double right[3] = {
+        fwd[1]*worldUp[2] - fwd[2]*worldUp[1],
+        fwd[2]*worldUp[0] - fwd[0]*worldUp[2],
+        fwd[0]*worldUp[1] - fwd[1]*worldUp[0]
+    };
+    double rlen = std::sqrt(right[0]*right[0] + right[1]*right[1] + right[2]*right[2]);
+    if (rlen < 1e-6) {
+        // Camera looking straight up/down — pick X as right
+        right[0] = 1; right[1] = 0; right[2] = 0;
+    } else {
+        right[0] /= rlen; right[1] /= rlen; right[2] /= rlen;
+    }
+    // up = cross(right, fwd) — orthogonal to both
+    double up[3] = {
+        right[1]*fwd[2] - right[2]*fwd[1],
+        right[2]*fwd[0] - right[0]*fwd[2],
+        right[0]*fwd[1] - right[1]*fwd[0]
+    };
+    // R columns (camera-to-world, column-vector): right, up, -fwd (OpenGL -Z look)
+    double R[3][3];
+    R[0][0] = right[0]; R[0][1] = up[0]; R[0][2] = -fwd[0];
+    R[1][0] = right[1]; R[1][1] = up[1]; R[1][2] = -fwd[1];
+    R[2][0] = right[2]; R[2][1] = up[2]; R[2][2] = -fwd[2];
+    RotationConventions::decompose(R, rxDeg, ryDeg, rzDeg);
+}
+
+// Orbit camera around `pivot` by mouse delta (dx, dy) pixels.
+static void
+applyOrbitToCamera3D(Camera3DNode* cam, double time, const float pivot[3], int dx, int dy)
+{
+    float pos[3];
+    camPosFromKnobs(cam, time, pos);
+
+    double v[3] = { pos[0] - pivot[0], pos[1] - pivot[1], pos[2] - pivot[2] };
+
+    // Yaw around world +Y (horizontal mouse)
+    const double SENS = 0.005; // radians/pixel, matches orbit-mode feel
+    double yaw = -dx * SENS;
+    double cy_ = std::cos(yaw), sy_ = std::sin(yaw);
+    double v_y[3] = {
+        cy_*v[0] + sy_*v[2],
+        v[1],
+        -sy_*v[0] + cy_*v[2]
+    };
+
+    // Pitch around current right vector (vertical mouse)
+    double R[3][3];
+    camRotFromKnobs(cam, time, R);
+    double right[3] = { R[0][0], R[1][0], R[2][0] };
+
+    double pitch = -dy * SENS;
+    double cp = std::cos(pitch), sp = std::sin(pitch);
+    // Rodrigues: v' = v*cos + (right x v)*sin + right*(right.v)*(1-cos)
+    double rxv[3] = {
+        right[1]*v_y[2] - right[2]*v_y[1],
+        right[2]*v_y[0] - right[0]*v_y[2],
+        right[0]*v_y[1] - right[1]*v_y[0]
+    };
+    double rdotv = right[0]*v_y[0] + right[1]*v_y[1] + right[2]*v_y[2];
+    double v_new[3] = {
+        v_y[0]*cp + rxv[0]*sp + right[0]*rdotv*(1-cp),
+        v_y[1]*cp + rxv[1]*sp + right[1]*rdotv*(1-cp),
+        v_y[2]*cp + rxv[2]*sp + right[2]*rdotv*(1-cp)
+    };
+
+    float newPos[3] = {
+        (float)(pivot[0] + v_new[0]),
+        (float)(pivot[1] + v_new[1]),
+        (float)(pivot[2] + v_new[2])
+    };
+    writeCamPos(cam, newPos[0], newPos[1], newPos[2]);
+
+    double newRX, newRY, newRZ;
+    eulerFromLookAt(newPos, pivot, newRX, newRY, newRZ);
+    writeCamRot(cam, newRX, newRY, newRZ);
+}
+
+// Pan: translate camera in its local right/up plane. Speed scales with the
+// distance to pivot so drag feels consistent at any zoom.
+static void
+applyPanToCamera3D(Camera3DNode* cam, double time, const float pivot[3], int dx, int dy)
+{
+    float pos[3];
+    camPosFromKnobs(cam, time, pos);
+    double R[3][3];
+    camRotFromKnobs(cam, time, R);
+
+    double dpx = pos[0] - pivot[0], dpy = pos[1] - pivot[1], dpz = pos[2] - pivot[2];
+    double dist = std::sqrt(dpx*dpx + dpy*dpy + dpz*dpz);
+    const double SPEED = std::max(0.05, dist) * 0.002;
+
+    // Drag right (dx>0) → camera moves LEFT (scene appears to move right under camera)
+    // Drag down (dy>0) → camera moves UP (scene appears to move down)
+    // Convention matches orbit-mode middle-drag pan.
+    double newTx = (double)pos[0] - dx * SPEED * R[0][0] + dy * SPEED * R[0][1];
+    double newTy = (double)pos[1] - dx * SPEED * R[1][0] + dy * SPEED * R[1][1];
+    double newTz = (double)pos[2] - dx * SPEED * R[2][0] + dy * SPEED * R[2][1];
+    writeCamPos(cam, newTx, newTy, newTz);
+}
+
+// Dolly: translate camera along its local view direction (-Z in camera frame).
+static void
+applyDollyToCamera3D(Camera3DNode* cam, double time, const float pivot[3], int dx, int dy)
+{
+    float pos[3];
+    camPosFromKnobs(cam, time, pos);
+    double R[3][3];
+    camRotFromKnobs(cam, time, R);
+    // View direction in world = -(col 2)
+    double viewDir[3] = { -R[0][2], -R[1][2], -R[2][2] };
+
+    double dpx = pos[0] - pivot[0], dpy = pos[1] - pivot[1], dpz = pos[2] - pivot[2];
+    double dist = std::sqrt(dpx*dpx + dpy*dpy + dpz*dpz);
+    const double SPEED = std::max(0.05, dist) * 0.005;
+
+    // Match orbit-mode: drag right or DOWN = zoom IN (forward), drag left or
+    // UP = zoom OUT (backward). Note Qt's y axis increases downward, so dy>0
+    // = mouse moved down on screen.
+    double delta = (dx + dy) * SPEED;
+    double newTx = (double)pos[0] + delta * viewDir[0];
+    double newTy = (double)pos[1] + delta * viewDir[1];
+    double newTz = (double)pos[2] + delta * viewDir[2];
+    writeCamPos(cam, newTx, newTy, newTz);
+}
+
 void
 DevViewport3D::paintGL()
 {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // 1. Build camera matrices (demo-style spherical coords -> LookAt)
-    float eye[3];
-    eye[0] = cosf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[0];
-    eye[1] = sinf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[1];
-    eye[2] = sinf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[2];
-    float at[3] = { _imp->camTarget[0], _imp->camTarget[1], _imp->camTarget[2] };
-    float up[3] = { 0.f, 1.f, 0.f };
-    LookAt(eye, at, up, _imp->cameraView);
+    // 1. Build camera matrices.
+    //   - "Look Through" mode: use the chosen Camera3D / ReadAlembicCamera's
+    //     transform + intrinsics. Same helpers as ScanlineRender, so the GL
+    //     wireframe view matches the actual render.
+    //   - Otherwise: orbit/free-fly camera built from spherical coords.
+    NodePtr lookCamNode = _imp->lookThroughCam.lock();
+    CameraProvider* lookCam = nullptr;
+    if (lookCamNode) {
+        EffectInstancePtr eff = lookCamNode->getEffectInstance();
+        if (eff) lookCam = dynamic_cast<CameraProvider*>(eff.get());
+    }
 
-    float aspect = (_imp->viewH > 0) ? (float)_imp->viewW / (float)_imp->viewH : 1.0f;
-    Perspective(_imp->fov, aspect, 0.1f, 500.f, _imp->cameraProjection);
+    if (lookCam) {
+        // Current frame
+        double time = 0.0;
+        Gui* g = getGui();
+        if (g) {
+            GuiAppInstancePtr a = g->getApp();
+            if (a) time = a->getTimeLine()->currentFrame();
+        }
+
+        double tx = 0, ty = 0, tz = 0, rx = 0, ry = 0, rz = 0;
+        lookCam->getCameraPosition(time, tx, ty, tz, rx, ry, rz);
+        const double focal = lookCam->getCameraFocalLength(time);
+        const double hAp = lookCam->getCameraHAperture(time);
+        const double vAp = lookCam->getCameraVAperture(time);
+        const float near_ = (float)lookCam->getCameraNear(time);
+        const float far_ = (float)lookCam->getCameraFar(time);
+
+        // View matrix = inverse of camera-to-world. RotationConventions::
+        // composeInverse builds R^T; we then translate by -t. Matches
+        // ScanlineRender::buildViewMatrix exactly.
+        double mInv[3][3];
+        RotationConventions::composeInverse(rx, ry, rz, mInv);
+        const float ntx = -(float)tx, nty = -(float)ty, ntz = -(float)tz;
+        float* out = _imp->cameraView;
+        out[0]  = (float)mInv[0][0]; out[1]  = (float)mInv[1][0]; out[2]  = (float)mInv[2][0]; out[3]  = 0.f;
+        out[4]  = (float)mInv[0][1]; out[5]  = (float)mInv[1][1]; out[6]  = (float)mInv[2][1]; out[7]  = 0.f;
+        out[8]  = (float)mInv[0][2]; out[9]  = (float)mInv[1][2]; out[10] = (float)mInv[2][2]; out[11] = 0.f;
+        out[12] = (float)(mInv[0][0]*ntx + mInv[0][1]*nty + mInv[0][2]*ntz);
+        out[13] = (float)(mInv[1][0]*ntx + mInv[1][1]*nty + mInv[1][2]*ntz);
+        out[14] = (float)(mInv[2][0]*ntx + mInv[2][1]*nty + mInv[2][2]*ntz);
+        out[15] = 1.f;
+
+        // Projection — both apertures, no aspect (matches ScanlineRender).
+        CameraMath::composeProjectionMatrix(focal, hAp, vAp, near_, far_, _imp->cameraProjection);
+    } else {
+        // Orbit camera (free-fly)
+        float eye[3];
+        eye[0] = cosf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[0];
+        eye[1] = sinf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[1];
+        eye[2] = sinf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[2];
+        float at[3] = { _imp->camTarget[0], _imp->camTarget[1], _imp->camTarget[2] };
+        float up[3] = { 0.f, 1.f, 0.f };
+        LookAt(eye, at, up, _imp->cameraView);
+
+        float aspect = (_imp->viewH > 0) ? (float)_imp->viewW / (float)_imp->viewH : 1.0f;
+        Perspective(_imp->fov, aspect, 0.1f, 500.f, _imp->cameraProjection);
+    }
 
     // 2. Set GL matrices
     glMatrixMode(GL_PROJECTION);
@@ -636,8 +929,8 @@ DevViewport3D::paintGL()
     glMatrixMode(GL_MODELVIEW);
     glLoadMatrixf(_imp->cameraView);
 
-    // 3. Draw grid + axes
-    drawGrid();
+    // 3. Draw grid + axes (grid toggleable from the toolbar Grid button)
+    if (_imp->showGrid) drawGrid();
     drawAxes();
 
     // 4. Scan for point cloud data
@@ -670,6 +963,7 @@ DevViewport3D::paintGL()
                                     QMutexLocker lock(&_imp->cloudMutex);
                                     _imp->pointCloud = cloud;
                                     _imp->pointSize = 2.0f;
+                                    _imp->activeBlastNode = *it; // remember for selection push
                                 }
                             } else if (dtp && !_imp->pointCloud) {
                                 // Only use DeepToPoints if no Blast cloud found yet
@@ -971,6 +1265,41 @@ DevViewport3D::mousePressEvent(QMouseEvent* e)
     // Don't start orbit/pan/selection if ImGuizmo was active last frame
     if (ImGuizmo::IsOver() || ImGuizmo::IsUsing()) return;
 
+    // Look-through-edit intercept: if we're looking through a Camera3D (NOT
+    // a ReadAlembicCamera) and the user starts an Alt+L / Mid / Alt+R drag,
+    // redirect interactions to write the camera's knobs instead of the orbit
+    // camera's state. Capture the orbit pivot 5 units in front of the camera.
+    if (Camera3DNode* editCam = getEditableCamera3D(_imp->lookThroughCam)) {
+        const bool isOrbit = (e->button() == Qt::LeftButton && (e->modifiers() & Qt::AltModifier));
+        const bool isPan = (e->button() == Qt::MiddleButton);
+        const bool isDolly = (e->button() == Qt::RightButton && (e->modifiers() & Qt::AltModifier));
+        if (isOrbit || isPan || isDolly) {
+            double time = 0.0;
+            if (getGui() && getGui()->getApp()) {
+                time = getGui()->getApp()->getTimeLine()->currentFrame();
+            }
+            float pos[3]; camPosFromKnobs(editCam, time, pos);
+            double R[3][3]; camRotFromKnobs(editCam, time, R);
+            const float dist = 5.0f;
+            // Pivot = camera_pos + 5 * (camera view direction) = pos - 5 * R col 2
+            _imp->lookThroughPivot[0] = pos[0] - dist * (float)R[0][2];
+            _imp->lookThroughPivot[1] = pos[1] - dist * (float)R[1][2];
+            _imp->lookThroughPivot[2] = pos[2] - dist * (float)R[2][2];
+            if (isOrbit)      _imp->lookThroughEditMode = DevViewport3DPrivate::LT_ORBIT;
+            else if (isPan)   _imp->lookThroughEditMode = DevViewport3DPrivate::LT_PAN;
+            else              _imp->lookThroughEditMode = DevViewport3DPrivate::LT_DOLLY;
+            // Right-button: still track for context-menu suppression in case
+            // the user does a small drag (we won't show the menu either way
+            // since they wanted to dolly, but keep the state coherent).
+            if (e->button() == Qt::RightButton) {
+                _imp->rightButtonDown = true;
+                _imp->rightPressX = e->x();
+                _imp->rightPressY = e->y();
+            }
+            return; // skip the orbit-camera flag-setting below
+        }
+    }
+
     if (e->button() == Qt::MiddleButton) {
         if ((e->modifiers() & Qt::AltModifier) || (e->modifiers() & Qt::ShiftModifier)) {
             _imp->panning = true;
@@ -1015,6 +1344,11 @@ DevViewport3D::mousePressEvent(QMouseEvent* e)
         if (e->modifiers() & Qt::AltModifier) {
             _imp->zooming = true;
         }
+        // Always remember the press position so mouseReleaseEvent can decide
+        // whether this was a click (→ show Blast menu) or a drag (→ ignore).
+        _imp->rightButtonDown = true;
+        _imp->rightPressX = e->x();
+        _imp->rightPressY = e->y();
     }
 }
 
@@ -1035,6 +1369,28 @@ DevViewport3D::mouseMoveEvent(QMouseEvent* e)
     // If ImGuizmo is being used, just update and return
     if (ImGuizmo::IsUsing()) {
         update();
+        return;
+    }
+
+    // Look-through-edit: dispatch to the appropriate Camera3D mutation.
+    if (_imp->lookThroughEditMode != DevViewport3DPrivate::LT_NONE) {
+        Camera3DNode* editCam = getEditableCamera3D(_imp->lookThroughCam);
+        if (editCam) {
+            double time = 0.0;
+            if (getGui() && getGui()->getApp()) {
+                time = getGui()->getApp()->getTimeLine()->currentFrame();
+            }
+            switch (_imp->lookThroughEditMode) {
+                case DevViewport3DPrivate::LT_ORBIT:
+                    applyOrbitToCamera3D(editCam, time, _imp->lookThroughPivot, dx, dy); break;
+                case DevViewport3DPrivate::LT_PAN:
+                    applyPanToCamera3D(editCam, time, _imp->lookThroughPivot, dx, dy); break;
+                case DevViewport3DPrivate::LT_DOLLY:
+                    applyDollyToCamera3D(editCam, time, _imp->lookThroughPivot, dx, dy); break;
+                default: break;
+            }
+            update();
+        }
         return;
     }
 
@@ -1100,9 +1456,25 @@ DevViewport3D::mouseReleaseEvent(QMouseEvent* e)
         update();
     }
 
+    // Right-button release: if this was a click (negligible drag), show the
+    // Blast context menu. If the user dragged (e.g. right-drag to navigate),
+    // suppress the menu.
+    if (e->button() == Qt::RightButton && _imp->rightButtonDown) {
+        const int dx = e->x() - _imp->rightPressX;
+        const int dy = e->y() - _imp->rightPressY;
+        const int CLICK_THRESHOLD = 5; // pixels
+        const bool wasClick = (std::abs(dx) <= CLICK_THRESHOLD &&
+                               std::abs(dy) <= CLICK_THRESHOLD);
+        _imp->rightButtonDown = false;
+        if (wasClick && !(e->modifiers() & Qt::AltModifier)) {
+            showBlastContextMenu(e->globalPos());
+        }
+    }
+
     _imp->orbiting = false;
     _imp->panning = false;
     _imp->zooming = false;
+    _imp->lookThroughEditMode = DevViewport3DPrivate::LT_NONE;
 }
 
 void
@@ -1282,12 +1654,92 @@ DevViewport3D::pickPointAtPosition(int screenX, int screenY)
         _imp->selectedPointCol[0] = data[bestIdx * stride + 3];
         _imp->selectedPointCol[1] = data[bestIdx * stride + 4];
         _imp->selectedPointCol[2] = data[bestIdx * stride + 5];
+        // Replace multi-selection with this single index. Selection is purely
+        // visual now — committing to Blast is explicit via the right-click
+        // context menu (see contextMenuEvent).
+        _imp->selectedPointIndices.clear();
+        _imp->selectedPointIndices.push_back(bestIdx);
         update();
         return true;
     }
 
+    // No hit — clear the multi-selection.
     _imp->selectedPointIndex = -1;
+    _imp->selectedPointIndices.clear();
     return false;
+}
+
+void
+DevViewport3D::setShowGrid(bool show)
+{
+    if (_imp->showGrid == show) return;
+    _imp->showGrid = show;
+    update();
+}
+
+void
+DevViewport3D::setLookThroughCamera(const NodePtr& cameraNode)
+{
+    _imp->lookThroughCam = cameraNode;
+    update();
+}
+
+NodePtr
+DevViewport3D::getLookThroughCamera() const
+{
+    return _imp->lookThroughCam.lock();
+}
+
+Blast*
+DevViewport3D::getActiveBlast() const
+{
+    NodePtr active = _imp->activeBlastNode.lock();
+    if (!active) return nullptr;
+    EffectInstancePtr eff = active->getEffectInstance();
+    if (!eff) return nullptr;
+    return dynamic_cast<Blast*>(eff.get());
+}
+
+void
+DevViewport3D::showBlastContextMenu(const QPoint& globalPos)
+{
+    Blast* blast = getActiveBlast();
+    if (!blast) return; // no Blast in scene → nothing to do
+
+    const std::vector<int> viewportSel = _imp->selectedPointIndices;
+    const bool hasSel = !viewportSel.empty();
+
+    QMenu menu(this);
+
+    QAction* addAct = menu.addAction(QString::fromUtf8("Blast: Add Selected"));
+    addAct->setEnabled(hasSel);
+    addAct->setToolTip(QString::fromUtf8("Add currently selected points to the Blast filter set"));
+
+    QAction* removeAct = menu.addAction(QString::fromUtf8("Blast: Remove Selected"));
+    removeAct->setEnabled(hasSel);
+    removeAct->setToolTip(QString::fromUtf8("Remove currently selected points from the Blast filter set"));
+
+    QAction* setAct = menu.addAction(QString::fromUtf8("Blast: Set as Selection"));
+    setAct->setEnabled(hasSel);
+    setAct->setToolTip(QString::fromUtf8("Replace the Blast filter set with the current viewport selection"));
+
+    menu.addSeparator();
+
+    QAction* clearAct = menu.addAction(QString::fromUtf8("Blast: Clear Selection"));
+    clearAct->setToolTip(QString::fromUtf8("Empty the Blast filter set"));
+
+    QAction* chosen = menu.exec(globalPos);
+    if (!chosen) return;
+
+    if (chosen == addAct) {
+        blast->addToSelection(viewportSel);
+    } else if (chosen == removeAct) {
+        blast->removeFromSelection(viewportSel);
+    } else if (chosen == setAct) {
+        blast->setSelectedIndices(viewportSel);
+    } else if (chosen == clearAct) {
+        blast->clearSelection();
+    }
 }
 
 void
@@ -1335,6 +1787,8 @@ DevViewport3D::boxSelectPoints()
         _imp->selectedPointCol[1] = data[idx * stride + 4];
         _imp->selectedPointCol[2] = data[idx * stride + 5];
     }
+    // Note: selection is purely visual now — committing to Blast is explicit
+    // via the right-click context menu.
 }
 
 void

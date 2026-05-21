@@ -28,6 +28,7 @@
 
 #include "../../EffectInstance.h"
 #include "PointCloudData.h"
+#include "PointCloudProvider.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 
@@ -46,6 +47,7 @@ struct DeepToPointsPrivate;
  */
 class DeepToPoints
     : public EffectInstance
+    , public PointCloudProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -97,8 +99,10 @@ public:
 
     /**
      * @brief Returns the point cloud data for the 3D viewport.
+     * Implements PointCloudProvider so downstream consumers (Blast,
+     * future Scatter, etc.) can fetch via the generic interface.
      */
-    PointCloudDataPtr getPointCloud() const;
+    virtual PointCloudDataPtr getPointCloud() const OVERRIDE;
 
 private:
 
