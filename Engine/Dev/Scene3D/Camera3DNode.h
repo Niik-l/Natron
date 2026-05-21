@@ -107,8 +107,14 @@ public:
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
+    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
+
+    // Refresh the aspect-info display string from current aperture knob values
+    // + the project format. Called from knobChanged on aperture-knob changes,
+    // and once at the end of initializeKnobs.
+    void refreshAspectInfo();
 
     std::unique_ptr<Camera3DNodePrivate> _imp;
 };

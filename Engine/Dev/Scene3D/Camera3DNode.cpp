@@ -24,12 +24,16 @@
 #include "Camera3DNode.h"
 
 #include <cmath>
+#include <sstream>
 
+#include "../../AppInstance.h"
 #include "../../AppManager.h"
+#include "../../Format.h"
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
+#include "../../Project.h"
 #include "../../ViewIdx.h"
 
 #ifndef M_PI
@@ -58,6 +62,10 @@ struct Camera3DNodePrivate
 
     // Depth of Field (F-Stop on Lens page; other DOF params on CyclesRender)
     KnobDoubleWPtr fStop;
+
+    // Sensor / project-format aspect info — discoverable mismatch + 1-click fix.
+    KnobStringWPtr aspectInfo;
+    KnobButtonWPtr matchAspectButton;
 };
 
 
@@ -198,6 +206,112 @@ Camera3DNode::initializeKnobs()
         k->setAnimationEnabled(true);
         lensPage->addKnob(k); _imp->fStop = k;
     }
+
+    // --- Aspect info (informational, refreshed live) ---
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Aspect Info"));
+        k->setName("aspectInfo"); k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false); k->setIsPersistent(false);
+        k->setAsMultiLine();
+        k->setHintToolTip(tr("Sensor aspect (H/V aperture) vs the current project format aspect. "
+                              "Use the Match Project Aspect button to align the camera's V aperture to the project."));
+        lensPage->addKnob(k); _imp->aspectInfo = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Match Project Aspect"));
+        k->setName("matchAspect");
+        k->setHintToolTip(tr("Set V Aperture = H Aperture x (project height / project width). "
+                              "Keeps H Aperture and focal length untouched."));
+        lensPage->addKnob(k); _imp->matchAspectButton = k;
+    }
+
+    refreshAspectInfo();
+}
+
+// ==================== Aspect info + Match Project Aspect button ====================
+
+bool
+Camera3DNode::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
+                          ViewSpec /*view*/, double /*time*/,
+                          bool /*originatedFromMainThread*/)
+{
+    if (!k) return false;
+
+    KnobIPtr hapKnob = _imp->hAperture.lock();
+    KnobIPtr vapKnob = _imp->vAperture.lock();
+    KnobIPtr matchKnob = _imp->matchAspectButton.lock();
+
+    // "Match Project Aspect" button → compute new V Aperture from project format.
+    if (matchKnob && k == matchKnob.get()) {
+        AppInstancePtr app = getApp();
+        if (app && app->getProject()) {
+            Format fmt;
+            app->getProject()->getProjectDefaultFormat(&fmt);
+            const double pw = fmt.width();
+            const double ph = fmt.height();
+            KnobDoublePtr hap = _imp->hAperture.lock();
+            KnobDoublePtr vap = _imp->vAperture.lock();
+            if (pw > 0 && ph > 0 && hap && vap) {
+                const double hA = hap->getValue();
+                const double newVA = hA * (ph / pw);
+                vap->setValue(newVA);
+                refreshAspectInfo();
+            }
+        }
+        return true;
+    }
+
+    // Aperture knob changes → refresh info string.
+    if ((hapKnob && k == hapKnob.get()) || (vapKnob && k == vapKnob.get())) {
+        refreshAspectInfo();
+        return true;
+    }
+
+    return false;
+}
+
+void
+Camera3DNode::refreshAspectInfo()
+{
+    KnobDoublePtr hap = _imp->hAperture.lock();
+    KnobDoublePtr vap = _imp->vAperture.lock();
+    KnobStringPtr info = _imp->aspectInfo.lock();
+    if (!hap || !vap || !info) return;
+
+    const double hA = hap->getValue();
+    const double vA = vap->getValue();
+    const double sensorAspect = (vA > 1e-6) ? (hA / vA) : 0.0;
+
+    int pw = 0, ph = 0;
+    double projAspect = 0.0;
+    AppInstancePtr app = getApp();
+    if (app && app->getProject()) {
+        Format fmt;
+        app->getProject()->getProjectDefaultFormat(&fmt);
+        pw = fmt.width();
+        ph = fmt.height();
+        if (ph > 0) projAspect = (double)pw / (double)ph;
+    }
+
+    std::ostringstream ss;
+    ss.precision(3);
+    ss << std::fixed;
+    ss << "Sensor: " << hA << " x " << vA << " mm  (aspect " << sensorAspect << ")\n";
+    if (pw > 0 && ph > 0) {
+        ss << "Project: " << pw << " x " << ph << "  (aspect " << projAspect << ")";
+        if (sensorAspect > 0 && projAspect > 0) {
+            const double diff = std::fabs(sensorAspect - projAspect) / projAspect;
+            if (diff > 0.001) {
+                ss << "\n[!] Sensor aspect differs from project aspect."
+                   << " Click \"Match Project Aspect\" to align the V aperture.";
+            } else {
+                ss << "\nSensor aspect matches project.";
+            }
+        }
+    } else {
+        ss << "Project format: unknown";
+    }
+    info->setValue(ss.str());
 }
 
 // ==================== CameraProvider interface ====================

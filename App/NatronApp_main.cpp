@@ -48,6 +48,10 @@
 
 #include "Engine/CLArgs.h"
 
+#ifdef NATRON_DEV_CRASH_LOG
+#include "DevCrashHandler.h"
+#endif
+
 NATRON_NAMESPACE_USING
 
 #ifdef Q_OS_WIN
@@ -63,6 +67,10 @@ int wmain(int argc, wchar_t** argv)
 int main(int argc, char *argv[])
 #endif
 {
+#ifdef NATRON_DEV_CRASH_LOG
+    Natron::Dev::installCrashHandler();
+#endif
+
 #ifdef DEBUG
     boost_adaptbx::floating_point::exception_trapping trap(boost_adaptbx::floating_point::exception_trapping::division_by_zero |
                                                            boost_adaptbx::floating_point::exception_trapping::invalid |

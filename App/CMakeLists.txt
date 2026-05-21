@@ -21,7 +21,19 @@ set(Natron_SOURCES NatronApp_main.cpp)
 if(WIN32)
     list(APPEND Natron_SOURCES ../Natron.rc)
 endif()
+# Optional local-only crash handler. Untracked file (kept out of git via
+# .git/info/exclude). Auto-disabled if the file isn't present, so this is
+# safe to commit and have a no-op for everyone else.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/DevCrashHandler.cpp")
+    list(APPEND Natron_SOURCES DevCrashHandler.cpp)
+endif()
 add_executable(Natron ${Natron_SOURCES})
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/DevCrashHandler.cpp")
+    target_compile_definitions(Natron PRIVATE NATRON_DEV_CRASH_LOG)
+    if(WIN32)
+        target_link_libraries(Natron PRIVATE dbghelp psapi)
+    endif()
+endif()
 if(APPLE)
     set_target_properties(Natron PROPERTIES
         MACOSX_BUNDLE TRUE

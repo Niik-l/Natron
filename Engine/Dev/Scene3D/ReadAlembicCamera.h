@@ -122,6 +122,11 @@ private:
 
     void loadAlembicFile(const std::string& path);
 
+    // Refresh the aspect-info display string from current aperture knob values
+    // + the project format. Called from knobChanged on aperture-knob changes,
+    // and once after loading the Alembic file.
+    void refreshAspectInfo();
+
     std::unique_ptr<ReadAlembicCameraPrivate> _imp;
 };
 

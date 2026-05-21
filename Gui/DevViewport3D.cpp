@@ -875,6 +875,10 @@ DevViewport3D::paintGL()
         if (eff) lookCam = dynamic_cast<CameraProvider*>(eff.get());
     }
 
+    // Gate rect in pixel coords — populated below when looking through a
+    // camera, then used after the 3D pass to draw the gate outline.
+    int gateX = 0, gateY = 0, gateW = _imp->viewW, gateH = _imp->viewH;
+
     if (lookCam) {
         // Current frame
         double time = 0.0;
@@ -909,6 +913,26 @@ DevViewport3D::paintGL()
 
         // Projection — both apertures, no aspect (matches ScanlineRender).
         CameraMath::composeProjectionMatrix(focal, hAp, vAp, near_, far_, _imp->cameraProjection);
+
+        // Camera gate — letterbox the 3D draw region to the camera sensor aspect
+        // so the wireframe matches ScanlineRender's output bit-perfectly. Without
+        // this the projection is stretched by the pane's aspect ratio.
+        if (hAp > 1e-6 && vAp > 1e-6 && _imp->viewW > 0 && _imp->viewH > 0) {
+            const double camAspect  = hAp / vAp;
+            const double paneAspect = (double)_imp->viewW / (double)_imp->viewH;
+            if (camAspect >= paneAspect) {
+                gateW = _imp->viewW;
+                gateH = (int)((double)_imp->viewW / camAspect + 0.5);
+                gateX = 0;
+                gateY = (_imp->viewH - gateH) / 2;
+            } else {
+                gateH = _imp->viewH;
+                gateW = (int)((double)_imp->viewH * camAspect + 0.5);
+                gateX = (_imp->viewW - gateW) / 2;
+                gateY = 0;
+            }
+            glViewport(gateX, gateY, gateW, gateH);
+        }
     } else {
         // Orbit camera (free-fly)
         float eye[3];
@@ -1089,6 +1113,53 @@ DevViewport3D::paintGL()
 
     // Draw point cloud
     drawPointCloud();
+
+    // Restore full-pane viewport before ImGui overlay (gate only applies to
+    // the 3D draw; gizmos & UI use the full pane in pixel coords).
+    if (lookCam) {
+        glViewport(0, 0, _imp->viewW, _imp->viewH);
+
+        // Draw a thin outline around the camera gate, in pixel coords. The
+        // outline marks the edge of the camera frustum — what actually gets
+        // rendered. The dark area outside is the letterbox.
+        if (gateW > 0 && gateH > 0 &&
+            (gateW < _imp->viewW || gateH < _imp->viewH)) {
+            glPushAttrib(GL_ENABLE_BIT | GL_LINE_BIT | GL_CURRENT_BIT);
+
+            glMatrixMode(GL_PROJECTION);
+            glPushMatrix();
+            glLoadIdentity();
+            glOrtho(0.0, (double)_imp->viewW, 0.0, (double)_imp->viewH, -1.0, 1.0);
+
+            glMatrixMode(GL_MODELVIEW);
+            glPushMatrix();
+            glLoadIdentity();
+
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_LIGHTING);
+            glLineWidth(1.0f);
+            glColor3f(0.85f, 0.55f, 0.10f); // warm gate color, distinct from grid/axes
+
+            // GL pixel-center convention: offset by 0.5 for crisp 1-pixel lines.
+            const float x0 = (float)gateX + 0.5f;
+            const float y0 = (float)gateY + 0.5f;
+            const float x1 = (float)(gateX + gateW) - 0.5f;
+            const float y1 = (float)(gateY + gateH) - 0.5f;
+            glBegin(GL_LINE_LOOP);
+                glVertex2f(x0, y0);
+                glVertex2f(x1, y0);
+                glVertex2f(x1, y1);
+                glVertex2f(x0, y1);
+            glEnd();
+
+            glMatrixMode(GL_PROJECTION);
+            glPopMatrix();
+            glMatrixMode(GL_MODELVIEW);
+            glPopMatrix();
+
+            glPopAttrib();
+        }
+    }
 
     // 7. ImGuizmo overlay
     if (_imp->imguiInitialized) {
