@@ -10,7 +10,7 @@ Standard practices for committing and pushing changes to this Natron fork.
 
 ## Golden Rules
 
-1. **Never commit directly to `RB-2.6`.** Always use a feature branch.
+1. **Feature branches for risky / experimental work.** Multi-week refactors, GPU ports, anything you might throw away → cut a `feature/*` or `experiment/*` branch first. Small verified fixes and incremental features can go directly to `RB-2.6` — this is a solo fork, not a team repo, and ceremony for ceremony's sake is just noise. If/when collaborators join, default back to feature branches for everything.
 2. **Never rewrite published history.** No `git rebase -i` or `git push --force` on commits that have been pushed.
 3. **Never commit build artifacts.** Anything in `build-qt6/`, `*.obj`, `*.dll`, `*.exe`, etc.
 4. **Logical commits.** One commit = one logical change. Don't lump unrelated work together.

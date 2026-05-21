@@ -1,8 +1,21 @@
-# Natron 3D System — Complete Changelog & Merge Guide
+# Natron 3D System — Initial Port Snapshot
+
+> **Status: snapshot of the initial 3D-port milestone (≈ 2026-03-30).**
+>
+> This doc captures the *original* port — adding a 3D viewport, Cycles renderer,
+> material system, Alembic I/O, lighting, deep compositing, and the first two
+> particle nodes. It is intentionally not kept live-updated.
+>
+> For the **current** state of the fork, see:
+> - [`NODE_REGISTRY.md`](NODE_REGISTRY.md) — full list of registered + unregistered nodes
+> - [`GIT_WORKFLOW.md`](GIT_WORKFLOW.md) — branch / commit conventions
+> - `git log --oneline RB-2.6` — full chronological history
 
 ## Overview
 
-This document covers ALL changes made to add a 3D viewport, Cycles renderer, material system, Alembic I/O, lighting, deep compositing, and particles to Natron. These changes are in the `RB-2.6` branch of `Natron_2026_git_Dev_2`.
+This document covers the changes that added a 3D viewport, Cycles renderer,
+material system, Alembic I/O, lighting, deep compositing, and the first
+particle nodes to Natron. All on the `RB-2.6` branch.
 
 ---
 

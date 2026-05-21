@@ -1,11 +1,11 @@
 # Natron Node Registry
 
 All custom built-in nodes added to Natron beyond the original upstream codebase.
-Updated: 2026-04-09
+Updated: 2026-05-21
 
 ---
 
-## 3D Geometry (7 nodes)
+## 3D Geometry (8 nodes)
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
@@ -13,19 +13,21 @@ Updated: 2026-04-09
 | **Card3D** | `fr.inria.built-in.Card3D` | Registered | Flat textured quad |
 | **Cube3D** | `fr.inria.built-in.Cube3D` | Registered | 24-vertex cube with per-face UVs |
 | **Cylinder3D** | `fr.inria.built-in.Cylinder3D` | Registered | Tessellated cylinder with caps |
-| **ReadGeo** | `fr.inria.built-in.ReadGeo` | Registered | Alembic .abc mesh loader (requires NATRON_HAVE_ALEMBIC) |
+| **ReadGeo** | `fr.inria.built-in.ReadGeo` | Registered | Alembic .abc single-mesh loader (requires NATRON_HAVE_ALEMBIC) |
+| **ReadAlembicArchive** | `fr.inria.built-in.ReadAlembicArchive` | Registered | Multi-mesh Alembic archive loader — reads full scene hierarchies, builds per-entry world transforms from the archive chain. Used by ScanlineRender / 3D viewport for whole-scene `.abc` ingest. |
 | **ReadVDB** | `fr.inria.built-in.ReadVDB` | Registered | OpenVDB volume loader. PrincipledVolume fire rendering via Cycles (density/temperature/flame grids, absorption, remap curves). Animated sequences with frame padding. Viewport wireframe bbox from grid bounds. |
 | **Group3D** | `fr.inria.built-in.Group3D` | Registered | Groups 3D objects with unified transform |
 
-## 3D Scene & Render (5 nodes)
+## 3D Scene & Render (6 nodes)
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
 | **Scene3D** | `fr.inria.built-in.Scene3D` | Registered | Aggregates 3D objects for rendering |
 | **RenderPass** | `fr.inria.built-in.RenderPass` | Registered | Multi-pass filter: object visibility, holdout, shadow catcher, light selection |
-| **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | Registered | OpenGL rasterizer with 4x MSAA, particle render modes (Point/Disc/Sphere/Sprite), multi-sample motion blur, geo instancing |
-| **CyclesRender** | `fr.inria.built-in.CyclesRender` | Registered | Cycles path tracer (requires NATRON_CYCLES). PrincipledVolume VDB rendering (fire/smoke), native particle instancing + motion blur, PBR materials via Material3D. Requires CPU device for NanoVDB volume support. |
-| **Project3D** | `fr.inria.built-in.Project3D` | Registered | Camera projection onto geometry |
+| **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | Registered | OpenGL rasterizer with 4x MSAA, particle render modes (Point/Disc/Sphere/Sprite), multi-sample motion blur, geo instancing, n-gon fan-triangulation, Sync-to-Project canvas. |
+| **CyclesRender** | `fr.inria.built-in.CyclesRender` | Registered | Cycles path tracer (requires NATRON_CYCLES). 12 AOV passes (diffuse/glossy direct/indirect/color, emission, env, AO, normal, depth, UV). PrincipledVolume VDB rendering, native particle instancing + motion blur, PBR materials via Material3D. CPU device for NanoVDB volume support. Sync-to-Project canvas. |
+| **Project3D** | `fr.inria.built-in.Project3D` | Registered | Camera projection onto geometry (standalone FBO renderer). |
+| **UVProject** | `fr.inria.built-in.UVProject` | Registered | Rewrite mesh UVs via projection — 6 modes (Perspective / PlanarXY/YZ/ZX / Spherical / Cylindrical). Perspective with Generate Perspective ON emits 3-component (s,t,w) coords for fragment-level perspective divide via glTexCoord4f. Reference Frame lock supported. |
 
 ## Camera & Lighting (4 nodes)
 
@@ -43,7 +45,7 @@ Updated: 2026-04-09
 | **Material3D** | `fr.inria.built-in.Material3D` | Registered | Standalone PBR material with texture map inputs |
 | **Volume3D** | `fr.inria.built-in.Volume3D` | Registered | Procedural volume (sphere, box). Translate/Rotate/Scale knobs, stepSize, volumeBounces. Renders via Cycles procedural shader graph. |
 
-## Deep Compositing — Tier 1+2 (16 nodes, registered)
+## Deep Compositing — Tier 1+2 (17 nodes, registered)
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
@@ -58,11 +60,12 @@ Updated: 2026-04-09
 | **DeepGrade** | `fr.inria.built-in.DeepGrade` | Registered | Grade deep samples |
 | **DeepReformat** | `fr.inria.built-in.DeepReformat` | Registered | Reformat deep resolution |
 | **DeepCrop** | `fr.inria.built-in.DeepCrop` | Registered | Crop deep images |
-| **DeepToPoints** | `fr.inria.built-in.DeepToPoints` | Registered | Convert deep to point cloud |
+| **DeepToPoints** | `fr.inria.built-in.DeepToPoints` | Registered | Convert deep to point cloud. Optional Camera3D input unprojects pixels+depth into world space. |
 | **DeepTransform** | `fr.inria.built-in.DeepTransform` | Registered | Transform deep images |
 | **DeepExpression** | `fr.inria.built-in.DeepExpression` | Registered | Expression-based deep processing |
 | **DeepColorCorrect** | `fr.inria.built-in.DeepColorCorrect` | Registered | Color correct deep samples |
 | **DeepDefocus** | `fr.inria.built-in.DeepDefocus` | Registered | Defocus deep images |
+| **Blast** | `fr.inria.built-in.Blast` | Registered | Point-cloud filter. Bounding-box mode (delete inside/outside a Cube3D bounds input) and Selection mode (right-click in 3D viewport). Invert toggle, info display, lazy computation. |
 
 ## Deep Compositing — Tier 3 (19 nodes, code exists but NOT registered)
 
@@ -118,11 +121,13 @@ Updated: 2026-04-09
 |------|-----------|--------|-------------|
 | **SphericalTransform** | `fr.inria.built-in.SphericalTransform` | Registered | 8 projection types (equirect, cubemap, fisheye, etc.), rotation, interpolation |
 
-## Color (1 node)
+## Color (3 nodes)
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
 | **ColorChartMatch** | `fr.inria.built-in.ColorChartMatch` | Registered | Color chart matching with matrix export (ACEScg default) |
+| **ColorMatrix** | `fr.inria.built-in.ColorMatrix` | Registered | 3×3 color-channel matrix multiply with Invert toggle. Standard CC-pipeline building block. |
+| **Exposure** | `fr.inria.built-in.Exposure` | Registered | Exposure (stops) + linear multiplier. Operates in scene-linear. |
 
 ## Other (1 node)
 
@@ -136,15 +141,15 @@ Updated: 2026-04-09
 
 | Category | Registered | Not Registered | Total |
 |----------|-----------|----------------|-------|
-| 3D Geometry | 7 | 0 | 7 |
-| 3D Scene & Render | 5 | 0 | 5 |
+| 3D Geometry | 8 | 0 | 8 |
+| 3D Scene & Render | 6 | 0 | 6 |
 | Camera & Lighting | 4 | 0 | 4 |
 | Materials | 2 | 0 | 2 |
-| Deep (Tier 1+2) | 16 | 0 | 16 |
+| Deep (Tier 1+2) | 17 | 0 | 17 |
 | Deep (Tier 3) | 0 | 19 | 19 |
 | Particles | 13 | 0 | 13 |
 | Channel | 1 | 0 | 1 |
 | Transform | 1 | 0 | 1 |
-| Color | 1 | 0 | 1 |
+| Color | 3 | 0 | 3 |
 | Other | 1 | 0 | 1 |
-| **Total** | **51** | **19** | **70** |
+| **Total** | **56** | **19** | **75** |
