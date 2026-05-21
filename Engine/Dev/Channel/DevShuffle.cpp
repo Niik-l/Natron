@@ -27,6 +27,10 @@
 #include <cstring>
 #include <algorithm>
 
+#include <QTimer>
+
+#include <ofxNatron.h> // kNatronOfxParamOutputChannels
+
 #include "../../AppInstance.h"
 #include "../../AppManager.h"
 #include "KnobShuffle.h"
@@ -35,6 +39,7 @@
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
+#include "../../NodeMetadata.h"
 #include "../../ViewIdx.h"
 
 NATRON_NAMESPACE_ENTER
@@ -66,9 +71,23 @@ struct DevShufflePrivate
     // Cache of discovered layers for input A (row 2)
     std::vector<ImagePlaneDesc> cachedLayers2;
 
-    // User-created layers (stored locally, not via addUserComponents)
-    std::list<ImagePlaneDesc> userLayers;
+    // User layers are owned by the Node (Node::addUserComponents). Fetch via
+    // fetchUserLayers() — they survive save/reload through the canonical
+    // <UserComponents> XML block.
 };
+
+// Pull user-created layers from the owning Node (the canonical source of truth).
+static std::list<ImagePlaneDesc>
+fetchUserLayers(const EffectInstance* self)
+{
+    std::list<ImagePlaneDesc> result;
+    if (!self) return result;
+    NodePtr node = const_cast<EffectInstance*>(self)->getNode();
+    if (node) {
+        node->getUserCreatedComponents(&result);
+    }
+    return result;
+}
 
 
 DevShuffle::DevShuffle(NodePtr node)
@@ -85,7 +104,7 @@ DevShuffle::~DevShuffle()
 std::string
 DevShuffle::getPluginDescription() const
 {
-    return tr("Two-row layer-aware channel shuffle (Nuke Shuffle2 style).\n\n"
+    return tr("Two-row layer-aware channel shuffle.\n\n"
               "Row 1 routes channels from input B (primary).\n"
               "Row 2 routes channels from input A (secondary).\n\n"
               "Row 2 routing overrides row 1 for the same output channel.\n"
@@ -133,18 +152,33 @@ DevShuffle::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
 // ==================== User layer management ====================
 
 void
-DevShuffle::addUserLayer(const ImagePlaneDesc& layer)
+DevShuffle::addUserLayer(const ImagePlaneDesc& layer, int targetRow)
 {
-    _imp->userLayers.push_back(layer);
-    // Refresh combos so the new layer appears in output combos
+    // Strategy: capture pre-values → addUserComponents (which mutates Row 1's
+    // output combo as a hardcoded side effect) → refresh combos → restore both
+    // rows → setValueFromID on the target row only.
+    KnobChoicePtr outLk  = _imp->outputLayer.lock();
+    KnobChoicePtr outL2k = _imp->outputLayer2.lock();
+    const int preValue1 = outLk  ? outLk ->getValue() : -1;
+    const int preValue2 = outL2k ? outL2k->getValue() : -1;
+
+    NodePtr node = getNode();
+    if (node) {
+        node->addUserComponents(layer);   // canonical Natron API
+    }
     refreshLayerChoices();
     refreshLayerChoices2();
-}
 
-const std::list<ImagePlaneDesc>&
-DevShuffle::getUserLayers() const
-{
-    return _imp->userLayers;
+    // Restore (undoes Node::addUserComponents's hardcoded auto-select on Row 1).
+    if (outLk  && preValue1 >= 0) outLk ->setValue(preValue1);
+    if (outL2k && preValue2 >= 0) outL2k->setValue(preValue2);
+
+    // Target the row the user actually picked.
+    if (targetRow == 0 && outLk) {
+        outLk->setValueFromID(layer.getPlaneID(), 0);
+    } else if (targetRow == 1 && outL2k) {
+        outL2k->setValueFromID(layer.getPlaneID(), 0);
+    }
 }
 
 const std::vector<ImagePlaneDesc>&
@@ -193,8 +227,11 @@ DevShuffle::initializeKnobs()
         _imp->inputLayer = k;
     }
     {
+        // Canonical name — Node::addUserComponents looks up this exact knob name
+        // (kNatronOfxParamOutputChannels = "outputChannels") to auto-add new
+        // user layers to its choices. Row 2's outputLayer2 keeps its own name.
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Output Layer"));
-        k->setName("outputLayer");
+        k->setName(kNatronOfxParamOutputChannels);
         std::vector<ChoiceOption> entries;
         entries.push_back(ChoiceOption("Color.RGBA", "Color.RGBA", "Output as Color.RGBA"));
         k->populateChoices(entries);
@@ -296,11 +333,15 @@ DevShuffle::initializeKnobs()
         _imp->outputA2 = k;
     }
 
-    // Visual routing widget (row 1) -- embedded in properties panel via KnobGuiShuffle
+    // Visual routing widget (row 1) -- embedded in properties panel via KnobGuiShuffle.
+    // Marked non-persistent: real routing state lives in outputR/G/B/A ints; this
+    // knob is a UI proxy. Skipping persistence also keeps Boost.serialization's
+    // string-knob round-trip from breaking project loads.
     {
         KnobShufflePtr k = AppManager::createKnob<KnobShuffle>(this, tr("Routing"));
         k->setName("shuffleRouting");
         k->setDefaultValue("0,1,2,3");
+        k->setIsPersistent(false);
         mainPage->addKnob(k);
     }
 
@@ -309,6 +350,7 @@ DevShuffle::initializeKnobs()
         KnobShufflePtr k = AppManager::createKnob<KnobShuffle>(this, tr("Routing 2"));
         k->setName("shuffleRouting2");
         k->setDefaultValue("-1,-1,-1,-1");
+        k->setIsPersistent(false);
         k->setSecret(true);
         mainPage->addKnob(k);
     }
@@ -329,19 +371,20 @@ DevShuffle::onInputChanged(int inputNo)
 static void discoverLayers(EffectInstance* self, int inputNb,
                            std::vector<ImagePlaneDesc>& outCachedLayers,
                            KnobChoiceWPtr& inputLayerKnob,
-                           KnobChoiceWPtr& outputLayerKnob,
-                           const std::list<ImagePlaneDesc>& userLayers)
+                           KnobChoiceWPtr& outputLayerKnob)
 {
-    EffectInstancePtr input = self->getInput(inputNb);
-    if (!input) return;
-
-    double time = 0;
-    if (self->getApp() && self->getApp()->getTimeLine()) {
-        time = self->getApp()->getTimeLine()->currentFrame();
-    }
+    // User layers come from the owning Node (canonical Natron API).
+    std::list<ImagePlaneDesc> userLayers = fetchUserLayers(self);
 
     std::list<ImagePlaneDesc> availableLayers;
-    input->getAvailableLayers(time, ViewIdx(0), -1, &availableLayers);
+    EffectInstancePtr input = self->getInput(inputNb);
+    if (input) {
+        double time = 0;
+        if (self->getApp() && self->getApp()->getTimeLine()) {
+            time = self->getApp()->getTimeLine()->currentFrame();
+        }
+        input->getAvailableLayers(time, ViewIdx(0), -1, &availableLayers);
+    }
 
     std::vector<ChoiceOption> layerEntries;
     outCachedLayers.clear();
@@ -367,32 +410,32 @@ static void discoverLayers(EffectInstance* self, int inputNb,
         outCachedLayers.push_back(layer);
     }
 
-    if (!layerEntries.empty()) {
-        KnobChoicePtr lk = inputLayerKnob.lock();
-        if (lk) lk->populateChoices(layerEntries);
+    // ALWAYS populate — user layers must appear in the output combo even when
+    // the input has no planes (e.g. before the upstream is wired or evaluated).
+    KnobChoicePtr lk = inputLayerKnob.lock();
+    if (lk) lk->populateChoices(layerEntries);
 
-        // Output layers = input layers + user-created layers
-        std::vector<ChoiceOption> outputEntries = layerEntries;
-        for (std::list<ImagePlaneDesc>::const_iterator it = userLayers.begin();
-             it != userLayers.end(); ++it) {
-            std::string id = it->getPlaneID();
-            std::string label = it->getPlaneLabel();
-            std::string chans;
-            const std::vector<std::string>& ch = it->getChannels();
-            for (size_t c = 0; c < ch.size(); ++c) chans += ch[c];
-            std::string displayName = (label.empty() ? id : label) + "." + chans;
-            outputEntries.push_back(ChoiceOption(id, displayName, displayName));
-        }
-
-        KnobChoicePtr olk = outputLayerKnob.lock();
-        if (olk) olk->populateChoices(outputEntries);
+    // Output layers = input layers + user-created layers
+    std::vector<ChoiceOption> outputEntries = layerEntries;
+    for (std::list<ImagePlaneDesc>::const_iterator it = userLayers.begin();
+         it != userLayers.end(); ++it) {
+        std::string id = it->getPlaneID();
+        std::string label = it->getPlaneLabel();
+        std::string chans;
+        const std::vector<std::string>& ch = it->getChannels();
+        for (size_t c = 0; c < ch.size(); ++c) chans += ch[c];
+        std::string displayName = (label.empty() ? id : label) + "." + chans;
+        outputEntries.push_back(ChoiceOption(id, displayName, displayName));
     }
+
+    KnobChoicePtr olk = outputLayerKnob.lock();
+    if (olk) olk->populateChoices(outputEntries);
 }
 
 void
 DevShuffle::refreshLayerChoices()
 {
-    discoverLayers(this, 0, _imp->cachedLayers, _imp->inputLayer, _imp->outputLayer, _imp->userLayers);
+    discoverLayers(this, 0, _imp->cachedLayers, _imp->inputLayer, _imp->outputLayer);
 
     // Trigger visual widget refresh
     KnobIPtr shuffleKnob = getKnobByName("shuffleRouting");
@@ -408,7 +451,7 @@ DevShuffle::refreshLayerChoices()
 void
 DevShuffle::refreshLayerChoices2()
 {
-    discoverLayers(this, 1, _imp->cachedLayers2, _imp->inputLayer2, _imp->outputLayer2, _imp->userLayers);
+    discoverLayers(this, 1, _imp->cachedLayers2, _imp->inputLayer2, _imp->outputLayer2);
 
     // Trigger visual widget refresh
     KnobIPtr shuffleKnob = getKnobByName("shuffleRouting");
@@ -557,8 +600,7 @@ DevShuffle::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
     if (ilk) {
         int layerIdx = ilk->getValue();
         if (layerIdx >= 0 && layerIdx < (int)_imp->cachedLayers.size()) {
-            const ImagePlaneDesc& layer = _imp->cachedLayers[layerIdx];
-            (*comps)[0].push_back(layer);
+            (*comps)[0].push_back(_imp->cachedLayers[layerIdx]);
         }
     }
 
@@ -567,47 +609,72 @@ DevShuffle::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
     if (il2k) {
         int layerIdx2 = il2k->getValue();
         if (layerIdx2 >= 0 && layerIdx2 < (int)_imp->cachedLayers2.size()) {
-            const ImagePlaneDesc& layer = _imp->cachedLayers2[layerIdx2];
-            (*comps)[1].push_back(layer);
+            (*comps)[1].push_back(_imp->cachedLayers2[layerIdx2]);
         }
     }
 
-    // Output: check what the user selected as output layer
-    // Row 1 output layer
-    KnobChoicePtr olk = _imp->outputLayer.lock();
-    int outLayerIdx = olk ? olk->getValue() : -1;
-
-    // The output layer list is: [input layers...] + [user layers...]
-    // If the selected output is a user layer, use that; otherwise default to RGBA
-    bool foundOutputLayer = false;
-    if (outLayerIdx >= 0) {
-        // Check if it's one of the input layers
-        if (outLayerIdx < (int)_imp->cachedLayers.size()) {
-            (*comps)[-1].push_back(_imp->cachedLayers[outLayerIdx]);
-            foundOutputLayer = true;
-        } else {
-            // It might be a user layer (index offset by cachedLayers size)
-            int userIdx = outLayerIdx - (int)_imp->cachedLayers.size();
-            int uIdx = 0;
-            for (std::list<ImagePlaneDesc>::const_iterator it = _imp->userLayers.begin();
-                 it != _imp->userLayers.end(); ++it, ++uIdx) {
-                if (uIdx == userIdx) {
-                    (*comps)[-1].push_back(*it);
-                    foundOutputLayer = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Fallback: always produce RGBA
-    if (!foundOutputLayer) {
-        (*comps)[-1].push_back(ImagePlaneDesc::getRGBAComponents());
+    // Output: BOTH rows' planes. If row 2 targets a distinct plane, we declare
+    // it as a second produced plane so Natron actually allocates + renders it.
+    // Without this, Row 2's "shuffle into new layer" UX is a no-op.
+    ImagePlaneDesc r1Plane = resolveOutputPlane(_imp->outputLayer,  _imp->cachedLayers);
+    ImagePlaneDesc r2Plane = resolveOutputPlane(_imp->outputLayer2, _imp->cachedLayers2);
+    (*comps)[-1].push_back(r1Plane);
+    if (r2Plane.getPlaneID() != r1Plane.getPlaneID()) {
+        (*comps)[-1].push_back(r2Plane);
     }
 
     *passThroughTime = 0;
     *passThroughView = 0;
     *passThroughInput = 0; // B is the primary passthrough
+}
+
+// ==================== Output-plane resolution helper ====================
+
+ImagePlaneDesc
+DevShuffle::resolveOutputPlane(const KnobChoiceWPtr& outputLayerKnob,
+                                const std::vector<ImagePlaneDesc>& cachedInputLayers) const
+{
+    KnobChoicePtr olk = outputLayerKnob.lock();
+    int idx = olk ? olk->getValue() : -1;
+    if (idx < 0) {
+        return ImagePlaneDesc::getRGBAComponents();
+    }
+    if (idx < (int)cachedInputLayers.size()) {
+        return cachedInputLayers[idx];
+    }
+    // Fall through to user layers, indexed after the cached input layers.
+    const std::list<ImagePlaneDesc> userLayers = fetchUserLayers(this);
+    int userIdx = idx - (int)cachedInputLayers.size();
+    int uIdx = 0;
+    for (std::list<ImagePlaneDesc>::const_iterator it = userLayers.begin();
+         it != userLayers.end(); ++it, ++uIdx) {
+        if (uIdx == userIdx) return *it;
+    }
+    return ImagePlaneDesc::getRGBAComponents();
+}
+
+// ==================== Post-load / metadata-refresh hooks ====================
+
+void
+DevShuffle::onKnobsLoaded()
+{
+    // Defer to next event-loop iteration. Inputs may not be wired yet at this
+    // synchronous moment; the deferred call picks up user layers + restored
+    // routing once the Node is fully constructed.
+    QTimer::singleShot(0, this, [this]() {
+        refreshLayerChoices();
+        refreshLayerChoices2();
+    });
+}
+
+void
+DevShuffle::onMetadataRefreshed(const NodeMetadata& /*metadata*/)
+{
+    // Canonical refresh trigger — matches the stock Shuffle's getClipPreferences.
+    // Fires after upstream metadata is computed → getAvailableLayers returns
+    // real data. Both input layers + user layers populate in one shot.
+    refreshLayerChoices();
+    refreshLayerChoices2();
 }
 
 // ==================== Render ====================
@@ -617,40 +684,9 @@ DevShuffle::render(const RenderActionArgs& args)
 {
     assert(!args.outputPlanes.empty());
 
-    // Find the output plane matching the selected output layer
-    KnobChoicePtr olkRender = _imp->outputLayer.lock();
-    int outLayerIdxRender = olkRender ? olkRender->getValue() : -1;
-    ImagePlaneDesc targetLayer = ImagePlaneDesc::getRGBAComponents();
-
-    if (outLayerIdxRender >= 0) {
-        if (outLayerIdxRender < (int)_imp->cachedLayers.size()) {
-            targetLayer = _imp->cachedLayers[outLayerIdxRender];
-        } else {
-            int userIdx = outLayerIdxRender - (int)_imp->cachedLayers.size();
-            int uIdx = 0;
-            for (std::list<ImagePlaneDesc>::const_iterator it = _imp->userLayers.begin();
-                 it != _imp->userLayers.end(); ++it, ++uIdx) {
-                if (uIdx == userIdx) {
-                    targetLayer = *it;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Search outputPlanes for the matching layer
-    ImagePtr outImg;
-    for (std::list<std::pair<ImagePlaneDesc, ImagePtr> >::const_iterator it = args.outputPlanes.begin();
-         it != args.outputPlanes.end(); ++it) {
-        if (it->first.getPlaneID() == targetLayer.getPlaneID()) {
-            outImg = it->second;
-            break;
-        }
-    }
-    if (!outImg) {
-        outImg = args.outputPlanes.front().second;
-    }
-    if (!outImg) return eStatusFailed;
+    // Resolve the planes each row wants to write to.
+    const ImagePlaneDesc r1Plane = resolveOutputPlane(_imp->outputLayer,  _imp->cachedLayers);
+    const ImagePlaneDesc r2Plane = resolveOutputPlane(_imp->outputLayer2, _imp->cachedLayers2);
 
     // --- Get Row 1 source image (input B = 0) ---
     KnobChoicePtr inputLayerKnob = _imp->inputLayer.lock();
@@ -705,32 +741,25 @@ DevShuffle::render(const RenderActionArgs& args)
     routing2[2] = bKnob2 ? bKnob2->getValue() : -1;
     routing2[3] = aKnob2 ? aKnob2->getValue() : -1;
 
-    int srcBNumComp = srcImgB ? srcImgB->getComponents().getNumComponents() : 0;
-    int srcANumComp = srcImgA ? srcImgA->getComponents().getNumComponents() : 0;
+    const int srcBNumComp = srcImgB ? srcImgB->getComponents().getNumComponents() : 0;
+    const int srcANumComp = srcImgA ? srcImgA->getComponents().getNumComponents() : 0;
 
-    // Decode routing value to a float from the source images
-    // value < 0 = disconnected, 0-99 = B input channel[value], 100-199 = A input channel[value-100]
+    // Decode routing value to a float from the source images.
+    // -1 = disconnected, -2 = black, -3 = white,
+    // 0-99 = B input channel[value], 100-199 = A input channel[value-100].
     auto readChannel = [&](int routingVal, const float* srcB, const float* srcA) -> float {
-        if (routingVal == -2) return 0.0f; // constant black
-        if (routingVal == -3) return 1.0f; // constant white
-        if (routingVal < 0) return 0.0f;   // disconnected
+        if (routingVal == -2) return 0.0f;
+        if (routingVal == -3) return 1.0f;
+        if (routingVal < 0) return 0.0f;
         if (routingVal < 100) {
-            // Row 1 source (B input)
             return (srcB && routingVal < srcBNumComp) ? srcB[routingVal] : 0.0f;
-        } else {
-            // Row 2 source (A input)
-            int ch = routingVal - 100;
-            return (srcA && ch < srcANumComp) ? srcA[ch] : 0.0f;
         }
+        int ch = routingVal - 100;
+        return (srcA && ch < srcANumComp) ? srcA[ch] : 0.0f;
     };
 
-    RectI outBounds = outImg->getBounds();
-    RectI srcBBounds = srcImgB ? srcImgB->getBounds() : RectI();
-    RectI srcABounds = srcImgA ? srcImgA->getBounds() : RectI();
-
-    int outNumComp = outImg->getComponents().getNumComponents();
-
-    Image::WriteAccess wa(outImg.get());
+    const RectI srcBBounds = srcImgB ? srcImgB->getBounds() : RectI();
+    const RectI srcABounds = srcImgA ? srcImgA->getBounds() : RectI();
 
     // Optional read access (may be null)
     std::unique_ptr<Image::ReadAccess> raB;
@@ -738,35 +767,88 @@ DevShuffle::render(const RenderActionArgs& args)
     if (srcImgB) raB.reset(new Image::ReadAccess(srcImgB.get()));
     if (srcImgA) raA.reset(new Image::ReadAccess(srcImgA.get()));
 
-    for (int y = outBounds.y1; y < outBounds.y2; ++y) {
-        for (int x = outBounds.x1; x < outBounds.x2; ++x) {
-            float* dst = (float*)wa.pixelAt(x, y);
-            if (!dst) continue;
+    // Iterate over every output plane Natron asked us to produce. For each
+    // plane, decide whether it's Row 1's target, Row 2's target, or both,
+    // then run a per-plane pixel fill.
+    for (std::list<std::pair<ImagePlaneDesc, ImagePtr> >::const_iterator pit = args.outputPlanes.begin();
+         pit != args.outputPlanes.end(); ++pit) {
+        const ImagePlaneDesc& planeDesc = pit->first;
+        const ImagePtr&       outImg    = pit->second;
+        if (!outImg) continue;
 
-            const float* srcB = NULL;
-            const float* srcA = NULL;
+        const std::string planeId = planeDesc.getPlaneID();
+        const bool isR1 = (planeId == r1Plane.getPlaneID());
+        const bool isR2 = (planeId == r2Plane.getPlaneID());
+        if (!isR1 && !isR2) continue; // plane we don't write to
 
-            if (raB && srcBBounds.contains(x, y)) {
-                srcB = (const float*)raB->pixelAt(x, y);
+        const RectI outBounds = outImg->getBounds();
+        const int   outNumComp = outImg->getComponents().getNumComponents();
+
+        Image::WriteAccess wa(outImg.get());
+
+        if (isR1 && isR2) {
+            // Same plane targeted by both rows → Row 1 fills, Row 2 overrides
+            // connected channels (matches the original single-plane behavior).
+            for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+                for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+
+                    const float* srcB = NULL;
+                    const float* srcA = NULL;
+                    if (raB && srcBBounds.contains(x, y)) srcB = (const float*)raB->pixelAt(x, y);
+                    if (raA && srcABounds.contains(x, y)) srcA = (const float*)raA->pixelAt(x, y);
+
+                    // Row 1 fills (B1: per-component guards against sub-RGBA dst).
+                    if (outNumComp > 0) dst[0] = readChannel(routing1[0], srcB, srcA);
+                    if (outNumComp > 1) dst[1] = readChannel(routing1[1], srcB, srcA);
+                    if (outNumComp > 2) dst[2] = readChannel(routing1[2], srcB, srcA);
+                    if (outNumComp > 3) dst[3] = readChannel(routing1[3], srcB, srcA);
+
+                    // Row 2 overrides only connected channels (routing != -1).
+                    if (srcImgA) {
+                        if (outNumComp > 0 && routing2[0] != -1) dst[0] = readChannel(routing2[0], srcB, srcA);
+                        if (outNumComp > 1 && routing2[1] != -1) dst[1] = readChannel(routing2[1], srcB, srcA);
+                        if (outNumComp > 2 && routing2[2] != -1) dst[2] = readChannel(routing2[2], srcB, srcA);
+                        if (outNumComp > 3 && routing2[3] != -1) dst[3] = readChannel(routing2[3], srcB, srcA);
+                    }
+                }
             }
-            if (raA && srcABounds.contains(x, y)) {
-                srcA = (const float*)raA->pixelAt(x, y);
+        } else if (isR1) {
+            // Row 1 only fills this plane.
+            for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+                for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+
+                    const float* srcB = NULL;
+                    const float* srcA = NULL;
+                    if (raB && srcBBounds.contains(x, y)) srcB = (const float*)raB->pixelAt(x, y);
+                    if (raA && srcABounds.contains(x, y)) srcA = (const float*)raA->pixelAt(x, y);
+
+                    if (outNumComp > 0) dst[0] = readChannel(routing1[0], srcB, srcA);
+                    if (outNumComp > 1) dst[1] = readChannel(routing1[1], srcB, srcA);
+                    if (outNumComp > 2) dst[2] = readChannel(routing1[2], srcB, srcA);
+                    if (outNumComp > 3) dst[3] = readChannel(routing1[3], srcB, srcA);
+                }
             }
+        } else {
+            // Row 2 only — this plane is row 2's distinct output. Treat
+            // disconnected (-1) channels as black (0.0).
+            for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+                for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
 
-            // Start with Row 1 routing
-            dst[0] = readChannel(routing1[0], srcB, srcA);
-            dst[1] = readChannel(routing1[1], srcB, srcA);
-            dst[2] = readChannel(routing1[2], srcB, srcA);
-            dst[3] = (outNumComp >= 4) ? readChannel(routing1[3], srcB, srcA) : 1.0f;
+                    const float* srcB = NULL;
+                    const float* srcA = NULL;
+                    if (raB && srcBBounds.contains(x, y)) srcB = (const float*)raB->pixelAt(x, y);
+                    if (raA && srcABounds.contains(x, y)) srcA = (const float*)raA->pixelAt(x, y);
 
-            // Row 2 only overrides channels that are CONNECTED (routing != -1)
-            // Constants (-2 = black, -3 = white) also count as connected
-            if (srcImgA) {
-                if (routing2[0] != -1) dst[0] = readChannel(routing2[0], srcB, srcA);
-                if (routing2[1] != -1) dst[1] = readChannel(routing2[1], srcB, srcA);
-                if (routing2[2] != -1) dst[2] = readChannel(routing2[2], srcB, srcA);
-                if (routing2[3] != -1 && outNumComp >= 4) {
-                    dst[3] = readChannel(routing2[3], srcB, srcA);
+                    if (outNumComp > 0) dst[0] = readChannel(routing2[0], srcB, srcA);
+                    if (outNumComp > 1) dst[1] = readChannel(routing2[1], srcB, srcA);
+                    if (outNumComp > 2) dst[2] = readChannel(routing2[2], srcB, srcA);
+                    if (outNumComp > 3) dst[3] = readChannel(routing2[3], srcB, srcA);
                 }
             }
         }

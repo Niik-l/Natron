@@ -61,8 +61,8 @@ public Q_SLOTS:
     void onInputLayer2ComboChanged(int index);
     void onOutputLayer2ComboChanged(int index);
 
-    // New layer dialog
-    void onNewLayerRequested();
+    // New layer dialog. rowIndex = 0 for Row 1, 1 for Row 2.
+    void onNewLayerRequested(int rowIndex);
 
 private:
     virtual void createWidget(QHBoxLayout* layout) OVERRIDE FINAL;

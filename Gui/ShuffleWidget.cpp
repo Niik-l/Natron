@@ -217,7 +217,7 @@ void
 ShuffleWidget::onOutputLayerComboTextChanged(int index)
 {
     if (index >= 0 && _outputLayerCombo->itemText(index) == QString::fromUtf8("new")) {
-        Q_EMIT newLayerRequested();
+        Q_EMIT newLayerRequested(0); // Row 1
     } else {
         Q_EMIT outputLayerChanged(index);
     }
@@ -227,7 +227,7 @@ void
 ShuffleWidget::onOutputLayer2ComboTextChanged(int index)
 {
     if (index >= 0 && _outputLayerCombo2->itemText(index) == QString::fromUtf8("new")) {
-        Q_EMIT newLayerRequested();
+        Q_EMIT newLayerRequested(1); // Row 2
     } else {
         Q_EMIT outputLayer2Changed(index);
     }

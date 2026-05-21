@@ -31,11 +31,11 @@ NATRON_NAMESPACE_ENTER
 
 /**
  * @brief A knob that displays an interactive channel routing widget.
- * Used by DevShuffle to show Nuke-style visual noodle connections.
+ * Used by DevShuffle to show visual noodle-style channel routing.
  * Stores routing as a simple string "0,1,2,3".
  **/
 class KnobShuffle
-    : public QObject, public KnobStringBase
+    : public QObject, public AnimatingKnobStringHelper
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT

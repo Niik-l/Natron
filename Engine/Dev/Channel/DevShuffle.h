@@ -35,9 +35,9 @@ NATRON_NAMESPACE_ENTER
 struct DevShufflePrivate;
 
 /**
- * @brief Layer-aware channel shuffle node inspired by Nuke's Shuffle2.
+ * @brief Layer-aware channel shuffle node with two-row routing.
  *
- * Two-row routing like Nuke's Shuffle2:
+ * Two-row routing:
  * - Row 1: routes channels from input B (primary)
  * - Row 2: routes channels from input A (secondary)
  *
@@ -87,7 +87,7 @@ public:
     virtual void addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const OVERRIDE FINAL;
 
     virtual RenderSafetyEnum renderThreadSafety() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return eRenderSafetyFullySafe; }
+    { return eRenderSafetyInstanceSafe; }   // cachedLayers mutated from main thread; render reads them
 
     virtual bool supportsTiles() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
     virtual bool supportsMultiResolution() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
@@ -98,9 +98,11 @@ public:
     virtual PassThroughEnum isPassThroughForNonRenderedPlanes() const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return ePassThroughPassThroughNonRenderedPlanes; }
 
-    // User-created layer management (stored locally, not via addUserComponents)
-    void addUserLayer(const ImagePlaneDesc& layer);
-    const std::list<ImagePlaneDesc>& getUserLayers() const;
+    // User-created layer management. Delegates to Node::addUserComponents
+    // (the canonical Natron API) so layers survive save/reload via the
+    // standard <UserComponents> XML block. targetRow = 0 routes the new
+    // layer to Row 1's output combo, 1 to Row 2's; -1 = no row hint.
+    void addUserLayer(const ImagePlaneDesc& layer, int targetRow = -1);
 
     // Access cached layers for GUI channel name display
     const std::vector<ImagePlaneDesc>& getCachedLayers() const;
@@ -120,8 +122,24 @@ private:
 
     virtual void onInputChanged(int inputNo) OVERRIDE FINAL;
 
+    // Post-load hook. Fires after knobs are restored; inputs may not be wired
+    // yet. We defer the refresh via QTimer::singleShot so user layers from the
+    // <UserComponents> block can land in the output combos.
+    virtual void onKnobsLoaded() OVERRIDE FINAL;
+
+    // Metadata-refresh hook (Natron equivalent of OFX getClipPreferences).
+    // Fires after input wiring AND upstream metadata is computed — exactly
+    // when getAvailableLayers actually returns useful data.
+    virtual void onMetadataRefreshed(const NodeMetadata& metadata) OVERRIDE FINAL;
+
     void refreshLayerChoices();
     void refreshLayerChoices2();
+
+    // Resolve the output ImagePlaneDesc from an output-layer combo value.
+    // First N entries map to cached input layers; entries past that index
+    // map to user layers (from Node::getUserCreatedComponents).
+    ImagePlaneDesc resolveOutputPlane(const KnobChoiceWPtr& outputLayerKnob,
+                                       const std::vector<ImagePlaneDesc>& cachedInputLayers) const;
 
     std::unique_ptr<DevShufflePrivate> _imp;
 };

@@ -31,7 +31,7 @@ class QComboBox;
 NATRON_NAMESPACE_ENTER
 
 /**
- * @brief Custom widget showing Nuke Shuffle2-style two-row channel routing
+ * @brief Custom widget showing two-row channel routing
  * with draggable noodles.
  *
  * Row 1 (top): Input B channel routing
@@ -81,8 +81,9 @@ Q_SIGNALS:
     void inputLayer2Changed(int index);
     void outputLayer2Changed(int index);
 
-    // New layer request (when user picks "new" from output combo)
-    void newLayerRequested();
+    // New layer request (when user picks "new" from an output combo).
+    // rowIndex = 0 for Row 1's "new", 1 for Row 2's "new".
+    void newLayerRequested(int rowIndex);
 
 protected:
     virtual void paintEvent(QPaintEvent* e) OVERRIDE;

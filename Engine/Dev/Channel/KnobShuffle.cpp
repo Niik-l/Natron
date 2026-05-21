@@ -29,7 +29,7 @@ KnobShuffle::KnobShuffle(KnobHolder* holder,
                           int dimension,
                           bool declaredByPlugin)
     : QObject()
-    , KnobStringBase(holder, description, dimension, declaredByPlugin)
+    , AnimatingKnobStringHelper(holder, description, dimension, declaredByPlugin)
 {
 }
 

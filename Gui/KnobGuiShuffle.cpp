@@ -24,6 +24,8 @@
 
 #include <QHBoxLayout>
 
+#include <ofxNatron.h> // kNatronOfxParamOutputChannels
+
 #include "Engine/Dev/Channel/DevShuffle.h"
 #include "Engine/EffectInstance.h"
 #include "Engine/ImagePlaneDesc.h"
@@ -67,8 +69,8 @@ KnobGuiShuffle::createWidget(QHBoxLayout* layout)
     QObject::connect(_widget, SIGNAL(inputLayer2Changed(int)), this, SLOT(onInputLayer2ComboChanged(int)));
     QObject::connect(_widget, SIGNAL(outputLayer2Changed(int)), this, SLOT(onOutputLayer2ComboChanged(int)));
 
-    // New layer dialog
-    QObject::connect(_widget, SIGNAL(newLayerRequested()), this, SLOT(onNewLayerRequested()));
+    // New layer dialog — row index tells DevShuffle which output combo to target.
+    QObject::connect(_widget, SIGNAL(newLayerRequested(int)), this, SLOT(onNewLayerRequested(int)));
 
     // Populate combos from the hidden knobs
     populateRow1Combos();
@@ -97,8 +99,9 @@ KnobGuiShuffle::populateRow1Combos()
             _widget->setInputLayerChoices(names, ilChoice->getValue());
         }
     }
-    // Output layer combo (row 1)
-    KnobIPtr olKnob = holder->getKnobByName("outputLayer");
+    // Output layer combo (row 1) — uses Natron's canonical name so
+    // Node::addUserComponents can find it when user creates a layer.
+    KnobIPtr olKnob = holder->getKnobByName(kNatronOfxParamOutputChannels);
     if (olKnob) {
         KnobChoice* olChoice = dynamic_cast<KnobChoice*>(olKnob.get());
         if (olChoice) {
@@ -201,7 +204,7 @@ KnobGuiShuffle::onOutputLayerComboChanged(int index)
     KnobHolder* holder = knob->getHolder();
     if (!holder) return;
 
-    KnobIPtr k = holder->getKnobByName("outputLayer");
+    KnobIPtr k = holder->getKnobByName(kNatronOfxParamOutputChannels);
     if (k) {
         KnobChoice* ck = dynamic_cast<KnobChoice*>(k.get());
         if (ck) ck->setValue(index);
@@ -283,27 +286,33 @@ KnobGuiShuffle::onOutputLayer2ComboChanged(int index)
 // ==================== New layer dialog ====================
 
 void
-KnobGuiShuffle::onNewLayerRequested()
+KnobGuiShuffle::onNewLayerRequested(int rowIndex)
 {
     ImagePlaneDesc emptyPlane = ImagePlaneDesc::getNoneComponents();
     NewLayerDialog dialog(emptyPlane, _widget);
-    if (dialog.exec() == QDialog::Accepted) {
-        ImagePlaneDesc newComp = dialog.getComponents();
-        if (newComp.getNumComponents() > 0) {
-            // Store the layer locally in DevShuffle (not via addUserComponents)
-            KnobShufflePtr knob = _knob.lock();
-            if (knob && knob->getHolder()) {
-                EffectInstance* effect = dynamic_cast<EffectInstance*>(knob->getHolder());
-                if (effect) {
-                    DevShuffle* devShuffle = dynamic_cast<DevShuffle*>(effect);
-                    if (devShuffle) {
-                        devShuffle->addUserLayer(newComp);
-                        // addUserLayer already calls refreshLayerChoices/refreshLayerChoices2
-                    }
-                }
-            }
-        }
-    }
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    ImagePlaneDesc newComp = dialog.getComponents();
+    if (newComp.getNumComponents() <= 0) return;
+
+    KnobShufflePtr knob = _knob.lock();
+    if (!knob || !knob->getHolder()) return;
+    EffectInstance* effect = dynamic_cast<EffectInstance*>(knob->getHolder());
+    if (!effect) return;
+    DevShuffle* devShuffle = dynamic_cast<DevShuffle*>(effect);
+    if (!devShuffle) return;
+
+    // Persist via Node::addUserComponents (canonical Natron API) and target
+    // the row the user clicked "new" on.
+    devShuffle->addUserLayer(newComp, rowIndex);
+
+    // CRITICAL: force the widget to re-read both rows after addUserLayer.
+    // The widget caches displayed values mid-sequence (between
+    // Node::addUserComponents auto-setting Row 1 and DevShuffle's restore +
+    // targeted setValueFromID). Without this refresh the GUI shows stale
+    // state even though the underlying KnobChoice values are correct.
+    populateRow1Combos();
+    populateRow2Combos();
 }
 
 // ==================== updateGUI ====================
@@ -330,7 +339,7 @@ KnobGuiShuffle::updateGUI(int /*dimension*/)
             _widget->setInputLayerChoices(names, ilChoice->getValue());
         }
     }
-    KnobIPtr olKnob = holder->getKnobByName("outputLayer");
+    KnobIPtr olKnob = holder->getKnobByName(kNatronOfxParamOutputChannels);
     if (olKnob) {
         KnobChoice* olChoice = dynamic_cast<KnobChoice*>(olKnob.get());
         if (olChoice) {
