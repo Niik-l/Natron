@@ -47,6 +47,8 @@ GCC_DIAG_ON(unused-parameter)
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
 #include <QCoreApplication>
+#include <QProcess>     // RV launcher uses QProcess::startDetached
+#include <QStringList>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 
@@ -205,6 +207,14 @@ public:
     KnobStringWPtr pluginIDStringKnob;
     KnobSeparatorWPtr separatorKnob;
     KnobButtonWPtr renderButtonKnob;
+
+    // RV / OpenRV integration. User sets the RV executable path once on the
+    // node; "Open in RV" button spawns RV with the current output file pattern
+    // as the argument. RV understands `####` notation natively, so sequences
+    // play directly. Process is detached — RV runs independently of Natron.
+    KnobFileWPtr   rvPathKnob;
+    KnobButtonWPtr openInRvButton;
+
     std::list<KnobIWPtr> writeNodeKnobs;
 
     //MT only
@@ -1078,6 +1088,34 @@ WriteNode::initializeKnobs()
     controlpage->addKnob(pluginID);
     _imp->pluginIDStringKnob = pluginID;
     _imp->writeNodeKnobs.push_back(pluginID);
+
+    // --- RV / OpenRV integration ---
+    // Two knobs at the bottom of the Controls page (visually below the Render
+    // Sequence button contributed by the OFX writer plugin). Handler lives in
+    // WriteNode::knobChanged.
+    {
+        KnobFilePtr rvPath = AppManager::createKnob<KnobFile>(this, tr("RV Executable"));
+        rvPath->setName("rvPath");
+        rvPath->setAnimationEnabled(false);
+        rvPath->setEvaluateOnChange(false);
+        rvPath->setHintToolTip(tr("Path to the RV / OpenRV executable (rv.exe on Windows, rv on macOS/Linux). "
+                                    "Used by the \"Open in RV\" button below. Persistent per-node — change it once "
+                                    "and the same path is remembered with the project."));
+        controlpage->addKnob(rvPath);
+        _imp->rvPathKnob = rvPath;
+        _imp->writeNodeKnobs.push_back(rvPath);
+    }
+    {
+        KnobButtonPtr btn = AppManager::createKnob<KnobButton>(this, tr("Open in RV"));
+        btn->setName("openInRv");
+        btn->setHintToolTip(tr("Launch RV / OpenRV on this Write node's output. The file pattern is passed "
+                                "directly to RV — RV understands ####/%04d notation and plays the sequence. "
+                                "Requires the \"RV Executable\" path above to be set. RV runs detached; "
+                                "closing Natron does not affect it."));
+        controlpage->addKnob(btn);
+        _imp->openInRvButton = btn;
+        _imp->writeNodeKnobs.push_back(btn);
+    }
 } // WriteNode::initializeKnobs
 
 void
@@ -1241,6 +1279,32 @@ WriteNode::knobChanged(KnobI* k,
                 ( k->getName() == kParamFrameRange) ) {
         _imp->setReadNodeOriginalFrameRange();
         ret = false;
+    } else if ( k == _imp->openInRvButton.lock().get() ) {
+        // "Open in RV" button — launch RV/OpenRV on the current output file pattern.
+        clearPersistentMessage(false);
+        KnobFilePtr rvPath = _imp->rvPathKnob.lock();
+        KnobOutputFilePtr fileKnob = _imp->outputFileKnob.lock();
+
+        const std::string rvExe = rvPath  ? rvPath->getValue()  : std::string();
+        const std::string outF  = fileKnob ? fileKnob->getValue() : std::string();
+
+        if (rvExe.empty()) {
+            setPersistentMessage(eMessageTypeError,
+                "RV executable path is not set. Fill in \"RV Executable\" above first.");
+        } else if (outF.empty()) {
+            setPersistentMessage(eMessageTypeError,
+                "Write node has no output filename to open.");
+        } else {
+            // RV understands ####/%04d notation natively — pass the pattern as-is.
+            // Detached process: RV runs independently, closing Natron does not affect it.
+            QStringList rvArgs;
+            rvArgs << QString::fromUtf8(outF.c_str());
+            bool ok = QProcess::startDetached(QString::fromUtf8(rvExe.c_str()), rvArgs);
+            if (!ok) {
+                setPersistentMessage(eMessageTypeError,
+                    "Failed to launch RV. Verify the executable path and that RV is installed.");
+            }
+        }
     } else {
         ret = false;
     }
