@@ -447,6 +447,15 @@ public:
         return _isToolButtonAction;
     }
 
+    // Custom Qt stylesheet applied to the underlying QPushButton at create
+    // time. Empty means use Natron's default button look. KnobGuiButton::
+    // createWidget calls _button->setStyleSheet() with this string. Use for
+    // emphasised / attention buttons (e.g. orange Refresh) where the standard
+    // button style isn't enough. Stylesheet is set programmatically in the
+    // C++ code that creates the knob — not persisted to project files.
+    void setStyleSheet(const std::string& css) { _styleSheet = css; }
+    const std::string& getStyleSheet() const   { return _styleSheet; }
+
 private:
 
 
@@ -458,6 +467,7 @@ private:
     bool _renderButton;
     bool _checkable;
     bool _isToolButtonAction;
+    std::string _styleSheet;
 };
 
 /******************************KnobChoice**************************************/

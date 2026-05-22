@@ -150,6 +150,15 @@ KnobGuiButton::createWidget(QHBoxLayout* layout)
         _button->setChecked(checked);
         _button->setDown(checked);
     }
+    // Optional per-knob Qt stylesheet (set via KnobButton::setStyleSheet on the
+    // engine side). Lets specific buttons opt into custom colors / borders
+    // without changing Natron's global button style. Empty string = no-op.
+    {
+        const std::string& css = knob->getStyleSheet();
+        if (!css.empty()) {
+            _button->setStyleSheet(QString::fromUtf8(css.c_str()));
+        }
+    }
     QObject::connect( _button, SIGNAL(clicked(bool)), this, SLOT(emitValueChanged(bool)) );
     if ( hasToolTip() ) {
         _button->setToolTip( toolTip() );
