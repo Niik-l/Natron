@@ -79,7 +79,7 @@ public:
     { return eRenderSafetyInstanceSafe; }
 
     virtual bool supportsTiles() const OVERRIDE WARN_UNUSED_RETURN { return false; }
-    virtual bool supportsMultiResolution() const OVERRIDE WARN_UNUSED_RETURN { return false; }
+    virtual bool supportsMultiResolution() const OVERRIDE WARN_UNUSED_RETURN { return true; }
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 

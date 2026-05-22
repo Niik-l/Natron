@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "../Scene3D/Card3D.h"
 #include "../Scene3D/RotationConventions.h"
 
 #include "../../AppInstance.h"
@@ -529,25 +530,85 @@ ParticleEmitter::getParticleData(double time)
     int maskOrientVal = 1; // XZ
     bool maskColorFromImg = true;
 
+    // Card3D Mask path (Scope A): if input 0 is a Card3D node, particles emit
+    // from the Card3D's textured surface using its world transform. The
+    // Card3D is visible in the 3D viewport so users see where particles are
+    // emerging from. Replaces the legacy XY/YZ/XZ plane projection and the
+    // emitter's own translateXYZ for the Card3D case.
+    Card3D* card3dMask = nullptr;
+    const Card3D::CachedTexture* card3dTex = nullptr;
+    float card3dT[3] = { 0.f, 0.f, 0.f };
+    double card3dRot[3][3] = { {1,0,0}, {0,1,0}, {0,0,1} };
+    float card3dScale[3] = { 1.f, 1.f, 1.f };
+    float card3dHalfW = 0.5f, card3dHalfH = 0.5f;
+
     if (shapeType == 4) {
         maskThresholdVal = (float)_imp->maskThreshold.lock()->getValueAtTime(time);
         maskPlaneScaleVal = (float)_imp->maskPlaneScale.lock()->getValueAtTime(time);
         maskOrientVal = _imp->maskPlaneOrientation.lock() ? _imp->maskPlaneOrientation.lock()->getValue() : 1;
         maskColorFromImg = _imp->maskColorFromImage.lock() ? _imp->maskColorFromImage.lock()->getValue() : true;
 
-        // Fetch the mask image from input 0
-        RectI srcRoi;
-        maskImg = getImage(0, time, RenderScale(), ViewIdx(0),
-                           NULL, NULL, false, true,
-                           eStorageModeRAM, 0, &srcRoi);
-        if (maskImg) {
-            maskBounds = maskImg->getBounds();
-            maskWidth = maskBounds.x2 - maskBounds.x1;
-            maskHeight = maskBounds.y2 - maskBounds.y1;
+        // Detect Card3D upstream
+        EffectInstancePtr maskInput = getInput(0);
+        if (maskInput) {
+            card3dMask = dynamic_cast<Card3D*>(maskInput.get());
         }
-        // If no image, fall back to Point shape
-        if (!maskImg || maskWidth <= 0 || maskHeight <= 0) {
-            shapeType = 0; // fallback to Point
+
+        if (card3dMask) {
+            // Card3D mask source — pull its cached texture + transform.
+            card3dMask->updateCachedTexture(time);
+            card3dTex = &card3dMask->getCachedTexture();
+
+            auto readDouble = [&](const char* name, float& out) {
+                KnobIPtr k = card3dMask->getKnobByName(name);
+                if (!k) return;
+                if (KnobDouble* kd = dynamic_cast<KnobDouble*>(k.get())) {
+                    out = (float)kd->getValueAtTime(time);
+                }
+            };
+            readDouble("translateX", card3dT[0]);
+            readDouble("translateY", card3dT[1]);
+            readDouble("translateZ", card3dT[2]);
+
+            float rx = 0.f, ry = 0.f, rz = 0.f;
+            readDouble("rotateX", rx);
+            readDouble("rotateY", ry);
+            readDouble("rotateZ", rz);
+            RotationConventions::compose((double)rx, (double)ry, (double)rz, card3dRot);
+
+            readDouble("scaleX", card3dScale[0]);
+            readDouble("scaleY", card3dScale[1]);
+            readDouble("scaleZ", card3dScale[2]);
+
+            // Card3D local plane spans (-halfW, -halfH, 0) to (+halfW, +halfH, 0).
+            // halfW carries the texture aspect, halfH = 0.5 (same convention
+            // drawCardNode uses in DevViewport3D).
+            if (card3dTex->width > 0 && card3dTex->height > 0) {
+                card3dHalfW = (float)card3dTex->width / (float)card3dTex->height * 0.5f;
+            }
+            card3dHalfH = 0.5f;
+
+            // If the Card3D has no texture loaded, fall back to Point shape.
+            if (card3dTex->pixels.empty()) {
+                card3dMask = nullptr;
+                card3dTex = nullptr;
+                shapeType = 0;
+            }
+        } else {
+            // Existing 2D-image mask path: fetch the mask image.
+            RectI srcRoi;
+            maskImg = getImage(0, time, RenderScale(), ViewIdx(0),
+                               NULL, NULL, false, true,
+                               eStorageModeRAM, 0, &srcRoi);
+            if (maskImg) {
+                maskBounds = maskImg->getBounds();
+                maskWidth = maskBounds.x2 - maskBounds.x1;
+                maskHeight = maskBounds.y2 - maskBounds.y1;
+            }
+            // If no image, fall back to Point shape
+            if (!maskImg || maskWidth <= 0 || maskHeight <= 0) {
+                shapeType = 0;
+            }
         }
     }
 
@@ -607,8 +668,54 @@ ParticleEmitter::getParticleData(double time)
                     offZ = rad * std::sin(angle);
                     break;
                 }
-                case 4: { // Image Mask
+                case 4: { // Image Mask (2D image OR Card3D)
                     bool accepted = false;
+
+                    // ----- Card3D mask path -----
+                    if (card3dMask) {
+                        for (int retry = 0; retry < 10; ++retry) {
+                            const float u = dist01(rng);
+                            const float v = dist01(rng);
+
+                            int px = (int)(u * (float)card3dTex->width);
+                            int py = (int)(v * (float)card3dTex->height);
+                            if (px >= card3dTex->width)  px = card3dTex->width  - 1;
+                            if (py >= card3dTex->height) py = card3dTex->height - 1;
+                            const float* pix = &card3dTex->pixels[(py * card3dTex->width + px) * 4];
+
+                            float lum = 0.2126f * pix[0] + 0.7152f * pix[1] + 0.0722f * pix[2];
+                            if (lum < maskThresholdVal) continue;
+
+                            // Local plane position: (-halfW..+halfW, -halfH..+halfH, 0).
+                            // Per-axis scale applied, then rotation, then translation.
+                            // Then SUBTRACT emPos so the final `p.px = emPosX + offX`
+                            // step downstream produces the absolute world position —
+                            // Card3D's transform replaces the emitter's translate.
+                            float lx = (u - 0.5f) * card3dHalfW * 2.f * card3dScale[0];
+                            float ly = (v - 0.5f) * card3dHalfH * 2.f * card3dScale[1];
+                            float lz = 0.f;
+
+                            float wx = (float)(card3dRot[0][0]*lx + card3dRot[0][1]*ly + card3dRot[0][2]*lz);
+                            float wy = (float)(card3dRot[1][0]*lx + card3dRot[1][1]*ly + card3dRot[1][2]*lz);
+                            float wz = (float)(card3dRot[2][0]*lx + card3dRot[2][1]*ly + card3dRot[2][2]*lz);
+
+                            offX = wx + card3dT[0] - (float)emPosX;
+                            offY = wy + card3dT[1] - (float)emPosY;
+                            offZ = wz + card3dT[2] - (float)emPosZ;
+
+                            if (maskColorFromImg) {
+                                colR = pix[0];
+                                colG = pix[1];
+                                colB = pix[2];
+                            }
+                            accepted = true;
+                            break;
+                        }
+                        if (!accepted) continue;
+                        break;
+                    }
+
+                    // ----- Legacy 2D-image mask path -----
                     for (int retry = 0; retry < 10; ++retry) {
                         int px = maskBounds.x1 + (int)(dist01(rng) * (float)maskWidth);
                         int py = maskBounds.y1 + (int)(dist01(rng) * (float)maskHeight);
