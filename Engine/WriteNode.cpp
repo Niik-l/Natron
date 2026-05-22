@@ -25,6 +25,7 @@
 
 #include "WriteNode.h"
 
+#include <cstdlib> // std::getenv (NATRON_RV_PATH lookup)
 #include <sstream> // stringstream
 
 #include "Global/QtCompat.h"
@@ -1100,7 +1101,16 @@ WriteNode::initializeKnobs()
         rvPath->setEvaluateOnChange(false);
         rvPath->setHintToolTip(tr("Path to the RV / OpenRV executable (rv.exe on Windows, rv on macOS/Linux). "
                                     "Used by the \"Open in RV\" button below. Persistent per-node — change it once "
-                                    "and the same path is remembered with the project."));
+                                    "and the same path is remembered with the project.\n\n"
+                                    "Tip: set the NATRON_RV_PATH environment variable before launching Natron and "
+                                    "every new Write node will be pre-filled with that path."));
+        // Pre-fill from the NATRON_RV_PATH env var if set. This is the default
+        // for new Write nodes; per-node overrides still win once typed in.
+        if (const char* envRv = std::getenv("NATRON_RV_PATH")) {
+            if (envRv[0] != '\0') {
+                rvPath->setDefaultValue(envRv);
+            }
+        }
         controlpage->addKnob(rvPath);
         _imp->rvPathKnob = rvPath;
         _imp->writeNodeKnobs.push_back(rvPath);
@@ -1285,12 +1295,21 @@ WriteNode::knobChanged(KnobI* k,
         KnobFilePtr rvPath = _imp->rvPathKnob.lock();
         KnobOutputFilePtr fileKnob = _imp->outputFileKnob.lock();
 
-        const std::string rvExe = rvPath  ? rvPath->getValue()  : std::string();
-        const std::string outF  = fileKnob ? fileKnob->getValue() : std::string();
+        std::string rvExe = rvPath  ? rvPath->getValue()  : std::string();
+        const std::string outF = fileKnob ? fileKnob->getValue() : std::string();
+
+        // Runtime fallback: when the knob is empty (e.g. project saved before
+        // NATRON_RV_PATH was set), use the env var directly.
+        if (rvExe.empty()) {
+            if (const char* envRv = std::getenv("NATRON_RV_PATH")) {
+                if (envRv[0] != '\0') rvExe = envRv;
+            }
+        }
 
         if (rvExe.empty()) {
             setPersistentMessage(eMessageTypeError,
-                "RV executable path is not set. Fill in \"RV Executable\" above first.");
+                "RV executable path is not set. Fill in \"RV Executable\" above, "
+                "or set the NATRON_RV_PATH environment variable before launching Natron.");
         } else if (outF.empty()) {
             setPersistentMessage(eMessageTypeError,
                 "Write node has no output filename to open.");

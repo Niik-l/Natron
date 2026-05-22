@@ -347,6 +347,45 @@ cp -r /c/msys64/mingw64/lib/python3.14 ../lib/python3.14
 
 ---
 
+## 9c. Optional runtime environment variables
+
+A few env vars are read at runtime — set them once in your shell profile or in Windows' permanent environment so Natron picks them up on every launch (including double-click from Explorer).
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `OFX_PLUGIN_PATH` | Where Natron looks for OFX plugin bundles (`.ofx.bundle`). Use this if your plugins live outside the default `Plugins/OFX/Natron` install location. | `D:\my\OFX\Plugins` |
+| `NATRON_RV_PATH` | Path to the RV / OpenRV executable. When set, every new WriteNode's "RV Executable" knob is pre-filled with this value, and the "Open in RV" button uses it as a runtime fallback when the knob is empty. | `C:\Program Files\RV\bin\rv.exe` |
+| `OCIO` | Path to a `config.ocio` file. Overrides the bundled OpenColorIO config search (see step 8). | `C:\colorpipe\aces\config.ocio` |
+
+### Setting them permanently on Windows
+
+Option A — GUI: Start menu → "environment" → "Edit environment variables for your account" → **New...** under **User variables** → enter Name + Value → OK.
+
+Option B — `cmd.exe` one-liner:
+```cmd
+setx NATRON_RV_PATH "C:\Program Files\RV\bin\rv.exe"
+setx OFX_PLUGIN_PATH "D:\my\OFX\Plugins"
+```
+
+Option C — PowerShell:
+```powershell
+[System.Environment]::SetEnvironmentVariable("NATRON_RV_PATH", "C:\Program Files\RV\bin\rv.exe", "User")
+```
+
+All three persist into your Windows user profile registry; new processes inherit them. Close + reopen any already-running shells/Natron for the change to take effect.
+
+### Setting them per-session (Linux/macOS or MSYS2)
+
+```bash
+export OFX_PLUGIN_PATH="/path/to/ofx/plugins"
+export NATRON_RV_PATH="/path/to/rv"
+./Natron
+```
+
+Add the `export` lines to your `~/.bashrc` / `~/.zshrc` to make them persistent across sessions.
+
+---
+
 ## 10. Enable Cycles Renderer (optional)
 
 Natron includes an optional Cycles path tracer integration (the same renderer used by Blender). It's disabled by default.
