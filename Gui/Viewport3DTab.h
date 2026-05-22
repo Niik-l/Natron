@@ -89,6 +89,10 @@ public Q_SLOTS:
     void onCameraMenuAboutToShow();
     void onCameraSelected();
 
+    /** Shading-mode dropdown — Wireframe / Shaded / Shaded+Wire.
+     *  QAction sender carries the chosen mode in its data() (int). */
+    void onShadingModeSelected();
+
 private:
 
     virtual void enterEvent(QtCompat::QEnterEvent* e) OVERRIDE FINAL;
@@ -107,6 +111,7 @@ private:
     QToolButton* _gridBtn;
     QToolButton* _spaceBtn;
     QToolButton* _cameraDropdown;
+    QToolButton* _shadingDropdown;
     bool _gridVisible;
 };
 

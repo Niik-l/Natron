@@ -370,6 +370,11 @@ struct DevViewport3DPrivate
     // Toggle from the Grid button in Viewport3DTab. Default visible.
     bool showGrid;
 
+    // Viewport shading style — driven by the Shading dropdown in Viewport3DTab.
+    // Default Shaded+Wire so meshes show solid grey + edges (Maya-like) while
+    // shapes carrying textures still display them.
+    DevViewport3D::ShadingMode shadingMode;
+
     // Right-click context menu — track the press position so we only show the
     // menu when the user releases without dragging (otherwise right-drag for
     // zoom/navigation would constantly trigger the menu). Threshold checked
@@ -437,6 +442,7 @@ struct DevViewport3DPrivate
         , boxStartX(0), boxStartY(0)
         , boxEndX(0), boxEndY(0)
         , showGrid(true)
+        , shadingMode(DevViewport3D::eShadedWire)
         , rightButtonDown(false)
         , rightPressX(0), rightPressY(0)
         , lookThroughEditMode(LT_NONE)
@@ -974,6 +980,7 @@ DevViewport3D::paintGL()
                     p->getNodes_recursive(allNodes, true);
                     for (NodesList::const_iterator it = allNodes.begin(); it != allNodes.end(); ++it) {
                         if (!(*it)->isActivated()) continue;
+                        if ((*it)->isNodeDisabled()) continue;
                         EffectInstancePtr eff = (*it)->getEffectInstance();
                         if (!eff) continue;
                         // Scan for Blast and DeepToPoints — prefer Blast (filtered) over raw
@@ -1749,6 +1756,20 @@ DevViewport3D::setShowGrid(bool show)
 }
 
 void
+DevViewport3D::setShadingMode(DevViewport3D::ShadingMode mode)
+{
+    if (_imp->shadingMode == mode) return;
+    _imp->shadingMode = mode;
+    update();
+}
+
+DevViewport3D::ShadingMode
+DevViewport3D::getShadingMode() const
+{
+    return _imp->shadingMode;
+}
+
+void
 DevViewport3D::setLookThroughCamera(const NodePtr& cameraNode)
 {
     _imp->lookThroughCam = cameraNode;
@@ -2060,6 +2081,7 @@ DevViewport3D::drawPointCloud() const
                     p->getNodes_recursive(allNodes, true);
                     for (NodesList::const_iterator it = allNodes.begin(); it != allNodes.end(); ++it) {
                         if (!(*it)->isActivated()) continue;
+                        if ((*it)->isNodeDisabled()) continue;
                         EffectInstancePtr eff = (*it)->getEffectInstance();
                         if (!eff) continue;
                         Blast* blast = dynamic_cast<Blast*>(eff.get());
@@ -2123,16 +2145,67 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
     }
     if (!mesh || mesh->numVertices == 0) return;
 
-    glColor3f(0.7f, 0.7f, 0.7f);
-    glLineWidth(1.0f);
+    const ShadingMode mode = _imp->shadingMode;
+    const int nv = (int)mesh->numVertices;
 
-    if (!mesh->edgeIndices.empty()) {
+    // ----- Shaded fill (Shaded / Shaded+Wire) -----
+    // Fan-triangulate the polygon-soup mesh via faceCounts. If faceCounts is
+    // empty, treat faceIndices as already-triangulated (GL_TRIANGLES every 3).
+    if (mode != eWireframe) {
+        if (mode == eShadedWire) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(1.0f, 1.0f);
+        }
+        glColor3f(0.45f, 0.45f, 0.45f);
+        glBegin(GL_TRIANGLES);
+        if (!mesh->faceCounts.empty()) {
+            size_t off = 0;
+            for (size_t f = 0; f < mesh->faceCounts.size(); ++f) {
+                const int c = mesh->faceCounts[f];
+                if (c < 3 || off + (size_t)c > mesh->faceIndices.size()) {
+                    off += (size_t)std::max(0, c);
+                    continue;
+                }
+                const int v0 = mesh->faceIndices[off];
+                for (int i = 1; i + 1 < c; ++i) {
+                    const int v1 = mesh->faceIndices[off + i];
+                    const int v2 = mesh->faceIndices[off + i + 1];
+                    if (v0 >= 0 && v0 < nv && v1 >= 0 && v1 < nv && v2 >= 0 && v2 < nv) {
+                        glVertex3f(mesh->vertices[v0*3], mesh->vertices[v0*3+1], mesh->vertices[v0*3+2]);
+                        glVertex3f(mesh->vertices[v1*3], mesh->vertices[v1*3+1], mesh->vertices[v1*3+2]);
+                        glVertex3f(mesh->vertices[v2*3], mesh->vertices[v2*3+1], mesh->vertices[v2*3+2]);
+                    }
+                }
+                off += (size_t)c;
+            }
+        } else {
+            // Already triangulated
+            for (size_t i = 0; i + 2 < mesh->faceIndices.size(); i += 3) {
+                const int v0 = mesh->faceIndices[i];
+                const int v1 = mesh->faceIndices[i + 1];
+                const int v2 = mesh->faceIndices[i + 2];
+                if (v0 >= 0 && v0 < nv && v1 >= 0 && v1 < nv && v2 >= 0 && v2 < nv) {
+                    glVertex3f(mesh->vertices[v0*3], mesh->vertices[v0*3+1], mesh->vertices[v0*3+2]);
+                    glVertex3f(mesh->vertices[v1*3], mesh->vertices[v1*3+1], mesh->vertices[v1*3+2]);
+                    glVertex3f(mesh->vertices[v2*3], mesh->vertices[v2*3+1], mesh->vertices[v2*3+2]);
+                }
+            }
+        }
+        glEnd();
+        if (mode == eShadedWire) {
+            glDisable(GL_POLYGON_OFFSET_FILL);
+        }
+    }
+
+    // ----- Wireframe (Wireframe / Shaded+Wire) -----
+    if (mode != eShaded && !mesh->edgeIndices.empty()) {
+        glColor3f(0.7f, 0.7f, 0.7f);
+        glLineWidth(1.0f);
         glBegin(GL_LINES);
         for (size_t i = 0; i + 1 < mesh->edgeIndices.size(); i += 2) {
             int i0 = mesh->edgeIndices[i];
             int i1 = mesh->edgeIndices[i + 1];
-            if (i0 >= 0 && i0 < (int)mesh->numVertices &&
-                i1 >= 0 && i1 < (int)mesh->numVertices) {
+            if (i0 >= 0 && i0 < nv && i1 >= 0 && i1 < nv) {
                 glVertex3f(mesh->vertices[i0*3], mesh->vertices[i0*3+1], mesh->vertices[i0*3+2]);
                 glVertex3f(mesh->vertices[i1*3], mesh->vertices[i1*3+1], mesh->vertices[i1*3+2]);
             }
@@ -2159,17 +2232,26 @@ DevViewport3D::drawCardNode(const SceneNode& sn) const
     float halfW = 0.5f, halfH = 0.5f;
 
     Card3D* card3dNew = dynamic_cast<Card3D*>(effect.get());
-    if (card3dNew) {
-        card3dNew->updateCachedTexture(time);
-        const Card3D::CachedTexture& tex = card3dNew->getCachedTexture();
+    if (!card3dNew) return;
 
-        if (tex.width > 0 && tex.height > 0) {
-            halfW = (float)tex.width / (float)tex.height * 0.5f;
-        } else {
-            halfW = 16.0f / 9.0f * 0.5f;
+    card3dNew->updateCachedTexture(time);
+    const Card3D::CachedTexture& tex = card3dNew->getCachedTexture();
+    const bool hasTex = (tex.width > 0 && tex.height > 0 && !tex.pixels.empty());
+
+    if (tex.width > 0 && tex.height > 0) {
+        halfW = (float)tex.width / (float)tex.height * 0.5f;
+    } else {
+        halfW = 16.0f / 9.0f * 0.5f;
+    }
+
+    const ShadingMode mode = _imp->shadingMode;
+
+    if (mode != eWireframe) {
+        if (mode == eShadedWire) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(1.0f, 1.0f);
         }
-
-        if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
+        if (hasTex) {
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
             glBindTexture(GL_TEXTURE_2D, glTex);
@@ -2193,21 +2275,32 @@ DevViewport3D::drawCardNode(const SceneNode& sn) const
             glDisable(GL_TEXTURE_2D);
             glDisable(GL_BLEND);
             glDeleteTextures(1, &glTex);
+        } else {
+            glColor3f(0.45f, 0.45f, 0.45f);
+            glBegin(GL_QUADS);
+            glVertex3f(-halfW, -halfH, 0);
+            glVertex3f( halfW, -halfH, 0);
+            glVertex3f( halfW,  halfH, 0);
+            glVertex3f(-halfW,  halfH, 0);
+            glEnd();
         }
-    } else {
-        return;
+        if (mode == eShadedWire) {
+            glDisable(GL_POLYGON_OFFSET_FILL);
+        }
     }
 
-    bool selected = (sn.name == _imp->selectedNodeName);
-    glColor3f(selected ? 1.0f : 0.2f, selected ? 1.0f : 0.8f, selected ? 0.0f : 0.2f);
-    glLineWidth(2.0f);
-    glBegin(GL_LINE_LOOP);
-    glVertex3f(-halfW, -halfH, 0.0f);
-    glVertex3f( halfW, -halfH, 0.0f);
-    glVertex3f( halfW,  halfH, 0.0f);
-    glVertex3f(-halfW,  halfH, 0.0f);
-    glEnd();
-    glLineWidth(1.0f);
+    if (mode != eShaded) {
+        bool selected = (sn.name == _imp->selectedNodeName);
+        glColor3f(selected ? 1.0f : 0.2f, selected ? 1.0f : 0.8f, selected ? 0.0f : 0.2f);
+        glLineWidth(2.0f);
+        glBegin(GL_LINE_LOOP);
+        glVertex3f(-halfW, -halfH, 0.0f);
+        glVertex3f( halfW, -halfH, 0.0f);
+        glVertex3f( halfW,  halfH, 0.0f);
+        glVertex3f(-halfW,  halfH, 0.0f);
+        glEnd();
+        glLineWidth(1.0f);
+    }
 }
 
 void
@@ -2320,74 +2413,103 @@ DevViewport3D::drawSphereNode(const SceneNode& sn) const
     int vertsPerRow = cols + 1;
     int numTris = (int)(triIndices.size() / 3);
 
+    const ShadingMode mode = _imp->shadingMode;
     const Sphere3D::CachedTexture& tex = sphere->getCachedTexture();
-    if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
-        GLuint glTex = 0;
-        glGenTextures(1, &glTex);
-        glBindTexture(GL_TEXTURE_2D, glTex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width, tex.height,
-                     0, GL_RGBA, GL_FLOAT, tex.pixels.data());
+    const bool hasTex = (tex.width > 0 && tex.height > 0 && !tex.pixels.empty());
 
-        glEnable(GL_TEXTURE_2D);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+    // ----- Shaded fill -----
+    if (mode != eWireframe) {
+        if (mode == eShadedWire) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(1.0f, 1.0f);
+        }
+        if (hasTex) {
+            GLuint glTex = 0;
+            glGenTextures(1, &glTex);
+            glBindTexture(GL_TEXTURE_2D, glTex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width, tex.height,
+                         0, GL_RGBA, GL_FLOAT, tex.pixels.data());
 
-        glBegin(GL_TRIANGLES);
-        for (int t = 0; t < numTris; ++t) {
-            for (int vi = 0; vi < 3; ++vi) {
-                int idx = triIndices[t * 3 + vi];
-                if (idx >= 0 && idx < (int)sphereVerts.size()) {
-                    glTexCoord2f(sphereVerts[idx].u, sphereVerts[idx].v);
+            glEnable(GL_TEXTURE_2D);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+
+            glBegin(GL_TRIANGLES);
+            for (int t = 0; t < numTris; ++t) {
+                for (int vi = 0; vi < 3; ++vi) {
+                    int idx = triIndices[t * 3 + vi];
+                    if (idx >= 0 && idx < (int)sphereVerts.size()) {
+                        glTexCoord2f(sphereVerts[idx].u, sphereVerts[idx].v);
+                        glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
+                    }
+                }
+            }
+            glEnd();
+
+            glDisable(GL_TEXTURE_2D);
+            glDisable(GL_BLEND);
+            glDeleteTextures(1, &glTex);
+        } else {
+            // Grey fallback (no texture present)
+            glColor3f(0.45f, 0.45f, 0.45f);
+            glBegin(GL_TRIANGLES);
+            for (int t = 0; t < numTris; ++t) {
+                for (int vi = 0; vi < 3; ++vi) {
+                    int idx = triIndices[t * 3 + vi];
+                    if (idx >= 0 && idx < (int)sphereVerts.size()) {
+                        glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
+                    }
+                }
+            }
+            glEnd();
+        }
+        if (mode == eShadedWire) {
+            glDisable(GL_POLYGON_OFFSET_FILL);
+        }
+    }
+
+    // ----- Wireframe -----
+    if (mode != eShaded) {
+        bool selected = (sn.name == _imp->selectedNodeName);
+        if (selected) {
+            glColor3f(1.0f, 1.0f, 0.0f);
+        } else {
+            glColor3f(0.3f, 0.6f, 0.3f);
+        }
+        glLineWidth(selected ? 2.0f : 1.0f);
+
+        int rowStep = std::max(1, rows / 12);
+        int colStep = std::max(1, cols / 12);
+
+        for (int row = 0; row <= rows; row += rowStep) {
+            glBegin(GL_LINE_STRIP);
+            for (int col = 0; col <= cols; ++col) {
+                int idx = row * vertsPerRow + col;
+                if (idx < (int)sphereVerts.size()) {
                     glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
                 }
             }
+            glEnd();
         }
-        glEnd();
 
-        glDisable(GL_TEXTURE_2D);
-        glDisable(GL_BLEND);
-        glDeleteTextures(1, &glTex);
-    }
-
-    bool selected = (sn.name == _imp->selectedNodeName);
-    if (selected) {
-        glColor3f(1.0f, 1.0f, 0.0f);
-    } else {
-        glColor3f(0.3f, 0.6f, 0.3f);
-    }
-    glLineWidth(selected ? 2.0f : 1.0f);
-
-    int rowStep = std::max(1, rows / 12);
-    int colStep = std::max(1, cols / 12);
-
-    for (int row = 0; row <= rows; row += rowStep) {
-        glBegin(GL_LINE_STRIP);
-        for (int col = 0; col <= cols; ++col) {
-            int idx = row * vertsPerRow + col;
-            if (idx < (int)sphereVerts.size()) {
-                glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
+        for (int col = 0; col <= cols; col += colStep) {
+            glBegin(GL_LINE_STRIP);
+            for (int row = 0; row <= rows; ++row) {
+                int idx = row * vertsPerRow + col;
+                if (idx < (int)sphereVerts.size()) {
+                    glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
+                }
             }
+            glEnd();
         }
-        glEnd();
-    }
 
-    for (int col = 0; col <= cols; col += colStep) {
-        glBegin(GL_LINE_STRIP);
-        for (int row = 0; row <= rows; ++row) {
-            int idx = row * vertsPerRow + col;
-            if (idx < (int)sphereVerts.size()) {
-                glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
-            }
-        }
-        glEnd();
+        glLineWidth(1.0f);
     }
-
-    glLineWidth(1.0f);
 }
 
 void
@@ -2413,57 +2535,83 @@ DevViewport3D::drawCubeNode(const SceneNode& sn) const
     cube->generateCubeMesh(time, cubeVerts, triIndices);
     int numTris = (int)(triIndices.size() / 3);
 
+    const ShadingMode mode = _imp->shadingMode;
     const Cube3D::CachedTexture& tex = cube->getCachedTexture();
-    if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
-        GLuint glTex = 0;
-        glGenTextures(1, &glTex);
-        glBindTexture(GL_TEXTURE_2D, glTex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width, tex.height,
-                     0, GL_RGBA, GL_FLOAT, tex.pixels.data());
+    const bool hasTex = (tex.width > 0 && tex.height > 0 && !tex.pixels.empty());
 
-        glEnable(GL_TEXTURE_2D);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+    if (mode != eWireframe) {
+        if (mode == eShadedWire) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(1.0f, 1.0f);
+        }
+        if (hasTex) {
+            GLuint glTex = 0;
+            glGenTextures(1, &glTex);
+            glBindTexture(GL_TEXTURE_2D, glTex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width, tex.height,
+                         0, GL_RGBA, GL_FLOAT, tex.pixels.data());
 
-        glBegin(GL_TRIANGLES);
-        for (int t = 0; t < numTris; ++t) {
-            for (int vi = 0; vi < 3; ++vi) {
-                int idx = triIndices[t * 3 + vi];
-                if (idx >= 0 && idx < (int)cubeVerts.size()) {
-                    glTexCoord2f(cubeVerts[idx].u, cubeVerts[idx].v);
-                    glVertex3f(cubeVerts[idx].x, cubeVerts[idx].y, cubeVerts[idx].z);
+            glEnable(GL_TEXTURE_2D);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+
+            glBegin(GL_TRIANGLES);
+            for (int t = 0; t < numTris; ++t) {
+                for (int vi = 0; vi < 3; ++vi) {
+                    int idx = triIndices[t * 3 + vi];
+                    if (idx >= 0 && idx < (int)cubeVerts.size()) {
+                        glTexCoord2f(cubeVerts[idx].u, cubeVerts[idx].v);
+                        glVertex3f(cubeVerts[idx].x, cubeVerts[idx].y, cubeVerts[idx].z);
+                    }
                 }
             }
-        }
-        glEnd();
+            glEnd();
 
-        glDisable(GL_TEXTURE_2D);
-        glDisable(GL_BLEND);
-        glDeleteTextures(1, &glTex);
+            glDisable(GL_TEXTURE_2D);
+            glDisable(GL_BLEND);
+            glDeleteTextures(1, &glTex);
+        } else {
+            glColor3f(0.45f, 0.45f, 0.45f);
+            glBegin(GL_TRIANGLES);
+            for (int t = 0; t < numTris; ++t) {
+                for (int vi = 0; vi < 3; ++vi) {
+                    int idx = triIndices[t * 3 + vi];
+                    if (idx >= 0 && idx < (int)cubeVerts.size()) {
+                        glVertex3f(cubeVerts[idx].x, cubeVerts[idx].y, cubeVerts[idx].z);
+                    }
+                }
+            }
+            glEnd();
+        }
+        if (mode == eShadedWire) {
+            glDisable(GL_POLYGON_OFFSET_FILL);
+        }
     }
 
-    bool selected = (sn.name == _imp->selectedNodeName);
-    glColor3f(selected ? 1.0f : 0.5f, selected ? 1.0f : 0.5f, selected ? 0.0f : 0.8f);
-    glLineWidth(selected ? 2.0f : 1.0f);
+    if (mode != eShaded) {
+        bool selected = (sn.name == _imp->selectedNodeName);
+        glColor3f(selected ? 1.0f : 0.5f, selected ? 1.0f : 0.5f, selected ? 0.0f : 0.8f);
+        glLineWidth(selected ? 2.0f : 1.0f);
 
-    float s = (float)cube->getSize(time) * 0.5f;
-    glBegin(GL_LINE_LOOP);
-    glVertex3f(-s, -s,  s); glVertex3f( s, -s,  s); glVertex3f( s,  s,  s); glVertex3f(-s,  s,  s);
-    glEnd();
-    glBegin(GL_LINE_LOOP);
-    glVertex3f(-s, -s, -s); glVertex3f( s, -s, -s); glVertex3f( s,  s, -s); glVertex3f(-s,  s, -s);
-    glEnd();
-    glBegin(GL_LINES);
-    glVertex3f(-s, -s, -s); glVertex3f(-s, -s,  s);
-    glVertex3f( s, -s, -s); glVertex3f( s, -s,  s);
-    glVertex3f( s,  s, -s); glVertex3f( s,  s,  s);
-    glVertex3f(-s,  s, -s); glVertex3f(-s,  s,  s);
-    glEnd();
+        float s = (float)cube->getSize(time) * 0.5f;
+        glBegin(GL_LINE_LOOP);
+        glVertex3f(-s, -s,  s); glVertex3f( s, -s,  s); glVertex3f( s,  s,  s); glVertex3f(-s,  s,  s);
+        glEnd();
+        glBegin(GL_LINE_LOOP);
+        glVertex3f(-s, -s, -s); glVertex3f( s, -s, -s); glVertex3f( s,  s, -s); glVertex3f(-s,  s, -s);
+        glEnd();
+        glBegin(GL_LINES);
+        glVertex3f(-s, -s, -s); glVertex3f(-s, -s,  s);
+        glVertex3f( s, -s, -s); glVertex3f( s, -s,  s);
+        glVertex3f( s,  s, -s); glVertex3f( s,  s,  s);
+        glVertex3f(-s,  s, -s); glVertex3f(-s,  s,  s);
+        glEnd();
 
-    glLineWidth(1.0f);
+        glLineWidth(1.0f);
+    }
 }
 
 void
@@ -2489,72 +2637,98 @@ DevViewport3D::drawCylinderNode(const SceneNode& sn) const
     cyl->generateCylinderMesh(time, cylVerts, triIndices);
     int numTris = (int)(triIndices.size() / 3);
 
+    const ShadingMode mode = _imp->shadingMode;
     const Cylinder3D::CachedTexture& tex = cyl->getCachedTexture();
-    if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
-        GLuint glTex = 0;
-        glGenTextures(1, &glTex);
-        glBindTexture(GL_TEXTURE_2D, glTex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width, tex.height,
-                     0, GL_RGBA, GL_FLOAT, tex.pixels.data());
+    const bool hasTex = (tex.width > 0 && tex.height > 0 && !tex.pixels.empty());
 
-        glEnable(GL_TEXTURE_2D);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+    if (mode != eWireframe) {
+        if (mode == eShadedWire) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(1.0f, 1.0f);
+        }
+        if (hasTex) {
+            GLuint glTex = 0;
+            glGenTextures(1, &glTex);
+            glBindTexture(GL_TEXTURE_2D, glTex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width, tex.height,
+                         0, GL_RGBA, GL_FLOAT, tex.pixels.data());
 
-        glBegin(GL_TRIANGLES);
-        for (int t = 0; t < numTris; ++t) {
-            for (int vi = 0; vi < 3; ++vi) {
-                int idx = triIndices[t * 3 + vi];
-                if (idx >= 0 && idx < (int)cylVerts.size()) {
-                    glTexCoord2f(cylVerts[idx].u, cylVerts[idx].v);
-                    glVertex3f(cylVerts[idx].x, cylVerts[idx].y, cylVerts[idx].z);
+            glEnable(GL_TEXTURE_2D);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+
+            glBegin(GL_TRIANGLES);
+            for (int t = 0; t < numTris; ++t) {
+                for (int vi = 0; vi < 3; ++vi) {
+                    int idx = triIndices[t * 3 + vi];
+                    if (idx >= 0 && idx < (int)cylVerts.size()) {
+                        glTexCoord2f(cylVerts[idx].u, cylVerts[idx].v);
+                        glVertex3f(cylVerts[idx].x, cylVerts[idx].y, cylVerts[idx].z);
+                    }
                 }
             }
+            glEnd();
+
+            glDisable(GL_TEXTURE_2D);
+            glDisable(GL_BLEND);
+            glDeleteTextures(1, &glTex);
+        } else {
+            glColor3f(0.45f, 0.45f, 0.45f);
+            glBegin(GL_TRIANGLES);
+            for (int t = 0; t < numTris; ++t) {
+                for (int vi = 0; vi < 3; ++vi) {
+                    int idx = triIndices[t * 3 + vi];
+                    if (idx >= 0 && idx < (int)cylVerts.size()) {
+                        glVertex3f(cylVerts[idx].x, cylVerts[idx].y, cylVerts[idx].z);
+                    }
+                }
+            }
+            glEnd();
+        }
+        if (mode == eShadedWire) {
+            glDisable(GL_POLYGON_OFFSET_FILL);
+        }
+    }
+
+    if (mode != eShaded) {
+        bool selected = (sn.name == _imp->selectedNodeName);
+        glColor3f(selected ? 1.0f : 0.5f, selected ? 1.0f : 0.8f, selected ? 0.0f : 0.5f);
+        glLineWidth(selected ? 2.0f : 1.0f);
+
+        float r = (float)cyl->getRadius(time);
+        float halfH = (float)cyl->getHeight(time) * 0.5f;
+        int cols = cyl->getColumns(time);
+
+        glBegin(GL_LINE_LOOP);
+        for (int c = 0; c < cols; ++c) {
+            float theta = (float)c / (float)cols * 2.0f * (float)M_PI;
+            glVertex3f(r * sinf(theta), halfH, r * cosf(theta));
         }
         glEnd();
 
-        glDisable(GL_TEXTURE_2D);
-        glDisable(GL_BLEND);
-        glDeleteTextures(1, &glTex);
+        glBegin(GL_LINE_LOOP);
+        for (int c = 0; c < cols; ++c) {
+            float theta = (float)c / (float)cols * 2.0f * (float)M_PI;
+            glVertex3f(r * sinf(theta), -halfH, r * cosf(theta));
+        }
+        glEnd();
+
+        int step = std::max(1, cols / 8);
+        glBegin(GL_LINES);
+        for (int c = 0; c < cols; c += step) {
+            float theta = (float)c / (float)cols * 2.0f * (float)M_PI;
+            float x = r * sinf(theta);
+            float z = r * cosf(theta);
+            glVertex3f(x,  halfH, z);
+            glVertex3f(x, -halfH, z);
+        }
+        glEnd();
+
+        glLineWidth(1.0f);
     }
-
-    bool selected = (sn.name == _imp->selectedNodeName);
-    glColor3f(selected ? 1.0f : 0.5f, selected ? 1.0f : 0.8f, selected ? 0.0f : 0.5f);
-    glLineWidth(selected ? 2.0f : 1.0f);
-
-    float r = (float)cyl->getRadius(time);
-    float halfH = (float)cyl->getHeight(time) * 0.5f;
-    int cols = cyl->getColumns(time);
-
-    glBegin(GL_LINE_LOOP);
-    for (int c = 0; c < cols; ++c) {
-        float theta = (float)c / (float)cols * 2.0f * (float)M_PI;
-        glVertex3f(r * sinf(theta), halfH, r * cosf(theta));
-    }
-    glEnd();
-
-    glBegin(GL_LINE_LOOP);
-    for (int c = 0; c < cols; ++c) {
-        float theta = (float)c / (float)cols * 2.0f * (float)M_PI;
-        glVertex3f(r * sinf(theta), -halfH, r * cosf(theta));
-    }
-    glEnd();
-
-    int step = std::max(1, cols / 8);
-    glBegin(GL_LINES);
-    for (int c = 0; c < cols; c += step) {
-        float theta = (float)c / (float)cols * 2.0f * (float)M_PI;
-        float x = r * sinf(theta);
-        float z = r * cosf(theta);
-        glVertex3f(x,  halfH, z);
-        glVertex3f(x, -halfH, z);
-    }
-    glEnd();
-
-    glLineWidth(1.0f);
 }
 
 void

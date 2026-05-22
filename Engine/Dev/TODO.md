@@ -198,16 +198,22 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ## 3D Viewport
 
-ImGuizmo-based viewport with orbit camera, translate/rotate/scale gizmos (W/E/R keys), undo support, light type icons.
+ImGuizmo-based viewport with orbit camera, translate/rotate/scale gizmos (W/E/R keys), undo support, light-type icons. Toolbar exposes: gizmo space toggle (world/local), Grid show/hide, **View** dropdown (look through any Camera3D / ReadAlembicCamera), **Shading** dropdown (Wireframe / Shaded / Shaded+Wire), and (NATRON_CYCLES builds) a Render button.
 
 ### Known Issues (Fixed)
 - ~~Point cloud persists after deleting DeepToPoints node~~ — Fixed
 - ~~No undo/redo for gizmo transforms~~ — Fixed: GizmoTransformUndoCommand
 
+### Completed (2026-05-21)
+- **Look-through camera** — pick any CameraProvider node from the View dropdown to drive the viewport. While looking through a Camera3D, `Alt+Left` orbit / `Middle` pan / `Alt+Right` dolly write back to the camera's translate/rotate knobs (Alembic cameras are read-only and skip this).
+- **Camera gate** — when looking through a camera, the 3D draw is letterboxed to the camera's sensor aspect so the wireframe matches the ScanlineRender output bit-perfect. A thin warm-orange outline marks the gate edge.
+- **Shading dropdown** — Wireframe / Shaded / Shaded+Wire (default). Meshes render as solid grey + edges by default. Shapes carrying textures (Sphere3D/Cube3D/Card3D/Cylinder3D) still display them in Shaded / Shaded+Wire; Wireframe suppresses textures for a clean schematic view.
+
 ### TODO
-- Look-through camera mode needs more testing with ReadAlembicCamera
 - Selection highlight could be more visible
 - Performance with very large point clouds (>10M points) untested
+- Tumble-pivot indicator (small dot at orbit centre while orbiting) — Maya/Blender convention
+- "Show Camera Gate" toggle to hide the orange outline when not wanted
 
 ---
 

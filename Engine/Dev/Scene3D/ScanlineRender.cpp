@@ -439,6 +439,11 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
     out.texImg.reset();
 
     if (!effect) return false;
+    // Honor "D" disable: a disabled node contributes nothing.
+    {
+        NodePtr n = effect->getNode();
+        if (n && n->isNodeDisabled()) return false;
+    }
 
     Sphere3D* sphere = dynamic_cast<Sphere3D*>(effect.get());
     if (sphere) {
@@ -565,6 +570,11 @@ static void
 extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vector<GeoData>& out)
 {
     if (!effect) return;
+    // Honor "D" disable: skip the whole branch under a disabled node.
+    {
+        NodePtr n = effect->getNode();
+        if (n && n->isNodeDisabled()) return;
+    }
 
     // UVProject: transparent UV-rewriting wrapper. Walk through to the upstream
     // geo, extract it normally, then apply the rewrite to every GeoData produced.
@@ -775,6 +785,10 @@ ScanlineRender::render(const RenderActionArgs& args)
 
     EffectInstancePtr geoEffect = getInput(1);
     if (!geoEffect) return eStatusFailed;
+    // Honor the "D" disable knob: a disabled scene/geo input renders nothing.
+    if (geoEffect->getNode() && geoEffect->getNode()->isNodeDisabled()) {
+        return eStatusFailed;
+    }
 
     // Check for volume nodes
     Volume3D* volume3d = dynamic_cast<Volume3D*>(geoEffect.get());
@@ -809,6 +823,8 @@ ScanlineRender::render(const RenderActionArgs& args)
             for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
                 EffectInstancePtr sceneInput = scene->getInput(i);
                 if (!sceneInput) continue;
+                // Honor "D" disable: skip disabled scene inputs entirely.
+                if (sceneInput->getNode() && sceneInput->getNode()->isNodeDisabled()) continue;
 
                 // Check for volumes in scene
                 Volume3D* sVol = dynamic_cast<Volume3D*>(sceneInput.get());

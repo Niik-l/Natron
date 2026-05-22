@@ -106,6 +106,20 @@ public:
     /** Current look-through camera node (may be null = orbit mode). */
     NodePtr getLookThroughCamera() const;
 
+    /** Viewport shading style. Wired from Viewport3DTab's Shading dropdown.
+     *  - eWireframe   wires only, textures suppressed (clean schematic).
+     *  - eShaded      solid fill (textured if shape carries a texture, else
+     *                 flat grey), no wireframe.
+     *  - eShadedWire  shaded fill plus wireframe overlay (Maya default).
+     */
+    enum ShadingMode {
+        eWireframe = 0,
+        eShaded,
+        eShadedWire
+    };
+    void setShadingMode(ShadingMode mode);
+    ShadingMode getShadingMode() const;
+
 private:
 
     virtual void initializeGL() OVERRIDE FINAL;

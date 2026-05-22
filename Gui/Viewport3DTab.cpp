@@ -165,6 +165,27 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
         toolbarLayout->addWidget(_cameraDropdown);
     }
 
+    // Shading dropdown — Wireframe / Shaded / Shaded+Wire (Maya-style default).
+    {
+        _shadingDropdown = new QToolButton(toolbar);
+        _shadingDropdown->setText(QString::fromUtf8("Shading: Shaded+Wire"));
+        _shadingDropdown->setToolTip(QString::fromUtf8("Viewport shading style"));
+        _shadingDropdown->setFixedHeight(22);
+        _shadingDropdown->setPopupMode(QToolButton::InstantPopup);
+        QMenu* shMenu = new QMenu(_shadingDropdown);
+        const char* labels[3]  = { "Wireframe", "Shaded", "Shaded+Wire" };
+        const int   modes[3]   = { (int)DevViewport3D::eWireframe,
+                                   (int)DevViewport3D::eShaded,
+                                   (int)DevViewport3D::eShadedWire };
+        for (int i = 0; i < 3; ++i) {
+            QAction* a = shMenu->addAction(QString::fromUtf8(labels[i]));
+            a->setData(modes[i]);
+            connect(a, SIGNAL(triggered()), this, SLOT(onShadingModeSelected()));
+        }
+        _shadingDropdown->setMenu(shMenu);
+        toolbarLayout->addWidget(_shadingDropdown);
+    }
+
 #ifdef NATRON_CYCLES
     // Cycles render button
     QToolButton* renderBtn = new QToolButton(toolbar);
@@ -346,6 +367,23 @@ Viewport3DTab::onCameraSelected()
             return;
         }
     }
+}
+
+void
+Viewport3DTab::onShadingModeSelected()
+{
+    QAction* a = qobject_cast<QAction*>(sender());
+    if (!a) return;
+    const int modeInt = a->data().toInt();
+    const DevViewport3D::ShadingMode mode = (DevViewport3D::ShadingMode)modeInt;
+    _viewport->setShadingMode(mode);
+    QString label;
+    switch (mode) {
+        case DevViewport3D::eWireframe:   label = QString::fromUtf8("Wireframe"); break;
+        case DevViewport3D::eShaded:      label = QString::fromUtf8("Shaded"); break;
+        case DevViewport3D::eShadedWire:  label = QString::fromUtf8("Shaded+Wire"); break;
+    }
+    _shadingDropdown->setText(QString::fromUtf8("Shading: ") + label);
 }
 
 void

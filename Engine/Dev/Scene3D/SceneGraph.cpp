@@ -568,6 +568,16 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         }
     }
 
+    // ===== Direct-disable pass: mark SceneNodes whose source node is "D"-disabled.
+    // Ancestor propagation runs as part of the world-transform depth-first walk
+    // below, so a disabled Group3D / Scene3D collapses everything under it. =====
+    for (int i = 0; i < (int)_nodes.size(); ++i) {
+        NodePtr src = _nodes[i].sourceNode.lock();
+        if (src && src->isNodeDisabled()) {
+            _nodes[i].visible = false;
+        }
+    }
+
     // ===== Build root list (nodes with no parent) =====
     for (int i = 0; i < (int)_nodes.size(); ++i) {
         if (_nodes[i].parentIndex == -1) {
@@ -575,7 +585,7 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         }
     }
 
-    // ===== PASS 3: Compute world transforms =====
+    // ===== PASS 3: Compute world transforms (also propagates visibility) =====
     computeWorldTransforms();
 }
 
@@ -596,6 +606,11 @@ SceneGraph::computeWorldRecursive(int nodeIdx)
     if (node.parentIndex >= 0) {
         // world = parent.world * local
         multiply(_nodes[node.parentIndex].worldMatrix, node.localMatrix, node.worldMatrix);
+        // Propagate disabled state from ancestor: a disabled Group3D / Scene3D
+        // hides every node downstream of it.
+        if (!_nodes[node.parentIndex].visible) {
+            node.visible = false;
+        }
     } else {
         // Root node: world = local
         std::memcpy(node.worldMatrix, node.localMatrix, 16 * sizeof(float));
