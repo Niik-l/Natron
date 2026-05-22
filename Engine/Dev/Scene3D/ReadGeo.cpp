@@ -23,11 +23,15 @@
 
 #include "ReadGeo.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib> // strtol
 #include <cstring>
+#include <fstream>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "../../AppInstance.h"
@@ -233,15 +237,21 @@ ReadGeo::~ReadGeo()
 std::string
 ReadGeo::getPluginDescription() const
 {
-    return
+    return tr(
 #ifdef NATRON_HAVE_ALEMBIC
-    tr("Import geometry from Alembic (.abc) files.\n\n"
-       "Supports PolyMesh, SubD, and Points objects. "
-       "Meshes are displayed as wireframe in the 3D viewport.\n\n"
-       "Set the file path and select the geometry object from the dropdown.").toStdString();
+       "Import geometry from .abc (Alembic) or .obj (Wavefront) files. "
+       "The parser dispatches on the file extension.\n\n"
+       "Alembic: PolyMesh, SubD, and Points objects. Object dropdown picks "
+       "which entry from a multi-mesh archive to load.\n\n"
 #else
-    tr("ReadGeo requires the Alembic library. Rebuild Natron with Alembic support.").toStdString();
+       "Import geometry from .obj (Wavefront) files. "
+       "Alembic (.abc) support is not built into this binary — rebuild with "
+       "Alembic to enable it.\n\n"
 #endif
+       "OBJ: positions, texture coords, and n-gon faces are honored. Group/"
+       "object directives populate the Object dropdown when present; "
+       "otherwise the file loads as a single mesh."
+    ).toStdString();
 }
 
 std::string
@@ -286,7 +296,7 @@ ReadGeo::initializeKnobs()
     {
         KnobFilePtr fp = AppManager::createKnob<KnobFile>(this, tr("File"));
         fp->setName("filename");
-        fp->setHintToolTip(tr("Path to the Alembic (.abc) file."));
+        fp->setHintToolTip(tr("Path to a .abc (Alembic) or .obj (Wavefront) geometry file."));
         fp->setAnimationEnabled(false);
         page->addKnob(fp);
         _imp->filePath = fp;
@@ -313,7 +323,7 @@ ReadGeo::initializeKnobs()
         infoKnob->setAnimationEnabled(false);
         infoKnob->setEvaluateOnChange(false);
         infoKnob->setIsPersistent(false);
-        infoKnob->setDefaultValue("Set file path to an .abc file.");
+        infoKnob->setDefaultValue("Set file path to a .abc or .obj file.");
         page->addKnob(infoKnob);
         _imp->info = infoKnob;
     }
@@ -464,11 +474,39 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         return false;
     }
 
+    // Helper: lowercase extension of `path` ("foo.OBJ" → ".obj").
+    auto extOf = [](const std::string& p) -> std::string {
+        const size_t dot = p.find_last_of('.');
+        if (dot == std::string::npos) return std::string();
+        std::string e = p.substr(dot);
+        std::transform(e.begin(), e.end(), e.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
+        return e;
+    };
+
+    auto loadByExt = [&](const std::string& path) {
+        const std::string e = extOf(path);
+        if (e == ".obj") {
+            loadObjGeo(path);
+        } else if (e == ".abc") {
+#ifdef NATRON_HAVE_ALEMBIC
+            loadAlembicGeo(path);
+#else
+            setPersistentMessage(eMessageTypeError,
+                "Alembic support not built into this Natron binary. "
+                "Use a .obj file, or rebuild Natron with Alembic.");
+#endif
+        } else {
+            setPersistentMessage(eMessageTypeError,
+                "Unsupported file extension. Use .abc (Alembic) or .obj (Wavefront).");
+        }
+    };
+
     if (_imp->filePath.lock().get() == k || _imp->reloadBtn.lock().get() == k) {
         std::string path = _imp->filePath.lock()->getValue();
         if (!path.empty()) {
             _imp->isLoading = true;
-            loadAlembicGeo(path);
+            loadByExt(path);
             _imp->isLoading = false;
         }
         return true;
@@ -479,7 +517,7 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         std::string path = _imp->filePath.lock()->getValue();
         if (!path.empty()) {
             _imp->isLoading = true;
-            loadAlembicGeo(path);
+            loadByExt(path);
             _imp->isLoading = false;
         }
         return true;
@@ -682,6 +720,239 @@ ReadGeo::loadAlembicGeo(const std::string& path)
     Q_UNUSED(path);
     setPersistentMessage(eMessageTypeError, "Alembic support not available.");
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// OBJ (Wavefront) loading
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Parse one face-vertex token: "v", "v/vt", "v//vn", or "v/vt/vn".
+// OBJ uses 1-based indices; negative indices are relative-from-end. We resolve
+// to 0-based positive indices using the supplied counts. Returns true on
+// parse success.
+bool
+parseObjFaceToken(const std::string& tok,
+                  int posCount, int vtCount, int vnCount,
+                  int& outV, int& outVt, int& outVn)
+{
+    outV = outVt = outVn = -1;
+    const size_t slash1 = tok.find('/');
+    auto resolve = [](int idx, int count) -> int {
+        if (idx == 0) return -1;
+        if (idx > 0)  return (idx <= count) ? (idx - 1) : -1;
+        // negative: -1 = last
+        const int abs = -idx;
+        return (abs <= count) ? (count - abs) : -1;
+    };
+
+    if (slash1 == std::string::npos) {
+        outV = resolve(std::atoi(tok.c_str()), posCount);
+        return outV >= 0;
+    }
+
+    outV = resolve(std::atoi(tok.substr(0, slash1).c_str()), posCount);
+    const size_t slash2 = tok.find('/', slash1 + 1);
+    if (slash2 == std::string::npos) {
+        outVt = resolve(std::atoi(tok.substr(slash1 + 1).c_str()), vtCount);
+    } else {
+        if (slash2 > slash1 + 1) {
+            outVt = resolve(std::atoi(tok.substr(slash1 + 1, slash2 - slash1 - 1).c_str()),
+                            vtCount);
+        }
+        outVn = resolve(std::atoi(tok.substr(slash2 + 1).c_str()), vnCount);
+    }
+    return outV >= 0;
+}
+
+// Strip leading UTF-8 BOM (\xEF\xBB\xBF) if present, plus trailing CR.
+void
+stripBomAndCR(std::string& line, bool& firstLine)
+{
+    if (firstLine && line.size() >= 3 &&
+        (unsigned char)line[0] == 0xEF &&
+        (unsigned char)line[1] == 0xBB &&
+        (unsigned char)line[2] == 0xBF) {
+        line.erase(0, 3);
+    }
+    firstLine = false;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+}
+
+struct ObjGroup
+{
+    std::string name;
+    std::vector<int>   faceIndicesV;   // position index per face-vertex
+    std::vector<int>   faceCounts;     // verts per face
+    std::vector<float> uvs;            // u,v per face-vertex (0,0 if no vt)
+    bool hasUVs = false;
+};
+
+} // anon
+
+void
+ReadGeo::loadObjGeo(const std::string& path)
+{
+    std::ifstream in(path.c_str());
+    if (!in.is_open()) {
+        setPersistentMessage(eMessageTypeError, "Cannot open file: " + path);
+        return;
+    }
+
+    std::vector<float> positions;  // x,y,z
+    std::vector<float> texCoords;  // u,v
+
+    std::vector<ObjGroup> groups;
+    groups.reserve(4);
+    groups.push_back(ObjGroup{}); // implicit default group
+    groups[0].name = "default";
+
+    bool firstLine = true;
+    std::string line;
+    line.reserve(256);
+
+    while (std::getline(in, line)) {
+        stripBomAndCR(line, firstLine);
+        if (line.empty() || line[0] == '#') continue;
+
+        std::istringstream ls(line);
+        std::string tag;
+        ls >> tag;
+        if (tag.empty()) continue;
+
+        if (tag == "v") {
+            float x = 0, y = 0, z = 0;
+            ls >> x >> y >> z;
+            positions.push_back(x);
+            positions.push_back(y);
+            positions.push_back(z);
+        } else if (tag == "vt") {
+            float u = 0, v = 0;
+            ls >> u >> v;
+            texCoords.push_back(u);
+            texCoords.push_back(v);
+        } else if (tag == "vn") {
+            // Normals: ignored in v1 (MeshData has no normals field).
+        } else if (tag == "g" || tag == "o") {
+            std::string name;
+            ls >> name;
+            // Start a new group if the current one has already received faces.
+            if (!groups.back().faceCounts.empty()) {
+                groups.push_back(ObjGroup{});
+            }
+            groups.back().name = name.empty() ? "unnamed" : name;
+        } else if (tag == "f") {
+            ObjGroup& g = groups.back();
+            int faceVerts = 0;
+            std::string tok;
+            const int posCount = (int)(positions.size() / 3);
+            const int vtCount  = (int)(texCoords.size() / 2);
+            while (ls >> tok) {
+                int v = -1, vt = -1, vn = -1;
+                if (!parseObjFaceToken(tok, posCount, vtCount, /*vnCount*/0, v, vt, vn)) continue;
+                g.faceIndicesV.push_back(v);
+                if (vt >= 0 && vt < vtCount) {
+                    g.uvs.push_back(texCoords[vt * 2 + 0]);
+                    g.uvs.push_back(texCoords[vt * 2 + 1]);
+                    g.hasUVs = true;
+                } else {
+                    g.uvs.push_back(0.0f);
+                    g.uvs.push_back(0.0f);
+                }
+                ++faceVerts;
+            }
+            if (faceVerts >= 3) g.faceCounts.push_back(faceVerts);
+        }
+        // Other tags (s, mtllib, usemtl, ...) deliberately ignored in v1.
+    }
+
+    // Drop empty groups (e.g. the implicit "default" if all faces went into a named group).
+    groups.erase(std::remove_if(groups.begin(), groups.end(),
+                                [](const ObjGroup& g){ return g.faceCounts.empty(); }),
+                 groups.end());
+
+    if (groups.empty() || positions.empty()) {
+        setPersistentMessage(eMessageTypeError, "No geometry found in " + path);
+        return;
+    }
+
+    // --- Populate the Object dropdown ---
+    _imp->geoPaths.clear();
+    for (const ObjGroup& g : groups) _imp->geoPaths.push_back(g.name);
+
+    KnobChoicePtr objKnob = _imp->objectPath.lock();
+    int chosenIdx = 0;
+    if (objKnob) {
+        std::vector<ChoiceOption> entries;
+        for (const std::string& n : _imp->geoPaths) {
+            entries.push_back(ChoiceOption(n, "", ""));
+        }
+        objKnob->populateChoices(entries);
+        chosenIdx = objKnob->getValue();
+        if (chosenIdx < 0 || chosenIdx >= (int)groups.size()) {
+            chosenIdx = 0;
+            objKnob->setValue(0);
+        }
+    }
+
+    const ObjGroup& chosen = groups[chosenIdx];
+
+    // --- Build MeshData for the chosen group ---
+    MeshDataPtr mesh(new MeshData);
+    mesh->vertices = positions; // global vertex positions
+    mesh->numVertices = positions.size() / 3;
+    mesh->faceIndices = chosen.faceIndicesV;
+    mesh->faceCounts  = chosen.faceCounts;
+    mesh->numFaces    = chosen.faceCounts.size();
+    if (chosen.hasUVs) {
+        mesh->uvs = chosen.uvs;
+        mesh->hasUVs = true;
+        mesh->texCoordComponents = 2;
+    }
+
+    // --- Edge list for wireframe drawing ---
+    // For each face emit boundary edges (vi, vi+1) and closing (last, first).
+    {
+        size_t off = 0;
+        const int nv = (int)mesh->numVertices;
+        for (size_t f = 0; f < mesh->faceCounts.size(); ++f) {
+            const int c = mesh->faceCounts[f];
+            if (c < 2 || off + (size_t)c > mesh->faceIndices.size()) {
+                off += (size_t)std::max(0, c);
+                continue;
+            }
+            for (int i = 0; i < c; ++i) {
+                const int a = mesh->faceIndices[off + i];
+                const int b = mesh->faceIndices[off + ((i + 1) % c)];
+                if (a >= 0 && a < nv && b >= 0 && b < nv) {
+                    mesh->edgeIndices.push_back(a);
+                    mesh->edgeIndices.push_back(b);
+                }
+            }
+            off += (size_t)c;
+        }
+    }
+
+    // Identity transform — the node's own Translate/Rotate/Scale knobs handle
+    // user-controlled placement downstream.
+    for (int i = 0; i < 16; ++i) mesh->transform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+
+    // --- Store result ---
+    _lastMeshData = mesh;
+    _imp->loadedFilePath = path;
+    _imp->loadedObjectPath = chosen.name;
+
+    // --- Update info string ---
+    std::ostringstream ss;
+    ss << "OBJ: " << chosen.name
+       << " | Vertices: " << mesh->numVertices
+       << " | Faces: " << mesh->numFaces
+       << " | Groups: " << groups.size()
+       << " | UVs: " << (mesh->hasUVs ? "yes" : "no");
+    _imp->info.lock()->setValue(ss.str());
+
+    clearPersistentMessage(false);
 }
 
 // ---------------------------------------------------------------------------

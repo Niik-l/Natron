@@ -40,8 +40,8 @@ NATRON_NAMESPACE_ENTER
 struct ReadGeoPrivate;
 
 /**
- * @brief Import geometry from Alembic (.abc) files.
- * Displays meshes and point clouds in the 3D viewport.
+ * @brief Import geometry from .abc (Alembic) or .obj (Wavefront) files.
+ * Parser dispatches on file extension. Displays meshes in the 3D viewport.
  */
 class ReadGeo
     : public EffectInstance
@@ -85,7 +85,7 @@ public:
     { return eRenderSafetyInstanceSafe; }
 
     virtual bool supportsTiles() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
-    virtual bool supportsMultiResolution() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
+    virtual bool supportsMultiResolution() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
@@ -121,6 +121,7 @@ private:
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     void loadAlembicGeo(const std::string& path);
+    void loadObjGeo(const std::string& path);
 
     std::unique_ptr<ReadGeoPrivate> _imp;
     mutable MeshDataPtr _lastMeshData;

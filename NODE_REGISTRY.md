@@ -13,7 +13,7 @@ Updated: 2026-05-21
 | **Card3D** | `fr.inria.built-in.Card3D` | Registered | Flat textured quad |
 | **Cube3D** | `fr.inria.built-in.Cube3D` | Registered | 24-vertex cube with per-face UVs |
 | **Cylinder3D** | `fr.inria.built-in.Cylinder3D` | Registered | Tessellated cylinder with caps |
-| **ReadGeo** | `fr.inria.built-in.ReadGeo` | Registered | Alembic .abc single-mesh loader (requires NATRON_HAVE_ALEMBIC) |
+| **ReadGeo** | `fr.inria.built-in.ReadGeo` | Registered | Single-mesh loader for `.abc` (Alembic, requires NATRON_HAVE_ALEMBIC) and `.obj` (Wavefront, no dependency). Parser dispatches on file extension. OBJ group/object directives populate the Object dropdown. |
 | **ReadAlembicArchive** | `fr.inria.built-in.ReadAlembicArchive` | Registered | Multi-mesh Alembic archive loader — reads full scene hierarchies, builds per-entry world transforms from the archive chain. Used by ScanlineRender / 3D viewport for whole-scene `.abc` ingest. |
 | **ReadVDB** | `fr.inria.built-in.ReadVDB` | Registered | OpenVDB volume loader. PrincipledVolume fire rendering via Cycles (density/temperature/flame grids, absorption, remap curves). Animated sequences with frame padding. Viewport wireframe bbox from grid bounds. |
 | **Group3D** | `fr.inria.built-in.Group3D` | Registered | Groups 3D objects with unified transform |
