@@ -216,6 +216,15 @@ public:
     KnobFileWPtr   rvPathKnob;
     KnobButtonWPtr openInRvButton;
 
+    // "Refresh Planes" — workaround for the openfx-io issue where ticking
+    // "All Planes" on a Write node doesn't pick up upstream plane changes
+    // until the project is saved + reopened. Pressing this button forces the
+    // OFX plugin's internal multi-plane cache to refresh by toggling
+    // processAllPlanes off-then-on. Repositioned next to the OFX "Parts"
+    // knob in onEffectCreated / onKnobsAboutToBeLoaded.
+    KnobButtonWPtr refreshPlanesButton;
+    KnobStringWPtr refreshPlanesInfo;
+
     std::list<KnobIWPtr> writeNodeKnobs;
 
     //MT only
@@ -1126,6 +1135,62 @@ WriteNode::initializeKnobs()
         _imp->openInRvButton = btn;
         _imp->writeNodeKnobs.push_back(btn);
     }
+
+    // --- "Refresh Planes" button + italic-grey rich-text hint ---
+    // Workaround for openfx-io's MultiPlaneEffectPrivate cache not invalidating
+    // when processAllPlanes / Parts changes. Pressing this toggles the writer's
+    // processAllPlanes off-then-on, which fires changedParam twice on the OFX
+    // side, invalidating the cache and re-firing getClipPreferences. The button
+    // is repositioned next to the OFX "Parts" knob in onEffectCreated /
+    // onKnobsAboutToBeLoaded once that knob exists.
+    {
+        KnobButtonPtr btn = AppManager::createKnob<KnobButton>(this, tr("Refresh"));
+        btn->setName("refreshPlanes");
+        btn->setStyleSheet(
+            "QPushButton {"
+            "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f6b97a, stop:1 #e89146);"
+            "  border: 1px solid #6e3a0f;"
+            "  color: #2a1604;"
+            "  padding: 1px 10px;"
+            "  font-weight: bold;"
+            "}"
+            "QPushButton:hover {"
+            "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffc78a, stop:1 #f4a05a);"
+            "}"
+            "QPushButton:pressed {"
+            "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #e89146, stop:1 #f6b97a);"
+            "}"
+        );
+        btn->setAddNewLine(false);   // hint label follows on same row
+        btn->setHintToolTip(tr("Force the Write node to re-scan upstream available planes. "
+                                "Use this after ticking \"All Planes\" or changing \"Parts\" on a "
+                                "freshly-built scene if the Layer(s) dropdown isn't surfacing new "
+                                "upstream planes. Works around an OFX MultiPlane cache that "
+                                "doesn't always invalidate on slave-param changes."));
+        controlpage->addKnob(btn);
+        _imp->refreshPlanesButton = btn;
+        _imp->writeNodeKnobs.push_back(btn);
+    }
+    {
+        KnobStringPtr info = AppManager::createKnob<KnobString>(this, std::string());
+        info->setName("refreshPlanesInfo");
+        info->setAsLabel();
+        info->setUsesRichText(true);
+        info->setAnimationEnabled(false);
+        info->setEvaluateOnChange(false);
+        info->setIsPersistent(false);
+        info->setDefaultValue(std::string(
+            "<i><span style=\"color:#9a9a9a\">Please refresh if "
+            "<b><span style=\"color:#f4c534\">All Planes</span></b> or "
+            "<b><span style=\"color:#f4c534\">Parts</span></b> has been modified.</span></i>"
+        ));
+        info->setHintToolTip(tr("Reminder: after ticking 'All Planes' or changing 'Parts' on a "
+                                 "freshly-built scene, click the Refresh button to make the writer "
+                                 "re-scan upstream layers."));
+        controlpage->addKnob(info);
+        _imp->refreshPlanesInfo = info;
+        _imp->writeNodeKnobs.push_back(info);
+    }
 } // WriteNode::initializeKnobs
 
 void
@@ -1180,6 +1245,32 @@ WriteNode::onEffectCreated(bool mayCreateFileDialog,
 
     _imp->createWriteNode( throwErrors, pattern, NodeSerializationPtr() );
     _imp->refreshPluginSelectorKnob();
+
+    // Reposition the Refresh button + hint between "Parts" and the next OFX
+    // knob (typically "OpenImageIO Info..."). Falls back gracefully if the
+    // writer has no Parts knob (PNG/JPEG/MOV/etc.) — the button stays at the
+    // end of the Controls page.
+    {
+        KnobIPtr partsK  = getKnobByName("partSplitting"); // WriteOIIO #define kParamPartsSplitting
+        KnobIPtr infoK   = _imp->refreshPlanesInfo.lock();
+        KnobIPtr buttonK = _imp->refreshPlanesButton.lock();
+        if (partsK && infoK && buttonK) {
+            KnobPagePtr page = std::dynamic_pointer_cast<KnobPage>(infoK->getParentKnob());
+            if (page) {
+                std::vector<KnobIPtr> children = page->getChildren();
+                int partsIdx = -1;
+                for (size_t i = 0; i < children.size(); ++i) {
+                    if (children[i] == partsK) { partsIdx = (int)i; break; }
+                }
+                if (partsIdx >= 0) {
+                    page->removeKnob(infoK.get());
+                    page->removeKnob(buttonK.get());
+                    page->insertKnob(partsIdx + 1, buttonK);
+                    page->insertKnob(partsIdx + 2, infoK);
+                }
+            }
+        }
+    }
 }
 
 void
@@ -1198,6 +1289,31 @@ WriteNode::onKnobsAboutToBeLoaded(const NodeSerializationPtr& serialization)
     //Create the Reader with the serialization
     _imp->createWriteNode(false, filename, serialization);
     _imp->refreshPluginSelectorKnob();
+
+    // Reposition the Refresh button + hint between "Parts" and the next OFX
+    // knob, identical to onEffectCreated. Needed on project reload so the
+    // ordering persists across save/load cycles.
+    {
+        KnobIPtr partsK  = getKnobByName("partSplitting");
+        KnobIPtr infoK   = _imp->refreshPlanesInfo.lock();
+        KnobIPtr buttonK = _imp->refreshPlanesButton.lock();
+        if (partsK && infoK && buttonK) {
+            KnobPagePtr page = std::dynamic_pointer_cast<KnobPage>(infoK->getParentKnob());
+            if (page) {
+                std::vector<KnobIPtr> children = page->getChildren();
+                int partsIdx = -1;
+                for (size_t i = 0; i < children.size(); ++i) {
+                    if (children[i] == partsK) { partsIdx = (int)i; break; }
+                }
+                if (partsIdx >= 0) {
+                    page->removeKnob(infoK.get());
+                    page->removeKnob(buttonK.get());
+                    page->insertKnob(partsIdx + 1, buttonK);
+                    page->insertKnob(partsIdx + 2, infoK);
+                }
+            }
+        }
+    }
 }
 
 bool
@@ -1323,6 +1439,39 @@ WriteNode::knobChanged(KnobI* k,
                 setPersistentMessage(eMessageTypeError,
                     "Failed to launch RV. Verify the executable path and that RV is installed.");
             }
+        }
+    } else if ( k == _imp->refreshPlanesButton.lock().get() ) {
+        // "Refresh Planes" — force the OFX writer plugin to re-scan upstream
+        // available planes. Workaround for the openfx-io issue where ticking
+        // "All Planes" doesn't trigger getClipPreferences refresh until the
+        // project is saved + reopened.
+        //
+        // Strategy: toggle the writer's "processAllPlanes" boolean off-then-on.
+        // The param is registered via addClipPreferencesSlaveParam, so the two
+        // changedParam events (a) invalidate MultiPlaneEffect's internal cache
+        // and (b) re-fire getClipPreferences, repopulating the Layer(s) dropdown.
+        // Final value = original, so the user's All Planes setting is preserved.
+        clearPersistentMessage(false);
+        NodePtr writer2 = _imp->embeddedPlugin.lock();
+        if (writer2) {
+            EffectInstancePtr writerEffect = writer2->getEffectInstance();
+            if (writerEffect) {
+                KnobIPtr   allPlanesK    = writerEffect->getKnobByName("processAllPlanes");
+                KnobBoolPtr allPlanesBool = std::dynamic_pointer_cast<KnobBool>(allPlanesK);
+                if (allPlanesBool) {
+                    const bool wasOn = allPlanesBool->getValue();
+                    // 6-arg overload: (value, view, dim, reason, keyframe*, hasChanged).
+                    // The 4-arg sibling takes a bool turnOffAutoKeying — passing a
+                    // ValueChangedReasonEnum there fails to compile.
+                    allPlanesBool->setValue(!wasOn, ViewSpec::all(), 0,
+                                            eValueChangedReasonUserEdited, NULL, true);
+                    allPlanesBool->setValue(wasOn,  ViewSpec::all(), 0,
+                                            eValueChangedReasonUserEdited, NULL, true);
+                }
+            }
+            // Belt-and-suspenders: bump knobs-age so downstream caches keyed on
+            // it rebuild on the next render.
+            writer2->incrementKnobsAge();
         }
     } else {
         ret = false;
