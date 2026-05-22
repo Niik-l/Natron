@@ -43,10 +43,12 @@ NATRON_NAMESPACE_ENTER
 // ============================================================
 
 // Bounce a particle off a surface. hitT is the fraction along the
-// prev->current segment where the hit occurred (0..1).
+// prev->current segment where the hit occurred (0..1). `dt` is the
+// substep size used by the integrator that produced the segment
+// — pass 1.0 if there are no substeps.
 static void
 bounceParticle(Particle& p, float nx, float ny, float nz, float hitT,
-               float elasticity, float friction)
+               float elasticity, float friction, float dt)
 {
     float vDotN = p.vx * nx + p.vy * ny + p.vz * nz;
     if (vDotN >= 0.0f) return; // moving away
@@ -86,11 +88,15 @@ bounceParticle(Particle& p, float nx, float ny, float nz, float hitT,
     p.py = hitY + ny * 0.001f;
     p.pz = hitZ + nz * 0.001f;
 
-    // Continue remaining motion in reflected direction
+    // Continue remaining motion in reflected direction. The integrator
+    // wrote `p.vx * dt` worth of motion per substep, so the remainder of
+    // this substep is `p.vx * remaining * dt` — NOT `p.vx * remaining`.
+    // Without the `* dt`, substepped bounces overshoot by N (the substep
+    // count) and particles "spring" off colliders.
     float remaining = 1.0f - hitT;
-    p.px += p.vx * remaining;
-    p.py += p.vy * remaining;
-    p.pz += p.vz * remaining;
+    p.px += p.vx * remaining * dt;
+    p.py += p.vy * remaining * dt;
+    p.pz += p.vz * remaining * dt;
 
     // Kill if settled
     float speed = std::sqrt(p.vx * p.vx + p.vy * p.vy + p.vz * p.vz);
@@ -218,15 +224,15 @@ pushOutOfSphere(Particle& p, float cx, float cy, float cz, float radius)
 // Collide particle with a plane (ray test: prev -> current).
 static void
 collidePlane(Particle& p, float planeH, float nx, float ny, float nz,
-             float elasticity, float friction)
+             float elasticity, float friction, float dt)
 {
     float distPrev = (p.prevPx * nx + p.prevPy * ny + p.prevPz * nz) - planeH;
     float distCurr = (p.px * nx + p.py * ny + p.pz * nz) - planeH;
     if (distPrev >= 0.0f && distCurr <= 0.0f) {
         float hitT = distPrev / (distPrev - distCurr);
-        bounceParticle(p, nx, ny, nz, hitT, elasticity, friction);
+        bounceParticle(p, nx, ny, nz, hitT, elasticity, friction, dt);
     } else if (distCurr <= 0.0f) {
-        bounceParticle(p, nx, ny, nz, 0.0f, elasticity, friction);
+        bounceParticle(p, nx, ny, nz, 0.0f, elasticity, friction, dt);
     }
 }
 
@@ -234,7 +240,7 @@ collidePlane(Particle& p, float planeH, float nx, float ny, float nz,
 static void
 collideGeoBox(Particle& p, float bMinX, float bMinY, float bMinZ,
               float bMaxX, float bMaxY, float bMaxZ,
-              float elasticity, float friction)
+              float elasticity, float friction, float dt)
 {
     float dx = p.px - p.prevPx;
     float dy = p.py - p.prevPy;
@@ -245,14 +251,14 @@ collideGeoBox(Particle& p, float bMinX, float bMinY, float bMinZ,
                 bMinX, bMinY, bMinZ,
                 bMaxX, bMaxY, bMaxZ,
                 hitT, hitNx, hitNy, hitNz)) {
-        bounceParticle(p, hitNx, hitNy, hitNz, hitT, elasticity, friction);
+        bounceParticle(p, hitNx, hitNy, hitNz, hitT, elasticity, friction, dt);
     }
 }
 
 // Collide particle with a sphere (solid obstacle — ray-sphere test).
 static void
 collideGeoSphere(Particle& p, float cx, float cy, float cz, float radius,
-                 float elasticity, float friction)
+                 float elasticity, float friction, float dt)
 {
     float ox = p.prevPx - cx, oy = p.prevPy - cy, oz = p.prevPz - cz;
     float dx = p.px - p.prevPx, dy = p.py - p.prevPy, dz = p.pz - p.prevPz;
@@ -264,7 +270,7 @@ collideGeoSphere(Particle& p, float cx, float cy, float cz, float radius,
         if (c < 0) {
             float dist = std::sqrt(ox * ox + oy * oy + oz * oz);
             if (dist > 0.001f)
-                bounceParticle(p, ox / dist, oy / dist, oz / dist, 0.0f, elasticity, friction);
+                bounceParticle(p, ox / dist, oy / dist, oz / dist, 0.0f, elasticity, friction, dt);
         }
         return;
     }
@@ -278,7 +284,7 @@ collideGeoSphere(Particle& p, float cx, float cy, float cz, float radius,
         float hz = p.prevPz + dz * t - cz;
         float len = std::sqrt(hx * hx + hy * hy + hz * hz);
         if (len > 0.001f)
-            bounceParticle(p, hx / len, hy / len, hz / len, t, elasticity, friction);
+            bounceParticle(p, hx / len, hy / len, hz / len, t, elasticity, friction, dt);
     }
 }
 
@@ -480,11 +486,13 @@ ParticleSolver::getParticleData(double time)
                 p.pz += p.vz * dt;
             }
 
-            // 5. Apply collision AFTER integration
+            // 5. Apply collision AFTER integration. Pass dt so the
+            //    post-bounce continuation displacement is scaled to one
+            //    substep, not one full frame.
             for (size_t j = 0; j < _imp->cachedData->particles.size(); ++j) {
                 Particle& p = _imp->cachedData->particles[j];
                 p.collided = false;
-                applyCollision(p, (double)frame);
+                applyCollision(p, (double)frame, dt);
             }
         }
 
@@ -507,7 +515,11 @@ ParticleSolver::getParticleData(double time)
                 p.b = it->second->b;
                 p.a = it->second->a;
                 p.size = it->second->size;
-                p.life = it->second->life;
+                // Deliberately NOT syncing `life` from the emitter. Lifetime is
+                // assigned at emission; resyncing it here would overwrite the
+                // bounce-settled kill (bounceParticle sets p.life = p.age when
+                // a particle comes to rest), resurrecting motionless particles
+                // that should expire.
             }
         }
 
@@ -593,7 +605,7 @@ static void invRotVec(const float m[3][3], float x, float y, float z,
 // the collision shape. For boxes, particles are transformed into the geo's
 // local space for AABB testing, then results are transformed back (OBB collision).
 void
-ParticleSolver::applyCollision(Particle& p, double time)
+ParticleSolver::applyCollision(Particle& p, double time, float dt)
 {
     // Check max bounces — kill particle if exceeded (0 = unlimited)
     int maxBouncesVal = _imp->maxBounces.lock() ? _imp->maxBounces.lock()->getValue() : 0;
@@ -608,22 +620,30 @@ ParticleSolver::applyCollision(Particle& p, double time)
     float elasticityVal = (float)_imp->elasticity.lock()->getValueAtTime(time);
     float frictionVal = (float)_imp->friction.lock()->getValueAtTime(time);
 
-    // Read transform + rotation + size knobs from connected geometry node
+    // Read transform + rotation + size knobs from connected geometry node.
+    // Each lookup is guarded against a non-KnobDouble (a future node with a
+    // KnobChoice / KnobInt of the same name would otherwise null-deref).
     float tx = 0, ty = 0, tz = 0;
     float rx = 0, ry = 0, rz = 0;
     float sx = 1, sy = 1, sz = 1;
     float geoSize = 1.0f;
-    KnobIPtr k;
-    k = geoEffect->getKnobByName("translateX"); if (k) tx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-    k = geoEffect->getKnobByName("translateY"); if (k) ty = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-    k = geoEffect->getKnobByName("translateZ"); if (k) tz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-    k = geoEffect->getKnobByName("rotateX"); if (k) rx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-    k = geoEffect->getKnobByName("rotateY"); if (k) ry = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-    k = geoEffect->getKnobByName("rotateZ"); if (k) rz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-    k = geoEffect->getKnobByName("scaleX"); if (k) sx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-    k = geoEffect->getKnobByName("scaleY"); if (k) sy = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-    k = geoEffect->getKnobByName("scaleZ"); if (k) sz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-    k = geoEffect->getKnobByName("size"); if (k) geoSize = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+    auto readDouble = [&](const char* name, float& out) {
+        KnobIPtr k = geoEffect->getKnobByName(name);
+        if (!k) return;
+        if (KnobDouble* kd = dynamic_cast<KnobDouble*>(k.get())) {
+            out = (float)kd->getValueAtTime(time);
+        }
+    };
+    readDouble("translateX", tx);
+    readDouble("translateY", ty);
+    readDouble("translateZ", tz);
+    readDouble("rotateX",    rx);
+    readDouble("rotateY",    ry);
+    readDouble("rotateZ",    rz);
+    readDouble("scaleX",     sx);
+    readDouble("scaleY",     sy);
+    readDouble("scaleZ",     sz);
+    readDouble("size",       geoSize);
 
     std::string pluginID = geoEffect->getPluginID();
     bool isSphere = (pluginID.find("Sphere") != std::string::npos);
@@ -631,7 +651,7 @@ ParticleSolver::applyCollision(Particle& p, double time)
     if (isSphere) {
         // Sphere is rotation-invariant — no need for OBB
         float radius = geoSize * 0.5f * sx;
-        collideGeoSphere(p, tx, ty, tz, radius, elasticityVal, frictionVal);
+        collideGeoSphere(p, tx, ty, tz, radius, elasticityVal, frictionVal, dt);
         pushOutOfSphere(p, tx, ty, tz, radius);
     } else {
         // OBB collision: transform particle into the cube's local space,
@@ -648,7 +668,7 @@ ParticleSolver::applyCollision(Particle& p, double time)
             float bMinY = ty - hy, bMaxY = ty + hy;
             float bMinZ = tz - hz, bMaxZ = tz + hz;
             collideGeoBox(p, bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ,
-                          elasticityVal, frictionVal);
+                          elasticityVal, frictionVal, dt);
             pushOutOfBox(p, bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ);
         } else {
             // OBB: transform particle positions into local space
@@ -668,7 +688,7 @@ ParticleSolver::applyCollision(Particle& p, double time)
             invRotVec(rot, p.vx, p.vy, p.vz, p.vx, p.vy, p.vz);
 
             // AABB test in local space (centered at origin)
-            collideGeoBox(p, -hx, -hy, -hz, hx, hy, hz, elasticityVal, frictionVal);
+            collideGeoBox(p, -hx, -hy, -hz, hx, hy, hz, elasticityVal, frictionVal, dt);
             pushOutOfBox(p, -hx, -hy, -hz, hx, hy, hz);
 
             if (p.collided) {

@@ -96,8 +96,11 @@ private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
 
-    // Per-particle collision dispatch (called after integration)
-    void applyCollision(Particle& p, double time);
+    // Per-particle collision dispatch (called after integration). `dt` is
+    // the substep size (1.0/numSubsteps); threaded through to bounceParticle
+    // so the post-bounce displacement is scaled to one substep, not one full
+    // frame.
+    void applyCollision(Particle& p, double time, float dt);
 
     std::unique_ptr<ParticleSolverPrivate> _imp;
 };

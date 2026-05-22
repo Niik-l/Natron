@@ -129,7 +129,7 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ## Particles
 
-**Status: Phase 2 complete (12 nodes). Solver architecture refactored. Collision with geometry working.**
+**Status: Phase 2 complete (13 nodes). Solver architecture refactored. Collision with geometry working.**
 
 ### Architecture (2026-04-06 refactor)
 
@@ -141,9 +141,10 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ### Known Issues
 
-- **No substeps in solver** — one integration step per frame. Fast particles can tunnel through thin colliders. Testbed has 4 substeps. Adding substeps to the solver loop is straightforward but not yet done.
 - **Force preview is velocity-only** — viewing from a force node (e.g. Gravity) shows emitter positions, not accumulated force positions. Must view from ParticleSolver for proper simulation.
 - **Node renamed** — ParticleCollide → ParticleSolver (2026-04-06). Plugin ID is now `ParticleSolver`.
+- **Animated colliders snap per-frame, not per-substep** — `applyCollision` is called per substep but with frame-level time. A keyframed-rotating Cube3D collider effectively uses the frame-N pose for all substeps. Visible as "popping" only on fast-rotating colliders. Fix would be `applyCollision(p, frame + sub/numSubsteps, dt)` plus per-substep knob caching. Low priority.
+- **Per-particle knob reads in `applyCollision`** — 10 knob lookups per particle per substep per frame on the collision geo. At 10k particles × 4 substeps = 400k knob reads/frame. Should hoist the reads outside the inner loop. Perf, not correctness.
 
 ### Completed (2026-04-06)
 
@@ -172,6 +173,12 @@ Tracking known bugs, incomplete features, and planned improvements.
 - **maxBounces** — bounceCount on Particle struct, kills particle when exceeded
 - **Color variance** — per-particle random color variation on emitter (deterministic by particle ID)
 - **Sphere/instance smoothing** — bumped sphere tessellation (16×24 instance, 10×14 particle mode), disc segments (32), added back-face culling for 3D geo
+
+### Completed (2026-05-22) — Audit pass: A1 / A2 / A3 fixes
+
+- **A1: Guarded `dynamic_cast` on collision-geo knob lookups** — `ParticleSolver::applyCollision` and `ParticleEmitter::getParticleData` (transform input path) previously checked the `KnobIPtr` was non-null but blindly dereferenced the `dynamic_cast<KnobDouble*>` result. Future node types exposing `translateX` / `rotateX` etc. as non-`KnobDouble` would null-deref. Replaced inline casts with a `readDouble()` local helper that guards both checks.
+- **A2: Threaded `dt` through `bounceParticle` / collide helpers** — at `Substeps > 1` (default 4), the post-bounce continuation displacement (`p.vx * remaining`) was using the full-frame velocity instead of scaling by the substep size. Particles overshot the bounce point by ×4 at default substeps — visible as a "spring" effect on fresh bounces. `bounceParticle`, `collidePlane`, `collideGeoBox`, `collideGeoSphere`, and `ParticleSolver::applyCollision` now all take `dt` and apply `p.vx * remaining * dt` for the continuation.
+- **A3: Stopped resyncing `p.life` from the emitter in solver step 6** — the per-frame appearance-sync loop overwrote `p.life` with the emitter's value, undoing the kill that `bounceParticle` set when a particle settled (`speed < 0.0001f` → `p.life = p.age`). Settled particles accumulated indefinitely on collider surfaces. Now sync only `r/g/b/a/size`; `life` is assigned at emission and stays put.
 
 ### Still TODO
 

@@ -464,19 +464,27 @@ ParticleEmitter::getParticleData(double time)
     double edy = _imp->emitDirY.lock()->getValueAtTime(time);
     double edz = _imp->emitDirZ.lock()->getValueAtTime(time);
 
-    // Override position + emit direction from transform input (input 1)
+    // Override position + emit direction from transform input (input 1).
+    // Each lookup is guarded so a non-KnobDouble knob with a matching name
+    // (KnobChoice / KnobInt etc.) doesn't null-deref.
     EffectInstancePtr xformInput = getInput(1);
     if (xformInput) {
-        KnobIPtr k;
-        k = xformInput->getKnobByName("translateX"); if (k) emPosX = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-        k = xformInput->getKnobByName("translateY"); if (k) emPosY = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-        k = xformInput->getKnobByName("translateZ"); if (k) emPosZ = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+        auto readDouble = [&](const char* name, double& out) {
+            KnobIPtr k = xformInput->getKnobByName(name);
+            if (!k) return;
+            if (KnobDouble* kd = dynamic_cast<KnobDouble*>(k.get())) {
+                out = kd->getValueAtTime(time);
+            }
+        };
+        readDouble("translateX", emPosX);
+        readDouble("translateY", emPosY);
+        readDouble("translateZ", emPosZ);
 
         // Read rotation (degrees) and rotate emit direction by the parent's transform.
         double rxDeg = 0, ryDeg = 0, rzDeg = 0;
-        k = xformInput->getKnobByName("rotateX"); if (k) rxDeg = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-        k = xformInput->getKnobByName("rotateY"); if (k) ryDeg = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-        k = xformInput->getKnobByName("rotateZ"); if (k) rzDeg = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+        readDouble("rotateX", rxDeg);
+        readDouble("rotateY", ryDeg);
+        readDouble("rotateZ", rzDeg);
 
         // Extrinsic XYZ matrix (M = Rz*Ry*Rx column-vector, Maya/Blender/Houdini default).
         double m[3][3];
