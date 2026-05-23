@@ -26,6 +26,7 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstdio>   // fprintf/fflush — used by Phase 3 GLSL helpers
 #include <cstring>
 #include <vector>
 
@@ -82,6 +83,23 @@ struct ScanlineRenderPrivate
     KnobDoubleWPtr particleMotionBlur; // velocity stretch amount (legacy cheat mode)
     KnobIntWPtr motionSamples;      // number of sub-frame samples (1 = off)
     KnobDoubleWPtr motionShutter;   // shutter open fraction (0-1, default 0.5)
+
+    // Phase 3 experimental — GLSL/MRT pipeline. Default OFF until the GLSL
+    // beauty render path lands (Phase 3C). When ON, the render() method
+    // uses the GLSL/MRT path instead of fixed-function GL. The two paths
+    // co-exist during the migration; Phase 3E retires fixed-function.
+    KnobBoolWPtr useGlslPipeline;
+
+    // Phase 3D — per-pixel AOV outputs. Each AOV is produced only when its
+    // knob is on AND (for the MRT ones) the GLSL pipeline is on. Depth and
+    // World Position are the exception: they come from the existing depth
+    // attachment + inverse(MVP) and work under both fixed-function and GLSL.
+    KnobBoolWPtr outputDepth;     // depth.Z plane (linear camera-space distance)
+    KnobBoolWPtr outputPosition;  // world_position.xyz plane (reconstructed from depth)
+    KnobBoolWPtr outputNormal;
+    KnobBoolWPtr outputUV;
+    KnobBoolWPtr outputPref;
+    KnobBoolWPtr outputVelocity;
 };
 
 
@@ -129,7 +147,12 @@ ScanlineRender::isInputOptional(int inputNb) const
 void
 ScanlineRender::addAcceptedComponents(int /*inputNb*/, std::list<ImagePlaneDesc>* comps)
 {
+    // RGBA for beauty. RGB for world_position / Normal / Pref / Velocity / UV
+    // (3-channel AOVs). Alpha (1-channel) for depth. Without these, Natron may
+    // refuse to allocate the AOV planes with correct bounds.
     comps->push_back(ImagePlaneDesc::getRGBAComponents());
+    comps->push_back(ImagePlaneDesc::getRGBComponents());
+    comps->push_back(ImagePlaneDesc::getAlphaComponents());
 }
 
 void
@@ -167,6 +190,22 @@ ScanlineRender::initializeKnobs()
         k->setHintToolTip(tr("Copy the current project default format's width and "
                              "height into the Width/Height knobs above."));
         outPage->addKnob(k); _imp->syncToProject = k;
+    }
+
+    // Phase 3 — GLSL/MRT pipeline toggle. Off by default while migration is
+    // in progress; the GLSL beauty path lands in Phase 3C and the MRT AOVs in
+    // Phase 3D. The fixed-function path stays the default until Phase 3E
+    // retires it. When ON: scene draws via GLSL 3.3 core shaders, MRT enables
+    // per-fragment AOV outputs (Normal / UV / Pref / Velocity).
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Use GLSL pipeline"));
+        k->setName("useGlslPipeline");
+        k->setDefaultValue(false);
+        k->setHintToolTip(tr("EXPERIMENTAL (Phase 3 migration). Toggle the GLSL/MRT render path. "
+                              "When OFF, uses the legacy fixed-function GL pipeline. "
+                              "When ON, scene draws via GLSL 3.3 core shaders — required for "
+                              "the Normal / UV / Pref / Velocity AOVs added in Phase 3D."));
+        outPage->addKnob(k); _imp->useGlslPipeline = k;
     }
 
     // Particle rendering knobs
@@ -224,6 +263,57 @@ ScanlineRender::initializeKnobs()
         k->setHintToolTip(tr("Shutter open duration as fraction of frame time. 0.5 = 180 degree shutter (film standard). Only used when Motion Samples > 1."));
         partPage->addKnob(k); _imp->motionShutter = k;
     }
+
+    // Phase 3D — AOV outputs page. Each toggle adds a per-pixel arbitrary
+    // output variable on top of beauty. They only fire when the GLSL pipeline
+    // (Output page) is also on; otherwise the legacy fixed-function path
+    // doesn't have a way to emit them.
+    KnobPagePtr aovPage = AppManager::createKnob<KnobPage>(this, tr("AOVs"));
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Depth"));
+        k->setName("outputDepth"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Per-pixel linear camera-space distance (depth.Z). "
+                              "Background pixels emit the camera Far value. Works "
+                              "under both fixed-function and GLSL pipelines."));
+        aovPage->addKnob(k); _imp->outputDepth = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("World Position"));
+        k->setName("outputPosition"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Per-pixel world-space surface position (world_position.x/y/z), "
+                              "reconstructed from depth via inverse(proj * view). Background "
+                              "pixels emit (0,0,0). Works under both fixed-function and GLSL."));
+        aovPage->addKnob(k); _imp->outputPosition = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Normal"));
+        k->setName("outputNormal"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Per-pixel surface normal in world space (Normal.x/y/z). "
+                              "Requires the GLSL pipeline (Output page)."));
+        aovPage->addKnob(k); _imp->outputNormal = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("UV"));
+        k->setName("outputUV"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Per-pixel texture coordinate (uv.u/v/w). "
+                              "Requires the GLSL pipeline (Output page)."));
+        aovPage->addKnob(k); _imp->outputUV = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Pref"));
+        k->setName("outputPref"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Per-pixel reference position in object space (Pref.x/y/z). "
+                              "Useful as a texture-projection key. Requires the GLSL pipeline."));
+        aovPage->addKnob(k); _imp->outputPref = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Velocity"));
+        k->setName("outputVelocity"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Per-pixel screen-space motion vector in pixels per frame "
+                              "(Velocity.x/y/z). Z is reserved (0). Requires the GLSL "
+                              "pipeline. Re-extracts geometry and camera at time-1."));
+        aovPage->addKnob(k); _imp->outputVelocity = k;
+    }
 }
 
 bool
@@ -266,6 +356,50 @@ ScanlineRender::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const Rende
     return eStatusOK;
 }
 
+namespace {
+// Phase 3D — forward declarations so the member function below can call
+// these factories. Their definitions live further down in the same anonymous
+// namespace (alongside the GLSL helpers).
+static ImagePlaneDesc makeDepthPlane();
+static ImagePlaneDesc makeWorldPositionPlane();
+static ImagePlaneDesc makeNormalPlane();
+static ImagePlaneDesc makeUvPlane();
+static ImagePlaneDesc makePrefPlane();
+static ImagePlaneDesc makeVelocityPlane();
+} // namespace
+
+void
+ScanlineRender::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
+                                               EffectInstance::ComponentsNeededMap* comps,
+                                               double* passThroughTime,
+                                               int* passThroughView,
+                                               int* passThroughInput)
+{
+    // Beauty on the default color plane is always produced.
+    (*comps)[-1].push_back(ImagePlaneDesc::getRGBAComponents());
+
+    // Phase 3D — declare each AOV plane only when its knob is on. The render
+    // path checks the same knobs to decide whether to allocate MRT attachments
+    // and run the readback/blit; keeping them gated here ensures we don't
+    // promise planes we won't fill.
+    KnobBoolPtr depthK    = _imp->outputDepth.lock();
+    KnobBoolPtr posK      = _imp->outputPosition.lock();
+    KnobBoolPtr normalK   = _imp->outputNormal.lock();
+    KnobBoolPtr uvK       = _imp->outputUV.lock();
+    KnobBoolPtr prefK     = _imp->outputPref.lock();
+    KnobBoolPtr velocityK = _imp->outputVelocity.lock();
+    if (depthK    && depthK->getValue())    (*comps)[-1].push_back(makeDepthPlane());
+    if (posK      && posK->getValue())      (*comps)[-1].push_back(makeWorldPositionPlane());
+    if (normalK   && normalK->getValue())   (*comps)[-1].push_back(makeNormalPlane());
+    if (uvK       && uvK->getValue())       (*comps)[-1].push_back(makeUvPlane());
+    if (prefK     && prefK->getValue())     (*comps)[-1].push_back(makePrefPlane());
+    if (velocityK && velocityK->getValue()) (*comps)[-1].push_back(makeVelocityPlane());
+
+    *passThroughTime = 0;
+    *passThroughView = 0;
+    *passThroughInput = 0; // bg input passes through
+}
+
 // ==================== Helpers ====================
 
 static void
@@ -296,6 +430,361 @@ buildViewMatrix(double tx, double ty, double tz,
 // (independent fov_h / fov_v from both apertures). Image aspect is no longer
 // used to derive the Y FOV — that was a long-standing bug producing CG drift
 // proportional to camera motion when sensor aspect != image aspect.
+
+// ==================== 4x4 matrix helpers (column-major, OpenGL convention) ====================
+
+// out = a * b   (column-major). Used by the GLSL render path to compose
+// projView * localMatrix into a per-mesh MVP uniform.
+static void
+mat4Mul(float out[16], const float a[16], const float b[16])
+{
+    float r[16];
+    for (int c = 0; c < 4; ++c) {
+        for (int rIdx = 0; rIdx < 4; ++rIdx) {
+            float s = 0.f;
+            for (int k = 0; k < 4; ++k) {
+                s += a[k * 4 + rIdx] * b[c * 4 + k];
+            }
+            r[c * 4 + rIdx] = s;
+        }
+    }
+    std::memcpy(out, r, sizeof(r));
+}
+
+// Apply a 4x4 column-major matrix to (x,y,z,w). Available for future GLSL
+// CPU-side prep (Phase 3D-3 Velocity AOV will use it for the previous-frame
+// clip-space derivation when the GPU path needs CPU validation).
+static void
+mat4Apply(const float m[16], float x, float y, float z, float w,
+          float* ox, float* oy, float* oz, float* ow)
+{
+    *ox = m[0]*x + m[4]*y + m[8]*z  + m[12]*w;
+    *oy = m[1]*x + m[5]*y + m[9]*z  + m[13]*w;
+    *oz = m[2]*x + m[6]*y + m[10]*z + m[14]*w;
+    *ow = m[3]*x + m[7]*y + m[11]*z + m[15]*w;
+}
+
+// ==================== GLSL / MRT helpers (Phase 3B scaffolding) ====================
+//
+// Inert by default — only invoked when the "Use GLSL pipeline" knob on
+// ScanlineRender is enabled. Phase 3C will start using them for the beauty
+// pass; Phase 3D will add MRT AOVs (Normal / UV / Pref / Velocity) via
+// glslSetupMrtFbo's multi-attachment support.
+//
+// Once Phase 3 is complete and fixed-function is retired, these can migrate
+// to a dedicated `GlslRenderHelpers.{h,cpp}` for reuse by ParticleRender,
+// Project3D, and UVProject.
+
+namespace {
+
+// Phase 3D — AOV plane factories. Each AOV is its own ImagePlaneDesc with a
+// stable plane ID + channel name layout, so downstream nodes (Shuffle, Write)
+// can address them by name. Channel names are short to keep EXR multipart
+// metadata tidy. The plane ID/label pair follows Natron's convention of
+// matching common DCC names (Nuke, Mantra) for round-trip compatibility.
+static ImagePlaneDesc makeDepthPlane()
+{
+    // Channel name "Z" uppercase is the OpenEXR convention for depth (Houdini
+    // Mantra, V-Ray, Arnold, Renderman). Lowercase "z" is recognized by Nuke
+    // but is filtered out by stricter EXR readers.
+    std::vector<std::string> channels;
+    channels.push_back("Z");
+    return ImagePlaneDesc("depth", "depth", "Z", channels);
+}
+
+static ImagePlaneDesc makeWorldPositionPlane()
+{
+    std::vector<std::string> channels;
+    channels.push_back("x"); channels.push_back("y"); channels.push_back("z");
+    return ImagePlaneDesc("world_position", "world_position", "xyz", channels);
+}
+
+static ImagePlaneDesc makeNormalPlane()
+{
+    std::vector<std::string> channels;
+    channels.push_back("x"); channels.push_back("y"); channels.push_back("z");
+    return ImagePlaneDesc("Normal", "Normal", "xyz", channels);
+}
+
+static ImagePlaneDesc makeUvPlane()
+{
+    std::vector<std::string> channels;
+    channels.push_back("u"); channels.push_back("v"); channels.push_back("w");
+    return ImagePlaneDesc("uv", "uv", "uvw", channels);
+}
+
+static ImagePlaneDesc makePrefPlane()
+{
+    std::vector<std::string> channels;
+    channels.push_back("x"); channels.push_back("y"); channels.push_back("z");
+    return ImagePlaneDesc("Pref", "Pref", "xyz", channels);
+}
+
+static ImagePlaneDesc makeVelocityPlane()
+{
+    std::vector<std::string> channels;
+    channels.push_back("x"); channels.push_back("y"); channels.push_back("z");
+    return ImagePlaneDesc("Velocity", "Velocity", "xyz", channels);
+}
+
+// Compile a single shader stage. Logs failure to stderr. Returns 0 on failure.
+static GLuint
+glslCompileShader(GLenum stage, const char* source, const char* stageName)
+{
+    GLuint sh = glCreateShader(stage);
+    glShaderSource(sh, 1, &source, NULL);
+    glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        GLint logLen = 0;
+        glGetShaderiv(sh, GL_INFO_LOG_LENGTH, &logLen);
+        std::vector<char> log(logLen + 1, 0);
+        glGetShaderInfoLog(sh, logLen, NULL, log.data());
+        std::fprintf(stderr, "[GLSL FAIL] %s compile:\n%s\n", stageName, log.data());
+        std::fflush(stderr);
+        glDeleteShader(sh);
+        return 0;
+    }
+    return sh;
+}
+
+// Compile + link a vertex+fragment shader pair. Returns 0 on failure.
+// Caller owns the returned program — must glDeleteProgram() when done.
+static GLuint
+glslBuildProgram(const char* vertSrc, const char* fragSrc)
+{
+    GLuint vs = glslCompileShader(GL_VERTEX_SHADER, vertSrc, "vertex shader");
+    if (!vs) return 0;
+    GLuint fs = glslCompileShader(GL_FRAGMENT_SHADER, fragSrc, "fragment shader");
+    if (!fs) { glDeleteShader(vs); return 0; }
+
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        GLint logLen = 0;
+        glGetProgramiv(prog, GL_INFO_LOG_LENGTH, &logLen);
+        std::vector<char> log(logLen + 1, 0);
+        glGetProgramInfoLog(prog, logLen, NULL, log.data());
+        std::fprintf(stderr, "[GLSL FAIL] program link:\n%s\n", log.data());
+        std::fflush(stderr);
+        glDeleteProgram(prog);
+        prog = 0;
+    }
+    // Shaders can be deleted now — they're attached to the program.
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return prog;
+}
+
+// Create a multi-attachment FBO with N RGBA32F color attachments + a depth
+// renderbuffer. Out params receive the FBO handle + texture/RB handles.
+// `outColorTextures` will have `numColorAttachments` entries on success.
+// Returns true on success; on failure, all created resources are deleted
+// and out params are zeroed. Phase 3D consumers wire this up to MRT AOV
+// blits — Phase 3C only uses the standalone helpers.
+[[maybe_unused]] static bool
+glslSetupMrtFbo(int width, int height, int numColorAttachments,
+                GLuint* outFbo,
+                std::vector<GLuint>* outColorTextures,
+                GLuint* outDepthRb)
+{
+    *outFbo = 0;
+    *outDepthRb = 0;
+    outColorTextures->clear();
+    if (numColorAttachments <= 0 || numColorAttachments > 8) {
+        std::fprintf(stderr, "[GLSL FAIL] MRT: invalid attachment count %d (max 8)\n",
+                     numColorAttachments);
+        std::fflush(stderr);
+        return false;
+    }
+
+    GLuint fbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+    std::vector<GLuint> colorTex(numColorAttachments, 0);
+    std::vector<GLenum> drawBufs(numColorAttachments);
+    for (int i = 0; i < numColorAttachments; ++i) {
+        glGenTextures(1, &colorTex[i]);
+        glBindTexture(GL_TEXTURE_2D, colorTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F_ARB, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,
+                               GL_COLOR_ATTACHMENT0 + i,
+                               GL_TEXTURE_2D, colorTex[i], 0);
+        drawBufs[i] = GL_COLOR_ATTACHMENT0 + i;
+    }
+
+    GLuint depthRb = 0;
+    glGenRenderbuffers(1, &depthRb);
+    glBindRenderbuffer(GL_RENDERBUFFER, depthRb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRb);
+
+    glDrawBuffers(numColorAttachments, drawBufs.data());
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        std::fprintf(stderr, "[GLSL FAIL] MRT FBO incomplete (status=0x%x, attachments=%d)\n",
+                     status, numColorAttachments);
+        std::fflush(stderr);
+        for (GLuint t : colorTex) if (t) glDeleteTextures(1, &t);
+        glDeleteRenderbuffers(1, &depthRb);
+        glDeleteFramebuffers(1, &fbo);
+        return false;
+    }
+
+    *outFbo = fbo;
+    *outDepthRb = depthRb;
+    *outColorTextures = colorTex;
+    return true;
+}
+
+// Tear down an MRT FBO created by glslSetupMrtFbo. Safe to call with zero handles.
+[[maybe_unused]] static void
+glslTeardownMrtFbo(GLuint fbo, const std::vector<GLuint>& colorTextures, GLuint depthRb)
+{
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    for (GLuint t : colorTextures) if (t) glDeleteTextures(1, &t);
+    if (depthRb) glDeleteRenderbuffers(1, &depthRb);
+}
+
+} // anonymous namespace
+
+// Invert a 4x4 column-major matrix. Returns false on singular. Used by
+// the GLSL render path to compute the normal matrix from the local-to-world
+// transform (inverse-transpose of the upper 3x3).
+static bool
+mat4Invert(float out[16], const float m[16])
+{
+    float inv[16];
+    inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8]  =  m[4]*m[9]*m[15]  - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14]  + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9]  = -m[0]*m[9]*m[15]  + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] =  m[0]*m[9]*m[14]  - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2]  =  m[1]*m[6]*m[15]  - m[1]*m[7]*m[14]  - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7]  - m[13]*m[3]*m[6];
+    inv[6]  = -m[0]*m[6]*m[15]  + m[0]*m[7]*m[14]  + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7]  + m[12]*m[3]*m[6];
+    inv[10] =  m[0]*m[5]*m[15]  - m[0]*m[7]*m[13]  - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7]  - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14]  + m[0]*m[6]*m[13]  + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6]  + m[12]*m[2]*m[5];
+    inv[3]  = -m[1]*m[6]*m[11]  + m[1]*m[7]*m[10]  + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7]   + m[9]*m[3]*m[6];
+    inv[7]  =  m[0]*m[6]*m[11]  - m[0]*m[7]*m[10]  - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7]   - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11]  + m[0]*m[7]*m[9]   + m[4]*m[1]*m[11] - m[4]*m[3]*m[9]  - m[8]*m[1]*m[7]   + m[8]*m[3]*m[5];
+    inv[15] =  m[0]*m[5]*m[10]  - m[0]*m[6]*m[9]   - m[4]*m[1]*m[10] + m[4]*m[2]*m[9]  + m[8]*m[1]*m[6]   - m[8]*m[2]*m[5];
+
+    float det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    if (det == 0.0f) return false;
+    float invDet = 1.0f / det;
+    for (int i = 0; i < 16; ++i) out[i] = inv[i] * invDet;
+    return true;
+}
+
+// ==================== Phase 3C: beauty shaders ====================
+//
+// GLSL passthrough shaders for the beauty plane. Supports both regular UV
+// texturing AND STW projective texturing (UVProject Perspective mode) via a
+// u_hasTexture uniform: 0 = no texture (white), 1 = regular UV, 2 = STW.
+//
+// The fragment shader has output locations for 5 attachments (beauty + 4 AOVs)
+// so Phase 3D can extend without recompiling. AOV writes are gated by
+// u_writeNormal / u_writeUV / u_writePref / u_writeVelocity uniforms — all
+// default to 0 in Phase 3C, so only attachment 0 (beauty) gets meaningful
+// data. Unused attachments either don't exist in the FBO (driver silently
+// drops writes) or write zeros — both fine.
+
+static const char* kBeautyVert =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 in_pos;\n"
+    "layout(location = 1) in vec2 in_uv;\n"
+    "layout(location = 2) in vec4 in_stw;       // s, t, 0, w (for projective texturing)\n"
+    "layout(location = 3) in vec3 in_normal;    // object-space normal (Phase 3D)\n"
+    "layout(location = 4) in vec3 in_prevPos;   // previous-frame object-space position (Phase 3D-3 — velocity)\n"
+    "uniform mat4 u_mvp;\n"
+    "uniform mat4 u_prevMvp;                   // previous-frame MVP for velocity computation\n"
+    "uniform mat3 u_normalMatrix;              // transpose(inverse(localMatrix3x3)) for world normals\n"
+    "uniform vec2 u_viewportSize;              // (width, height) in pixels — scales NDC delta to screen pixels\n"
+    "out vec2 v_uv;\n"
+    "out vec4 v_stw;\n"
+    "out vec3 v_worldNormal;\n"
+    "out vec3 v_prefPos;                       // object-space position (= in_pos) — Pref AOV\n"
+    "out vec4 v_currClipPos;                   // current-frame clip-space position — for velocity\n"
+    "out vec4 v_prevClipPos;                   // previous-frame clip-space position — for velocity\n"
+    "void main() {\n"
+    "    v_uv          = in_uv;\n"
+    "    v_stw         = in_stw;\n"
+    "    v_worldNormal = u_normalMatrix * in_normal;\n"
+    "    v_prefPos     = in_pos;\n"
+    "    v_currClipPos = u_mvp * vec4(in_pos, 1.0);\n"
+    "    v_prevClipPos = u_prevMvp * vec4(in_prevPos, 1.0);\n"
+    "    gl_Position   = v_currClipPos;\n"
+    "}\n";
+
+static const char* kBeautyFrag =
+    "#version 330 core\n"
+    "in vec2 v_uv;\n"
+    "in vec4 v_stw;\n"
+    "in vec3 v_worldNormal;\n"
+    "in vec3 v_prefPos;\n"
+    "in vec4 v_currClipPos;\n"
+    "in vec4 v_prevClipPos;\n"
+    "uniform sampler2D u_tex;\n"
+    "uniform vec2 u_viewportSize;\n"
+    "uniform int u_hasTexture;       // 0=no, 1=regular UV, 2=STW projective\n"
+    "uniform int u_writeNormal;      // attachment 1 (Phase 3D)\n"
+    "uniform int u_writeUV;          // attachment 2 (Phase 3D)\n"
+    "uniform int u_writePref;        // attachment 3 (Phase 3D)\n"
+    "uniform int u_writeVelocity;    // attachment 4 (Phase 3D)\n"
+    "layout(location = 0) out vec4 out_color;\n"
+    "layout(location = 1) out vec4 out_normal;\n"
+    "layout(location = 2) out vec4 out_uv;\n"
+    "layout(location = 3) out vec4 out_pref;\n"
+    "layout(location = 4) out vec4 out_velocity;\n"
+    "void main() {\n"
+    "    // --- Beauty (attachment 0) ---\n"
+    "    if (u_hasTexture == 2) {\n"
+    "        if (v_stw.w <= 0.0) discard;\n"
+    "        vec2 uv = v_stw.xy / v_stw.w;\n"
+    "        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {\n"
+    "            out_color = vec4(0.0);\n"
+    "        } else {\n"
+    "            out_color = texture(u_tex, uv);\n"
+    "        }\n"
+    "    } else if (u_hasTexture == 1) {\n"
+    "        out_color = texture(u_tex, v_uv);\n"
+    "    } else {\n"
+    "        out_color = vec4(1.0, 1.0, 1.0, 1.0);\n"
+    "    }\n"
+    "    // --- Normal AOV ---\n"
+    "    if (u_writeNormal == 1) {\n"
+    "        vec3 n = normalize(v_worldNormal);\n"
+    "        out_normal = vec4(n, 1.0);\n"
+    "    } else { out_normal = vec4(0.0); }\n"
+    "    // --- UV AOV ---\n"
+    "    if (u_writeUV == 1) {\n"
+    "        out_uv = vec4(v_uv, 0.0, 1.0);\n"
+    "    } else { out_uv = vec4(0.0); }\n"
+    "    // --- Pref AOV (object-space position, before localMatrix) ---\n"
+    "    if (u_writePref == 1) {\n"
+    "        out_pref = vec4(v_prefPos, 1.0);\n"
+    "    } else { out_pref = vec4(0.0); }\n"
+    "    // --- Velocity AOV (screen-pixels delta between previous + current frame) ---\n"
+    "    if (u_writeVelocity == 1) {\n"
+    "        vec2 currNdc = v_currClipPos.xy / v_currClipPos.w;\n"
+    "        vec2 prevNdc = v_prevClipPos.xy / v_prevClipPos.w;\n"
+    "        vec2 deltaNdc = currNdc - prevNdc;\n"
+    "        vec2 deltaPx = deltaNdc * (u_viewportSize * 0.5);\n"
+    "        out_velocity = vec4(deltaPx, 0.0, 1.0);\n"
+    "    } else { out_velocity = vec4(0.0); }\n"
+    "}\n";
 
 // ==================== Volume ray marching shaders ====================
 
@@ -391,6 +880,21 @@ struct GeoData {
     std::vector<int> triIndices;
     float localMatrix[16];
     ImagePtr texImg;
+
+    // Phase 3 GLSL/MRT extensions. Empty / identity for fixed-function path.
+    // Phase 3D populates these for the Normal / Pref / Velocity AOVs:
+    //   normals          — object-space per-vertex normals (xyz interleaved)
+    //   prevVerts        — previous-frame object-space positions (xyz interleaved)
+    //   prevLocalMatrix  — previous-frame local→world transform (col-major)
+    std::vector<float> normals;
+    std::vector<float> prevVerts;
+    float prevLocalMatrix[16];
+
+    GeoData()
+    {
+        // Identity for prevLocalMatrix so velocity = 0 by default (static).
+        for (int i = 0; i < 16; ++i) prevLocalMatrix[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+    }
 };
 
 // Fan-triangulate a polygon-soup mesh (faceIndices + per-face vertex counts)
@@ -451,9 +955,11 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         sphere->generateSphereMesh(time, sv, out.triIndices);
         out.verts.resize(sv.size() * 3);
         out.uvs.resize(sv.size() * 2);
+        out.normals.resize(sv.size() * 3);
         for (size_t i = 0; i < sv.size(); ++i) {
             out.verts[i*3+0] = sv[i].x; out.verts[i*3+1] = sv[i].y; out.verts[i*3+2] = sv[i].z;
             out.uvs[i*2+0] = sv[i].u; out.uvs[i*2+1] = sv[i].v;
+            out.normals[i*3+0] = sv[i].nx; out.normals[i*3+1] = sv[i].ny; out.normals[i*3+2] = sv[i].nz;
         }
         double tx,ty,tz,rx,ry,rz,sx,sy,sz;
         sphere->getSphereTransform(time, tx,ty,tz, rx,ry,rz, sx,sy,sz);
@@ -471,9 +977,11 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         card->generateCardMesh(time, cv, out.triIndices);
         out.verts.resize(cv.size() * 3);
         out.uvs.resize(cv.size() * 2);
+        out.normals.resize(cv.size() * 3);
         for (size_t i = 0; i < cv.size(); ++i) {
             out.verts[i*3+0] = cv[i].x; out.verts[i*3+1] = cv[i].y; out.verts[i*3+2] = cv[i].z;
             out.uvs[i*2+0] = cv[i].u; out.uvs[i*2+1] = cv[i].v;
+            out.normals[i*3+0] = cv[i].nx; out.normals[i*3+1] = cv[i].ny; out.normals[i*3+2] = cv[i].nz;
         }
         double tx,ty,tz,rx,ry,rz,sx,sy;
         card->getCardTransform(time, tx,ty,tz, rx,ry,rz, sx,sy);
@@ -491,9 +999,11 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         cube->generateCubeMesh(time, cv, out.triIndices);
         out.verts.resize(cv.size() * 3);
         out.uvs.resize(cv.size() * 2);
+        out.normals.resize(cv.size() * 3);
         for (size_t i = 0; i < cv.size(); ++i) {
             out.verts[i*3+0] = cv[i].x; out.verts[i*3+1] = cv[i].y; out.verts[i*3+2] = cv[i].z;
             out.uvs[i*2+0] = cv[i].u; out.uvs[i*2+1] = cv[i].v;
+            out.normals[i*3+0] = cv[i].nx; out.normals[i*3+1] = cv[i].ny; out.normals[i*3+2] = cv[i].nz;
         }
         double tx,ty,tz,rx,ry,rz,sx,sy,sz;
         cube->getCubeTransform(time, tx,ty,tz, rx,ry,rz, sx,sy,sz);
@@ -511,9 +1021,11 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         cyl->generateCylinderMesh(time, cv, out.triIndices);
         out.verts.resize(cv.size() * 3);
         out.uvs.resize(cv.size() * 2);
+        out.normals.resize(cv.size() * 3);
         for (size_t i = 0; i < cv.size(); ++i) {
             out.verts[i*3+0] = cv[i].x; out.verts[i*3+1] = cv[i].y; out.verts[i*3+2] = cv[i].z;
             out.uvs[i*2+0] = cv[i].u; out.uvs[i*2+1] = cv[i].v;
+            out.normals[i*3+0] = cv[i].nx; out.normals[i*3+1] = cv[i].ny; out.normals[i*3+2] = cv[i].nz;
         }
         double tx,ty,tz,rx,ry,rz,sx,sy,sz;
         cyl->getCylinderTransform(time, tx,ty,tz, rx,ry,rz, sx,sy,sz);
@@ -659,6 +1171,179 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
     if (extractGeometry(effect, time, view, g)) {
         out.push_back(g);
     }
+}
+
+// Phase 3C — GLSL beauty render path. Parallel to renderGeoObject (below)
+// but uses modern GL 3.3 core: VAO + interleaved VBO + IBO + uniform-driven
+// MVP, sampled via the kBeautyVert/kBeautyFrag shader pair. Caller must have
+// glUseProgram'd `program` before invoking. `prevProjViewMatrix` is the
+// camera (proj * view) at the previous frame — used for Velocity AOV in
+// Phase 3D; pass current projViewMatrix when velocity isn't needed.
+// `writeNormal/UV/Pref/Velocity` request AOV outputs at MRT attachments 1-4
+// (Phase 3D only — caller must have bound an MRT FBO with those slots).
+static void
+renderGeoObjectGlsl(const GeoData& geo, GLuint program,
+                    const float projViewMatrix[16],
+                    const float prevProjViewMatrix[16],
+                    int viewportW, int viewportH,
+                    bool writeNormal, bool writeUV, bool writePref, bool writeVelocity)
+{
+    const int numVerts = (int)(geo.verts.size() / 3);
+    const int numTris  = (int)(geo.triIndices.size() / 3);
+    if (numVerts == 0 || numTris == 0) return;
+
+    // --- Upload texture if available (mirrors fixed-function path) ---
+    GLuint srcTex = 0;
+    int hasTextureMode = 0;  // 0=no, 1=UV, 2=STW
+    if (geo.texImg) {
+        RectI texBounds = geo.texImg->getBounds();
+        const int texW = texBounds.width();
+        const int texH = texBounds.height();
+        if (texW > 0 && texH > 0) {
+            glGenTextures(1, &srcTex);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, srcTex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+            std::vector<float> texData((size_t)texW * texH * 4, 0.0f);
+            {
+                Image::ReadAccess ra(geo.texImg.get());
+                for (int y = texBounds.y1; y < texBounds.y2; ++y) {
+                    for (int x = texBounds.x1; x < texBounds.x2; ++x) {
+                        const float* pix = (const float*)ra.pixelAt(x, y);
+                        if (!pix) continue;
+                        int idx = ((y - texBounds.y1) * texW + (x - texBounds.x1)) * 4;
+                        texData[idx + 0] = pix[0];
+                        texData[idx + 1] = pix[1];
+                        texData[idx + 2] = pix[2];
+                        texData[idx + 3] = (geo.texImg->getComponents().getNumComponents() >= 4) ? pix[3] : 1.0f;
+                    }
+                }
+            }
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F_ARB, texW, texH, 0, GL_RGBA, GL_FLOAT, texData.data());
+            const bool useSTW = !geo.stw.empty() && (int)geo.stw.size() >= numVerts * 3;
+            hasTextureMode = useSTW ? 2 : 1;
+        }
+    }
+
+    // --- Per-mesh MVP = projView * localMatrix (current + previous) ---
+    float mvp[16];
+    mat4Mul(mvp, projViewMatrix, geo.localMatrix);
+    float prevMvp[16];
+    mat4Mul(prevMvp, prevProjViewMatrix, geo.prevLocalMatrix);
+
+    // --- Normal matrix = transpose(inverse(localMatrix3x3)). For non-uniform
+    // scale, normals need inverse-transpose to stay perpendicular to the
+    // surface in world space. Identity fallback when localMatrix is singular.
+    float normalMat[9] = { 1, 0, 0,  0, 1, 0,  0, 0, 1 };
+    {
+        float m3[16] = {
+            geo.localMatrix[0], geo.localMatrix[1], geo.localMatrix[2],  0,
+            geo.localMatrix[4], geo.localMatrix[5], geo.localMatrix[6],  0,
+            geo.localMatrix[8], geo.localMatrix[9], geo.localMatrix[10], 0,
+            0, 0, 0, 1
+        };
+        float inv[16];
+        if (mat4Invert(inv, m3)) {
+            normalMat[0] = inv[0];  normalMat[1] = inv[4];  normalMat[2] = inv[8];
+            normalMat[3] = inv[1];  normalMat[4] = inv[5];  normalMat[5] = inv[9];
+            normalMat[6] = inv[2];  normalMat[7] = inv[6];  normalMat[8] = inv[10];
+        }
+    }
+
+    // --- Interleaved VBO: pos(3) + uv(2) + stw(4) + normal(3) + prevPos(3) = 15 floats/vertex
+    const int stride = 3 + 2 + 4 + 3 + 3;
+    std::vector<float> interleaved((size_t)numVerts * stride, 0.0f);
+    const bool hasPrevVerts = ((int)geo.prevVerts.size() >= numVerts * 3);
+    for (int v = 0; v < numVerts; ++v) {
+        float* row = &interleaved[(size_t)v * stride];
+        row[0] = geo.verts[v * 3 + 0];
+        row[1] = geo.verts[v * 3 + 1];
+        row[2] = geo.verts[v * 3 + 2];
+        if ((int)geo.uvs.size() > v * 2 + 1) {
+            row[3] = geo.uvs[v * 2 + 0];
+            row[4] = geo.uvs[v * 2 + 1];
+        }
+        if ((int)geo.stw.size() > v * 3 + 2) {
+            row[5] = geo.stw[v * 3 + 0];
+            row[6] = geo.stw[v * 3 + 1];
+            row[7] = 0.0f;
+            row[8] = geo.stw[v * 3 + 2];
+        }
+        if ((int)geo.normals.size() > v * 3 + 2) {
+            row[9]  = geo.normals[v * 3 + 0];
+            row[10] = geo.normals[v * 3 + 1];
+            row[11] = geo.normals[v * 3 + 2];
+        }
+        if (hasPrevVerts) {
+            row[12] = geo.prevVerts[v * 3 + 0];
+            row[13] = geo.prevVerts[v * 3 + 1];
+            row[14] = geo.prevVerts[v * 3 + 2];
+        } else {
+            row[12] = row[0]; row[13] = row[1]; row[14] = row[2];
+        }
+    }
+
+    GLuint vao = 0, vbo = 0, ibo = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(interleaved.size() * sizeof(float)),
+                 interleaved.data(), GL_STREAM_DRAW);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride * sizeof(float), (void*)(5 * sizeof(float)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, stride * sizeof(float), (void*)(9 * sizeof(float)));
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, stride * sizeof(float), (void*)(12 * sizeof(float)));
+
+    glGenBuffers(1, &ibo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 (GLsizeiptr)(geo.triIndices.size() * sizeof(int)),
+                 geo.triIndices.data(), GL_STREAM_DRAW);
+
+    // --- Set uniforms + draw ---
+    glUseProgram(program);
+    GLint locMvp           = glGetUniformLocation(program, "u_mvp");
+    GLint locPrevMvp       = glGetUniformLocation(program, "u_prevMvp");
+    GLint locNormalMat     = glGetUniformLocation(program, "u_normalMatrix");
+    GLint locViewportSize  = glGetUniformLocation(program, "u_viewportSize");
+    GLint locTex           = glGetUniformLocation(program, "u_tex");
+    GLint locHasTexture    = glGetUniformLocation(program, "u_hasTexture");
+    GLint locWriteNormal   = glGetUniformLocation(program, "u_writeNormal");
+    GLint locWriteUV       = glGetUniformLocation(program, "u_writeUV");
+    GLint locWritePref     = glGetUniformLocation(program, "u_writePref");
+    GLint locWriteVelocity = glGetUniformLocation(program, "u_writeVelocity");
+    if (locMvp >= 0)           glUniformMatrix4fv(locMvp,        1, GL_FALSE, mvp);
+    if (locPrevMvp >= 0)       glUniformMatrix4fv(locPrevMvp,    1, GL_FALSE, prevMvp);
+    if (locNormalMat >= 0)     glUniformMatrix3fv(locNormalMat,  1, GL_FALSE, normalMat);
+    if (locViewportSize >= 0)  glUniform2f(locViewportSize, (float)viewportW, (float)viewportH);
+    if (locTex >= 0)           glUniform1i(locTex, 0);
+    if (locHasTexture >= 0)    glUniform1i(locHasTexture, hasTextureMode);
+    if (locWriteNormal >= 0)   glUniform1i(locWriteNormal,   writeNormal   ? 1 : 0);
+    if (locWriteUV >= 0)       glUniform1i(locWriteUV,       writeUV       ? 1 : 0);
+    if (locWritePref >= 0)     glUniform1i(locWritePref,     writePref     ? 1 : 0);
+    if (locWriteVelocity >= 0) glUniform1i(locWriteVelocity, writeVelocity ? 1 : 0);
+
+    glDrawElements(GL_TRIANGLES, numTris * 3, GL_UNSIGNED_INT, 0);
+
+    // --- Cleanup ---
+    glBindVertexArray(0);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &ibo);
+    glDeleteVertexArrays(1, &vao);
+    if (srcTex) glDeleteTextures(1, &srcTex);
 }
 
 // Helper: render one GeoData object (must be called within active GL context with camera set up)
@@ -935,6 +1620,56 @@ ScanlineRender::render(const RenderActionArgs& args)
         return eStatusFailed;
     }
 
+    // --- Phase 3D: optional MRT attachments (Normal=1, UV=2, Pref=3, Velocity=4) ---
+    // Each AOV's attachment is allocated only when its knob is on AND GLSL is on.
+    // Attachments don't have to be contiguous — glDrawBuffers can carry GL_NONE for
+    // skipped slots, e.g. [COLOR0, GL_NONE, COLOR2].
+    const bool glslOn = _imp->useGlslPipeline.lock() && _imp->useGlslPipeline.lock()->getValue();
+    const bool wantsNormalMrtPre   = glslOn && _imp->outputNormal.lock()   && _imp->outputNormal.lock()->getValue();
+    const bool wantsUvMrtPre       = glslOn && _imp->outputUV.lock()       && _imp->outputUV.lock()->getValue();
+    const bool wantsPrefMrtPre     = glslOn && _imp->outputPref.lock()     && _imp->outputPref.lock()->getValue();
+    const bool wantsVelocityMrtPre = glslOn && _imp->outputVelocity.lock() && _imp->outputVelocity.lock()->getValue();
+    GLuint msNormalRB = 0,   normalResolveTex   = 0;
+    GLuint msUvRB = 0,       uvResolveTex       = 0;
+    GLuint msPrefRB = 0,     prefResolveTex     = 0;
+    GLuint msVelocityRB = 0, velocityResolveTex = 0;
+
+    auto allocMrtAttachment = [&](int attachmentIndex, GLuint& msRB, GLuint& resolveTex,
+                                  const char* aovName) {
+        glBindFramebuffer(GL_FRAMEBUFFER, msFBO);
+        glGenRenderbuffers(1, &msRB);
+        glBindRenderbuffer(GL_RENDERBUFFER, msRB);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA32F_ARB, outW, outH);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + attachmentIndex,
+                                  GL_RENDERBUFFER, msRB);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glGenTextures(1, &resolveTex);
+        glBindTexture(GL_TEXTURE_2D, resolveTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F_ARB, outW, outH, 0, GL_RGBA, GL_FLOAT, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + attachmentIndex,
+                               GL_TEXTURE_2D, resolveTex, 0);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, msFBO);
+        bool ok = (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        if (ok) ok = (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+        if (!ok) {
+            std::fprintf(stderr, "[GLSL FAIL] %s AOV: MRT FBO incomplete after adding attachment %d.\n",
+                         aovName, attachmentIndex);
+            std::fflush(stderr);
+            glDeleteRenderbuffers(1, &msRB);    msRB = 0;
+            glDeleteTextures(1, &resolveTex);   resolveTex = 0;
+        }
+    };
+
+    if (wantsNormalMrtPre)   allocMrtAttachment(1, msNormalRB,   normalResolveTex,   "Normal");
+    if (wantsUvMrtPre)       allocMrtAttachment(2, msUvRB,       uvResolveTex,       "UV");
+    if (wantsPrefMrtPre)     allocMrtAttachment(3, msPrefRB,     prefResolveTex,     "Pref");
+    if (wantsVelocityMrtPre) allocMrtAttachment(4, msVelocityRB, velocityResolveTex, "Velocity");
+
     // Render into the multisampled FBO
     glBindFramebuffer(GL_FRAMEBUFFER, msFBO);
 
@@ -971,6 +1706,94 @@ ScanlineRender::render(const RenderActionArgs& args)
 
     // Accumulator for multi-sample blur
     std::vector<float> accumPixels;
+    // Phase 3D — parallel accumulators for the GLSL-MRT AOVs. Averaging across
+    // motion-blur samples is meaningful for normals, UVs, Pref, and velocity.
+    std::vector<float> normalAccumPixels;
+    std::vector<float> uvAccumPixels;
+    std::vector<float> prefAccumPixels;
+    std::vector<float> velocityAccumPixels;
+
+    // Phase 3C — build the GLSL beauty program once if the GLSL pipeline knob
+    // is ON. Done outside the multi-sample loop so we don't rebuild per sample.
+    const bool useGlslBeauty = _imp->useGlslPipeline.lock() &&
+                                _imp->useGlslPipeline.lock()->getValue();
+    GLuint glslBeautyProg = 0;
+    if (useGlslBeauty) {
+        glslBeautyProg = glslBuildProgram(kBeautyVert, kBeautyFrag);
+        // If the program fails to build, drop back to the fixed-function path
+        // for this render (glslBeautyProg == 0 → the per-geo branch below uses
+        // renderGeoObject instead of renderGeoObjectGlsl).
+    }
+
+    // Precompute projView = projMatrix * viewMatrix for the GLSL path.
+    float projViewMatrix[16];
+    mat4Mul(projViewMatrix, projMatrix, viewMatrix);
+
+    // Phase 3D — latch the final wants*Mrt flags now that we know whether the
+    // beauty program built and whether the MRT attachment was allocated. Any
+    // failure latches `false` and we just skip that AOV silently.
+    const bool wantsNormalMrt   = wantsNormalMrtPre   && (glslBeautyProg != 0) && (msNormalRB   != 0);
+    const bool wantsUvMrt       = wantsUvMrtPre       && (glslBeautyProg != 0) && (msUvRB       != 0);
+    const bool wantsPrefMrt     = wantsPrefMrtPre     && (glslBeautyProg != 0) && (msPrefRB     != 0);
+    const bool wantsVelocityMrt = wantsVelocityMrtPre && (glslBeautyProg != 0) && (msVelocityRB != 0);
+    const bool wantsAnyMrt      = wantsNormalMrt || wantsUvMrt || wantsPrefMrt || wantsVelocityMrt;
+
+    // Phase 3D — previous-frame camera matrices for the Velocity AOV. Use
+    // time - 1.0 as the reference. Output is pixels per frame.
+    float prevViewMatrix[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    float prevProjMatrix[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    float prevProjViewMatrix[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    if (wantsVelocityMrt) {
+        const double prevTime = args.time - 1.0;
+        double pTx = (double)camTX, pTy = (double)camTY, pTz = (double)camTZ;
+        double pRx = (double)camRX, pRy = (double)camRY, pRz = (double)camRZ;
+        double pFL = (double)camFL, pHA = (double)camHA, pVA = (double)camVA;
+        double pNear = (double)camNear, pFar = (double)camFar;
+        if (cam) {
+            cam->getCameraPosition(prevTime, pTx, pTy, pTz, pRx, pRy, pRz);
+            pFL   = cam->getCameraFocalLength(prevTime);
+            pHA   = cam->getCameraHAperture(prevTime);
+            pVA   = cam->getCameraVAperture(prevTime);
+            pNear = cam->getCameraNear(prevTime);
+            pFar  = cam->getCameraFar(prevTime);
+        }
+        buildViewMatrix((float)pTx, (float)pTy, (float)pTz,
+                        (float)pRx, (float)pRy, (float)pRz, prevViewMatrix);
+        CameraMath::composeProjectionMatrix((float)pFL, (float)pHA, (float)pVA,
+                                            (float)pNear, (float)pFar, prevProjMatrix);
+        mat4Mul(prevProjViewMatrix, prevProjMatrix, prevViewMatrix);
+    }
+
+    // Phase 3D — extract previous-frame geometry. For animated meshes the
+    // verts differ across frames; for static meshes only the local matrix
+    // moves. renderGeoObjectGlsl auto-detects via `hasPrevVerts`.
+    if (wantsVelocityMrt && geoEffect) {
+        std::vector<GeoData> prevGeoObjects;
+        const double prevTime = args.time - 1.0;
+        Scene3D* scenePrev = dynamic_cast<Scene3D*>(geoEffect.get());
+        if (scenePrev) {
+            for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
+                EffectInstancePtr sceneInputPrev = scenePrev->getInput(i);
+                if (!sceneInputPrev) continue;
+                if (dynamic_cast<Volume3D*>(sceneInputPrev.get())) continue;
+                if (dynamic_cast<ReadVDB*>(sceneInputPrev.get())) continue;
+                if (dynamic_cast<Light3D*>(sceneInputPrev.get())) continue;
+                if (dynamic_cast<ParticleInstance*>(sceneInputPrev.get())) continue;
+                if (dynamic_cast<ParticleProvider*>(sceneInputPrev.get())) continue;
+                extractGeometries(sceneInputPrev, prevTime, args.view, prevGeoObjects);
+            }
+        } else {
+            extractGeometries(geoEffect, prevTime, args.view, prevGeoObjects);
+        }
+        const size_t n = std::min(geoObjects.size(), prevGeoObjects.size());
+        for (size_t i = 0; i < n; ++i) {
+            std::memcpy(geoObjects[i].prevLocalMatrix, prevGeoObjects[i].localMatrix, sizeof(float) * 16);
+            if (prevGeoObjects[i].verts.size() == geoObjects[i].verts.size() &&
+                prevGeoObjects[i].verts != geoObjects[i].verts) {
+                geoObjects[i].prevVerts = std::move(prevGeoObjects[i].verts);
+            }
+        }
+    }
 
     // === MULTI-SAMPLE RENDER LOOP ===
     for (int sample = 0; sample < motionSamples; ++sample) {
@@ -991,6 +1814,23 @@ ScanlineRender::render(const RenderActionArgs& args)
 
         // Clear the MSAA FBO for this sample
         glBindFramebuffer(GL_FRAMEBUFFER, msFBO);
+        // Phase 3D — glDrawBuffers maps fragment-shader layout(location=N) to
+        // physical color attachments. GL_NONE lets us skip un-allocated slots
+        // so e.g. "UV only, no Normal" still works without re-compiling the
+        // shader.
+        if (wantsAnyMrt) {
+            GLenum drawBufs[5] = {
+                (GLenum)GL_COLOR_ATTACHMENT0,
+                (GLenum)(wantsNormalMrt   ? GL_COLOR_ATTACHMENT1 : GL_NONE),
+                (GLenum)(wantsUvMrt       ? GL_COLOR_ATTACHMENT2 : GL_NONE),
+                (GLenum)(wantsPrefMrt     ? GL_COLOR_ATTACHMENT3 : GL_NONE),
+                (GLenum)(wantsVelocityMrt ? GL_COLOR_ATTACHMENT4 : GL_NONE),
+            };
+            glDrawBuffers(5, drawBufs);
+        } else {
+            GLenum drawBufs[] = { GL_COLOR_ATTACHMENT0 };
+            glDrawBuffers(1, drawBufs);
+        }
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -1004,7 +1844,25 @@ ScanlineRender::render(const RenderActionArgs& args)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     for (size_t gi = 0; gi < geoObjects.size(); ++gi) {
-        renderGeoObject(geoObjects[gi]);
+        if (useGlslBeauty && glslBeautyProg) {
+            renderGeoObjectGlsl(geoObjects[gi], glslBeautyProg,
+                                projViewMatrix, prevProjViewMatrix,
+                                outW, outH,
+                                wantsNormalMrt, wantsUvMrt,
+                                wantsPrefMrt, wantsVelocityMrt);
+        } else {
+            renderGeoObject(geoObjects[gi]);
+        }
+    }
+    // Return to fixed-function pipeline for particles / lights / etc. Also
+    // restore single-attachment draw buffer so particles only paint into
+    // beauty (their fixed-function path doesn't know about MRT slots).
+    if (useGlslBeauty && glslBeautyProg) {
+        glUseProgram(0);
+        if (wantsAnyMrt) {
+            GLenum drawBufs[] = { GL_COLOR_ATTACHMENT0 };
+            glDrawBuffers(1, drawBufs);
+        }
     }
 
     // --- Render particles ---
@@ -1766,17 +2624,48 @@ ScanlineRender::render(const RenderActionArgs& args)
     glDisable(GL_BLEND);
 
         // --- Resolve MSAA: blit multisampled FBO to single-sample FBO ---
+        // Default read/draw buffer is attachment 0 (beauty). Blit it first.
         glBindFramebuffer(GL_READ_FRAMEBUFFER, msFBO);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
         glBlitFramebuffer(0, 0, outW, outH,
                           0, 0, outW, outH,
                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+        // Phase 3D — blit MRT attachments as separate passes (glBlitFramebuffer
+        // only operates on the currently-bound read/draw buffer pair).
+        if (wantsNormalMrt) {
+            glReadBuffer(GL_COLOR_ATTACHMENT1);
+            glDrawBuffer(GL_COLOR_ATTACHMENT1);
+            glBlitFramebuffer(0, 0, outW, outH, 0, 0, outW, outH,
+                              GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+        if (wantsUvMrt) {
+            glReadBuffer(GL_COLOR_ATTACHMENT2);
+            glDrawBuffer(GL_COLOR_ATTACHMENT2);
+            glBlitFramebuffer(0, 0, outW, outH, 0, 0, outW, outH,
+                              GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+        if (wantsPrefMrt) {
+            glReadBuffer(GL_COLOR_ATTACHMENT3);
+            glDrawBuffer(GL_COLOR_ATTACHMENT3);
+            glBlitFramebuffer(0, 0, outW, outH, 0, 0, outW, outH,
+                              GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+        if (wantsVelocityMrt) {
+            glReadBuffer(GL_COLOR_ATTACHMENT4);
+            glDrawBuffer(GL_COLOR_ATTACHMENT4);
+            glBlitFramebuffer(0, 0, outW, outH, 0, 0, outW, outH,
+                              GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
 
         // Bind resolve FBO for readback
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 
         // --- Read back this sample's pixels ---
         std::vector<float> samplePixels(outW * outH * 4);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
         glReadPixels(0, 0, outW, outH, GL_RGBA, GL_FLOAT, samplePixels.data());
 
         // Accumulate into the accumulator
@@ -1787,7 +2676,47 @@ ScanlineRender::render(const RenderActionArgs& args)
                 accumPixels[i] += samplePixels[i];
             }
         }
+
+        // Phase 3D — read + accumulate per-AOV pixels.
+        if (wantsNormalMrt) {
+            std::vector<float> normalSamplePixels(outW * outH * 4);
+            glReadBuffer(GL_COLOR_ATTACHMENT1);
+            glReadPixels(0, 0, outW, outH, GL_RGBA, GL_FLOAT, normalSamplePixels.data());
+            if (normalAccumPixels.empty()) normalAccumPixels = normalSamplePixels;
+            else for (size_t i = 0; i < normalAccumPixels.size(); ++i)
+                normalAccumPixels[i] += normalSamplePixels[i];
+        }
+        if (wantsUvMrt) {
+            std::vector<float> uvSamplePixels(outW * outH * 4);
+            glReadBuffer(GL_COLOR_ATTACHMENT2);
+            glReadPixels(0, 0, outW, outH, GL_RGBA, GL_FLOAT, uvSamplePixels.data());
+            if (uvAccumPixels.empty()) uvAccumPixels = uvSamplePixels;
+            else for (size_t i = 0; i < uvAccumPixels.size(); ++i)
+                uvAccumPixels[i] += uvSamplePixels[i];
+        }
+        if (wantsPrefMrt) {
+            std::vector<float> prefSamplePixels(outW * outH * 4);
+            glReadBuffer(GL_COLOR_ATTACHMENT3);
+            glReadPixels(0, 0, outW, outH, GL_RGBA, GL_FLOAT, prefSamplePixels.data());
+            if (prefAccumPixels.empty()) prefAccumPixels = prefSamplePixels;
+            else for (size_t i = 0; i < prefAccumPixels.size(); ++i)
+                prefAccumPixels[i] += prefSamplePixels[i];
+        }
+        if (wantsVelocityMrt) {
+            std::vector<float> velocitySamplePixels(outW * outH * 4);
+            glReadBuffer(GL_COLOR_ATTACHMENT4);
+            glReadPixels(0, 0, outW, outH, GL_RGBA, GL_FLOAT, velocitySamplePixels.data());
+            if (velocityAccumPixels.empty()) velocityAccumPixels = velocitySamplePixels;
+            else for (size_t i = 0; i < velocityAccumPixels.size(); ++i)
+                velocityAccumPixels[i] += velocitySamplePixels[i];
+        }
     } // === END MULTI-SAMPLE RENDER LOOP ===
+
+    // Phase 3C — release the GLSL beauty program.
+    if (glslBeautyProg) {
+        glDeleteProgram(glslBeautyProg);
+        glslBeautyProg = 0;
+    }
 
     // Restore original particle positions
     if (motionSamples > 1 && motionBlurPData) {
@@ -1811,6 +2740,20 @@ ScanlineRender::render(const RenderActionArgs& args)
         pixels = std::move(accumPixels);
     }
 
+    // Phase 3D — average each AOV accumulator the same way.
+    auto avgAovAccum = [&](std::vector<float>& accum) -> std::vector<float> {
+        std::vector<float> out = std::move(accum);
+        if (motionSamples > 1 && !out.empty()) {
+            float invN = 1.0f / (float)motionSamples;
+            for (size_t i = 0; i < out.size(); ++i) out[i] *= invN;
+        }
+        return out;
+    };
+    std::vector<float> normalPixels   = wantsNormalMrt   ? avgAovAccum(normalAccumPixels)   : std::vector<float>();
+    std::vector<float> uvPixels       = wantsUvMrt       ? avgAovAccum(uvAccumPixels)       : std::vector<float>();
+    std::vector<float> prefPixels     = wantsPrefMrt     ? avgAovAccum(prefAccumPixels)     : std::vector<float>();
+    std::vector<float> velocityPixels = wantsVelocityMrt ? avgAovAccum(velocityAccumPixels) : std::vector<float>();
+
     // --- Composite with background if connected ---
     ImagePtr bgImg;
     EffectInstancePtr bgEffect = getInput(0);
@@ -1821,52 +2764,241 @@ ScanlineRender::render(const RenderActionArgs& args)
                          eStorageModeRAM, 0, &bgRoi);
     }
 
-    // Copy to output
-    RectI outBounds = outImg->getBounds();
-    {
-        Image::WriteAccess wa(outImg.get());
-        Image::ReadAccess* bgRa = bgImg ? new Image::ReadAccess(bgImg.get()) : NULL;
-        RectI bgBounds;
-        if (bgImg) bgBounds = bgImg->getBounds();
+    // --- Depth + World Position readback ---
+    // Multi-sampled depth doesn't compose meaningfully (motion-blurred depth is
+    // unphysical), so we just take depth from the final sample's resolve.
+    // Acceptable for DOF / fog / re-projection use cases.
+    const bool emitDepth = _imp->outputDepth.lock()    && _imp->outputDepth.lock()->getValue();
+    const bool emitPos   = _imp->outputPosition.lock() && _imp->outputPosition.lock()->getValue();
+    const bool emitAovs  = emitDepth || emitPos;
 
-        for (int y = outBounds.y1; y < outBounds.y2; ++y) {
-            for (int x = outBounds.x1; x < outBounds.x2; ++x) {
-                float* dst = (float*)wa.pixelAt(x, y);
-                if (!dst) continue;
+    std::vector<float> depthBuf;
+    if (emitAovs) {
+        // Blit MSAA depth → single-sample resolve FBO so we can glReadPixels it.
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, msFBO);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+        glBlitFramebuffer(0, 0, outW, outH,
+                          0, 0, outW, outH,
+                          GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        depthBuf.resize((size_t)outW * (size_t)outH);
+        glReadPixels(0, 0, outW, outH, GL_DEPTH_COMPONENT, GL_FLOAT, depthBuf.data());
+    }
 
-                int fbX = x - outBounds.x1;
-                int fbY = y - outBounds.y1;
+    // Inverse(projection * view) for world-position reconstruction.
+    float invMVP[16] = {0};
+    bool haveInvMVP = false;
+    if (emitPos) {
+        float mvp[16];
+        mat4Mul(mvp, projMatrix, viewMatrix);
+        haveInvMVP = mat4Invert(invMVP, mvp);
+    }
 
-                float fgR = 0, fgG = 0, fgB = 0, fgA = 0;
-                if (fbX >= 0 && fbX < outW && fbY >= 0 && fbY < outH) {
-                    int idx = (fbY * outW + fbX) * 4;
-                    fgR = pixels[idx + 0];
-                    fgG = pixels[idx + 1];
-                    fgB = pixels[idx + 2];
-                    fgA = pixels[idx + 3];
+    // --- Per-plane output: iterate args.outputPlanes (Color + optional AOVs) ---
+    for (std::list<std::pair<ImagePlaneDesc, ImagePtr> >::const_iterator pit = args.outputPlanes.begin();
+         pit != args.outputPlanes.end(); ++pit) {
+        const ImagePlaneDesc& planeDesc = pit->first;
+        ImagePtr outPlaneImg = pit->second;
+        if (!outPlaneImg) continue;
+        const RectI outBounds = outPlaneImg->getBounds();
+        const std::string& planeID = planeDesc.getPlaneID();
+
+        if (planeDesc.isColorPlane()) {
+            // Beauty plane — composite foreground over background image.
+            Image::WriteAccess wa(outPlaneImg.get());
+            Image::ReadAccess* bgRa = bgImg ? new Image::ReadAccess(bgImg.get()) : NULL;
+            RectI bgBounds;
+            if (bgImg) bgBounds = bgImg->getBounds();
+
+            for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+                for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+
+                    int fbX = x - outBounds.x1;
+                    int fbY = y - outBounds.y1;
+
+                    float fgR = 0, fgG = 0, fgB = 0, fgA = 0;
+                    if (fbX >= 0 && fbX < outW && fbY >= 0 && fbY < outH) {
+                        int idx = (fbY * outW + fbX) * 4;
+                        fgR = pixels[idx + 0];
+                        fgG = pixels[idx + 1];
+                        fgB = pixels[idx + 2];
+                        fgA = pixels[idx + 3];
+                    }
+
+                    if (bgRa && bgBounds.contains(x, y)) {
+                        const float* bgPix = (const float*)bgRa->pixelAt(x, y);
+                        if (bgPix) {
+                            float bgR = bgPix[0], bgG = bgPix[1], bgB = bgPix[2], bgA = bgPix[3];
+                            dst[0] = fgR + bgR * (1.0f - fgA);
+                            dst[1] = fgG + bgG * (1.0f - fgA);
+                            dst[2] = fgB + bgB * (1.0f - fgA);
+                            dst[3] = fgA + bgA * (1.0f - fgA);
+                            continue;
+                        }
+                    }
+
+                    dst[0] = fgR;
+                    dst[1] = fgG;
+                    dst[2] = fgB;
+                    dst[3] = fgA;
                 }
-
-                // Over composite: fg over bg
-                if (bgRa && bgBounds.contains(x, y)) {
-                    const float* bgPix = (const float*)bgRa->pixelAt(x, y);
-                    if (bgPix) {
-                        float bgR = bgPix[0], bgG = bgPix[1], bgB = bgPix[2], bgA = bgPix[3];
-                        dst[0] = fgR + bgR * (1.0f - fgA);
-                        dst[1] = fgG + bgG * (1.0f - fgA);
-                        dst[2] = fgB + bgB * (1.0f - fgA);
-                        dst[3] = fgA + bgA * (1.0f - fgA);
+            }
+            delete bgRa;
+        } else if (planeID == "depth" && emitDepth && !depthBuf.empty()) {
+            // Linear camera-space distance (world units). Background pixels
+            // (depth==1.0) emit camFar so downstream nodes have a clean
+            // "infinity" value.
+            Image::WriteAccess wa(outPlaneImg.get());
+            for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+                for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+                    int fbX = x - outBounds.x1;
+                    int fbY = y - outBounds.y1;
+                    if (fbX < 0 || fbX >= outW || fbY < 0 || fbY >= outH) {
+                        dst[0] = camFar;
                         continue;
                     }
+                    float d = depthBuf[(size_t)fbY * outW + fbX];
+                    if (d >= 1.0f - 1e-6f) {
+                        dst[0] = camFar;
+                    } else {
+                        float zNdc = 2.0f * d - 1.0f;
+                        dst[0] = (2.0f * camNear * camFar) /
+                                 (camFar + camNear - zNdc * (camFar - camNear));
+                    }
                 }
-
-                dst[0] = fgR;
-                dst[1] = fgG;
-                dst[2] = fgB;
-                dst[3] = fgA;
+            }
+        } else if (planeID == "world_position" && emitPos && haveInvMVP && !depthBuf.empty()) {
+            // Reconstruct world-space surface position via inverse(proj*view)
+            // on NDC samples. Background pixels (depth==1.0) emit (0,0,0) since
+            // no surface was hit.
+            Image::WriteAccess wa(outPlaneImg.get());
+            const int outNumComp = outPlaneImg->getComponents().getNumComponents();
+            for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+                for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+                    int fbX = x - outBounds.x1;
+                    int fbY = y - outBounds.y1;
+                    if (fbX < 0 || fbX >= outW || fbY < 0 || fbY >= outH) {
+                        if (outNumComp > 0) dst[0] = 0.0f;
+                        if (outNumComp > 1) dst[1] = 0.0f;
+                        if (outNumComp > 2) dst[2] = 0.0f;
+                        continue;
+                    }
+                    float d = depthBuf[(size_t)fbY * outW + fbX];
+                    if (d >= 1.0f - 1e-6f) {
+                        if (outNumComp > 0) dst[0] = 0.0f;
+                        if (outNumComp > 1) dst[1] = 0.0f;
+                        if (outNumComp > 2) dst[2] = 0.0f;
+                        continue;
+                    }
+                    float ndcX = 2.0f * ((float)fbX + 0.5f) / (float)outW - 1.0f;
+                    float ndcY = 2.0f * ((float)fbY + 0.5f) / (float)outH - 1.0f;
+                    float ndcZ = 2.0f * d - 1.0f;
+                    float wX, wY, wZ, wW;
+                    mat4Apply(invMVP, ndcX, ndcY, ndcZ, 1.0f, &wX, &wY, &wZ, &wW);
+                    if (wW != 0.0f) {
+                        float inv = 1.0f / wW;
+                        if (outNumComp > 0) dst[0] = wX * inv;
+                        if (outNumComp > 1) dst[1] = wY * inv;
+                        if (outNumComp > 2) dst[2] = wZ * inv;
+                    } else {
+                        if (outNumComp > 0) dst[0] = 0.0f;
+                        if (outNumComp > 1) dst[1] = 0.0f;
+                        if (outNumComp > 2) dst[2] = 0.0f;
+                    }
+                }
+            }
+        } else if (planeID == "Normal" && wantsNormalMrt && !normalPixels.empty()) {
+            Image::WriteAccess wa(outPlaneImg.get());
+            const int outNumComp = outPlaneImg->getComponents().getNumComponents();
+            for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+                for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+                    int fbX = x - outBounds.x1;
+                    int fbY = y - outBounds.y1;
+                    if (fbX < 0 || fbX >= outW || fbY < 0 || fbY >= outH) {
+                        if (outNumComp > 0) dst[0] = 0.0f;
+                        if (outNumComp > 1) dst[1] = 0.0f;
+                        if (outNumComp > 2) dst[2] = 0.0f;
+                        continue;
+                    }
+                    int idx = (fbY * outW + fbX) * 4;
+                    if (outNumComp > 0) dst[0] = normalPixels[idx + 0];
+                    if (outNumComp > 1) dst[1] = normalPixels[idx + 1];
+                    if (outNumComp > 2) dst[2] = normalPixels[idx + 2];
+                }
+            }
+        } else if (planeID == "uv" && wantsUvMrt && !uvPixels.empty()) {
+            Image::WriteAccess wa(outPlaneImg.get());
+            const int outNumComp = outPlaneImg->getComponents().getNumComponents();
+            for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+                for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+                    int fbX = x - outBounds.x1;
+                    int fbY = y - outBounds.y1;
+                    if (fbX < 0 || fbX >= outW || fbY < 0 || fbY >= outH) {
+                        if (outNumComp > 0) dst[0] = 0.0f;
+                        if (outNumComp > 1) dst[1] = 0.0f;
+                        if (outNumComp > 2) dst[2] = 0.0f;
+                        continue;
+                    }
+                    int idx = (fbY * outW + fbX) * 4;
+                    if (outNumComp > 0) dst[0] = uvPixels[idx + 0];
+                    if (outNumComp > 1) dst[1] = uvPixels[idx + 1];
+                    if (outNumComp > 2) dst[2] = 0.0f;
+                }
+            }
+        } else if (planeID == "Pref" && wantsPrefMrt && !prefPixels.empty()) {
+            Image::WriteAccess wa(outPlaneImg.get());
+            const int outNumComp = outPlaneImg->getComponents().getNumComponents();
+            for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+                for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+                    int fbX = x - outBounds.x1;
+                    int fbY = y - outBounds.y1;
+                    if (fbX < 0 || fbX >= outW || fbY < 0 || fbY >= outH) {
+                        if (outNumComp > 0) dst[0] = 0.0f;
+                        if (outNumComp > 1) dst[1] = 0.0f;
+                        if (outNumComp > 2) dst[2] = 0.0f;
+                        continue;
+                    }
+                    int idx = (fbY * outW + fbX) * 4;
+                    if (outNumComp > 0) dst[0] = prefPixels[idx + 0];
+                    if (outNumComp > 1) dst[1] = prefPixels[idx + 1];
+                    if (outNumComp > 2) dst[2] = prefPixels[idx + 2];
+                }
+            }
+        } else if (planeID == "Velocity" && wantsVelocityMrt && !velocityPixels.empty()) {
+            Image::WriteAccess wa(outPlaneImg.get());
+            const int outNumComp = outPlaneImg->getComponents().getNumComponents();
+            for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+                for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+                    int fbX = x - outBounds.x1;
+                    int fbY = y - outBounds.y1;
+                    if (fbX < 0 || fbX >= outW || fbY < 0 || fbY >= outH) {
+                        if (outNumComp > 0) dst[0] = 0.0f;
+                        if (outNumComp > 1) dst[1] = 0.0f;
+                        if (outNumComp > 2) dst[2] = 0.0f;
+                        continue;
+                    }
+                    int idx = (fbY * outW + fbX) * 4;
+                    if (outNumComp > 0) dst[0] = velocityPixels[idx + 0];
+                    if (outNumComp > 1) dst[1] = velocityPixels[idx + 1];
+                    if (outNumComp > 2) dst[2] = 0.0f;
+                }
             }
         }
-        delete bgRa;
-    }
+    } // for each output plane
 
     // Cleanup
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1876,6 +3008,15 @@ ScanlineRender::render(const RenderActionArgs& args)
     glDeleteFramebuffers(1, &msFBO);
     glDeleteRenderbuffers(1, &msColorRB);
     glDeleteRenderbuffers(1, &msDepthRB);
+    // Phase 3D — release optional MRT resources.
+    if (msNormalRB)         glDeleteRenderbuffers(1, &msNormalRB);
+    if (normalResolveTex)   glDeleteTextures(1, &normalResolveTex);
+    if (msUvRB)             glDeleteRenderbuffers(1, &msUvRB);
+    if (uvResolveTex)       glDeleteTextures(1, &uvResolveTex);
+    if (msPrefRB)           glDeleteRenderbuffers(1, &msPrefRB);
+    if (prefResolveTex)     glDeleteTextures(1, &prefResolveTex);
+    if (msVelocityRB)       glDeleteRenderbuffers(1, &msVelocityRB);
+    if (velocityResolveTex) glDeleteTextures(1, &velocityResolveTex);
 
     OSGLContext::unsetCurrentContextNoRender();
     pool->releaseGLContextFromRender(glContext);

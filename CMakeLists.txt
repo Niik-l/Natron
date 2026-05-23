@@ -34,6 +34,7 @@ option(NATRON_QT6 "use Qt6" OFF)
 option(NATRON_SYSTEM_LIBS "use system versions of dependencies instead of bundled ones" OFF)
 option(NATRON_BUILD_TESTS "build the Natron test suite" ON)
 option(NATRON_CYCLES "Enable Cycles renderer integration" OFF)
+option(BUILD_GLSL_TESTBED "Build the standalone GLSL 3.3 + MRT feasibility tester (opt-in dev tool)" OFF)
 set(NATRON_CYCLES_DIR "" CACHE PATH "Path to Cycles source directory")
 set(NATRON_CYCLES_BUILD_DIR "" CACHE PATH "Path to Cycles build directory")
 set(NATRON_LLVM_INSTALL_DIR "" CACHE PATH "LLVM/Clang install dir for shiboken (e.g. /c/msys64/mingw64)")
@@ -186,3 +187,9 @@ if(NATRON_BUILD_TESTS)
 endif()
 
 add_subdirectory(App)
+
+# Opt-in GLSL/MRT feasibility testbed. Standalone executable, not linked
+# into Natron. Off by default; enable with `cmake -DBUILD_GLSL_TESTBED=ON ..`.
+if(BUILD_GLSL_TESTBED)
+    add_subdirectory(tools/glsl_mrt_testbed)
+endif()

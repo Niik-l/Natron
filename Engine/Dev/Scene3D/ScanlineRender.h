@@ -92,6 +92,16 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
+    // Phase 3D — declare per-pixel AOV planes (Normal/UV/Pref/Velocity) so
+    // downstream nodes can shuffle/write them. Beauty stays on the default
+    // color plane (-1). Each AOV is produced only when its knob is on.
+    virtual bool isMultiPlanar() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
+    virtual void getComponentsNeededAndProduced(double time, ViewIdx view,
+                                                EffectInstance::ComponentsNeededMap* comps,
+                                                double* passThroughTime,
+                                                int* passThroughView,
+                                                int* passThroughInput) OVERRIDE FINAL;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
