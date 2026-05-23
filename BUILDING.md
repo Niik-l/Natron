@@ -52,7 +52,8 @@ pacman -S --noconfirm \
   mingw-w64-x86_64-python \
   mingw-w64-x86_64-boost \
   mingw-w64-x86_64-cairo \
-  mingw-w64-x86_64-expat
+  mingw-w64-x86_64-expat \
+  mingw-w64-x86_64-openvdb
 
 # For OFX plugins (Read/Write/Blur nodes)
 pacman -S --noconfirm \
@@ -63,6 +64,11 @@ pacman -S --noconfirm \
   mingw-w64-x86_64-libraw \
   mingw-w64-x86_64-libpng
 ```
+
+> **Note:** `mingw-w64-x86_64-openvdb` is required by Cycles' VDB image loader.
+> Without it, the Natron + Cycles link step fails with `undefined reference to
+> ccl::VDBImageLoader::VDBImageLoader(...)`. Pull it in even if you don't plan
+> on building Cycles immediately — installing it doesn't add runtime cost.
 
 ---
 
@@ -83,6 +89,11 @@ git submodule update --init --recursive
 ---
 
 ## 4. Configure with CMake
+
+> **Build order tip.** If you want Cycles, **build Cycles first** (§10) and then
+> configure Natron once with `-DNATRON_CYCLES=ON` (lines shown below). Doing
+> Natron first then re-running `cmake ..` with Cycles on later forces an
+> AUTOMOC cache reset (`rm -rf Engine/NatronEngine_autogen`) — avoidable.
 
 ```bash
 # Create build directory
@@ -142,7 +153,9 @@ This will take 5-15 minutes depending on your machine (`-j1` is slower but alway
 [100%] Built target Natron
 ```
 
-The executable is at: `build-qt6/App/Natron.exe`
+Two executables are produced:
+- `build-qt6/App/Natron.exe` — interactive GUI
+- `build-qt6/Renderer/NatronRenderer.exe` — CLI batch renderer (headless, no Qt window)
 
 ---
 
@@ -171,6 +184,15 @@ mingw32-make -j2
 > **CMake error about CMAKE_SYSTEM_PROCESSOR?** If you get an error about empty `CMAKE_SYSTEM_PROCESSOR`,
 > edit the plugin's `CMakeLists.txt` and quote it: change `${CMAKE_SYSTEM_PROCESSOR}` to `"${CMAKE_SYSTEM_PROCESSOR}"`.
 
+> **`mingw32-make` exits with code 2 even when `Misc.ofx` built fine?**
+> openfx-misc has a sibling `CImg` target alongside `Misc`. The CImg target
+> requires headers from a separate [CImg](https://github.com/dtschump/CImg)
+> clone — if you skip it, the build continues past `[100%] Built target Misc`
+> into `CImg.ofx`, fails with `fatal error: CImg.h: No such file or directory`,
+> and propagates the non-zero exit. **Check that `build/Misc.ofx` exists
+> before treating it as a real failure** — the standard plugin set doesn't
+> need CImg.
+
 ### openfx-io (Read, Write — EXR, PNG, FFmpeg, etc.)
 
 ```bash
@@ -193,13 +215,24 @@ mingw32-make -j2
 
 openfx-io has not been updated for OpenImageIO 3.x and FFmpeg 8.x. You will need these fixes:
 
-**1. OIIO 3.x — ImageCache returns shared_ptr** (`OIIO/ReadOIIO.cpp`):
+**1. OIIO 3.x — ImageCache returns shared_ptr** (`OIIO/ReadOIIO.cpp`). Three separate edits in the same file — easy to miss any one of them:
+
+- **1a.** Member type:
 ```cpp
 // Change: ImageCache* _cache;
 // To:     std::shared_ptr<ImageCache> _cache;
-// Also change: ImageCache* sharedcache = ImageCache::create(true);
-// To:          std::shared_ptr<ImageCache> sharedcache = ImageCache::create(true);
-// And: , _cache(NULL)  →  , _cache(nullptr)
+```
+
+- **1b.** Local at `:3148`:
+```cpp
+// Change: ImageCache* sharedcache = ImageCache::create(true);
+// To:     std::shared_ptr<ImageCache> sharedcache = ImageCache::create(true);
+```
+
+- **1c.** Constructor initializer list:
+```cpp
+// Change: , _cache(NULL)
+// To:     , _cache(nullptr)
 ```
 
 **2. OIIO 3.x — ImageIOParameterList removed** (`OIIO/ReadOIIO.cpp`):
@@ -301,20 +334,11 @@ export PATH="/c/msys64/mingw64/bin:$PATH"
 
 ### 9b. Bundle for standalone launch (double-click from Explorer)
 
-After bundling, you can double-click `Natron.exe` from Windows Explorer without needing the MSYS2 terminal. Two ways to bundle the DLLs — pick one:
+After bundling, you can double-click `Natron.exe` from Windows Explorer without needing the MSYS2 terminal. Two ways to bundle the DLLs — **pick Option A if you want a lean bundle**, Option B if you want the easiest "just copy everything" approach.
 
-#### Option A — Copy all MSYS2 DLLs (brute-force, ~700 DLLs / ~1.5 GB)
+#### Option A — Trace only required DLLs with `ntldd -R` (recommended, ~50-80 DLLs)
 
-Simplest and most reliable — no extra tooling required. Has deep dependency chains (Qt6, OIIO, FFmpeg, Python, etc.) covered by default.
-
-```bash
-cd /d/projects/Natron/build-qt6/App
-cp /c/msys64/mingw64/bin/*.dll .
-```
-
-#### Option B — Trace only required DLLs (leaner)
-
-Use `ntldd` to walk Natron's actual dependency tree and copy only what's needed:
+Walks Natron's actual dependency tree and copies only what's needed. Result is roughly 1/10 the size of Option B.
 
 ```bash
 pacman -S mingw-w64-x86_64-ntldd
@@ -322,7 +346,16 @@ cd /d/projects/Natron/build-qt6/App
 ntldd -R Natron.exe | grep mingw64 | awk '{print $3}' | xargs -I {} cp {} .
 ```
 
-This produces a much smaller bundle, but may miss DLLs loaded dynamically at runtime (Qt plugins, OCIO config plugins, OFX plugins, etc.). If launching fails with a missing-DLL error, fall back to Option A or copy the specific missing DLL by hand.
+Caveat: may miss DLLs loaded dynamically at runtime (Qt plugins, OCIO config plugins, OFX plugins). If launching fails with a missing-DLL error, copy the specific missing DLL by hand or fall back to Option B.
+
+#### Option B — Copy all MSYS2 DLLs (brute-force, ~700 DLLs / ~1.5 GB)
+
+Simplest and most reliable — no extra tooling, no risk of missing a dynamically-loaded dependency.
+
+```bash
+cd /d/projects/Natron/build-qt6/App
+cp /c/msys64/mingw64/bin/*.dll .
+```
 
 #### Common steps (both options)
 
@@ -416,6 +449,21 @@ git checkout v5.0.0
 # Apply MinGW compatibility patch (from Natron repo)
 git apply /d/projects/Natron/patches/cycles-mingw.patch
 
+# Patch 1 — FindTBB.cmake doesn't recognize MSYS2's libtbb12. Without this,
+# configure fails with "Could NOT find TBB (missing: TBB_LIBRARY)".
+sed -i 's/NAMES tbb$/NAMES tbb tbb12/' src/cmake/Modules/FindTBB.cmake
+
+# Patch 2 — MinGW doesn't expose M_PI from <cmath> unless _USE_MATH_DEFINES
+# is set first. Otherwise cycles/src/subd/dice.cpp (via OpenSubdiv headers)
+# fails with `'M_PI' was not declared in this scope`.
+cat <<'EOF' >> CMakeLists.txt
+
+# Niik-l fork: ensure MinGW exposes M_PI for OpenSubdiv-using sources.
+if(WIN32)
+  add_compile_definitions(_USE_MATH_DEFINES)
+endif()
+EOF
+
 mkdir build && cd build
 cmake .. -G "MinGW Makefiles" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -490,6 +538,14 @@ After fixing either, retest with:
 ```bash
 mingw32-make NatronRenderer -j2
 ```
+
+### Harmless build warning: `wmain` missing declaration
+
+```
+App/NatronApp_main.cpp:65:5: warning: no previous declaration for 'int wmain(int, wchar_t**)' [-Wmissing-declarations]
+```
+
+Cosmetic. `wmain` is the wide-char entry point; the warning is GCC asking for a forward declaration. Doesn't affect the build or runtime.
 
 ### "cmake: command not found" or "mingw32-make: command not found"
 
