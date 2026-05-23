@@ -1,157 +1,115 @@
-# Natron 3D System — Initial Port Snapshot
+# Natron 3D System — Developer Reference
 
-> **Status: snapshot of the initial 3D-port milestone (≈ 2026-03-30).**
+> **Status: live doc — updated alongside `RB-2.6` work.** Previous revisions are
+> in git history (`git log -- DEV_3D_SYSTEM_CHANGELOG.md`).
 >
-> This doc captures the *original* port — adding a 3D viewport, Cycles renderer,
-> material system, Alembic I/O, lighting, deep compositing, and the first two
-> particle nodes. It is intentionally not kept live-updated.
->
-> For the **current** state of the fork, see:
-> - [`NODE_REGISTRY.md`](NODE_REGISTRY.md) — full list of registered + unregistered nodes
+> Companion docs:
+> - [`NODE_REGISTRY.md`](NODE_REGISTRY.md) — registered-node list with one-line descriptions
+> - [`Engine/Dev/WIKI.md`](Engine/Dev/WIKI.md) — user-facing knob/workflow reference
+> - [`Engine/Dev/TODO.md`](Engine/Dev/TODO.md) — running completed/in-progress/blocked lists per subsystem
 > - [`GIT_WORKFLOW.md`](GIT_WORKFLOW.md) — branch / commit conventions
-> - `git log --oneline RB-2.6` — full chronological history
 
 ## Overview
 
-This document covers the changes that added a 3D viewport, Cycles renderer,
-material system, Alembic I/O, lighting, deep compositing, and the first
-particle nodes to Natron. All on the `RB-2.6` branch.
+The 3D system adds a 3D viewport, Cycles renderer, GLSL/MRT scanline renderer,
+material system, Alembic I/O, OpenVDB support, lighting, deep compositing, and
+a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
+
+Recent milestones:
+
+- **Phase 3 (2026-05-22)** — ScanlineRender migrated from fixed-function GL to a
+  GLSL 3.3 + MRT pipeline. Adds 6 per-pixel AOVs (Depth / WorldPos / Normal /
+  UV / Pref / Velocity) for both meshes and particles.
+- **Phase 3E (2026-05-23)** — Retired the legacy fixed-function path entirely
+  (particles + meshes all GLSL). Added Shading Mode knob (Shaded / Flat /
+  Wireframe) and 3D viewport lighting modes.
+- **Particle system Phase 2 (2026-04-07)** — 13 particle nodes, refactored
+  solver architecture, geo collisions, motion blur (stretch cheat + multi-sample),
+  instancing.
 
 ---
 
-## New Node Types Registered
+## Node Inventory
 
-All registered in `Engine/AppManager.cpp` via `registerBuiltInPlugin<>()`:
+> Detailed one-line descriptions live in [`NODE_REGISTRY.md`](NODE_REGISTRY.md);
+> this is a counts-and-categories summary. All registered in
+> `Engine/AppManager.cpp` via `registerBuiltInPlugin<>()`.
 
-### 3D Geometry (6 nodes)
-| Node | Plugin ID | Inputs | Description |
-|------|-----------|--------|-------------|
-| **Sphere3D** | `fr.inria.built-in.Sphere3D` | 2 (img, material) | Tessellated sphere with equirectangular UVs |
-| **Card3D** | `fr.inria.built-in.Card3D` | 2 (img, material) | Flat textured quad, aspect from image |
-| **Cube3D** | `fr.inria.built-in.Cube3D` | 2 (img, material) | 24-vertex cube with per-face UVs |
-| **Cylinder3D** | `fr.inria.built-in.Cylinder3D` | 2 (img, material) | Tessellated cylinder with caps |
-| **ReadGeo** | `fr.inria.built-in.ReadGeo` | 1 (material) | Alembic .abc mesh loader with UVs |
-| **Group3D** | `fr.inria.built-in.Group3D` | 8 (3D objects) | Groups 3D objects with unified transform |
+### 3D Geometry (8 nodes)
+| Node | Plugin ID | Description |
+|------|-----------|-------------|
+| **Sphere3D** | `fr.inria.built-in.Sphere3D` | Tessellated sphere with equirectangular UVs |
+| **Card3D** | `fr.inria.built-in.Card3D` | Flat textured quad, aspect from image |
+| **Cube3D** | `fr.inria.built-in.Cube3D` | 24-vertex cube with per-face UVs |
+| **Cylinder3D** | `fr.inria.built-in.Cylinder3D` | Tessellated cylinder with caps |
+| **ReadGeo** | `fr.inria.built-in.ReadGeo` | Single-mesh `.abc` / `.obj` loader |
+| **ReadAlembicArchive** | `fr.inria.built-in.ReadAlembicArchive` | Multi-mesh Alembic archive (full hierarchy) |
+| **ReadVDB** | `fr.inria.built-in.ReadVDB` | OpenVDB volume loader (PrincipledVolume rendering via Cycles) |
+| **Group3D** | `fr.inria.built-in.Group3D` | Groups 3D objects with unified transform |
 
-### 3D Scene & Render (5 nodes)
-| Node | Plugin ID | Inputs | Description |
-|------|-----------|--------|-------------|
-| **Scene3D** | `fr.inria.built-in.Scene3D` | 8 (3D objects) | Aggregates 3D objects for rendering |
-| **RenderPass** | `fr.inria.built-in.RenderPass` | 1 (scene) | Multi-pass filter: object visibility, holdout, shadow catcher, light selection |
-| **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | 3 (bg, obj/scn, cam) | CPU rasterizer, outputs 2D |
-| **CyclesRender** | `fr.inria.built-in.CyclesRender` | 3 (bg, obj/scn, cam) | Cycles path tracer, outputs 2D |
-| **Project3D** | `fr.inria.built-in.Project3D` | 4 (img, projCam, geo, renderCam) | Camera projection onto geometry |
+### 3D Scene & Render (6 nodes)
+| Node | Plugin ID | Description |
+|------|-----------|-------------|
+| **Scene3D** | `fr.inria.built-in.Scene3D` | Aggregates 3D objects for rendering |
+| **RenderPass** | `fr.inria.built-in.RenderPass` | Multi-pass filter: visibility, holdout, shadow catcher, light selection |
+| **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | GLSL 3.3 + MRT rasterizer; 6 AOVs; Shading modes; particle render |
+| **CyclesRender** | `fr.inria.built-in.CyclesRender` | Cycles path tracer (NATRON_CYCLES); 12 AOVs |
+| **Project3D** | `fr.inria.built-in.Project3D` | Camera projection onto geometry |
+| **UVProject** | `fr.inria.built-in.UVProject` | Rewrite mesh UVs (6 projection modes incl. STW perspective) |
 
-### Camera & Lighting (3 nodes)
-| Node | Plugin ID | Inputs | Description |
-|------|-----------|--------|-------------|
-| **Camera3D** | `fr.inria.built-in.Camera3D` | 0 | Camera with T/R, focal length, aperture |
-| **ReadAlembicCamera** | `fr.inria.built-in.ReadAlembicCamera` | 0 | Import animated camera from .abc |
-| **Light3D** | `fr.inria.built-in.Light3D` | 0 | Point/Spot/Area/Distant/Dome light |
+### Camera & Lighting (4 nodes)
+| Node | Plugin ID | Description |
+|------|-----------|-------------|
+| **Camera3D** | `fr.inria.built-in.Camera3D` | Camera with T/R, focal length, aperture, DOF |
+| **ReadAlembicCamera** | `fr.inria.built-in.ReadAlembicCamera` | Import animated camera from `.abc` |
+| **ReadAlembicTransform** | `fr.inria.built-in.ReadAlembicTransform` | Import animated transform/null/locator from `.abc` |
+| **Light3D** | `fr.inria.built-in.Light3D` | Point/Spot/Area/Distant/Dome light with HDRI |
 
 ### Materials (2 nodes)
-| Node | Plugin ID | Inputs | Description |
-|------|-----------|--------|-------------|
-| **Material3D** | `fr.inria.built-in.Material3D` | 5 (diffuse, metallic, roughness, emission, normal) | Standalone PBR material with texture map inputs |
-| **Volume3D** | `fr.inria.built-in.Volume3D` | 0 | Procedural volume (sphere, noise, box) |
+| Node | Plugin ID | Description |
+|------|-----------|-------------|
+| **Material3D** | `fr.inria.built-in.Material3D` | Standalone PBR material with texture map inputs |
+| **Volume3D** | `fr.inria.built-in.Volume3D` | Procedural volume (sphere, box) — Cycles shader graph |
 
-### Deep Compositing (17 nodes)
-DeepRead, DeepWrite, DeepFlatten, DeepMerge, DeepSlice, DeepColorCorrect, DeepGrade, DeepTransform, DeepCrop, DeepDefocus, DeepExpression, DeepHoldout, DeepRecolor, DeepFromImage, DeepToPoints, DeepImage
+### Deep Compositing — registered (17 nodes)
+DeepRead, DeepWrite, DeepFlatten, DeepMerge, DeepRecolor, DeepSlice, DeepHoldout,
+DeepFromImage, DeepGrade, DeepReformat, DeepCrop, DeepToPoints, DeepTransform,
+DeepExpression, DeepColorCorrect, DeepDefocus, Blast.
 
-### Particles (2 nodes)
-ParticleEmitter, ParticleGravity
+Tier 3 (19 more) exists in code but is unregistered pending further testing —
+see `NODE_REGISTRY.md`.
+
+### Particles (13 nodes, "Phase 2 complete")
+ParticleEmitter, ParticleGravity, ParticleDrag, ParticleTurbulence,
+ParticleTurbulence2D, ParticleWind, ParticleKillBox, ParticleAttract,
+ParticleVortex, ParticleSpawn, ParticleSolver, ParticleInstance, ParticleMerge.
 
 ### Channel (1 node)
-DevShuffle
+DevShuffle.
 
 ---
 
-## File Inventory
+## Source Layout
 
-### Modified Existing Files
+All 3D-system code lives under `Engine/Dev/` + `Gui/` on `RB-2.6`. Authoritative
+file inventory is `git ls-files Engine/Dev/ Gui/Dev*` — counts shift as work
+lands. Categories:
 
-| File | Changes |
-|------|---------|
-| `CMakeLists.txt` | Qt6 compat, optional NATRON_CYCLES flag |
-| `App/CMakeLists.txt` | Link flags |
-| `Engine/CMakeLists.txt` | Dev/ source globs, Alembic/Cycles deps, NATRON_HAVE_ALEMBIC, NATRON_CYCLES defines |
-| `Engine/AppManager.cpp` | `registerBuiltInPlugin<>()` for all new nodes |
-| `Engine/EffectInstance.h` | Extended interface |
-| `Gui/CMakeLists.txt` | ImGui/ImGuizmo sources, NATRON_CYCLES define |
-| `Gui/Viewport3D.cpp` | Replaced internals with DevViewport3D |
-| `Gui/Viewport3D.h` | Replaced internals with DevViewport3D |
-| `Gui/Viewport3DTab.cpp` | Updated to use DevViewport3D, timeline integration |
-| `Gui/Viewport3DTab.h` | Updated member types |
+| Path | Contains |
+|------|----------|
+| `Engine/Dev/Scene3D/` | 3D geometry nodes (Sphere/Card/Cube/Cyl), readers (ReadGeo, ReadAlembic*, ReadVDB), scene + camera + light + material providers, ScanlineRender, UVProject, Project3D |
+| `Engine/Dev/Cycles/` | CyclesRender Natron node + CyclesRenderer API bridge (gated by `NATRON_CYCLES`) |
+| `Engine/Dev/Deep/` | All Deep* nodes + PointCloudData + DeepUtils |
+| `Engine/Dev/Particles/` | Particle solver + emitter + 11 modifier/instancer/spawn nodes + shared ParticleData header |
+| `Gui/DevViewport3D.{h,cpp}` | ImGuizmo-based 3D viewport (camera orbit, gizmos, shading modes, look-through camera, axis grid) |
+| `Gui/Viewport3DTab.{h,cpp}` | Panel wrapper (toolbar + viewport + timeline integration) |
+| `Gui/ShuffleWidget.{h,cpp}` + `KnobGuiShuffle.{h,cpp}` | DevShuffle UI |
+| `Gui/ImGuizmo/` | ImGui + ImGuizmo vendored (MIT licensed) |
+| `tools/glsl_mrt_testbed/` | Opt-in standalone GLSL 3.3 + MRT feasibility tester (`BUILD_GLSL_TESTBED=ON`) |
 
-### New Files — Engine/Dev/Scene3D/ (34 files)
-
-```
-Camera3DNode.h / Camera3DNode.cpp
-CameraProvider.h
-Card3D.h / Card3D.cpp
-Cube3D.h / Cube3D.cpp
-Cylinder3D.h / Cylinder3D.cpp
-Group3D.h / Group3D.cpp
-Light3D.h / Light3D.cpp
-Material3D.h / Material3D.cpp
-MaterialProvider.h
-Project3D.h / Project3D.cpp
-ReadAlembicCamera.h / ReadAlembicCamera.cpp
-ReadGeo.h / ReadGeo.cpp
-ReadVDB.h / ReadVDB.cpp
-ScanlineRender.h / ScanlineRender.cpp
-Scene3D.h / Scene3D.cpp
-SceneGraph.h / SceneGraph.cpp
-Sphere3D.h / Sphere3D.cpp
-Volume3D.h / Volume3D.cpp
-```
-
-### New Files — Engine/Dev/Cycles/ (4 files)
-
-```
-CyclesRender.h / CyclesRender.cpp      # Natron node wrapper
-CyclesRenderer.h / CyclesRenderer.cpp  # Cycles API bridge
-```
-
-### New Files — Engine/Dev/Deep/ (~30 files)
-
-```
-DeepImage.h/cpp, DeepRead.h/cpp, DeepWrite.h/cpp, DeepFlatten.h/cpp,
-DeepMerge.h/cpp, DeepSlice.h/cpp, DeepColorCorrect.h/cpp, DeepGrade.h/cpp,
-DeepTransform.h/cpp, DeepCrop.h/cpp, DeepDefocus.h/cpp, DeepExpression.h/cpp,
-DeepHoldout.h/cpp, DeepRecolor.h/cpp, DeepFromImage.h/cpp, DeepToPoints.h/cpp,
-PointCloudData.h, DeepUtils.h/cpp
-```
-
-### New Files — Engine/Dev/Particles/ (4 files)
-
-```
-ParticleEmitter.h / ParticleEmitter.cpp
-ParticleGravity.h / ParticleGravity.cpp
-ParticleData.h
-```
-
-### New Files — Gui/ (6 files)
-
-```
-DevViewport3D.h / DevViewport3D.cpp    # ImGuizmo-based 3D viewport
-Viewport3DTab.h / Viewport3DTab.cpp    # Panel wrapper (toolbar + viewport + timeline)
-ShuffleWidget.h / ShuffleWidget.cpp    # DevShuffle UI
-KnobGuiShuffle.h / KnobGuiShuffle.cpp # Shuffle knob GUI
-```
-
-### New Files — Gui/ImGuizmo/ (MIT licensed, ~10 files)
-
-```
-imgui.h / imgui.cpp
-imgui_draw.cpp
-imgui_widgets.cpp
-imgui_tables.cpp
-imgui_internal.h
-ImGuizmo.h / ImGuizmo.cpp
-imconfig.h
-imstb_rectpack.h, imstb_textedit.h, imstb_truetype.h
-```
+Build wiring lives in the top-level `CMakeLists.txt` (Qt6 toggle,
+`NATRON_CYCLES`, `BUILD_GLSL_TESTBED`) and each subdir's `CMakeLists.txt`
+(source globs + per-target deps).
 
 ---
 
@@ -235,6 +193,88 @@ Replaced hand-rolled Viewport3D with ImGuizmo-based DevViewport3D:
 
 ---
 
+## ScanlineRender GLSL/MRT Pipeline (Phase 3 + 3E)
+
+The legacy fixed-function rasterizer (`glBegin` / `glEnd` / fixed-function
+texture pipeline) was retired in 2026-05-22 → 2026-05-23. Current path:
+
+- **Shaders** — `kBeautyVert` / `kBeautyFrag` for meshes, `kParticleVert` /
+  `kParticleFrag` for particles. Volume rendering still uses its own shader
+  pair under `Engine/Dev/Scene3D/ScanlineRender.cpp` (volume migration is
+  deferred; volumes rely on fixed-function `gl_ModelViewProjectionMatrix`).
+- **Geometry path** — interleaved VAO/VBO (15 floats: pos / uv / stw / normal /
+  prevPos) + IBO + uniform-driven MVP. `renderGeoObjectGlsl` runs once per
+  GeoData per motion-blur sample.
+- **Particle path** — per-mode CPU-side accumulator into a single VBO
+  (18 floats: pos / color / normal / uv / pref / velocity), drawn as
+  GL_POINTS / GL_LINES / GL_TRIANGLES depending on mode. AOV uniform gates
+  mirror the mesh shader.
+- **STW projective texturing** — UVProject's Perspective mode emits 3-component
+  (s, t, w) attribs. Shader detects via `u_hasTexture == 2` and does the
+  perspective divide in-fragment (`v_stw.xy / v_stw.w`).
+- **MSAA** — 4x via multisampled FBO + blit-to-resolve. AOV attachments share
+  the same MSAA count.
+
+### Multi-pass Output: 6 AOVs
+
+Declared on plane -1 via `isMultiPlanar() = true` + `getComponentsNeededAndProduced`.
+Allocated lazily — only enabled AOVs get MRT attachments.
+
+| AOV | Source | Notes |
+|-----|--------|-------|
+| `depth.Z` | GL depth attachment (last sample) | Linear camera-space distance. Bg = camFar. |
+| `world_position.xyz` | Reconstructed via `inverse(proj * view)` × NDC | Same depth caveat — single-sample. |
+| `Normal.xyz` | Fragment shader from world normal | Normalized in-shader. |
+| `uv.uvw` | Per-vertex UVs | Particles emit (0,0) except Sprite static. |
+| `Pref.xyz` | Object-space position (= in_pos for meshes) | Particles use world pos as stable per-particle ID. |
+| `Velocity.xyz` | Screen-pixels-per-frame motion vector | Re-extracts geometry + camera at `time - 1`. |
+
+Per-attachment blend override (`glBlendFunci` for slots 1–4 with
+`GL_ONE / GL_ZERO`) prevents AOV stacking across overlapping particle fragments
+while keeping beauty additive on slot 0.
+
+### Shading Modes
+
+Knob on the Output page, applied to mesh draws (particles always use their
+own pipeline and aren't affected):
+
+| Mode | Behavior |
+|------|----------|
+| Shaded (default) | Per-pixel N.L diffuse + 0.15 ambient. Light from `Light3D` if connected, else a camera-relative headlight (Maya default convention). |
+| Flat | No lighting — texture / per-vertex color only. |
+| Wireframe | Solid white GL_LINES from triangle indices. |
+
+`DevViewport3D` has the same modes (`eWireframe / eFlat / eShaded /
+eShadedWire`) — lighting in the viewport is per-face flat against a fixed
+eye-space light direction. Procedural primitives use their per-vertex normals;
+ReadGeo/Alembic use a cross-product face normal (CCW-from-outside assumption).
+
+---
+
+## Particle System (Phase 2 complete)
+
+13 nodes (see Inventory). Architecture refactor 2026-04-06. Key bits:
+
+- **Solver loop** — sub-stepped (default 4 sub-steps/frame) for accurate
+  collision response. `Substeps > 1` scales the continuation displacement by
+  the substep size so post-bounce particles don't overshoot.
+- **Particle struct** — `(p.px/py/pz, vx/vy/vz, r/g/b/a, size, age, life,
+  bounceCount, collided)` — 13 fields, packed for cache. `id` is stable across
+  frames for deterministic per-particle data.
+- **Geo collision** — plane / box / sphere collide helpers + ReadGeo BVH path
+  (cached per-frame). `bounceParticle` reflects velocity, optional restitution.
+- **Motion blur** — two independent paths:
+  - Stretch cheat (`Motion Blur` knob): single-sample, geometry-stretch fake.
+    Only active when `Motion Samples = 1`. Beauty-only — see WIKI.md for
+    AOV interaction notes.
+  - Multi-sample (`Motion Samples`): sub-frame renders → CPU-side averaging.
+    Works on all modes, all AOVs.
+- **Cycles parity** — `ccl::PointCloud` for sprites with per-particle vertex
+  color + emission; native instancing for ParticleInstance (shared
+  `ccl::Mesh`, one `ccl::Object` per instance, 3-step motion attribute).
+
+---
+
 ## Build Dependencies
 
 ### Required (always)
@@ -264,57 +304,46 @@ pacman -S mingw-w64-x86_64-alembic mingw-w64-x86_64-openimageio
 
 ---
 
-## Testing Checklist
+## Smoke-Test Checklist
 
-### Basic 3D Viewport
-- [ ] Open 3D Viewport tab
-- [ ] Grid and axes visible
-- [ ] Orbit (middle-mouse), pan (shift+middle), zoom (scroll)
-- [ ] Create Sphere3D — appears in viewport
-- [ ] Select sphere — ImGuizmo handles appear
-- [ ] W/E/R — translate/rotate/scale gizmos
-- [ ] F — frame to selected object
-- [ ] Ctrl+Z — undo gizmo transforms
+Quick post-build sanity sweep — not exhaustive. Detailed regression tests live
+in `Engine/Dev/TODO.md` per subsystem.
 
-### Alembic Import
-- [ ] Create ReadGeo → set .abc file path
-- [ ] Object dropdown populates with geometry objects
-- [ ] Mesh appears in 3D viewport as wireframe
-- [ ] T/R/S gizmo works on imported mesh
-- [ ] Info field shows vertex/face count
+### 3D Viewport
+- [ ] Open Viewport3D tab — grid, axes visible, orbit/pan/zoom work
+- [ ] Create Sphere3D — ImGuizmo handles appear when selected, W/E/R cycles
+- [ ] Switch Shading dropdown through Wireframe / Flat / Shaded / Shaded+Wire — light orbits with camera in Shaded modes
+- [ ] Camera look-through + gate outline draws letterboxed to camera aspect
 
-### Materials
-- [ ] Material3D node → connect to ReadGeo's Material input
-- [ ] Set Base Color → renders with color in Cycles
-- [ ] Set Diffuse Map texture → renders with texture
-- [ ] Set Normal Map → surface detail visible
-- [ ] Set Roughness Map → per-pixel roughness variation
-- [ ] Set Metallic Map → metal/dielectric variation
+### ScanlineRender
+- [ ] Sphere3D + ScanlineRender → renders with default Shaded mode (no Light3D needed — fallback headlight)
+- [ ] Add Light3D via Scene3D → render updates to use the placed light
+- [ ] Toggle Shading Mode → output changes between lit / flat / wireframe
+- [ ] Enable Depth + WorldPos + Normal + UV + Pref + Velocity AOVs → 6 planes appear at output
+- [ ] All 4 particle modes render (Point/Disc/Sphere/Sprite); AOVs work on particles too
 
-### Lighting
-- [ ] Light3D node → Point type → illuminates scene
-- [ ] Switch to Spot → cone visible in viewport
-- [ ] Adjust Spot Angle/Smooth → cone updates
-- [ ] Switch to Area → rectangle visible
-- [ ] Adjust Area Width/Height → rectangle updates
-- [ ] Dome + HDRI file → environment lighting
+### Alembic + ReadGeo
+- [ ] Single `.abc` mesh loads via ReadGeo, UVs visible
+- [ ] Multi-mesh archive loads via ReadAlembicArchive, transforms chain correctly
+- [ ] `.obj` mesh loads via ReadGeo, group dropdown populated
 
-### Cycles Rendering
-- [ ] Camera3D + Scene3D + CyclesRender → Viewer shows rendered image
-- [ ] Adjust Samples → quality changes
-- [ ] Adjust Max Bounces → GI changes
-- [ ] Cache works (same frame doesn't re-render)
-- [ ] Animation: keyframed objects update per frame
+### Cycles
+- [ ] Camera3D + Scene3D + CyclesRender → final-quality render
+- [ ] All 12 Cycles AOVs available, cache invalidates per-frame on animation
+- [ ] Volume3D + ReadVDB → renders volumes (CPU device required)
+- [ ] Particle instancing renders thousands of objects efficiently
 
 ---
 
 ## Known Issues / TODO
 
-1. **Material3D 2D input baking** — experimental; renders connected 2D nodes to temp .hdr files via `renderRoI()`. Works but needs more testing with complex node chains.
-2. **Deep EXR** — Deep nodes exist but Cycles deep output is WIP upstream.
-3. **ReadVDB** — Requires OpenVDB library (optional dependency).
-4. **OFX plugins** — When running from build directory, set `OFX_PLUGIN_PATH` to load Read/Write nodes.
-5. **Viewport3DTab signal warning** — `frameChanged(SequenceTime,int)` vs `onFrameChanged(double)` mismatch (cosmetic, doesn't affect functionality).
+1. **Volume shader path still uses fixed-function matrices** — `glMatrixMode` + `gl_ModelViewProjectionMatrix` survive in the volume passes. A future phase migrates them to explicit uniforms (after which `glMatrixMode`/`glLoadMatrixf` can be removed entirely from ScanlineRender).
+2. **Particles + Depth/WorldPos** — only static Sphere mode contributes to depth-based AOVs (others disable depth writes for translucent blending). See `FUTURE_FEATURES.md` for the depth-only pre-pass design.
+3. **Material3D 2D input baking** — experimental; renders connected 2D nodes to temp `.hdr` files via `renderRoI()`. Needs more testing with complex node chains.
+4. **ScanlineRender PBR** — does not consume materials. Only texture from input 0 is sampled. Material system Phase 2+ deferred (see TODO.md).
+5. **ScanlineRender shadows** — not implemented (Cycles only).
+6. **Sprite particles texturing** — not implemented (legacy was flat-colored; GLSL migration preserved that). Recipe in `FUTURE_FEATURES.md`.
+7. **OFX plugins** — When running from build directory, set `OFX_PLUGIN_PATH` to load Read/Write nodes.
 
 ---
 
@@ -330,3 +359,10 @@ pacman -S mingw-w64-x86_64-alembic mingw-w64-x86_64-openimageio
 | 2026-03-29 | ReadGeo rewrite, Alembic Cycles rendering, UVs, material support |
 | 2026-03-29 | PBR texture maps (Normal, Roughness, Metallic, Emission) |
 | 2026-03-30 | Texture tab reorganization, Material3D 2D inputs, documentation |
+| 2026-04-06 | Particle solver architecture refactor (Phase 2) |
+| 2026-04-07 | ScanlineRender particle modes (Point/Disc/Sphere/Sprite), 4x MSAA, multi-sample motion blur, instancing |
+| 2026-04-08 | ReadVDB + OpenVDB integration; PrincipledVolume fire rendering; Cycles CPU-device NanoVDB |
+| 2026-05-21 | Camera aspect-match + look-through + gate + viewport shading dropdown |
+| 2026-05-22 | Phase 3A–3D: GLSL/MRT migration, 6 per-pixel AOVs (Depth/WorldPos/Normal/UV/Pref/Velocity) |
+| 2026-05-23 | Phase 3E: particles migrated to GLSL, fixed-function path retired, AOVs on particles |
+| 2026-05-23 | Shading Modes (Shaded/Flat/Wireframe) for ScanlineRender + viewport, headlight fallback |

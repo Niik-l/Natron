@@ -1,7 +1,7 @@
 # Natron Node Registry
 
 All custom built-in nodes added to Natron beyond the original upstream codebase.
-Updated: 2026-05-21
+Updated: 2026-05-23
 
 ---
 
@@ -24,7 +24,7 @@ Updated: 2026-05-21
 |------|-----------|--------|-------------|
 | **Scene3D** | `fr.inria.built-in.Scene3D` | Registered | Aggregates 3D objects for rendering |
 | **RenderPass** | `fr.inria.built-in.RenderPass` | Registered | Multi-pass filter: object visibility, holdout, shadow catcher, light selection |
-| **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | Registered | OpenGL rasterizer with 4x MSAA, particle render modes (Point/Disc/Sphere/Sprite), multi-sample motion blur, geo instancing, n-gon fan-triangulation, Sync-to-Project canvas. |
+| **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | Registered | GLSL 3.3 + MRT rasterizer (4x MSAA). Per-pixel AOVs (Depth, World Position, Normal, UV, Pref, Velocity) for both meshes and particles. Shading modes: Shaded (N.L diffuse from Light3D, fallback camera headlight) / Flat / Wireframe. Particle modes (Point/Disc/Sphere/Sprite) all migrated to GLSL with full AOV support. Multi-sample motion blur + velocity-stretch cheat, geo instancing, n-gon fan-triangulation, Sync-to-Project canvas. |
 | **CyclesRender** | `fr.inria.built-in.CyclesRender` | Registered | Cycles path tracer (requires NATRON_CYCLES). 12 AOV passes (diffuse/glossy direct/indirect/color, emission, env, AO, normal, depth, UV). PrincipledVolume VDB rendering, native particle instancing + motion blur, PBR materials via Material3D. CPU device for NanoVDB volume support. Sync-to-Project canvas. |
 | **Project3D** | `fr.inria.built-in.Project3D` | Registered | Camera projection onto geometry (standalone FBO renderer). |
 | **UVProject** | `fr.inria.built-in.UVProject` | Registered | Rewrite mesh UVs via projection — 6 modes (Perspective / PlanarXY/YZ/ZX / Spherical / Cylindrical). Perspective with Generate Perspective ON emits 3-component (s,t,w) coords for fragment-level perspective divide via glTexCoord4f. Reference Frame lock supported. |

@@ -291,9 +291,36 @@ On the **Particles** tab of ScanlineRender:
 | Particle Mode | Choice | Sprite | Point, Disc (soft circle), Sphere (N.L lit), Sprite (flat quad) |
 | Blend Mode | Choice | Additive | Additive (fire/sparks), Over (solid/smoke) |
 | Particle Scale | Double | 1.0 | Global size multiplier |
-| Motion Blur (stretch) | Double | 0 | Fast velocity-stretch motion blur (cheat). Multiplied by Shutter. Only active when Motion Samples = 1. |
+| Motion Blur (stretch) | Double | 0 | Fast velocity-stretch motion blur (cheat). Multiplied by Shutter. Only active when Motion Samples = 1. Beauty-only — for motion-blurred AOVs use Motion Samples > 1. |
 | Motion Samples | Int | 1 | Physically-accurate multi-sample motion blur. 1 = off, 4-8 = typical, 16 = film quality. Renders scene N times at sub-frame offsets and averages. Works for all modes including instances. |
 | Shutter | Double | 0.5 | Shutter open fraction. 0.5 = 180° film shutter. Controls blur amount in both modes. |
+
+## ScanlineRender Shading + AOVs
+
+ScanlineRender draws via a GLSL 3.3 + MRT pipeline (the legacy fixed-function path was retired in Phase 3E).
+
+**Shading Mode** knob on the **Output** tab — applies to mesh geometry (Sphere3D / Card3D / Cube3D / Cylinder3D / ReadGeo / Alembic):
+
+| Mode | Behavior |
+|------|----------|
+| Shaded (default) | Per-pixel N.L diffuse + 0.15 ambient. Uses a `Light3D` if connected, otherwise a camera-relative headlight (Maya default convention). |
+| Flat | No lighting — raw texture / vertex color. Matches the legacy pre-Phase-3 look. |
+| Wireframe | Solid white GL_LINES derived from triangle indices. |
+
+Particles always use their own additive/over blend and are not affected by Shading Mode.
+
+**AOVs** — toggled on the **AOVs** tab. Each off by default; enabling adds a per-pixel plane to the output:
+
+| AOV | Plane | Notes |
+|-----|-------|-------|
+| Depth | `depth.Z` | Linear camera-space distance. Background = camFar. Particles only contribute via the static Sphere mode (other modes are translucent, no depth write). |
+| World Position | `world_position.xyz` | Reconstructed from depth via `inverse(proj × view)`. Same particle caveat as Depth. |
+| Normal | `Normal.xyz` | World-space surface normal. For particles: camera-facing on Sprite/Disc/Point, true per-vertex on Sphere static. |
+| UV | `uv.uvw` | Per-vertex UVs. Particles emit zero except Sprite static (quad-corner gradient). |
+| Pref | `Pref.xyz` | Object-space reference position. Particles use their world position as a stable per-particle ID. |
+| Velocity | `Velocity.xyz` | Screen-pixels-per-frame motion vector. Re-extracts geometry + camera at `time - 1`. Per-particle vel = `(p.vx, p.vy, p.vz)`. |
+
+**Vector-blur / defocus workflow:** render at single-sample, enable Velocity + Depth (static Sphere particles needed for Depth), then run Nuke's VectorBlur + ZDefocus downstream. Avoids the cost of `Motion Samples > 1` while still producing motion-blurred + depth-of-field output.
 
 **Anti-aliasing:** ScanlineRender uses **4x MSAA** via a multisampled FBO + blit-to-resolve pattern. All particles, geo, and instances get smoothed edges automatically.
 

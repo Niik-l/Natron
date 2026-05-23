@@ -110,6 +110,14 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
 
+### Completed (2026-05-23) — Phase 3 GLSL/MRT migration + Shading Modes
+
+- **ScanlineRender GLSL 3.3 + MRT pipeline** — fixed-function `glBegin`/`glEnd` mesh + particle paths retired. Single VAO/VBO/IBO + `kBeautyVert`/`kBeautyFrag` shader pair drives every geo draw; particle draws use a parallel `kParticleVert`/`kParticleFrag` pair. UVProject's STW projective texturing handled in-shader via `u_hasTexture == 2` branch.
+- **6 per-pixel AOVs** — Depth (linear camera-space), World Position (reconstructed via inverse(MVP)), Normal (world-space), UV, Pref (object-space ref position), Velocity (screen-pixels-per-frame). Declared on plane -1 via `isMultiPlanar()` + `getComponentsNeededAndProduced`. MRT attachments allocated lazily per-AOV. AOV blend overridden to `GL_ONE / GL_ZERO` (replace) via `glBlendFunci` so values don't accumulate across overlapping fragments.
+- **Particle AOVs** — Normal/UV/Pref/Velocity work for all four particle modes (Point/Disc/Sphere/Sprite + motion-blur stretch variants). Per-vertex AOV defaults set via a `fillAovs` lambda (normal = +fwd camera-facing, pref = particle world pos, velocity = per-frame displacement). Sphere static overrides normal/pref with real per-vertex sphere values; Sprite static overrides UVs with quad-corner layout. Depth/WorldPos for particles is by-design only contributed by static Sphere (other modes disable depth writes for translucency). Motion-blur stretch is documented as beauty-only — for AOV-correct motion blur use Motion Samples > 1.
+- **Shading modes** — new `Shading Mode` knob on ScanlineRender (default Shaded). Shaded does per-pixel N.L diffuse + 0.15 ambient against a `Light3D` if connected, otherwise a camera-relative headlight (Maya default convention). Flat preserves the legacy unlit behavior. Wireframe renders solid white GL_LINES derived from triangle indices.
+- **3D viewport shading parity** — `DevViewport3D` adds `eFlat` to `ShadingMode` enum (legacy unlit). `eShaded` + `eShadedWire` now compute per-face flat N.L using averaged per-vertex normals on primitives (Sphere/Card/Cube/Cylinder — winding-agnostic) and cross-product face normals on ReadGeo/Alembic (CCW-from-outside assumption). Light is camera-locked top-right-eye, orbits with viewer.
+
 ### Completed (2026-04-08)
 
 - **ReadVDB OpenVDB support enabled** — `NATRON_HAVE_OPENVDB` defined under `NATRON_CYCLES` build. VDB grids load directly via `VDBImageLoader` (no dense conversion).
