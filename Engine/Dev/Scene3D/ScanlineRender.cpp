@@ -84,6 +84,11 @@ struct ScanlineRenderPrivate
     KnobIntWPtr motionSamples;      // number of sub-frame samples (1 = off)
     KnobDoubleWPtr motionShutter;   // shutter open fraction (0-1, default 0.5)
 
+    // Shading mode for mesh geometry. 0 = Shaded (N.L diffuse + ambient,
+    // using Light3D if connected), 1 = Flat (no lighting, just texture/color),
+    // 2 = Wireframe (solid white lines from triangle edges).
+    KnobChoiceWPtr shadingMode;
+
     // Phase 3D/3E — per-pixel AOV outputs. The GLSL/MRT pipeline is mandatory
     // since Phase 3E; AOVs only depend on their own knobs being on.
     KnobBoolWPtr outputDepth;     // depth.Z plane (linear camera-space distance)
@@ -182,6 +187,21 @@ ScanlineRender::initializeKnobs()
         k->setHintToolTip(tr("Copy the current project default format's width and "
                              "height into the Width/Height knobs above."));
         outPage->addKnob(k); _imp->syncToProject = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Shading Mode"));
+        k->setName("shadingMode"); k->setAnimationEnabled(false);
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("Shaded", "", "N.L diffuse lighting (uses Light3D if connected, else top-right default)"));
+        entries.push_back(ChoiceOption("Flat", "", "No lighting — texture or per-vertex color only"));
+        entries.push_back(ChoiceOption("Wireframe", "", "Solid white edges derived from triangle indices"));
+        k->populateChoices(entries);
+        k->setDefaultValue(0); // Shaded
+        k->setHintToolTip(tr("Mesh display mode. "
+                              "Shaded: N.L diffuse lighting (uses Light3D if connected, otherwise a default top-right light). "
+                              "Flat: no lighting — just texture or per-vertex color. "
+                              "Wireframe: solid white edges derived from triangle indices."));
+        outPage->addKnob(k); _imp->shadingMode = k;
     }
 
     // Particle rendering knobs
@@ -687,11 +707,13 @@ static const char* kBeautyVert =
     "layout(location = 4) in vec3 in_prevPos;   // previous-frame object-space position (Phase 3D-3 — velocity)\n"
     "uniform mat4 u_mvp;\n"
     "uniform mat4 u_prevMvp;                   // previous-frame MVP for velocity computation\n"
+    "uniform mat4 u_localMatrix;               // object -> world (for v_worldPos in Shaded mode)\n"
     "uniform mat3 u_normalMatrix;              // transpose(inverse(localMatrix3x3)) for world normals\n"
     "uniform vec2 u_viewportSize;              // (width, height) in pixels — scales NDC delta to screen pixels\n"
     "out vec2 v_uv;\n"
     "out vec4 v_stw;\n"
     "out vec3 v_worldNormal;\n"
+    "out vec3 v_worldPos;                      // world-space position — used by Shaded mode lighting\n"
     "out vec3 v_prefPos;                       // object-space position (= in_pos) — Pref AOV\n"
     "out vec4 v_currClipPos;                   // current-frame clip-space position — for velocity\n"
     "out vec4 v_prevClipPos;                   // previous-frame clip-space position — for velocity\n"
@@ -699,6 +721,7 @@ static const char* kBeautyVert =
     "    v_uv          = in_uv;\n"
     "    v_stw         = in_stw;\n"
     "    v_worldNormal = u_normalMatrix * in_normal;\n"
+    "    v_worldPos    = (u_localMatrix * vec4(in_pos, 1.0)).xyz;\n"
     "    v_prefPos     = in_pos;\n"
     "    v_currClipPos = u_mvp * vec4(in_pos, 1.0);\n"
     "    v_prevClipPos = u_prevMvp * vec4(in_prevPos, 1.0);\n"
@@ -710,12 +733,19 @@ static const char* kBeautyFrag =
     "in vec2 v_uv;\n"
     "in vec4 v_stw;\n"
     "in vec3 v_worldNormal;\n"
+    "in vec3 v_worldPos;\n"
     "in vec3 v_prefPos;\n"
     "in vec4 v_currClipPos;\n"
     "in vec4 v_prevClipPos;\n"
     "uniform sampler2D u_tex;\n"
     "uniform vec2 u_viewportSize;\n"
     "uniform int u_hasTexture;       // 0=no, 1=regular UV, 2=STW projective\n"
+    "uniform int u_shadingMode;      // 0=Shaded, 1=Flat, 2=Wireframe\n"
+    "uniform int u_hasLight;         // 1 if Light3D connected, 0 = fallback default\n"
+    "uniform vec3 u_lightPos;        // world-space point light position\n"
+    "uniform vec3 u_lightColor;\n"
+    "uniform float u_lightIntensity;\n"
+    "uniform vec3 u_cameraPos;       // world-space camera position (fallback headlight when no Light3D)\n"
     "uniform int u_writeNormal;      // attachment 1 (Phase 3D)\n"
     "uniform int u_writeUV;          // attachment 2 (Phase 3D)\n"
     "uniform int u_writePref;        // attachment 3 (Phase 3D)\n"
@@ -726,19 +756,52 @@ static const char* kBeautyFrag =
     "layout(location = 3) out vec4 out_pref;\n"
     "layout(location = 4) out vec4 out_velocity;\n"
     "void main() {\n"
-    "    // --- Beauty (attachment 0) ---\n"
-    "    if (u_hasTexture == 2) {\n"
-    "        if (v_stw.w <= 0.0) discard;\n"
-    "        vec2 uv = v_stw.xy / v_stw.w;\n"
-    "        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {\n"
-    "            out_color = vec4(0.0);\n"
-    "        } else {\n"
-    "            out_color = texture(u_tex, uv);\n"
-    "        }\n"
-    "    } else if (u_hasTexture == 1) {\n"
-    "        out_color = texture(u_tex, v_uv);\n"
-    "    } else {\n"
+    "    // --- Wireframe: solid white edges, skip texture sampling + lighting ---\n"
+    "    if (u_shadingMode == 2) {\n"
     "        out_color = vec4(1.0, 1.0, 1.0, 1.0);\n"
+    "    } else {\n"
+    "        // --- Base color from texture / STW / vertex (existing logic) ---\n"
+    "        vec4 baseColor;\n"
+    "        if (u_hasTexture == 2) {\n"
+    "            if (v_stw.w <= 0.0) discard;\n"
+    "            vec2 uv = v_stw.xy / v_stw.w;\n"
+    "            if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {\n"
+    "                baseColor = vec4(0.0);\n"
+    "            } else {\n"
+    "                baseColor = texture(u_tex, uv);\n"
+    "            }\n"
+    "        } else if (u_hasTexture == 1) {\n"
+    "            baseColor = texture(u_tex, v_uv);\n"
+    "        } else {\n"
+    "            baseColor = vec4(1.0, 1.0, 1.0, 1.0);\n"
+    "        }\n"
+    "        if (u_shadingMode == 0) {\n"
+    "            // --- Shaded: N.L diffuse + ambient ---\n"
+    "            vec3 N = normalize(v_worldNormal);\n"
+    "            vec3 L;\n"
+    "            vec3 lCol;\n"
+    "            float lInt;\n"
+    "            if (u_hasLight == 1) {\n"
+    "                L    = normalize(u_lightPos - v_worldPos);\n"
+    "                lCol = u_lightColor;\n"
+    "                lInt = u_lightIntensity;\n"
+    "            } else {\n"
+    // No Light3D connected — fall back to a camera-relative headlight (light
+    // sits at the camera, follows the camera as it moves). Same convention as
+    // Maya's default viewport: the side facing the camera is always lit and
+    // the shape stays readable from any angle, no fixed world-space direction.
+    "                L    = normalize(u_cameraPos - v_worldPos);\n"
+    "                lCol = vec3(1.0, 1.0, 1.0);\n"
+    "                lInt = 1.0;\n"
+    "            }\n"
+    "            float NL      = max(0.0, dot(N, L));\n"
+    "            float ambient = 0.15;\n"
+    "            vec3 lit      = baseColor.rgb * (ambient + NL * lCol * lInt);\n"
+    "            out_color     = vec4(lit, baseColor.a);\n"
+    "        } else {\n"
+    "            // --- Flat: no lighting, just base color ---\n"
+    "            out_color = baseColor;\n"
+    "        }\n"
     "    }\n"
     "    // --- Normal AOV ---\n"
     "    if (u_writeNormal == 1) {\n"
@@ -1302,6 +1365,10 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
                     const float projViewMatrix[16],
                     const float prevProjViewMatrix[16],
                     int viewportW, int viewportH,
+                    int shadingMode, bool hasLight,
+                    const float lightPos[3], const float lightColor[3],
+                    float lightIntensity,
+                    const float cameraPos[3],
                     bool writeNormal, bool writeUV, bool writePref, bool writeVelocity)
 {
     const int numVerts = (int)(geo.verts.size() / 3);
@@ -1423,36 +1490,83 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
     glEnableVertexAttribArray(4);
     glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, stride * sizeof(float), (void*)(12 * sizeof(float)));
 
+    // Wireframe mode draws GL_LINES from edges derived from triangle indices
+    // (3 edges per triangle, including duplicates at shared edges — visually
+    // identical to a clean edge list and avoids needing edgeIndices on GeoData
+    // for the procedural primitives).
+    std::vector<int> wireIndices;
+    if (shadingMode == 2) {
+        wireIndices.reserve(geo.triIndices.size() * 2);
+        for (size_t t = 0; t + 2 < geo.triIndices.size(); t += 3) {
+            int a = geo.triIndices[t + 0];
+            int b = geo.triIndices[t + 1];
+            int c = geo.triIndices[t + 2];
+            wireIndices.push_back(a); wireIndices.push_back(b);
+            wireIndices.push_back(b); wireIndices.push_back(c);
+            wireIndices.push_back(c); wireIndices.push_back(a);
+        }
+    }
+
     glGenBuffers(1, &ibo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                 (GLsizeiptr)(geo.triIndices.size() * sizeof(int)),
-                 geo.triIndices.data(), GL_STREAM_DRAW);
+    if (shadingMode == 2) {
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                     (GLsizeiptr)(wireIndices.size() * sizeof(int)),
+                     wireIndices.data(), GL_STREAM_DRAW);
+    } else {
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                     (GLsizeiptr)(geo.triIndices.size() * sizeof(int)),
+                     geo.triIndices.data(), GL_STREAM_DRAW);
+    }
 
     // --- Set uniforms + draw ---
     glUseProgram(program);
     GLint locMvp           = glGetUniformLocation(program, "u_mvp");
     GLint locPrevMvp       = glGetUniformLocation(program, "u_prevMvp");
+    GLint locLocalMatrix   = glGetUniformLocation(program, "u_localMatrix");
     GLint locNormalMat     = glGetUniformLocation(program, "u_normalMatrix");
     GLint locViewportSize  = glGetUniformLocation(program, "u_viewportSize");
     GLint locTex           = glGetUniformLocation(program, "u_tex");
     GLint locHasTexture    = glGetUniformLocation(program, "u_hasTexture");
+    GLint locShadingMode   = glGetUniformLocation(program, "u_shadingMode");
+    GLint locHasLight      = glGetUniformLocation(program, "u_hasLight");
+    GLint locLightPos      = glGetUniformLocation(program, "u_lightPos");
+    GLint locLightColor    = glGetUniformLocation(program, "u_lightColor");
+    GLint locLightIntensity= glGetUniformLocation(program, "u_lightIntensity");
+    GLint locCameraPos     = glGetUniformLocation(program, "u_cameraPos");
     GLint locWriteNormal   = glGetUniformLocation(program, "u_writeNormal");
     GLint locWriteUV       = glGetUniformLocation(program, "u_writeUV");
     GLint locWritePref     = glGetUniformLocation(program, "u_writePref");
     GLint locWriteVelocity = glGetUniformLocation(program, "u_writeVelocity");
-    if (locMvp >= 0)           glUniformMatrix4fv(locMvp,        1, GL_FALSE, mvp);
-    if (locPrevMvp >= 0)       glUniformMatrix4fv(locPrevMvp,    1, GL_FALSE, prevMvp);
-    if (locNormalMat >= 0)     glUniformMatrix3fv(locNormalMat,  1, GL_FALSE, normalMat);
-    if (locViewportSize >= 0)  glUniform2f(locViewportSize, (float)viewportW, (float)viewportH);
-    if (locTex >= 0)           glUniform1i(locTex, 0);
-    if (locHasTexture >= 0)    glUniform1i(locHasTexture, hasTextureMode);
-    if (locWriteNormal >= 0)   glUniform1i(locWriteNormal,   writeNormal   ? 1 : 0);
-    if (locWriteUV >= 0)       glUniform1i(locWriteUV,       writeUV       ? 1 : 0);
-    if (locWritePref >= 0)     glUniform1i(locWritePref,     writePref     ? 1 : 0);
-    if (locWriteVelocity >= 0) glUniform1i(locWriteVelocity, writeVelocity ? 1 : 0);
+    if (locMvp >= 0)            glUniformMatrix4fv(locMvp,         1, GL_FALSE, mvp);
+    if (locPrevMvp >= 0)        glUniformMatrix4fv(locPrevMvp,     1, GL_FALSE, prevMvp);
+    if (locLocalMatrix >= 0)    glUniformMatrix4fv(locLocalMatrix, 1, GL_FALSE, geo.localMatrix);
+    if (locNormalMat >= 0)      glUniformMatrix3fv(locNormalMat,   1, GL_FALSE, normalMat);
+    if (locViewportSize >= 0)   glUniform2f(locViewportSize, (float)viewportW, (float)viewportH);
+    if (locTex >= 0)            glUniform1i(locTex, 0);
+    if (locHasTexture >= 0)     glUniform1i(locHasTexture, hasTextureMode);
+    if (locShadingMode >= 0)    glUniform1i(locShadingMode, shadingMode);
+    if (locHasLight >= 0)       glUniform1i(locHasLight, hasLight ? 1 : 0);
+    if (locLightPos >= 0)       glUniform3f(locLightPos,
+                                            hasLight ? lightPos[0] : 0.0f,
+                                            hasLight ? lightPos[1] : 0.0f,
+                                            hasLight ? lightPos[2] : 0.0f);
+    if (locLightColor >= 0)     glUniform3f(locLightColor,
+                                            hasLight ? lightColor[0] : 1.0f,
+                                            hasLight ? lightColor[1] : 1.0f,
+                                            hasLight ? lightColor[2] : 1.0f);
+    if (locLightIntensity >= 0) glUniform1f(locLightIntensity, hasLight ? lightIntensity : 1.0f);
+    if (locCameraPos >= 0)      glUniform3f(locCameraPos, cameraPos[0], cameraPos[1], cameraPos[2]);
+    if (locWriteNormal >= 0)    glUniform1i(locWriteNormal,   writeNormal   ? 1 : 0);
+    if (locWriteUV >= 0)        glUniform1i(locWriteUV,       writeUV       ? 1 : 0);
+    if (locWritePref >= 0)      glUniform1i(locWritePref,     writePref     ? 1 : 0);
+    if (locWriteVelocity >= 0)  glUniform1i(locWriteVelocity, writeVelocity ? 1 : 0);
 
-    glDrawElements(GL_TRIANGLES, numTris * 3, GL_UNSIGNED_INT, 0);
+    if (shadingMode == 2) {
+        glDrawElements(GL_LINES, (GLsizei)wireIndices.size(), GL_UNSIGNED_INT, 0);
+    } else {
+        glDrawElements(GL_TRIANGLES, numTris * 3, GL_UNSIGNED_INT, 0);
+    }
 
     // --- Cleanup ---
     glBindVertexArray(0);
@@ -1800,6 +1914,23 @@ ScanlineRender::render(const RenderActionArgs& args)
     // Phase 3D — extract previous-frame geometry. For animated meshes the
     // verts differ across frames; for static meshes only the local matrix
     // moves. renderGeoObjectGlsl auto-detects via `hasPrevVerts`.
+    // Pull shading mode + light parameters once per render (shared by every
+    // motion-blur sample and every geo object inside the loop).
+    int shadingMode = _imp->shadingMode.lock() ? _imp->shadingMode.lock()->getValue() : 0;
+    bool hasLight = false;
+    float lightPos[3] = { 0, 0, 0 };
+    float lightColor[3] = { 1, 1, 1 };
+    float lightIntensity = 1.0f;
+    const float cameraPos[3] = { (float)camTX, (float)camTY, (float)camTZ };
+    if (light3d) {
+        double ltx, lty, ltz, lr, lg, lb, lint, lexp_unused;
+        light3d->getLightParams(args.time, ltx, lty, ltz, lr, lg, lb, lint, lexp_unused);
+        lightPos[0] = (float)ltx; lightPos[1] = (float)lty; lightPos[2] = (float)ltz;
+        lightColor[0] = (float)lr; lightColor[1] = (float)lg; lightColor[2] = (float)lb;
+        lightIntensity = (float)lint;
+        hasLight = true;
+    }
+
     if (wantsVelocityMrt && geoEffect) {
         std::vector<GeoData> prevGeoObjects;
         const double prevTime = args.time - 1.0;
@@ -1881,6 +2012,8 @@ ScanlineRender::render(const RenderActionArgs& args)
             renderGeoObjectGlsl(geoObjects[gi], glslBeautyProg,
                                 projViewMatrix, prevProjViewMatrix,
                                 outW, outH,
+                                shadingMode, hasLight, lightPos, lightColor, lightIntensity,
+                                cameraPos,
                                 wantsNormalMrt, wantsUvMrt,
                                 wantsPrefMrt, wantsVelocityMrt);
         }

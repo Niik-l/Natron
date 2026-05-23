@@ -110,6 +110,65 @@ static void Normalize(const float* a, float* r)
    r[2] = a[2] * il;
 }
 
+// Per-face flat-shading factor for the viewport's eShaded / eShadedWire modes.
+// Computes ambient + N.L using a fixed eye-space light direction (roughly
+// top-right-behind-camera, same as Maya's default headlight).
+//
+// Two flavors:
+//   ViewportLitFromVertexNormals — preferred when the geometry carries
+//     per-vertex normals (Sphere3D / Card3D / Cube3D / Cylinder3D). The
+//     averaged local normal is transformed into eye space via the upper-left
+//     3x3 of the modelview matrix. Winding-agnostic since we use the supplied
+//     normals directly, not a cross product.
+//   ViewportLitFromVerts — fallback for ReadGeo / Alembic where we don't have
+//     vertex normals. Cross product of (b-a) x (c-a) gives the face normal
+//     assuming CCW-from-outside winding (the Maya/Houdini/Blender default
+//     that exporters typically produce).
+static const float kViewportLightDirEye[3] = { 0.4082482f, 0.5715476f, 0.7113249f };
+static const float kViewportAmbient = 0.15f;
+
+static float
+ViewportLitFromEyeNormal(const float* nEye)
+{
+    float nn[3];
+    Normalize(nEye, nn);
+    float nl = Dot(nn, kViewportLightDirEye);
+    if (nl < 0.0f) nl = 0.0f;
+    return kViewportAmbient + nl * (1.0f - kViewportAmbient);
+}
+
+static float
+ViewportLitFromVertexNormals(const float* n0, const float* n1, const float* n2,
+                             const float mv[16])
+{
+    const float nAvg[3] = {
+        (n0[0] + n1[0] + n2[0]) * (1.0f / 3.0f),
+        (n0[1] + n1[1] + n2[1]) * (1.0f / 3.0f),
+        (n0[2] + n1[2] + n2[2]) * (1.0f / 3.0f),
+    };
+    const float nEye[3] = {
+        mv[0] * nAvg[0] + mv[4] * nAvg[1] + mv[8]  * nAvg[2],
+        mv[1] * nAvg[0] + mv[5] * nAvg[1] + mv[9]  * nAvg[2],
+        mv[2] * nAvg[0] + mv[6] * nAvg[1] + mv[10] * nAvg[2],
+    };
+    return ViewportLitFromEyeNormal(nEye);
+}
+
+static float
+ViewportFaceLitFactor(const float* a, const float* b, const float* c, const float mv[16])
+{
+    const float e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+    const float e2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+    float nLocal[3];
+    Cross(e1, e2, nLocal);
+    const float nEye[3] = {
+        mv[0] * nLocal[0] + mv[4] * nLocal[1] + mv[8]  * nLocal[2],
+        mv[1] * nLocal[0] + mv[5] * nLocal[1] + mv[9]  * nLocal[2],
+        mv[2] * nLocal[0] + mv[6] * nLocal[1] + mv[10] * nLocal[2],
+    };
+    return ViewportLitFromEyeNormal(nEye);
+}
+
 static void Frustum(float left, float right, float bottom, float top, float znear, float zfar, float* m16)
 {
    float temp, temp2, temp3, temp4;
@@ -2148,7 +2207,7 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
     const ShadingMode mode = _imp->shadingMode;
     const int nv = (int)mesh->numVertices;
 
-    // ----- Shaded fill (Shaded / Shaded+Wire) -----
+    // ----- Shaded fill (Shaded / Shaded+Wire / Flat) -----
     // Fan-triangulate the polygon-soup mesh via faceCounts. If faceCounts is
     // empty, treat faceIndices as already-triangulated (GL_TRIANGLES every 3).
     if (mode != eWireframe) {
@@ -2156,8 +2215,24 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
             glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(1.0f, 1.0f);
         }
-        glColor3f(0.45f, 0.45f, 0.45f);
+        const bool lit = (mode == eShaded || mode == eShadedWire);
+        const float baseGrey = 0.45f;
+        float mvForLit[16];
+        if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
+        if (!lit) glColor3f(baseGrey, baseGrey, baseGrey);
         glBegin(GL_TRIANGLES);
+        auto emitTri = [&](int v0, int v1, int v2) {
+            const float* p0 = &mesh->vertices[v0*3];
+            const float* p1 = &mesh->vertices[v1*3];
+            const float* p2 = &mesh->vertices[v2*3];
+            if (lit) {
+                float f = ViewportFaceLitFactor(p0, p1, p2, mvForLit);
+                glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
+            }
+            glVertex3f(p0[0], p0[1], p0[2]);
+            glVertex3f(p1[0], p1[1], p1[2]);
+            glVertex3f(p2[0], p2[1], p2[2]);
+        };
         if (!mesh->faceCounts.empty()) {
             size_t off = 0;
             for (size_t f = 0; f < mesh->faceCounts.size(); ++f) {
@@ -2171,9 +2246,7 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
                     const int v1 = mesh->faceIndices[off + i];
                     const int v2 = mesh->faceIndices[off + i + 1];
                     if (v0 >= 0 && v0 < nv && v1 >= 0 && v1 < nv && v2 >= 0 && v2 < nv) {
-                        glVertex3f(mesh->vertices[v0*3], mesh->vertices[v0*3+1], mesh->vertices[v0*3+2]);
-                        glVertex3f(mesh->vertices[v1*3], mesh->vertices[v1*3+1], mesh->vertices[v1*3+2]);
-                        glVertex3f(mesh->vertices[v2*3], mesh->vertices[v2*3+1], mesh->vertices[v2*3+2]);
+                        emitTri(v0, v1, v2);
                     }
                 }
                 off += (size_t)c;
@@ -2185,9 +2258,7 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
                 const int v1 = mesh->faceIndices[i + 1];
                 const int v2 = mesh->faceIndices[i + 2];
                 if (v0 >= 0 && v0 < nv && v1 >= 0 && v1 < nv && v2 >= 0 && v2 < nv) {
-                    glVertex3f(mesh->vertices[v0*3], mesh->vertices[v0*3+1], mesh->vertices[v0*3+2]);
-                    glVertex3f(mesh->vertices[v1*3], mesh->vertices[v1*3+1], mesh->vertices[v1*3+2]);
-                    glVertex3f(mesh->vertices[v2*3], mesh->vertices[v2*3+1], mesh->vertices[v2*3+2]);
+                    emitTri(v0, v1, v2);
                 }
             }
         }
@@ -2198,7 +2269,7 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
     }
 
     // ----- Wireframe (Wireframe / Shaded+Wire) -----
-    if (mode != eShaded && !mesh->edgeIndices.empty()) {
+    if ((mode == eWireframe || mode == eShadedWire) && !mesh->edgeIndices.empty()) {
         glColor3f(0.7f, 0.7f, 0.7f);
         glLineWidth(1.0f);
         glBegin(GL_LINES);
@@ -2251,6 +2322,16 @@ DevViewport3D::drawCardNode(const SceneNode& sn) const
             glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(1.0f, 1.0f);
         }
+        // Card is a flat XY plane with normal +Z in local space. Use that
+        // directly instead of a cross product so winding doesn't matter.
+        const bool lit = (mode == eShaded || mode == eShadedWire);
+        float litF = 1.0f;
+        if (lit) {
+            float mvForLit[16];
+            glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
+            const float n0[3] = { 0.0f, 0.0f, 1.0f };
+            litF = ViewportLitFromVertexNormals(n0, n0, n0, mvForLit);
+        }
         if (hasTex) {
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
@@ -2263,7 +2344,7 @@ DevViewport3D::drawCardNode(const SceneNode& sn) const
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+            glColor4f(litF, litF, litF, 0.85f);
 
             glBegin(GL_QUADS);
             glTexCoord2f(0, 0); glVertex3f(-halfW, -halfH, 0);
@@ -2276,7 +2357,7 @@ DevViewport3D::drawCardNode(const SceneNode& sn) const
             glDisable(GL_BLEND);
             glDeleteTextures(1, &glTex);
         } else {
-            glColor3f(0.45f, 0.45f, 0.45f);
+            glColor3f(0.45f * litF, 0.45f * litF, 0.45f * litF);
             glBegin(GL_QUADS);
             glVertex3f(-halfW, -halfH, 0);
             glVertex3f( halfW, -halfH, 0);
@@ -2289,7 +2370,7 @@ DevViewport3D::drawCardNode(const SceneNode& sn) const
         }
     }
 
-    if (mode != eShaded) {
+    if ((mode == eWireframe || mode == eShadedWire)) {
         bool selected = (sn.name == _imp->selectedNodeName);
         glColor3f(selected ? 1.0f : 0.2f, selected ? 1.0f : 0.8f, selected ? 0.0f : 0.2f);
         glLineWidth(2.0f);
@@ -2423,6 +2504,18 @@ DevViewport3D::drawSphereNode(const SceneNode& sn) const
             glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(1.0f, 1.0f);
         }
+        const bool lit = (mode == eShaded || mode == eShadedWire);
+        float mvForLit[16];
+        if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
+        // Sphere carries per-vertex normals (sphereVerts[i].nx/ny/nz) so use
+        // those directly — winding-agnostic, always points outward.
+        auto litForTri = [&](int i0, int i1, int i2) -> float {
+            if (!lit) return 1.0f;
+            const float n0[3] = { sphereVerts[i0].nx, sphereVerts[i0].ny, sphereVerts[i0].nz };
+            const float n1[3] = { sphereVerts[i1].nx, sphereVerts[i1].ny, sphereVerts[i1].nz };
+            const float n2[3] = { sphereVerts[i2].nx, sphereVerts[i2].ny, sphereVerts[i2].nz };
+            return ViewportLitFromVertexNormals(n0, n1, n2, mvForLit);
+        };
         if (hasTex) {
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
@@ -2437,16 +2530,24 @@ DevViewport3D::drawSphereNode(const SceneNode& sn) const
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+            if (!lit) glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
 
             glBegin(GL_TRIANGLES);
             for (int t = 0; t < numTris; ++t) {
+                const int i0 = triIndices[t * 3 + 0];
+                const int i1 = triIndices[t * 3 + 1];
+                const int i2 = triIndices[t * 3 + 2];
+                if (i0 < 0 || i0 >= (int)sphereVerts.size() ||
+                    i1 < 0 || i1 >= (int)sphereVerts.size() ||
+                    i2 < 0 || i2 >= (int)sphereVerts.size()) continue;
+                if (lit) {
+                    float f = litForTri(i0, i1, i2);
+                    glColor4f(f, f, f, 0.85f);
+                }
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    if (idx >= 0 && idx < (int)sphereVerts.size()) {
-                        glTexCoord2f(sphereVerts[idx].u, sphereVerts[idx].v);
-                        glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
-                    }
+                    glTexCoord2f(sphereVerts[idx].u, sphereVerts[idx].v);
+                    glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
                 }
             }
             glEnd();
@@ -2456,14 +2557,23 @@ DevViewport3D::drawSphereNode(const SceneNode& sn) const
             glDeleteTextures(1, &glTex);
         } else {
             // Grey fallback (no texture present)
-            glColor3f(0.45f, 0.45f, 0.45f);
+            const float baseGrey = 0.45f;
+            if (!lit) glColor3f(baseGrey, baseGrey, baseGrey);
             glBegin(GL_TRIANGLES);
             for (int t = 0; t < numTris; ++t) {
+                const int i0 = triIndices[t * 3 + 0];
+                const int i1 = triIndices[t * 3 + 1];
+                const int i2 = triIndices[t * 3 + 2];
+                if (i0 < 0 || i0 >= (int)sphereVerts.size() ||
+                    i1 < 0 || i1 >= (int)sphereVerts.size() ||
+                    i2 < 0 || i2 >= (int)sphereVerts.size()) continue;
+                if (lit) {
+                    float f = litForTri(i0, i1, i2);
+                    glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
+                }
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    if (idx >= 0 && idx < (int)sphereVerts.size()) {
-                        glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
-                    }
+                    glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
                 }
             }
             glEnd();
@@ -2474,7 +2584,7 @@ DevViewport3D::drawSphereNode(const SceneNode& sn) const
     }
 
     // ----- Wireframe -----
-    if (mode != eShaded) {
+    if ((mode == eWireframe || mode == eShadedWire)) {
         bool selected = (sn.name == _imp->selectedNodeName);
         if (selected) {
             glColor3f(1.0f, 1.0f, 0.0f);
@@ -2544,6 +2654,17 @@ DevViewport3D::drawCubeNode(const SceneNode& sn) const
             glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(1.0f, 1.0f);
         }
+        const bool lit = (mode == eShaded || mode == eShadedWire);
+        float mvForLit[16];
+        if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
+        // Cube carries per-vertex normals (cubeVerts[i].nx/ny/nz).
+        auto litForTri = [&](int i0, int i1, int i2) -> float {
+            if (!lit) return 1.0f;
+            const float n0[3] = { cubeVerts[i0].nx, cubeVerts[i0].ny, cubeVerts[i0].nz };
+            const float n1[3] = { cubeVerts[i1].nx, cubeVerts[i1].ny, cubeVerts[i1].nz };
+            const float n2[3] = { cubeVerts[i2].nx, cubeVerts[i2].ny, cubeVerts[i2].nz };
+            return ViewportLitFromVertexNormals(n0, n1, n2, mvForLit);
+        };
         if (hasTex) {
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
@@ -2556,16 +2677,24 @@ DevViewport3D::drawCubeNode(const SceneNode& sn) const
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+            if (!lit) glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
 
             glBegin(GL_TRIANGLES);
             for (int t = 0; t < numTris; ++t) {
+                const int i0 = triIndices[t * 3 + 0];
+                const int i1 = triIndices[t * 3 + 1];
+                const int i2 = triIndices[t * 3 + 2];
+                if (i0 < 0 || i0 >= (int)cubeVerts.size() ||
+                    i1 < 0 || i1 >= (int)cubeVerts.size() ||
+                    i2 < 0 || i2 >= (int)cubeVerts.size()) continue;
+                if (lit) {
+                    float f = litForTri(i0, i1, i2);
+                    glColor4f(f, f, f, 0.85f);
+                }
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    if (idx >= 0 && idx < (int)cubeVerts.size()) {
-                        glTexCoord2f(cubeVerts[idx].u, cubeVerts[idx].v);
-                        glVertex3f(cubeVerts[idx].x, cubeVerts[idx].y, cubeVerts[idx].z);
-                    }
+                    glTexCoord2f(cubeVerts[idx].u, cubeVerts[idx].v);
+                    glVertex3f(cubeVerts[idx].x, cubeVerts[idx].y, cubeVerts[idx].z);
                 }
             }
             glEnd();
@@ -2574,14 +2703,23 @@ DevViewport3D::drawCubeNode(const SceneNode& sn) const
             glDisable(GL_BLEND);
             glDeleteTextures(1, &glTex);
         } else {
-            glColor3f(0.45f, 0.45f, 0.45f);
+            const float baseGrey = 0.45f;
+            if (!lit) glColor3f(baseGrey, baseGrey, baseGrey);
             glBegin(GL_TRIANGLES);
             for (int t = 0; t < numTris; ++t) {
+                const int i0 = triIndices[t * 3 + 0];
+                const int i1 = triIndices[t * 3 + 1];
+                const int i2 = triIndices[t * 3 + 2];
+                if (i0 < 0 || i0 >= (int)cubeVerts.size() ||
+                    i1 < 0 || i1 >= (int)cubeVerts.size() ||
+                    i2 < 0 || i2 >= (int)cubeVerts.size()) continue;
+                if (lit) {
+                    float f = litForTri(i0, i1, i2);
+                    glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
+                }
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    if (idx >= 0 && idx < (int)cubeVerts.size()) {
-                        glVertex3f(cubeVerts[idx].x, cubeVerts[idx].y, cubeVerts[idx].z);
-                    }
+                    glVertex3f(cubeVerts[idx].x, cubeVerts[idx].y, cubeVerts[idx].z);
                 }
             }
             glEnd();
@@ -2591,7 +2729,7 @@ DevViewport3D::drawCubeNode(const SceneNode& sn) const
         }
     }
 
-    if (mode != eShaded) {
+    if ((mode == eWireframe || mode == eShadedWire)) {
         bool selected = (sn.name == _imp->selectedNodeName);
         glColor3f(selected ? 1.0f : 0.5f, selected ? 1.0f : 0.5f, selected ? 0.0f : 0.8f);
         glLineWidth(selected ? 2.0f : 1.0f);
@@ -2658,16 +2796,30 @@ DevViewport3D::drawCylinderNode(const SceneNode& sn) const
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+            const bool lit = (mode == eShaded || mode == eShadedWire);
+            float mvForLit[16];
+            if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
+            if (!lit) glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
 
             glBegin(GL_TRIANGLES);
             for (int t = 0; t < numTris; ++t) {
+                const int i0 = triIndices[t * 3 + 0];
+                const int i1 = triIndices[t * 3 + 1];
+                const int i2 = triIndices[t * 3 + 2];
+                if (i0 < 0 || i0 >= (int)cylVerts.size() ||
+                    i1 < 0 || i1 >= (int)cylVerts.size() ||
+                    i2 < 0 || i2 >= (int)cylVerts.size()) continue;
+                if (lit) {
+                    const float n0[3] = { cylVerts[i0].nx, cylVerts[i0].ny, cylVerts[i0].nz };
+                    const float n1[3] = { cylVerts[i1].nx, cylVerts[i1].ny, cylVerts[i1].nz };
+                    const float n2[3] = { cylVerts[i2].nx, cylVerts[i2].ny, cylVerts[i2].nz };
+                    float f = ViewportLitFromVertexNormals(n0, n1, n2, mvForLit);
+                    glColor4f(f, f, f, 0.85f);
+                }
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    if (idx >= 0 && idx < (int)cylVerts.size()) {
-                        glTexCoord2f(cylVerts[idx].u, cylVerts[idx].v);
-                        glVertex3f(cylVerts[idx].x, cylVerts[idx].y, cylVerts[idx].z);
-                    }
+                    glTexCoord2f(cylVerts[idx].u, cylVerts[idx].v);
+                    glVertex3f(cylVerts[idx].x, cylVerts[idx].y, cylVerts[idx].z);
                 }
             }
             glEnd();
@@ -2676,14 +2828,29 @@ DevViewport3D::drawCylinderNode(const SceneNode& sn) const
             glDisable(GL_BLEND);
             glDeleteTextures(1, &glTex);
         } else {
-            glColor3f(0.45f, 0.45f, 0.45f);
+            const bool lit = (mode == eShaded || mode == eShadedWire);
+            float mvForLit[16];
+            if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
+            const float baseGrey = 0.45f;
+            if (!lit) glColor3f(baseGrey, baseGrey, baseGrey);
             glBegin(GL_TRIANGLES);
             for (int t = 0; t < numTris; ++t) {
+                const int i0 = triIndices[t * 3 + 0];
+                const int i1 = triIndices[t * 3 + 1];
+                const int i2 = triIndices[t * 3 + 2];
+                if (i0 < 0 || i0 >= (int)cylVerts.size() ||
+                    i1 < 0 || i1 >= (int)cylVerts.size() ||
+                    i2 < 0 || i2 >= (int)cylVerts.size()) continue;
+                if (lit) {
+                    const float n0[3] = { cylVerts[i0].nx, cylVerts[i0].ny, cylVerts[i0].nz };
+                    const float n1[3] = { cylVerts[i1].nx, cylVerts[i1].ny, cylVerts[i1].nz };
+                    const float n2[3] = { cylVerts[i2].nx, cylVerts[i2].ny, cylVerts[i2].nz };
+                    float f = ViewportLitFromVertexNormals(n0, n1, n2, mvForLit);
+                    glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
+                }
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    if (idx >= 0 && idx < (int)cylVerts.size()) {
-                        glVertex3f(cylVerts[idx].x, cylVerts[idx].y, cylVerts[idx].z);
-                    }
+                    glVertex3f(cylVerts[idx].x, cylVerts[idx].y, cylVerts[idx].z);
                 }
             }
             glEnd();
@@ -2693,7 +2860,7 @@ DevViewport3D::drawCylinderNode(const SceneNode& sn) const
         }
     }
 
-    if (mode != eShaded) {
+    if ((mode == eWireframe || mode == eShadedWire)) {
         bool selected = (sn.name == _imp->selectedNodeName);
         glColor3f(selected ? 1.0f : 0.5f, selected ? 1.0f : 0.8f, selected ? 0.0f : 0.5f);
         glLineWidth(selected ? 2.0f : 1.0f);

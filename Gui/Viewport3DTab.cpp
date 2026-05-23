@@ -173,11 +173,12 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
         _shadingDropdown->setFixedHeight(22);
         _shadingDropdown->setPopupMode(QToolButton::InstantPopup);
         QMenu* shMenu = new QMenu(_shadingDropdown);
-        const char* labels[3]  = { "Wireframe", "Shaded", "Shaded+Wire" };
-        const int   modes[3]   = { (int)DevViewport3D::eWireframe,
+        const char* labels[4]  = { "Wireframe", "Flat", "Shaded", "Shaded+Wire" };
+        const int   modes[4]   = { (int)DevViewport3D::eWireframe,
+                                   (int)DevViewport3D::eFlat,
                                    (int)DevViewport3D::eShaded,
                                    (int)DevViewport3D::eShadedWire };
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
             QAction* a = shMenu->addAction(QString::fromUtf8(labels[i]));
             a->setData(modes[i]);
             connect(a, SIGNAL(triggered()), this, SLOT(onShadingModeSelected()));
@@ -380,6 +381,7 @@ Viewport3DTab::onShadingModeSelected()
     QString label;
     switch (mode) {
         case DevViewport3D::eWireframe:   label = QString::fromUtf8("Wireframe"); break;
+        case DevViewport3D::eFlat:        label = QString::fromUtf8("Flat"); break;
         case DevViewport3D::eShaded:      label = QString::fromUtf8("Shaded"); break;
         case DevViewport3D::eShadedWire:  label = QString::fromUtf8("Shaded+Wire"); break;
     }

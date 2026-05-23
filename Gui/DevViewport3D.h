@@ -108,14 +108,18 @@ public:
 
     /** Viewport shading style. Wired from Viewport3DTab's Shading dropdown.
      *  - eWireframe   wires only, textures suppressed (clean schematic).
-     *  - eShaded      solid fill (textured if shape carries a texture, else
-     *                 flat grey), no wireframe.
+     *  - eShaded      solid fill with per-face N.L diffuse lighting (light
+     *                 from top-right-forward, ambient 0.15). Faceted look —
+     *                 you can see individual polygons.
      *  - eShadedWire  shaded fill plus wireframe overlay (Maya default).
+     *  - eFlat        solid fill, no lighting (the legacy "Shaded" behavior —
+     *                 uniform colour per surface).
      */
     enum ShadingMode {
         eWireframe = 0,
         eShaded,
-        eShadedWire
+        eShadedWire,
+        eFlat
     };
     void setShadingMode(ShadingMode mode);
     ShadingMode getShadingMode() const;
