@@ -84,16 +84,8 @@ struct ScanlineRenderPrivate
     KnobIntWPtr motionSamples;      // number of sub-frame samples (1 = off)
     KnobDoubleWPtr motionShutter;   // shutter open fraction (0-1, default 0.5)
 
-    // Phase 3 experimental — GLSL/MRT pipeline. Default OFF until the GLSL
-    // beauty render path lands (Phase 3C). When ON, the render() method
-    // uses the GLSL/MRT path instead of fixed-function GL. The two paths
-    // co-exist during the migration; Phase 3E retires fixed-function.
-    KnobBoolWPtr useGlslPipeline;
-
-    // Phase 3D — per-pixel AOV outputs. Each AOV is produced only when its
-    // knob is on AND (for the MRT ones) the GLSL pipeline is on. Depth and
-    // World Position are the exception: they come from the existing depth
-    // attachment + inverse(MVP) and work under both fixed-function and GLSL.
+    // Phase 3D/3E — per-pixel AOV outputs. The GLSL/MRT pipeline is mandatory
+    // since Phase 3E; AOVs only depend on their own knobs being on.
     KnobBoolWPtr outputDepth;     // depth.Z plane (linear camera-space distance)
     KnobBoolWPtr outputPosition;  // world_position.xyz plane (reconstructed from depth)
     KnobBoolWPtr outputNormal;
@@ -192,22 +184,6 @@ ScanlineRender::initializeKnobs()
         outPage->addKnob(k); _imp->syncToProject = k;
     }
 
-    // Phase 3 — GLSL/MRT pipeline toggle. Off by default while migration is
-    // in progress; the GLSL beauty path lands in Phase 3C and the MRT AOVs in
-    // Phase 3D. The fixed-function path stays the default until Phase 3E
-    // retires it. When ON: scene draws via GLSL 3.3 core shaders, MRT enables
-    // per-fragment AOV outputs (Normal / UV / Pref / Velocity).
-    {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Use GLSL pipeline"));
-        k->setName("useGlslPipeline");
-        k->setDefaultValue(false);
-        k->setHintToolTip(tr("EXPERIMENTAL (Phase 3 migration). Toggle the GLSL/MRT render path. "
-                              "When OFF, uses the legacy fixed-function GL pipeline. "
-                              "When ON, scene draws via GLSL 3.3 core shaders — required for "
-                              "the Normal / UV / Pref / Velocity AOVs added in Phase 3D."));
-        outPage->addKnob(k); _imp->useGlslPipeline = k;
-    }
-
     // Particle rendering knobs
     KnobPagePtr partPage = AppManager::createKnob<KnobPage>(this, tr("Particles"));
     {
@@ -244,7 +220,12 @@ ScanlineRender::initializeKnobs()
         k->setName("particleMotionBlur"); k->setDefaultValue(0.0);
         k->setMinimum(0.0); k->setMaximum(5.0);
         k->setDisplayMinimum(0.0); k->setDisplayMaximum(2.0);
-        k->setHintToolTip(tr("Fast velocity-stretch motion blur (cheat). Stretches particles/instances along velocity. Use Motion Samples for physically-accurate blur."));
+        k->setHintToolTip(tr("Fast velocity-stretch motion blur (cheat). Stretches particles/instances along velocity. "
+                              "This is a beauty-only fake — only Velocity and Pref AOVs are meaningful when stretch is on; "
+                              "Normal/UV are flat (no real surface), and Depth/World Position skip particles entirely "
+                              "because the stretched fans are translucent (no depth write). "
+                              "For motion-blurred AOVs use Motion Samples > 1, which renders at sub-frame times and "
+                              "averages every AOV through the integration."));
         partPage->addKnob(k); _imp->particleMotionBlur = k;
     }
     {
@@ -273,45 +254,42 @@ ScanlineRender::initializeKnobs()
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Depth"));
         k->setName("outputDepth"); k->setDefaultValue(false);
         k->setHintToolTip(tr("Per-pixel linear camera-space distance (depth.Z). "
-                              "Background pixels emit the camera Far value. Works "
-                              "under both fixed-function and GLSL pipelines."));
+                              "Background pixels emit the camera Far value."));
         aovPage->addKnob(k); _imp->outputDepth = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("World Position"));
         k->setName("outputPosition"); k->setDefaultValue(false);
         k->setHintToolTip(tr("Per-pixel world-space surface position (world_position.x/y/z), "
-                              "reconstructed from depth via inverse(proj * view). Background "
-                              "pixels emit (0,0,0). Works under both fixed-function and GLSL."));
+                              "reconstructed from depth via inverse(proj * view). "
+                              "Background pixels emit (0,0,0)."));
         aovPage->addKnob(k); _imp->outputPosition = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Normal"));
         k->setName("outputNormal"); k->setDefaultValue(false);
-        k->setHintToolTip(tr("Per-pixel surface normal in world space (Normal.x/y/z). "
-                              "Requires the GLSL pipeline (Output page)."));
+        k->setHintToolTip(tr("Per-pixel surface normal in world space (Normal.x/y/z)."));
         aovPage->addKnob(k); _imp->outputNormal = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("UV"));
         k->setName("outputUV"); k->setDefaultValue(false);
-        k->setHintToolTip(tr("Per-pixel texture coordinate (uv.u/v/w). "
-                              "Requires the GLSL pipeline (Output page)."));
+        k->setHintToolTip(tr("Per-pixel texture coordinate (uv.u/v/w)."));
         aovPage->addKnob(k); _imp->outputUV = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Pref"));
         k->setName("outputPref"); k->setDefaultValue(false);
         k->setHintToolTip(tr("Per-pixel reference position in object space (Pref.x/y/z). "
-                              "Useful as a texture-projection key. Requires the GLSL pipeline."));
+                              "Useful as a texture-projection key."));
         aovPage->addKnob(k); _imp->outputPref = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Velocity"));
         k->setName("outputVelocity"); k->setDefaultValue(false);
         k->setHintToolTip(tr("Per-pixel screen-space motion vector in pixels per frame "
-                              "(Velocity.x/y/z). Z is reserved (0). Requires the GLSL "
-                              "pipeline. Re-extracts geometry and camera at time-1."));
+                              "(Velocity.x/y/z). Z is reserved (0). Re-extracts geometry "
+                              "and camera at time-1."));
         aovPage->addKnob(k); _imp->outputVelocity = k;
     }
 }
@@ -464,15 +442,14 @@ mat4Apply(const float m[16], float x, float y, float z, float w,
     *ow = m[3]*x + m[7]*y + m[11]*z + m[15]*w;
 }
 
-// ==================== GLSL / MRT helpers (Phase 3B scaffolding) ====================
+// ==================== GLSL / MRT helpers ====================
 //
-// Inert by default — only invoked when the "Use GLSL pipeline" knob on
-// ScanlineRender is enabled. Phase 3C will start using them for the beauty
-// pass; Phase 3D will add MRT AOVs (Normal / UV / Pref / Velocity) via
-// glslSetupMrtFbo's multi-attachment support.
+// Shared utilities for building shader programs and (optionally) MRT FBOs.
+// The mesh and particle render paths both use these; Phase 3E retired the
+// fixed-function path so they're always invoked.
 //
-// Once Phase 3 is complete and fixed-function is retired, these can migrate
-// to a dedicated `GlslRenderHelpers.{h,cpp}` for reuse by ParticleRender,
+// Once these stabilize and no longer need Scene3D-specific tweaks, they can
+// move to a dedicated `GlslRenderHelpers.{h,cpp}` for reuse by ParticleRender,
 // Project3D, and UVProject.
 
 namespace {
@@ -785,6 +762,146 @@ static const char* kBeautyFrag =
     "        out_velocity = vec4(deltaPx, 0.0, 1.0);\n"
     "    } else { out_velocity = vec4(0.0); }\n"
     "}\n";
+
+// ==================== Particle shaders (Phase 3E) ====================
+//
+// One shader pair drives every particle draw call (Point, Disc, Sphere, Sprite,
+// and motion-blur streak lines). Particles only ever write the beauty plane —
+// AOVs are gated to GL_NONE for the particle pass via glDrawBuffers, so no AOV
+// outputs in the fragment shader. Three uniforms:
+//   u_projView   — projection * view, same as the mesh shader
+//   u_pointMode  — 0 for lines / quads, 1 for round point sprites (discards
+//                  fragments outside the unit circle using gl_PointCoord)
+//   u_hasTexture — 0 for solid color (Point/Disc/Sphere/streak), 1 for sprites
+//                  (Sprite mode samples u_tex modulated by per-vertex color)
+
+static const char* kParticleVert =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 in_pos;\n"
+    "layout(location = 1) in vec4 in_color;\n"
+    "layout(location = 2) in vec3 in_normal;\n"
+    "layout(location = 3) in vec2 in_uv;\n"
+    "layout(location = 4) in vec3 in_pref;\n"
+    "layout(location = 5) in vec3 in_velocity;   // world-space per-frame displacement\n"
+    "uniform mat4 u_projView;\n"
+    "uniform mat4 u_prevProjView;                // camera at time-1 (for velocity AOV)\n"
+    "out vec4 v_color;\n"
+    "out vec3 v_normal;\n"
+    "out vec2 v_uv;\n"
+    "out vec3 v_pref;\n"
+    "out vec4 v_currClip;\n"
+    "out vec4 v_prevClip;\n"
+    "void main() {\n"
+    "    gl_Position = u_projView * vec4(in_pos, 1.0);\n"
+    "    v_color     = in_color;\n"
+    "    v_normal    = in_normal;\n"
+    "    v_uv        = in_uv;\n"
+    "    v_pref      = in_pref;\n"
+    "    v_currClip  = gl_Position;\n"
+    // For the velocity AOV: prev position is the particle's current position
+    // minus its per-frame displacement vector. Sufficient under the assumption
+    // that per-particle motion is linear between frames (no curved paths).
+    "    v_prevClip  = u_prevProjView * vec4(in_pos - in_velocity, 1.0);\n"
+    "}\n";
+
+// Particle fragment shader — beauty + MRT AOVs. Same pattern as the mesh
+// beauty shader (kBeautyFrag): per-AOV uniform gates so unwanted attachments
+// still need to be written to satisfy MRT, but the caller controls which ones
+// actually carry data via u_writeXxx.
+static const char* kParticleFrag =
+    "#version 330 core\n"
+    "in vec4 v_color;\n"
+    "in vec3 v_normal;\n"
+    "in vec2 v_uv;\n"
+    "in vec3 v_pref;\n"
+    "in vec4 v_currClip;\n"
+    "in vec4 v_prevClip;\n"
+    "uniform int  u_writeNormal;\n"
+    "uniform int  u_writeUV;\n"
+    "uniform int  u_writePref;\n"
+    "uniform int  u_writeVelocity;\n"
+    "uniform vec2 u_resolution;\n"
+    "layout(location = 0) out vec4 FragColor;\n"
+    "layout(location = 1) out vec4 out_normal;\n"
+    "layout(location = 2) out vec4 out_uv;\n"
+    "layout(location = 3) out vec4 out_pref;\n"
+    "layout(location = 4) out vec4 out_velocity;\n"
+    "void main() {\n"
+    "    FragColor = v_color;\n"
+    "    if (u_writeNormal == 1) {\n"
+    "        vec3 n = v_normal;\n"
+    "        float L = length(n);\n"
+    "        if (L > 1e-6) n = n / L;\n"
+    "        out_normal = vec4(n, 1.0);\n"
+    "    } else { out_normal = vec4(0.0); }\n"
+    "    if (u_writeUV == 1) {\n"
+    "        out_uv = vec4(v_uv, 0.0, 1.0);\n"
+    "    } else { out_uv = vec4(0.0); }\n"
+    "    if (u_writePref == 1) {\n"
+    "        out_pref = vec4(v_pref, 1.0);\n"
+    "    } else { out_pref = vec4(0.0); }\n"
+    "    if (u_writeVelocity == 1) {\n"
+    "        vec2 currNdc = v_currClip.xy / v_currClip.w;\n"
+    "        vec2 prevNdc = v_prevClip.xy / v_prevClip.w;\n"
+    "        vec2 dPix    = (currNdc - prevNdc) * 0.5 * u_resolution;\n"
+    "        out_velocity = vec4(dPix.x, dPix.y, 0.0, 1.0);\n"
+    "    } else { out_velocity = vec4(0.0); }\n"
+    "}\n";
+
+// Per-particle vertex. Position + color drive beauty; the rest drive the AOV
+// MRT outputs (Phase 3E.5). Default-zeroed so existing 7-field brace init still
+// compiles — AOV fields are then set explicitly by each per-mode loop.
+struct ParticleVertex {
+    float x, y, z;
+    float r, g, b, a;
+    float nx = 0, ny = 0, nz = 0;   // world-space surface normal
+    float u = 0, v = 0;             // texture coordinate (natural where defined, else 0)
+    float prefX = 0, prefY = 0, prefZ = 0;  // reference position (per-particle world pos)
+    float velX = 0, velY = 0, velZ = 0;     // world-space per-frame displacement
+};
+
+// Render either GL_POINTS or GL_LINES of particles via the GLSL pipeline.
+// `verts` is interleaved {pos.xyz, color.rgba} per vertex. The caller sets
+// up program/uniforms/blend/depth/draw-buffers before calling and tears
+// them down after.
+static void
+drawParticlePrimitives(GLenum primitive, const std::vector<ParticleVertex>& verts)
+{
+    if (verts.empty()) return;
+    GLuint vao = 0, vbo = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)(verts.size() * sizeof(ParticleVertex)),
+                 verts.data(), GL_STREAM_DRAW);
+    // location 0..5: pos, color, normal, uv, pref, velocity
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ParticleVertex), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(ParticleVertex),
+                          (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(ParticleVertex),
+                          (void*)(7 * sizeof(float)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(ParticleVertex),
+                          (void*)(10 * sizeof(float)));
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(ParticleVertex),
+                          (void*)(12 * sizeof(float)));
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(ParticleVertex),
+                          (void*)(15 * sizeof(float)));
+
+    glDrawArrays(primitive, 0, (GLsizei)verts.size());
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+}
 
 // ==================== Volume ray marching shaders ====================
 
@@ -1173,12 +1290,11 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
     }
 }
 
-// Phase 3C — GLSL beauty render path. Parallel to renderGeoObject (below)
-// but uses modern GL 3.3 core: VAO + interleaved VBO + IBO + uniform-driven
-// MVP, sampled via the kBeautyVert/kBeautyFrag shader pair. Caller must have
-// glUseProgram'd `program` before invoking. `prevProjViewMatrix` is the
-// camera (proj * view) at the previous frame — used for Velocity AOV in
-// Phase 3D; pass current projViewMatrix when velocity isn't needed.
+// GLSL beauty render path. Modern GL 3.3 core: VAO + interleaved VBO + IBO +
+// uniform-driven MVP, sampled via the kBeautyVert/kBeautyFrag shader pair.
+// Caller must have glUseProgram'd `program` before invoking. `prevProjViewMatrix`
+// is the camera (proj * view) at the previous frame — used for the Velocity
+// AOV; pass current projViewMatrix when velocity isn't needed.
 // `writeNormal/UV/Pref/Velocity` request AOV outputs at MRT attachments 1-4
 // (Phase 3D only — caller must have bound an MRT FBO with those slots).
 static void
@@ -1344,95 +1460,6 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
     glDeleteBuffers(1, &ibo);
     glDeleteVertexArrays(1, &vao);
     if (srcTex) glDeleteTextures(1, &srcTex);
-}
-
-// Helper: render one GeoData object (must be called within active GL context with camera set up)
-static void
-renderGeoObject(const GeoData& geo)
-{
-    int numVerts = (int)(geo.verts.size() / 3);
-    int numTris = (int)(geo.triIndices.size() / 3);
-    if (numVerts == 0 || numTris == 0) return;
-
-    // Upload texture if available
-    GLuint srcTex = 0;
-    bool hasTexture = false;
-
-    if (geo.texImg) {
-        RectI texBounds = geo.texImg->getBounds();
-        int texW = texBounds.width();
-        int texH = texBounds.height();
-        if (texW > 0 && texH > 0) {
-            glGenTextures(1, &srcTex);
-            glBindTexture(GL_TEXTURE_2D, srcTex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-            std::vector<float> texData(texW * texH * 4, 0.0f);
-            {
-                Image::ReadAccess ra(geo.texImg.get());
-                for (int y = texBounds.y1; y < texBounds.y2; ++y) {
-                    for (int x = texBounds.x1; x < texBounds.x2; ++x) {
-                        const float* pix = (const float*)ra.pixelAt(x, y);
-                        if (pix) {
-                            int idx = ((y - texBounds.y1) * texW + (x - texBounds.x1)) * 4;
-                            texData[idx + 0] = pix[0];
-                            texData[idx + 1] = pix[1];
-                            texData[idx + 2] = pix[2];
-                            texData[idx + 3] = (geo.texImg->getComponents().getNumComponents() >= 4) ? pix[3] : 1.0f;
-                        }
-                    }
-                }
-            }
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F_ARB, texW, texH, 0, GL_RGBA, GL_FLOAT, texData.data());
-            hasTexture = true;
-        }
-    }
-
-    if (hasTexture) glEnable(GL_TEXTURE_2D);
-
-    // STW path = UVProject in Perspective + Generate Perspective mode. When
-    // active, we emit (s, t, 0, w) so GL does the perspective divide at the
-    // fragment. Clamp-to-border with transparent border so out-of-frustum
-    // samples come out as zero (matches a Crop-style out-of-frame behavior).
-    const bool useSTW = hasTexture && !geo.stw.empty()
-                        && (int)geo.stw.size() >= numVerts * 3;
-    if (useSTW) {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-        const float borderColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
-    }
-
-    glPushMatrix();
-    glMultMatrixf(geo.localMatrix);
-    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-
-    glBegin(GL_TRIANGLES);
-    for (int t = 0; t < numTris; ++t) {
-        for (int vi = 0; vi < 3; ++vi) {
-            int idx = geo.triIndices[t * 3 + vi];
-            if (idx < 0 || idx >= numVerts) continue;
-            if (useSTW) {
-                glTexCoord4f(geo.stw[idx * 3 + 0],
-                             geo.stw[idx * 3 + 1],
-                             0.0f,
-                             geo.stw[idx * 3 + 2]);
-            } else if (hasTexture && (int)geo.uvs.size() > idx * 2 + 1) {
-                glTexCoord2f(geo.uvs[idx * 2 + 0], geo.uvs[idx * 2 + 1]);
-            }
-            glVertex3f(geo.verts[idx * 3 + 0], geo.verts[idx * 3 + 1], geo.verts[idx * 3 + 2]);
-        }
-    }
-    glEnd();
-
-    glPopMatrix();
-    if (hasTexture) {
-        glDisable(GL_TEXTURE_2D);
-        glDeleteTextures(1, &srcTex);
-    }
 }
 
 // ==================== Render ====================
@@ -1620,15 +1647,14 @@ ScanlineRender::render(const RenderActionArgs& args)
         return eStatusFailed;
     }
 
-    // --- Phase 3D: optional MRT attachments (Normal=1, UV=2, Pref=3, Velocity=4) ---
-    // Each AOV's attachment is allocated only when its knob is on AND GLSL is on.
-    // Attachments don't have to be contiguous — glDrawBuffers can carry GL_NONE for
+    // --- Phase 3D/3E: optional MRT attachments (Normal=1, UV=2, Pref=3, Velocity=4) ---
+    // Each AOV's attachment is allocated only when its knob is on. Attachments
+    // don't have to be contiguous — glDrawBuffers can carry GL_NONE for
     // skipped slots, e.g. [COLOR0, GL_NONE, COLOR2].
-    const bool glslOn = _imp->useGlslPipeline.lock() && _imp->useGlslPipeline.lock()->getValue();
-    const bool wantsNormalMrtPre   = glslOn && _imp->outputNormal.lock()   && _imp->outputNormal.lock()->getValue();
-    const bool wantsUvMrtPre       = glslOn && _imp->outputUV.lock()       && _imp->outputUV.lock()->getValue();
-    const bool wantsPrefMrtPre     = glslOn && _imp->outputPref.lock()     && _imp->outputPref.lock()->getValue();
-    const bool wantsVelocityMrtPre = glslOn && _imp->outputVelocity.lock() && _imp->outputVelocity.lock()->getValue();
+    const bool wantsNormalMrtPre   = _imp->outputNormal.lock()   && _imp->outputNormal.lock()->getValue();
+    const bool wantsUvMrtPre       = _imp->outputUV.lock()       && _imp->outputUV.lock()->getValue();
+    const bool wantsPrefMrtPre     = _imp->outputPref.lock()     && _imp->outputPref.lock()->getValue();
+    const bool wantsVelocityMrtPre = _imp->outputVelocity.lock() && _imp->outputVelocity.lock()->getValue();
     GLuint msNormalRB = 0,   normalResolveTex   = 0;
     GLuint msUvRB = 0,       uvResolveTex       = 0;
     GLuint msPrefRB = 0,     prefResolveTex     = 0;
@@ -1713,24 +1739,31 @@ ScanlineRender::render(const RenderActionArgs& args)
     std::vector<float> prefAccumPixels;
     std::vector<float> velocityAccumPixels;
 
-    // Phase 3C — build the GLSL beauty program once if the GLSL pipeline knob
-    // is ON. Done outside the multi-sample loop so we don't rebuild per sample.
-    const bool useGlslBeauty = _imp->useGlslPipeline.lock() &&
-                                _imp->useGlslPipeline.lock()->getValue();
-    GLuint glslBeautyProg = 0;
-    if (useGlslBeauty) {
-        glslBeautyProg = glslBuildProgram(kBeautyVert, kBeautyFrag);
-        // If the program fails to build, drop back to the fixed-function path
-        // for this render (glslBeautyProg == 0 → the per-geo branch below uses
-        // renderGeoObject instead of renderGeoObjectGlsl).
+    // Phase 3E — beauty program is the only mesh draw path. Built once outside
+    // the multi-sample loop. On build failure, mesh rendering is skipped this
+    // render (program==0 → the per-geo branch below short-circuits).
+    GLuint glslBeautyProg = glslBuildProgram(kBeautyVert, kBeautyFrag);
+    if (!glslBeautyProg) {
+        std::fprintf(stderr, "[GLSL FAIL] beauty program build failed — mesh geometry will not render.\n");
+        std::fflush(stderr);
     }
 
     // Precompute projView = projMatrix * viewMatrix for the GLSL path.
     float projViewMatrix[16];
     mat4Mul(projViewMatrix, projMatrix, viewMatrix);
 
-    // Phase 3D — latch the final wants*Mrt flags now that we know whether the
-    // beauty program built and whether the MRT attachment was allocated. Any
+    // Phase 3E — build the particle GLSL program once. Used for any partMode
+    // that's been migrated to GLSL (3E.1 covers Point + streak lines; 3E.2/3
+    // will add Disc/Sphere/Sprite). Failure to build silently falls back to
+    // the legacy fixed-function path for unmigrated modes.
+    GLuint glslParticleProg = glslBuildProgram(kParticleVert, kParticleFrag);
+    if (!glslParticleProg) {
+        std::fprintf(stderr, "[GLSL FAIL] particle program build failed — particles will be skipped for this render.\n");
+        std::fflush(stderr);
+    }
+
+    // Phase 3D/3E — latch the final wants*Mrt flags now that we know whether
+    // the beauty program built and the MRT attachment was allocated. Any
     // failure latches `false` and we just skip that AOV silently.
     const bool wantsNormalMrt   = wantsNormalMrtPre   && (glslBeautyProg != 0) && (msNormalRB   != 0);
     const bool wantsUvMrt       = wantsUvMrtPre       && (glslBeautyProg != 0) && (msUvRB       != 0);
@@ -1843,22 +1876,17 @@ ScanlineRender::render(const RenderActionArgs& args)
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    for (size_t gi = 0; gi < geoObjects.size(); ++gi) {
-        if (useGlslBeauty && glslBeautyProg) {
+    if (glslBeautyProg) {
+        for (size_t gi = 0; gi < geoObjects.size(); ++gi) {
             renderGeoObjectGlsl(geoObjects[gi], glslBeautyProg,
                                 projViewMatrix, prevProjViewMatrix,
                                 outW, outH,
                                 wantsNormalMrt, wantsUvMrt,
                                 wantsPrefMrt, wantsVelocityMrt);
-        } else {
-            renderGeoObject(geoObjects[gi]);
         }
-    }
-    // Return to fixed-function pipeline for particles / lights / etc. Also
-    // restore single-attachment draw buffer so particles only paint into
-    // beauty (their fixed-function path doesn't know about MRT slots).
-    if (useGlslBeauty && glslBeautyProg) {
         glUseProgram(0);
+        // Restore single-attachment draw buffer so particles + volumes only
+        // paint into beauty (they don't emit AOV outputs).
         if (wantsAnyMrt) {
             GLenum drawBufs[] = { GL_COLOR_ATTACHMENT0 };
             glDrawBuffers(1, drawBufs);
@@ -1871,14 +1899,14 @@ ScanlineRender::render(const RenderActionArgs& args)
         int blendMode = _imp->particleBlend.lock() ? _imp->particleBlend.lock()->getValue() : 0;
         float globalScale = _imp->particleScale.lock() ? (float)_imp->particleScale.lock()->getValueAtTime(args.time) : 1.0f;
 
-        // Get camera right/up/forward vectors from modelview matrix for billboarding
-        float mv[16];
-        glGetFloatv(GL_MODELVIEW_MATRIX, mv);
-        float rightX = mv[0], rightY = mv[4], rightZ = mv[8];
-        float upX    = mv[1], upY    = mv[5], upZ    = mv[9];
-        float fwdX   = mv[2], fwdY   = mv[6], fwdZ   = mv[10];
+        // Camera right/up/forward vectors directly from the view matrix
+        // (column-major float[16]: out[col*4 + row]). Used for billboarding
+        // sprites/discs and projecting velocity onto the camera plane for
+        // streak lines.
+        float rightX = viewMatrix[0], rightY = viewMatrix[4], rightZ = viewMatrix[8];
+        float upX    = viewMatrix[1], upY    = viewMatrix[5], upZ    = viewMatrix[9];
+        float fwdX   = viewMatrix[2], fwdY   = viewMatrix[6], fwdZ   = viewMatrix[10];
 
-        glDisable(GL_TEXTURE_2D);
         glEnable(GL_BLEND);
         if (blendMode == 0)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);         // Additive
@@ -1894,19 +1922,98 @@ ScanlineRender::render(const RenderActionArgs& args)
         glEnable(GL_POINT_SMOOTH);
         glHint(GL_POINT_SMOOTH_HINT, GL_NICEST);
 
-        if (partMode == 0) {
-            // --- Point mode ---
-            // Set point size based on global scale (default ~3 pixels)
+        // Phase 3E.5 — re-enable multi-attachment draw buffers so particles can
+        // emit AOVs. The geo loop's restore-to-1 happens above; we now restore
+        // the full attachment set for the particle pass, then drop back to
+        // single-attachment after particles for the volume pass.
+        if (wantsAnyMrt) {
+            GLenum drawBufs[5] = {
+                (GLenum)GL_COLOR_ATTACHMENT0,
+                (GLenum)(wantsNormalMrt   ? GL_COLOR_ATTACHMENT1 : GL_NONE),
+                (GLenum)(wantsUvMrt       ? GL_COLOR_ATTACHMENT2 : GL_NONE),
+                (GLenum)(wantsPrefMrt     ? GL_COLOR_ATTACHMENT3 : GL_NONE),
+                (GLenum)(wantsVelocityMrt ? GL_COLOR_ATTACHMENT4 : GL_NONE),
+            };
+            glDrawBuffers(5, drawBufs);
+
+            // Phase 3E.5 — per-attachment blend override. Beauty keeps the
+            // additive/over blend set just above; the AOV attachments use
+            // GL_ONE / GL_ZERO (replace) so values don't accumulate across
+            // overlapping particle fragments (otherwise stacking saturates
+            // Normal/Pref/UV to nonsense — the same camera-facing normal
+            // summed N times for N overlapping particles, etc.). glBlendFunci
+            // is GL 4.0 core; on a 3.3 core context the symbol is still loaded
+            // by Natron's GL loader on any driver that supports 4.x underneath
+            // (any NVIDIA / AMD / Intel from ~2010 onward).
+            glBlendFunci(1, GL_ONE, GL_ZERO);
+            glBlendFunci(2, GL_ONE, GL_ZERO);
+            glBlendFunci(3, GL_ONE, GL_ZERO);
+            glBlendFunci(4, GL_ONE, GL_ZERO);
+        }
+
+        // Phase 3E.5 — common AOV defaults applied to every particle vertex
+        // before push_back. Per-mode branches override UVs (Sprite static) or
+        // normals (Sphere static) on top of these defaults.
+        //   - normal:   +fwd — billboard's outward face, pointing toward the
+        //               camera. Note that `fwd` in this code is row 2 of the
+        //               view matrix, i.e. the world-space direction that maps
+        //               to +Z in camera space (= behind the camera = where the
+        //               camera sits in world). For a camera-facing billboard
+        //               the surface normal points toward the camera, so the
+        //               correct sign is +fwd. (Using -fwd produces a normal
+        //               pointing away from the camera, which the viewer's
+        //               [0,1] clamp displays as black.)
+        //   - uv:       (0, 0)   (overridden by Sprite static corners)
+        //   - pref:     particle world position (per-particle stable id)
+        //   - velocity: particle per-frame displacement (drives Velocity AOV)
+        auto fillAovs = [&](ParticleVertex& v, const Particle& p) {
+            v.nx = fwdX; v.ny = fwdY; v.nz = fwdZ;
+            v.u  = 0.0f; v.v  = 0.0f;
+            v.prefX = p.px; v.prefY = p.py; v.prefZ = p.pz;
+            v.velX  = p.vx; v.velY  = p.vy; v.velZ  = p.vz;
+        };
+
+        // Phase 3E.5 — bind the particle program once for the whole partMode
+        // cascade and set all uniforms (matrix + AOV write flags + screen
+        // resolution for the Velocity AOV pixel scaling). Per-mode branches
+        // below just build their vert buffer and call drawParticlePrimitives.
+        if (glslParticleProg) {
+            glUseProgram(glslParticleProg);
+            GLint lProjView      = glGetUniformLocation(glslParticleProg, "u_projView");
+            GLint lPrevProjView  = glGetUniformLocation(glslParticleProg, "u_prevProjView");
+            GLint lResolution    = glGetUniformLocation(glslParticleProg, "u_resolution");
+            GLint lWriteNormal   = glGetUniformLocation(glslParticleProg, "u_writeNormal");
+            GLint lWriteUV       = glGetUniformLocation(glslParticleProg, "u_writeUV");
+            GLint lWritePref     = glGetUniformLocation(glslParticleProg, "u_writePref");
+            GLint lWriteVelocity = glGetUniformLocation(glslParticleProg, "u_writeVelocity");
+            if (lProjView      >= 0) glUniformMatrix4fv(lProjView, 1, GL_FALSE, projViewMatrix);
+            if (lPrevProjView  >= 0) glUniformMatrix4fv(lPrevProjView, 1, GL_FALSE, prevProjViewMatrix);
+            if (lResolution    >= 0) glUniform2f(lResolution, (float)outW, (float)outH);
+            if (lWriteNormal   >= 0) glUniform1i(lWriteNormal,   wantsNormalMrt   ? 1 : 0);
+            if (lWriteUV       >= 0) glUniform1i(lWriteUV,       wantsUvMrt       ? 1 : 0);
+            if (lWritePref     >= 0) glUniform1i(lWritePref,     wantsPrefMrt     ? 1 : 0);
+            if (lWriteVelocity >= 0) glUniform1i(lWriteVelocity, wantsVelocityMrt ? 1 : 0);
+        }
+
+        if (partMode == 0 && glslParticleProg) {
+            // --- Point mode (Phase 3E.1 GLSL) ---
+            // GL_LINES streaks when motion-blur stretch is on, else GL_POINTS.
+            // Point/line size from the compat-profile glPointSize/glLineWidth,
+            // round-point appearance from GL_POINT_SMOOTH (already enabled
+            // above).
             glPointSize(3.0f * globalScale);
             glLineWidth(2.0f * globalScale);
+
             if (motionBlur > 0.001f) {
-                // Motion blur: draw lines from tail to head with gradient alpha
-                glBegin(GL_LINES);
+                // Streak path: two vertices per particle (tail with alpha=0,
+                // head with full alpha). Drawn as GL_LINES with vertex-color
+                // interpolation across the segment.
+                std::vector<ParticleVertex> verts;
+                verts.reserve((size_t)particleData->numParticles() * 2);
                 for (int i = 0; i < particleData->numParticles(); ++i) {
                     const Particle& p = particleData->particles[i];
                     float alpha = p.a;
                     if (alpha < 0.001f) continue;
-                    // Project velocity to camera plane
                     float vx = p.vx, vy = p.vy, vz = p.vz;
                     float vDotF = vx * fwdX + vy * fwdY + vz * fwdZ;
                     float vPX = vx - vDotF * fwdX;
@@ -1914,34 +2021,42 @@ ScanlineRender::render(const RenderActionArgs& args)
                     float vPZ = vz - vDotF * fwdZ;
                     float vLen = std::sqrt(vPX*vPX + vPY*vPY + vPZ*vPZ);
                     if (vLen < 0.0001f) {
-                        glColor4f(p.r, p.g, p.b, alpha);
-                        glVertex3f(p.px, p.py, p.pz);
-                        glVertex3f(p.px, p.py, p.pz);
+                        ParticleVertex v = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                        fillAovs(v, p);
+                        verts.push_back(v); verts.push_back(v);
                         continue;
                     }
                     float stretch = vLen * motionBlur;
-                    // Tail (alpha 0) → Head (full alpha)
-                    glColor4f(p.r, p.g, p.b, 0.0f);
-                    glVertex3f(p.px - vPX/vLen * stretch, p.py - vPY/vLen * stretch, p.pz - vPZ/vLen * stretch);
-                    glColor4f(p.r, p.g, p.b, alpha);
-                    glVertex3f(p.px, p.py, p.pz);
+                    float invLen = 1.0f / vLen;
+                    ParticleVertex tail = {
+                        p.px - vPX*invLen*stretch, p.py - vPY*invLen*stretch, p.pz - vPZ*invLen*stretch,
+                        p.r, p.g, p.b, 0.0f
+                    };
+                    ParticleVertex head = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                    fillAovs(tail, p); fillAovs(head, p);
+                    verts.push_back(tail);
+                    verts.push_back(head);
                 }
-                glEnd();
+                drawParticlePrimitives(GL_LINES, verts);
             } else {
-                glBegin(GL_POINTS);
+                std::vector<ParticleVertex> verts;
+                verts.reserve((size_t)particleData->numParticles());
                 for (int i = 0; i < particleData->numParticles(); ++i) {
                     const Particle& p = particleData->particles[i];
                     float alpha = p.a;
                     if (alpha < 0.001f) continue;
-                    glColor4f(p.r, p.g, p.b, alpha);
-                    glVertex3f(p.px, p.py, p.pz);
+                    ParticleVertex v = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                    fillAovs(v, p);
+                    verts.push_back(v);
                 }
-                glEnd();
+                drawParticlePrimitives(GL_POINTS, verts);
             }
 
-        } else if (partMode == 1) {
-            // --- Disc mode (camera-facing circle with soft edge) ---
-            // Approximate a circle with a triangle fan per particle
+        } else if (partMode == 1 && glslParticleProg) {
+            // --- Disc mode (Phase 3E.2 GLSL) ---
+            // Camera-facing soft-edge disc per particle. Decomposed to a
+            // triangle list (center + edge[s] + edge[s+1] for s=0..segs-1)
+            // so the whole set draws in one batched GL_TRIANGLES call.
             const int segments = 32;
             float cosTable[33], sinTable[33];
             for (int s = 0; s <= segments; ++s) {
@@ -1950,13 +2065,16 @@ ScanlineRender::render(const RenderActionArgs& args)
                 sinTable[s] = std::sin(a);
             }
 
+            std::vector<ParticleVertex> verts;
+            verts.reserve((size_t)particleData->numParticles() * (size_t)segments * 3u);
+
             for (int i = 0; i < particleData->numParticles(); ++i) {
                 const Particle& p = particleData->particles[i];
                 float alpha = p.a;
                 if (alpha < 0.001f) continue;
                 float hs = p.size * 0.5f * globalScale;
+                bool didMotionBlur = false;
 
-                // Motion blur — elliptical fan, soft in all directions
                 if (motionBlur > 0.001f) {
                     float vx = p.vx, vy = p.vy, vz = p.vz;
                     float vDotF = vx * fwdX + vy * fwdY + vz * fwdZ;
@@ -1975,49 +2093,63 @@ ScanlineRender::render(const RenderActionArgs& args)
 
                         float halfLen = vLen * motionBlur * 0.5f + hs;
                         float halfWid = hs;
-                        // Center the ellipse so the bright spot is at the particle position (head)
                         float cx = p.px - dx * halfLen * 0.5f;
                         float cy = p.py - dy * halfLen * 0.5f;
                         float cz = p.pz - dz * halfLen * 0.5f;
 
                         const int segs = 16;
-                        glBegin(GL_TRIANGLE_FAN);
-                        glColor4f(p.r, p.g, p.b, alpha);
-                        glVertex3f(p.px, p.py, p.pz);
-                        glColor4f(p.r, p.g, p.b, 0.0f);
+                        ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                        fillAovs(center, p);
+                        // Pre-compute ring of edge verts once
+                        std::vector<ParticleVertex> ring((size_t)segs + 1);
                         for (int s = 0; s <= segs; ++s) {
                             float a = 2.0f * (float)M_PI * s / segs;
                             float ca = std::cos(a), sa = std::sin(a);
                             float ex = dx * ca * halfLen + px * sa * halfWid;
                             float ey = dy * ca * halfLen + py * sa * halfWid;
                             float ez = dz * ca * halfLen + pz * sa * halfWid;
-                            glVertex3f(cx + ex, cy + ey, cz + ez);
+                            ring[s] = { cx + ex, cy + ey, cz + ez, p.r, p.g, p.b, 0.0f };
+                            fillAovs(ring[s], p);
                         }
-                        glEnd();
-                        continue;
+                        for (int s = 0; s < segs; ++s) {
+                            verts.push_back(center);
+                            verts.push_back(ring[s]);
+                            verts.push_back(ring[s + 1]);
+                        }
+                        didMotionBlur = true;
                     }
                 }
 
-                // No motion blur — standard camera-facing disc
-                glBegin(GL_TRIANGLE_FAN);
-                glColor4f(p.r, p.g, p.b, alpha);
-                glVertex3f(p.px, p.py, p.pz);
-                glColor4f(p.r, p.g, p.b, alpha * 0.0f);
-                for (int s = 0; s <= segments; ++s) {
-                    float ex = rightX * cosTable[s] + upX * sinTable[s];
-                    float ey = rightY * cosTable[s] + upY * sinTable[s];
-                    float ez = rightZ * cosTable[s] + upZ * sinTable[s];
-                    glVertex3f(p.px + ex * hs, p.py + ey * hs, p.pz + ez * hs);
+                if (!didMotionBlur) {
+                    ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                    fillAovs(center, p);
+                    // Pre-compute ring of edge verts once
+                    std::vector<ParticleVertex> ring((size_t)segments + 1);
+                    for (int s = 0; s <= segments; ++s) {
+                        float ex = rightX * cosTable[s] + upX * sinTable[s];
+                        float ey = rightY * cosTable[s] + upY * sinTable[s];
+                        float ez = rightZ * cosTable[s] + upZ * sinTable[s];
+                        ring[s] = { p.px + ex * hs, p.py + ey * hs, p.pz + ez * hs,
+                                    p.r, p.g, p.b, 0.0f };
+                        fillAovs(ring[s], p);
+                    }
+                    for (int s = 0; s < segments; ++s) {
+                        verts.push_back(center);
+                        verts.push_back(ring[s]);
+                        verts.push_back(ring[s + 1]);
+                    }
                 }
-                glEnd();
             }
 
-        } else if (partMode == 2) {
-            // --- Sphere mode (lit sphere with N.L shading, or stretched fan for motion blur) ---
-            // When motion blur is on, use elliptical fan with soft alpha (like Disc mode).
-            // When off, use full 3D sphere mesh with N.L shading.
+            drawParticlePrimitives(GL_TRIANGLES, verts);
+
+        } else if (partMode == 2 && glslParticleProg) {
+            // --- Sphere mode (Phase 3E.2 GLSL) ---
+            // Motion blur: elliptical fan per particle (same shape as Disc).
+            // No motion blur: full sphere mesh with per-vertex N.L shading
+            // pre-baked into the vertex colors. All particles batched into one
+            // GL_TRIANGLES draw call.
             if (motionBlur < 0.001f) {
-                // Static: enable depth writes + back-face culling for 3D mesh
                 glDepthMask(GL_TRUE);
                 glEnable(GL_CULL_FACE);
                 glCullFace(GL_BACK);
@@ -2028,13 +2160,17 @@ ScanlineRender::render(const RenderActionArgs& args)
             lx /= ll; ly /= ll; lz /= ll;
 
             const int rings = 10, sectors = 14;
+            std::vector<ParticleVertex> verts;
+            verts.reserve((size_t)particleData->numParticles()
+                          * (size_t)(rings * sectors * 6));
+
             for (int i = 0; i < particleData->numParticles(); ++i) {
                 const Particle& p = particleData->particles[i];
                 float alpha = p.a;
                 if (alpha < 0.001f) continue;
                 float rad = p.size * 0.5f * globalScale;
+                bool didMotionBlur = false;
 
-                // Motion blur path: use elliptical fan (like Disc mode)
                 if (motionBlur > 0.001f) {
                     float vx = p.vx, vy = p.vy, vz = p.vz;
                     float vDotF = vx * fwdX + vy * fwdY + vz * fwdZ;
@@ -2057,76 +2193,78 @@ ScanlineRender::render(const RenderActionArgs& args)
                         float cz = p.pz - ddz * halfLen * 0.5f;
 
                         const int segs = 16;
-                        glBegin(GL_TRIANGLE_FAN);
-                        glColor4f(p.r, p.g, p.b, alpha);
-                        glVertex3f(p.px, p.py, p.pz);
-                        glColor4f(p.r, p.g, p.b, 0.0f);
+                        ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                        fillAovs(center, p);
+                        std::vector<ParticleVertex> ring((size_t)segs + 1);
                         for (int s = 0; s <= segs; ++s) {
                             float a = 2.0f * (float)M_PI * s / segs;
                             float ca = std::cos(a), sa = std::sin(a);
                             float ex = ddx * ca * halfLen + ppx * sa * halfWid;
                             float ey = ddy * ca * halfLen + ppy * sa * halfWid;
                             float ez = ddz * ca * halfLen + ppz * sa * halfWid;
-                            glVertex3f(cx + ex, cy + ey, cz + ez);
+                            ring[s] = { cx + ex, cy + ey, cz + ez, p.r, p.g, p.b, 0.0f };
+                            fillAovs(ring[s], p);
                         }
-                        glEnd();
-                        continue;
+                        for (int s = 0; s < segs; ++s) {
+                            verts.push_back(center);
+                            verts.push_back(ring[s]);
+                            verts.push_back(ring[s + 1]);
+                        }
+                        didMotionBlur = true;
                     }
                 }
 
-                glBegin(GL_TRIANGLES);
+                if (didMotionBlur) continue;
+
+                // Solid shaded sphere mesh, with N.L shading per vertex.
+                auto worldPos = [&](float nx, float ny, float nz, float& wx, float& wy, float& wz) {
+                    wx = p.px + (rightX * nx + upX * ny + fwdX * nz) * rad;
+                    wy = p.py + (rightY * nx + upY * ny + fwdY * nz) * rad;
+                    wz = p.pz + (rightZ * nx + upZ * ny + fwdZ * nz) * rad;
+                };
+                auto shade = [&](float nx, float ny, float nz) -> float {
+                    float d = nx * lx + ny * ly + nz * lz;
+                    return 0.15f + 0.85f * std::max(0.0f, d);
+                };
+                auto pushV = [&](float nx, float ny, float nz) {
+                    float wx, wy, wz; worldPos(nx, ny, nz, wx, wy, wz);
+                    float s = shade(nx, ny, nz);
+                    ParticleVertex v = { wx, wy, wz, p.r * s, p.g * s, p.b * s, alpha };
+                    fillAovs(v, p);
+                    // Sphere static — override the camera-facing default with
+                    // the true per-vertex world-space normal, and the per-vertex
+                    // unit-sphere offset as Pref (object-space reference position).
+                    v.nx = nx; v.ny = ny; v.nz = nz;
+                    v.prefX = nx; v.prefY = ny; v.prefZ = nz;
+                    verts.push_back(v);
+                };
                 for (int r = 0; r < rings; ++r) {
                     float phi0 = (float)M_PI * r / rings;
                     float phi1 = (float)M_PI * (r + 1) / rings;
                     float cp0 = std::cos(phi0), sp0 = std::sin(phi0);
                     float cp1 = std::cos(phi1), sp1 = std::sin(phi1);
-
                     for (int s = 0; s < sectors; ++s) {
                         float th0 = 2.0f * (float)M_PI * s / sectors;
                         float th1 = 2.0f * (float)M_PI * (s + 1) / sectors;
                         float ct0 = std::cos(th0), st0 = std::sin(th0);
                         float ct1 = std::cos(th1), st1 = std::sin(th1);
-
-                        // 4 vertices of the quad on the sphere surface
                         float nx00 = sp0*ct0, ny00 = cp0, nz00 = sp0*st0;
                         float nx10 = sp1*ct0, ny10 = cp1, nz10 = sp1*st0;
                         float nx01 = sp0*ct1, ny01 = cp0, nz01 = sp0*st1;
                         float nx11 = sp1*ct1, ny11 = cp1, nz11 = sp1*st1;
-
-                        // Transform normals to world space for billboard
-                        auto worldPos = [&](float nx, float ny, float nz, float& wx, float& wy, float& wz) {
-                            wx = p.px + (rightX * nx + upX * ny + fwdX * nz) * rad;
-                            wy = p.py + (rightY * nx + upY * ny + fwdY * nz) * rad;
-                            wz = p.pz + (rightZ * nx + upZ * ny + fwdZ * nz) * rad;
-                        };
-                        auto shade = [&](float nx, float ny, float nz) -> float {
-                            float d = nx * lx + ny * ly + nz * lz;
-                            return 0.15f + 0.85f * std::max(0.0f, d); // ambient + diffuse
-                        };
-
-                        float wx, wy, wz;
                         // Triangle 1
-                        float s00 = shade(nx00, ny00, nz00);
-                        glColor4f(p.r * s00, p.g * s00, p.b * s00, alpha);
-                        worldPos(nx00, ny00, nz00, wx, wy, wz); glVertex3f(wx, wy, wz);
-                        float s10 = shade(nx10, ny10, nz10);
-                        glColor4f(p.r * s10, p.g * s10, p.b * s10, alpha);
-                        worldPos(nx10, ny10, nz10, wx, wy, wz); glVertex3f(wx, wy, wz);
-                        float s11 = shade(nx11, ny11, nz11);
-                        glColor4f(p.r * s11, p.g * s11, p.b * s11, alpha);
-                        worldPos(nx11, ny11, nz11, wx, wy, wz); glVertex3f(wx, wy, wz);
+                        pushV(nx00, ny00, nz00);
+                        pushV(nx10, ny10, nz10);
+                        pushV(nx11, ny11, nz11);
                         // Triangle 2
-                        glColor4f(p.r * s00, p.g * s00, p.b * s00, alpha);
-                        worldPos(nx00, ny00, nz00, wx, wy, wz); glVertex3f(wx, wy, wz);
-                        glColor4f(p.r * s11, p.g * s11, p.b * s11, alpha);
-                        worldPos(nx11, ny11, nz11, wx, wy, wz); glVertex3f(wx, wy, wz);
-                        float s01 = shade(nx01, ny01, nz01);
-                        glColor4f(p.r * s01, p.g * s01, p.b * s01, alpha);
-                        worldPos(nx01, ny01, nz01, wx, wy, wz); glVertex3f(wx, wy, wz);
+                        pushV(nx00, ny00, nz00);
+                        pushV(nx11, ny11, nz11);
+                        pushV(nx01, ny01, nz01);
                     }
                 }
-                glEnd();
             }
+
+            drawParticlePrimitives(GL_TRIANGLES, verts);
 
             // Restore for subsequent rendering
             if (motionBlur < 0.001f) {
@@ -2134,20 +2272,24 @@ ScanlineRender::render(const RenderActionArgs& args)
                 glDepthMask(GL_FALSE);
             }
 
-        } else {
-            // --- Sprite mode (camera-facing quad, with optional velocity stretch) ---
-            glBegin(GL_QUADS);
+        } else if (partMode == 3 && glslParticleProg) {
+            // --- Sprite mode (Phase 3E.3 GLSL) ---
+            // Camera-facing colored quad per particle; elliptical soft fan when
+            // motion blur is on. All particles batched into one GL_TRIANGLES
+            // draw call. Note: the legacy "Sprite" was always a flat-colored
+            // billboard (no texture sampling) — same here.
+            std::vector<ParticleVertex> verts;
+            verts.reserve((size_t)particleData->numParticles() * 6u);
+
             for (int i = 0; i < particleData->numParticles(); ++i) {
                 const Particle& p = particleData->particles[i];
                 float alpha = p.a;
                 if (alpha < 0.001f) continue;
 
                 float hs = p.size * 0.5f * globalScale;
+                bool didMotionBlur = false;
 
                 if (motionBlur > 0.001f) {
-                    // Elliptical triangle fan: soft in ALL directions
-                    // Center at particle position (offset slightly toward velocity)
-                    // Perimeter is an ellipse stretched along velocity
                     float vx = p.vx, vy = p.vy, vz = p.vz;
                     float vDotF = vx * fwdX + vy * fwdY + vz * fwdZ;
                     float vPX = vx - vDotF * fwdX;
@@ -2165,54 +2307,71 @@ ScanlineRender::render(const RenderActionArgs& args)
 
                         float halfLen = vLen * motionBlur * 0.5f + hs;
                         float halfWid = hs;
-                        // Center position (between tail and head)
-                        float cx = p.px - dx * halfLen * 0.5f + dx * halfLen * 0.5f;
-                        float cy = p.py - dy * halfLen * 0.5f + dy * halfLen * 0.5f;
-                        float cz = p.pz - dz * halfLen * 0.5f + dz * halfLen * 0.5f;
-                        // Actually use particle position as the bright center (head end)
-                        cx = p.px - dx * halfLen + dx * halfLen;
-                        cy = p.py - dy * halfLen + dy * halfLen;
-                        cz = p.pz - dz * halfLen + dz * halfLen;
-                        // Center the ellipse so the bright spot is at the particle's current position
-                        // (head of the streak), tail extends backward
-                        float centerOffsetBack = halfLen * 0.5f; // shift center backward so head ends at p
-                        cx = p.px - dx * centerOffsetBack;
-                        cy = p.py - dy * centerOffsetBack;
-                        cz = p.pz - dz * centerOffsetBack;
-                        float ellLen = halfLen; // ellipse semi-major axis along velocity
+                        // Shift the ellipse center backward so the bright spot
+                        // lines up with the particle's current position (head
+                        // of the streak); the tail trails behind.
+                        float centerOffsetBack = halfLen * 0.5f;
+                        float cx = p.px - dx * centerOffsetBack;
+                        float cy = p.py - dy * centerOffsetBack;
+                        float cz = p.pz - dz * centerOffsetBack;
+                        float ellLen = halfLen;
 
-                        glEnd(); // end QUADS block
                         const int segs = 16;
-                        glBegin(GL_TRIANGLE_FAN);
-                        glColor4f(p.r, p.g, p.b, alpha);
-                        glVertex3f(p.px, p.py, p.pz); // bright center at particle position
-                        glColor4f(p.r, p.g, p.b, 0.0f);
+                        ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                        fillAovs(center, p);
+                        std::vector<ParticleVertex> ring((size_t)segs + 1);
                         for (int s = 0; s <= segs; ++s) {
                             float a = 2.0f * (float)M_PI * s / segs;
                             float ca = std::cos(a), sa = std::sin(a);
-                            // Ellipse: stretch along velocity (dx,dy,dz), width perpendicular (px,py,pz)
                             float ex = dx * ca * ellLen + px * sa * halfWid;
                             float ey = dy * ca * ellLen + py * sa * halfWid;
                             float ez = dz * ca * ellLen + pz * sa * halfWid;
-                            glVertex3f(cx + ex, cy + ey, cz + ez);
+                            ring[s] = { cx + ex, cy + ey, cz + ez, p.r, p.g, p.b, 0.0f };
+                            fillAovs(ring[s], p);
                         }
-                        glEnd();
-                        glBegin(GL_QUADS); // resume quads
-                        continue;
+                        for (int s = 0; s < segs; ++s) {
+                            verts.push_back(center);
+                            verts.push_back(ring[s]);
+                            verts.push_back(ring[s + 1]);
+                        }
+                        didMotionBlur = true;
                     }
                 }
 
-                // No motion blur or stationary particle — normal camera-facing quad
+                if (didMotionBlur) continue;
+
+                // Plain camera-facing colored quad → 2 triangles. UVs are the
+                // natural quad corner layout BL=(0,0), BR=(1,0), TR=(1,1),
+                // TL=(0,1) — these are the only natural per-vertex UVs in any
+                // particle mode.
                 float rx = rightX * hs, ry = rightY * hs, rz = rightZ * hs;
                 float ux = upX * hs,    uy = upY * hs,    uz = upZ * hs;
-
-                glColor4f(p.r, p.g, p.b, alpha);
-                glVertex3f(p.px - rx - ux, p.py - ry - uy, p.pz - rz - uz);
-                glVertex3f(p.px + rx - ux, p.py + ry - uy, p.pz + rz - uz);
-                glVertex3f(p.px + rx + ux, p.py + ry + uy, p.pz + rz + uz);
-                glVertex3f(p.px - rx + ux, p.py - ry + uy, p.pz - rz + uz);
+                ParticleVertex bl = { p.px - rx - ux, p.py - ry - uy, p.pz - rz - uz, p.r, p.g, p.b, alpha };
+                ParticleVertex br = { p.px + rx - ux, p.py + ry - uy, p.pz + rz - uz, p.r, p.g, p.b, alpha };
+                ParticleVertex tr = { p.px + rx + ux, p.py + ry + uy, p.pz + rz + uz, p.r, p.g, p.b, alpha };
+                ParticleVertex tl = { p.px - rx + ux, p.py - ry + uy, p.pz - rz + uz, p.r, p.g, p.b, alpha };
+                fillAovs(bl, p); fillAovs(br, p); fillAovs(tr, p); fillAovs(tl, p);
+                bl.u = 0.0f; bl.v = 0.0f;
+                br.u = 1.0f; br.v = 0.0f;
+                tr.u = 1.0f; tr.v = 1.0f;
+                tl.u = 0.0f; tl.v = 1.0f;
+                verts.push_back(bl); verts.push_back(br); verts.push_back(tr);
+                verts.push_back(bl); verts.push_back(tr); verts.push_back(tl);
             }
-            glEnd();
+
+            drawParticlePrimitives(GL_TRIANGLES, verts);
+        }
+
+        // Phase 3E.5 — unbind particle program, restore single-attachment
+        // draw buffer for the volume pass, and unify blend func across all
+        // attachments (the per-attachment overrides above only affect AOV
+        // slots, but a unified reset is cheaper than tracking which ones
+        // were touched and is robust to downstream code).
+        if (glslParticleProg) glUseProgram(0);
+        if (wantsAnyMrt) {
+            GLenum drawBufs[] = { GL_COLOR_ATTACHMENT0 };
+            glDrawBuffers(1, drawBufs);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
 
         // Restore state
@@ -2716,6 +2875,11 @@ ScanlineRender::render(const RenderActionArgs& args)
     if (glslBeautyProg) {
         glDeleteProgram(glslBeautyProg);
         glslBeautyProg = 0;
+    }
+    // Phase 3E — release the particle GLSL program.
+    if (glslParticleProg) {
+        glDeleteProgram(glslParticleProg);
+        glslParticleProg = 0;
     }
 
     // Restore original particle positions
