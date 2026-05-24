@@ -15,6 +15,8 @@
 
 #include "ReadAlembicArchive.h"
 
+#include "../../NodeMetadata.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -54,10 +56,21 @@ struct ArchiveEntry
     std::vector<Imath::M44d> sampleMatrices;
 
     // Mesh geometry — only populated for entries where isMesh == true.
-    // Phase B reads sample 0 only (rest-pose); animated topology is deferred.
+    // meshData->vertices holds the CURRENT-frame positions (mutated in place
+    // by updateVerticesAtTime when hasAnimatedVerts is true). Topology
+    // (faceIndices / faceCounts) stays constant across samples.
     MeshDataPtr meshData;
 
-    ArchiveEntry() : parentIndex(-1), isMesh(false) {}
+    // Vertex animation cache — populated by walkObjectRecursive when the
+    // PolyMesh schema reports more than one sample. Same pattern as ReadGeo:
+    // pre-load all samples into memory, then per-frame memcpy into
+    // meshData->vertices. vertexSampleTimes mirror the source TimeSampling
+    // so timeMode==1 (Source FPS) can pick the nearest sample correctly.
+    bool hasAnimatedVerts;
+    std::vector<double> vertexSampleTimes;
+    std::vector<std::vector<float>> vertexSamples;
+
+    ArchiveEntry() : parentIndex(-1), isMesh(false), hasAnimatedVerts(false) {}
 };
 
 // Read sample 0 of an IPolyMesh into a fresh MeshDataPtr.
@@ -200,8 +213,11 @@ walkObjectRecursive(const Alembic::AbcGeom::IObject& obj,
         thisEntryIndex = (int)entries.size();
         entries.push_back(e);
     } else if (IPolyMesh::matches(obj.getHeader())) {
-        // Read sample 0 of the mesh data (rest pose). The parent IXform's
-        // animation drives positioning via the SceneGraph parent chain.
+        // Read sample 0 as rest pose, then pre-load all remaining vertex
+        // samples for deforming meshes. Topology is assumed constant across
+        // samples (the standard Maya / Blender / Houdini export). The parent
+        // IXform's animation drives positioning via the SceneGraph parent
+        // chain; vertex animation handled here.
         IPolyMesh polyMesh(obj, kWrapExisting);
         ArchiveEntry e;
         e.fullPath = fullPath;
@@ -209,6 +225,31 @@ walkObjectRecursive(const Alembic::AbcGeom::IObject& obj,
         e.parentIndex = parentEntryIndex;
         e.isMesh = true;
         e.meshData = readPolyMeshSample0(polyMesh);
+
+        if (e.meshData && e.meshData->numVertices > 0) {
+            IPolyMeshSchema schema = polyMesh.getSchema();
+            const size_t numVertSamples = schema.getNumSamples();
+            if (numVertSamples > 1) {
+                Alembic::AbcCoreAbstract::TimeSamplingPtr ts = schema.getTimeSampling();
+                e.hasAnimatedVerts = true;
+                e.vertexSamples.assign(numVertSamples, std::vector<float>());
+                e.vertexSampleTimes.reserve(numVertSamples);
+                const size_t expectedFloats = e.meshData->numVertices * 3;
+                for (size_t s = 0; s < numVertSamples; ++s) {
+                    const double t = ts ? ts->getSampleTime((Alembic::AbcCoreAbstract::index_t)s) : (double)s;
+                    e.vertexSampleTimes.push_back(t);
+                    Alembic::Abc::ISampleSelector ss((Alembic::AbcCoreAbstract::index_t)s);
+                    IPolyMeshSchema::Sample animSample;
+                    schema.get(animSample, ss);
+                    Alembic::Abc::P3fArraySamplePtr positions = animSample.getPositions();
+                    if (!positions || positions->size() != e.meshData->numVertices) continue;
+                    const float* posPtr = reinterpret_cast<const float*>(positions->get());
+                    e.vertexSamples[s].resize(expectedFloats);
+                    std::memcpy(e.vertexSamples[s].data(), posPtr, expectedFloats * sizeof(float));
+                }
+            }
+        }
+
         thisEntryIndex = (int)entries.size();
         entries.push_back(e);
     }
@@ -414,11 +455,16 @@ ReadAlembicArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
                 loadAlembicFile(fp->getValue());
             }
         }
+        // Re-read metadata so getPreferredMetadata picks up the new entries'
+        // animation flags (without this, ScanlineRender's cache freezes the
+        // render on one frame even when the archive carries animated meshes).
+        refreshMetadata_public(true);
         return true;
     }
     if (isFilter) {
         // Re-apply the filter without re-reading the file.
         loadAlembicFile(_imp->loadedFilePath);
+        refreshMetadata_public(true);
         return true;
     }
     return false;
@@ -559,11 +605,44 @@ ReadAlembicArchive::getEntryTree() const
 }
 
 MeshDataPtr
-ReadAlembicArchive::getMeshDataAt(int idx) const
+ReadAlembicArchive::getMeshDataAt(int idx, double time) const
 {
     if (idx < 0 || idx >= (int)_imp->visible.size()) return MeshDataPtr();
-    const ArchiveEntry& e = _imp->entries[_imp->visible[idx]];
+    ArchiveEntry& e = _imp->entries[_imp->visible[idx]];
     if (!e.isMesh) return MeshDataPtr();
+
+    // Per-frame vertex update for deforming meshes. Mutates e.meshData->vertices
+    // in place (same shared_ptr returned across calls — matches ReadGeo's pattern).
+    // The time-to-sample mapping mirrors getEntryWorldMatrix below: timeMode 0 is
+    // simple per-frame indexing with Frame Offset, timeMode 1 uses the source
+    // TimeSampling values to find the nearest sample (handles fps mismatches).
+    if (time >= 0.0 && e.hasAnimatedVerts && !e.vertexSamples.empty() && e.meshData) {
+        const int N = (int)e.vertexSamples.size();
+        const int frameOffset = _imp->frameOffset.lock() ? _imp->frameOffset.lock()->getValue() : 0;
+        const int timeMode    = _imp->timeMode.lock()    ? _imp->timeMode.lock()->getValue()    : 0;
+
+        int sampleIdx = 0;
+        if (timeMode == 1 && _imp->sourceFps > 0.0 && (int)e.vertexSampleTimes.size() == N) {
+            const double projectFps = getApp() ? getApp()->getProjectFrameRate() : 24.0;
+            const double abcTimeWanted = (time - 1.0 - frameOffset) / projectFps;
+            double bestDelta = 1e18;
+            for (int i = 0; i < N; ++i) {
+                const double d = std::abs(e.vertexSampleTimes[i] - abcTimeWanted);
+                if (d < bestDelta) { bestDelta = d; sampleIdx = i; }
+            }
+        } else {
+            sampleIdx = (int)std::floor(time - 1.0 - frameOffset + 0.5);
+            if (sampleIdx < 0) sampleIdx = 0;
+            if (sampleIdx >= N) sampleIdx = N - 1;
+        }
+
+        const std::vector<float>& src = e.vertexSamples[sampleIdx];
+        if (!src.empty() && src.size() == e.meshData->vertices.size()) {
+            std::memcpy(e.meshData->vertices.data(), src.data(),
+                        src.size() * sizeof(float));
+        }
+    }
+
     return e.meshData;
 }
 
@@ -713,6 +792,30 @@ ReadAlembicArchive::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const R
     rod->y1 = 0;
     rod->x2 = 1;
     rod->y2 = 1;
+    return eStatusOK;
+}
+
+StatusEnum
+ReadAlembicArchive::getPreferredMetadata(NodeMetadata& metadata)
+{
+    // Declare frame-varying when any archive entry carries animated content
+    // (multi-sample xform OR multi-sample mesh verts). Without this, Scene3D
+    // doesn't see the time-varying upstream and ScanlineRender's cache pins
+    // its output to one frame even though the geometry actually animates.
+    // CyclesRender sets frame-varying on its own node so it never had this
+    // problem; the 3D viewport reads getMeshDataAt(idx, time) directly each
+    // paintGL so it bypasses the cache entirely.
+    bool anyAnimated = false;
+    for (const ArchiveEntry& e : _imp->entries) {
+        if (e.isMesh) {
+            if (e.hasAnimatedVerts) { anyAnimated = true; break; }
+        } else {
+            if (e.sampleMatrices.size() > 1) { anyAnimated = true; break; }
+        }
+    }
+    if (anyAnimated) {
+        metadata.setIsFrameVarying(true);
+    }
     return eStatusOK;
 }
 

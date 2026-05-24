@@ -23,6 +23,8 @@
 
 #include "ReadGeo.h"
 
+#include "../../NodeMetadata.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -216,6 +218,16 @@ struct ReadGeoPrivate
     bool hasAnimatedXform = false;
     size_t numXformSamples = 0;
     std::vector<float> xformMatrices; // numXformSamples * 16 floats (column-major)
+
+    // Cached vertex samples for animated (deforming) meshes — populated by
+    // loadAlembicGeo when the .abc has more than one PolyMesh / SubD sample
+    // (e.g. a morphing terrain or animated character mesh). Pre-loaded into
+    // memory at file-load time so per-frame fetches are a cheap memcpy.
+    // Topology (faceIndices / faceCounts) is assumed constant across samples
+    // — true for the typical exporter (Maya / Blender / Houdini Alembic).
+    bool hasAnimatedVerts = false;
+    size_t numVertexSamples = 0;
+    std::vector<std::vector<float>> vertexSamples; // each: numVerts * 3 floats
 };
 
 
@@ -508,6 +520,10 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
             _imp->isLoading = true;
             loadByExt(path);
             _imp->isLoading = false;
+            // Re-read metadata so getPreferredMetadata picks up the new
+            // hasAnimatedXform / hasAnimatedVerts flags (Scene3D + ScanlineRender
+            // cache need to see frame-varying when the new file has animation).
+            refreshMetadata_public(true);
         }
         return true;
     }
@@ -519,6 +535,7 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
             _imp->isLoading = true;
             loadByExt(path);
             _imp->isLoading = false;
+            refreshMetadata_public(true);
         }
         return true;
     }
@@ -601,6 +618,11 @@ ReadGeo::loadAlembicGeo(const std::string& path)
         // --- Allocate MeshData FIRST, before touching any Alembic sample data ---
         MeshDataPtr mesh = std::make_shared<MeshData>();
 
+        // Reset animation caches in case the user is reloading a different file.
+        _imp->hasAnimatedVerts = false;
+        _imp->numVertexSamples = 0;
+        _imp->vertexSamples.clear();
+
         bool isPoly = IPolyMesh::matches(obj.getHeader());
         bool isSubD = ISubD::matches(obj.getHeader());
 
@@ -619,6 +641,28 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             size_t      numFaces   = sample.getFaceCounts()->size();
 
             readMeshArrays(posPtr, numVerts, idxPtr, numIdx, cntPtr, numFaces, mesh.get());
+
+            // Pre-load all vertex samples if the mesh is animated. Topology
+            // (faceIndices/faceCounts) is assumed constant — only positions
+            // change. Stored in _imp->vertexSamples for per-frame memcpy via
+            // updateVerticesAtTime. See ReadGeoPrivate::hasAnimatedVerts.
+            const size_t numVertSamples = schema.getNumSamples();
+            if (numVertSamples > 1) {
+                _imp->hasAnimatedVerts = true;
+                _imp->numVertexSamples = numVertSamples;
+                _imp->vertexSamples.assign(numVertSamples, std::vector<float>());
+                for (size_t s = 0; s < numVertSamples; ++s) {
+                    Alembic::Abc::ISampleSelector ss((Alembic::Abc::index_t)s);
+                    IPolyMeshSchema::Sample animSample;
+                    schema.get(animSample, ss);
+                    const Alembic::Abc::P3fArraySamplePtr& positions = animSample.getPositions();
+                    if (!positions || positions->size() != numVerts) continue;
+                    const float* posPtrAnim = reinterpret_cast<const float*>(positions->get());
+                    _imp->vertexSamples[s].resize(numVerts * 3);
+                    std::memcpy(_imp->vertexSamples[s].data(), posPtrAnim,
+                                numVerts * 3 * sizeof(float));
+                }
+            }
 
             // Read UVs — try common Alembic UV param names
             IV2fGeomParam uvParam = schema.getUVsParam();
@@ -650,6 +694,25 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             size_t      numFaces   = sample.getFaceCounts()->size();
 
             readMeshArrays(posPtr, numVerts, idxPtr, numIdx, cntPtr, numFaces, mesh.get());
+
+            // Pre-load all vertex samples (same logic as the PolyMesh branch).
+            const size_t numVertSamples = schema.getNumSamples();
+            if (numVertSamples > 1) {
+                _imp->hasAnimatedVerts = true;
+                _imp->numVertexSamples = numVertSamples;
+                _imp->vertexSamples.assign(numVertSamples, std::vector<float>());
+                for (size_t s = 0; s < numVertSamples; ++s) {
+                    Alembic::Abc::ISampleSelector ss((Alembic::Abc::index_t)s);
+                    ISubDSchema::Sample animSample;
+                    schema.get(animSample, ss);
+                    const Alembic::Abc::P3fArraySamplePtr& positions = animSample.getPositions();
+                    if (!positions || positions->size() != numVerts) continue;
+                    const float* posPtrAnim = reinterpret_cast<const float*>(positions->get());
+                    _imp->vertexSamples[s].resize(numVerts * 3);
+                    std::memcpy(_imp->vertexSamples[s].data(), posPtrAnim,
+                                numVerts * 3 * sizeof(float));
+                }
+            }
 
             // Read UVs from SubD
             IV2fGeomParam uvParam = schema.getUVsParam();
@@ -962,10 +1025,15 @@ ReadGeo::loadObjGeo(const std::string& path)
 MeshDataPtr
 ReadGeo::getMeshData(double time) const
 {
-    if (_lastMeshData && time >= 0 && _imp &&
-        _imp->hasAnimatedXform && _imp->numXformSamples > 0 &&
-        !_imp->xformMatrices.empty()) {
-        updateTransformAtTime(_lastMeshData.get(), time);
+    if (_lastMeshData && time >= 0 && _imp) {
+        if (_imp->hasAnimatedXform && _imp->numXformSamples > 0 &&
+            !_imp->xformMatrices.empty()) {
+            updateTransformAtTime(_lastMeshData.get(), time);
+        }
+        if (_imp->hasAnimatedVerts && _imp->numVertexSamples > 0 &&
+            !_imp->vertexSamples.empty()) {
+            updateVerticesAtTime(_lastMeshData.get(), time);
+        }
     }
     return _lastMeshData;
 }
@@ -990,6 +1058,34 @@ ReadGeo::updateTransformAtTime(MeshData* mesh, double time) const
     std::memcpy(mesh->transform, &_imp->xformMatrices[sampleIdx * 16], 16 * sizeof(float));
 }
 
+void
+ReadGeo::updateVerticesAtTime(MeshData* mesh, double time) const
+{
+    if (!mesh || !_imp->hasAnimatedVerts || _imp->numVertexSamples == 0) {
+        return;
+    }
+
+    // Same frame→sample mapping as updateTransformAtTime (Natron frame 1
+    // == Alembic sample 0). For 24fps source + project we get 1:1; for
+    // mismatched rates the playback will be off until we add a proper
+    // time-to-sample mapping with sourceFps + projectFps + Frame Offset.
+    int sampleIdx = static_cast<int>(time - 1.0);
+    if (sampleIdx < 0) {
+        sampleIdx = 0;
+    }
+    if (sampleIdx >= static_cast<int>(_imp->numVertexSamples)) {
+        sampleIdx = static_cast<int>(_imp->numVertexSamples) - 1;
+    }
+
+    const std::vector<float>& src = _imp->vertexSamples[sampleIdx];
+    if (src.empty() || src.size() != mesh->vertices.size()) {
+        // Sample missing or mismatched topology — skip (mesh keeps its current
+        // verts, no flicker).
+        return;
+    }
+    std::memcpy(mesh->vertices.data(), src.data(), src.size() * sizeof(float));
+}
+
 // ---------------------------------------------------------------------------
 // Render (outputs a 1x1 transparent image, same as Light3D / Scene3D)
 // ---------------------------------------------------------------------------
@@ -1002,6 +1098,25 @@ ReadGeo::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale&
     rod->y1 = 0;
     rod->x2 = 1;
     rod->y2 = 1;
+    return eStatusOK;
+}
+
+StatusEnum
+ReadGeo::getPreferredMetadata(NodeMetadata& metadata)
+{
+    // Declare this node as frame-varying when the loaded .abc carries
+    // animated content (transform samples OR vertex samples). Required so
+    // downstream Scene3D + ScanlineRender hashes change per frame, otherwise
+    // the image cache freezes the render output on a single frame even though
+    // the geometry actually animates. The 3D viewport bypasses this cache so
+    // it always shows live motion; CyclesRender sets frame-varying on its own
+    // node which is why Cycles worked while ScanlineRender did not.
+    //
+    // Static .obj / single-sample .abc imports stay non-frame-varying so the
+    // cache does its job (one render reused across all frames).
+    if (_imp && (_imp->hasAnimatedXform || _imp->hasAnimatedVerts)) {
+        metadata.setIsFrameVarying(true);
+    }
     return eStatusOK;
 }
 

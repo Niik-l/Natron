@@ -171,7 +171,24 @@ Camera3DNode::initializeKnobs()
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("V Aperture (mm)"));
-        k->setName("vAperture"); k->setDefaultValue(18.672); k->setAnimationEnabled(true);
+        k->setName("vAperture");
+        // Pre-compute the V aperture so the new camera matches the project's
+        // aspect ratio from the start (24.576mm H × (projectH / projectW)).
+        // Saves the user clicking "Match Project Aspect" on every camera they
+        // create. Falls back to 18.672mm (35mm Academy) when no project is
+        // available — same as the legacy default.
+        double defaultVAp = 18.672;
+        AppInstancePtr app = getApp();
+        if (app && app->getProject()) {
+            Format fmt;
+            app->getProject()->getProjectDefaultFormat(&fmt);
+            const double pw = (double)fmt.width();
+            const double ph = (double)fmt.height();
+            if (pw > 0 && ph > 0) {
+                defaultVAp = 24.576 * (ph / pw);
+            }
+        }
+        k->setDefaultValue(defaultVAp); k->setAnimationEnabled(true);
         k->setMinimum(1.0); k->setDisplayMinimum(5.0); k->setDisplayMaximum(70.0);
         lensPage->addKnob(k); _imp->vAperture = k;
     }

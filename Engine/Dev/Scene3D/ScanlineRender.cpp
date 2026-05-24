@@ -1239,9 +1239,39 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
                 }
             }
         }
+
+        // Embedded transform from the source file (Alembic baked xform, or
+        // identity for OBJ / static .abc with no xform). Row-major in
+        // mesh->transform → column-major in localMatrix.
+        float embedded[16];
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c)
-                out.localMatrix[c * 4 + r] = mesh->transform[r * 4 + c];
+                embedded[c * 4 + r] = mesh->transform[r * 4 + c];
+
+        // Compose user TRS knobs (translateX/Y/Z, rotateX/Y/Z, scaleX/Y/Z)
+        // on top of the embedded transform. Without this the ScanlineRender
+        // output ignored the node's transform knobs — Cycles + SceneGraph
+        // pulled them via getKnobByName, ScanlineRender silently used the
+        // embedded matrix only. localMatrix = userTRS * embedded so user
+        // edits move the whole imported geo regardless of its baked xform.
+        auto readDouble = [&](const char* name, float fallback) -> float {
+            KnobIPtr k = readGeo->getKnobByName(name);
+            if (!k) return fallback;
+            KnobDouble* kd = dynamic_cast<KnobDouble*>(k.get());
+            return kd ? (float)kd->getValueAtTime(time) : fallback;
+        };
+        const float tx = readDouble("translateX", 0.0f);
+        const float ty = readDouble("translateY", 0.0f);
+        const float tz = readDouble("translateZ", 0.0f);
+        const float rx = readDouble("rotateX", 0.0f);
+        const float ry = readDouble("rotateY", 0.0f);
+        const float rz = readDouble("rotateZ", 0.0f);
+        const float sx = readDouble("scaleX", 1.0f);
+        const float sy = readDouble("scaleY", 1.0f);
+        const float sz = readDouble("scaleZ", 1.0f);
+        float userTRS[16];
+        SceneGraph::buildTRS(tx, ty, tz, rx, ry, rz, sx, sy, sz, userTRS);
+        mat4Mul(out.localMatrix, userTRS, embedded);
 
         // Optional Image input (input 1) — per-mesh texture for the scanline.
         if (readGeo->getInput(1)) {
@@ -1318,7 +1348,7 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
 
         const int count = abcArchive->getSceneNodeCount();
         for (int i = 0; i < count; ++i) {
-            MeshDataPtr mesh = abcArchive->getMeshDataAt(i);
+            MeshDataPtr mesh = abcArchive->getMeshDataAt(i, time);
             if (!mesh || mesh->numVertices == 0) continue;
 
             GeoData g;

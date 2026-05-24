@@ -231,7 +231,29 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             float sx = kSX ? (float)dynamic_cast<KnobDouble*>(kSX.get())->getValueAtTime(time) : 1;
             float sy = kSY ? (float)dynamic_cast<KnobDouble*>(kSY.get())->getValueAtTime(time) : 1;
             float sz = kSZ ? (float)dynamic_cast<KnobDouble*>(kSZ.get())->getValueAtTime(time) : 1;
-            buildTRS(tx, ty, tz, rx, ry, rz, sx, sy, sz, sn.localMatrix);
+
+            // Compose userTRS × mesh->transform so animated .abc xforms play
+            // back in Cycles + 3D viewport (they previously dropped the
+            // embedded Alembic transform entirely — only ScanlineRender saw
+            // it via mesh->transform). The embedded matrix is row-major in
+            // MeshData; convert to column-major before composing. Order
+            // matches ScanlineRender's extractGeometry: parent-style userTRS
+            // applied on top of the embedded animation.
+            float userTRS[16];
+            buildTRS(tx, ty, tz, rx, ry, rz, sx, sy, sz, userTRS);
+            float embedded[16];
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c)
+                    embedded[c * 4 + r] = mesh->transform[r * 4 + c];
+            // localMatrix = userTRS * embedded (4x4 column-major).
+            for (int c = 0; c < 4; ++c) {
+                for (int r = 0; r < 4; ++r) {
+                    float s = 0.0f;
+                    for (int k = 0; k < 4; ++k)
+                        s += userTRS[k * 4 + r] * embedded[c * 4 + k];
+                    sn.localMatrix[c * 4 + r] = s;
+                }
+            }
 
             nameToIndex[nodeName] = (int)_nodes.size();
             _nodes.push_back(sn);
@@ -307,7 +329,7 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
                 }
                 SceneNode sn;
                 if (isMesh) {
-                    MeshDataPtr md = abcArchive->getMeshDataAt(i);
+                    MeshDataPtr md = abcArchive->getMeshDataAt(i, time);
                     if (md && md->numVertices > 0) {
                         sn.type = eSceneNodeMesh;
                         sn.meshData = md;

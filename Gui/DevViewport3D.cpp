@@ -166,7 +166,19 @@ ViewportFaceLitFactor(const float* a, const float* b, const float* c, const floa
         mv[1] * nLocal[0] + mv[5] * nLocal[1] + mv[9]  * nLocal[2],
         mv[2] * nLocal[0] + mv[6] * nLocal[1] + mv[10] * nLocal[2],
     };
-    return ViewportLitFromEyeNormal(nEye);
+    // Two-sided lighting via abs(N.L). ReadGeo / Alembic meshes have
+    // unpredictable winding (Maya CCW, some tools CW, triangulated soups
+    // can be mixed), so we can't tell which side is "outside" from the
+    // cross product alone. Using abs lights both directions equally; the
+    // depth test hides back faces on closed meshes anyway, so visually this
+    // matches a correctly-wound mesh. Procedural primitives (Sphere / Card /
+    // Cube / Cyl) keep their per-vertex normal path (ViewportLitFromVertexNormals)
+    // which knows the outward direction.
+    float nn[3];
+    Normalize(nEye, nn);
+    float nl = Dot(nn, kViewportLightDirEye);
+    if (nl < 0.0f) nl = -nl;
+    return kViewportAmbient + nl * (1.0f - kViewportAmbient);
 }
 
 static void Frustum(float left, float right, float bottom, float top, float znear, float zfar, float* m16)

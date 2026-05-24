@@ -137,12 +137,17 @@ public:
                         bool& outIsMesh,
                         float outLocalMatrix[16]) const;
 
-    /** @brief Fetch the rest-pose mesh data for a mesh entry.
+    /** @brief Fetch the mesh data for a mesh entry at the given time.
      *  Returns nullptr if the entry isn't a mesh, or no mesh data was read.
+     *  For deforming meshes (multi-sample), mutates the entry's meshData->vertices
+     *  in place to the sample matching `time` before returning. The returned
+     *  shared_ptr is the entry's persistent meshData (same address across calls).
+     *  Pass time < 0 to skip the per-frame update (returns whatever vertices
+     *  were last set, or sample 0 if never animated).
      *  Mesh vertices are in the parent xform's local frame — SceneGraph composes
      *  the parent chain when computing the world transform.
      */
-    MeshDataPtr getMeshDataAt(int idx) const;
+    MeshDataPtr getMeshDataAt(int idx, double time = -1.0) const;
 
     // MaterialProvider interface — every archive mesh entry shares a single
     // material taken from the optional Material3D input on input 0. When no
@@ -183,6 +188,7 @@ private:
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     void loadAlembicFile(const std::string& path);
