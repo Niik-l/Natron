@@ -1,7 +1,7 @@
 # Natron Node Registry
 
 All custom built-in nodes added to Natron beyond the original upstream codebase.
-Updated: 2026-05-23
+Updated: 2026-05-24
 
 ---
 
@@ -13,8 +13,8 @@ Updated: 2026-05-23
 | **Card3D** | `fr.inria.built-in.Card3D` | Registered | Flat textured quad |
 | **Cube3D** | `fr.inria.built-in.Cube3D` | Registered | 24-vertex cube with per-face UVs |
 | **Cylinder3D** | `fr.inria.built-in.Cylinder3D` | Registered | Tessellated cylinder with caps |
-| **ReadGeo** | `fr.inria.built-in.ReadGeo` | Registered | Single-mesh loader for `.abc` (Alembic, requires NATRON_HAVE_ALEMBIC) and `.obj` (Wavefront, no dependency). Parser dispatches on file extension. OBJ group/object directives populate the Object dropdown. |
-| **ReadAlembicArchive** | `fr.inria.built-in.ReadAlembicArchive` | Registered | Multi-mesh Alembic archive loader — reads full scene hierarchies, builds per-entry world transforms from the archive chain. Used by ScanlineRender / 3D viewport for whole-scene `.abc` ingest. |
+| **ReadGeo** | `fr.inria.built-in.ReadGeo` | Registered | Single-mesh loader for `.abc` (Alembic, requires NATRON_HAVE_ALEMBIC) and `.obj` (Wavefront, no dependency). Parser dispatches on file extension. OBJ group/object directives populate the Object dropdown. Supports animated xforms AND animated (deforming) vertex meshes — all samples pre-loaded at file open, mutated per-frame via getMeshData(time). User T/R/S knobs compose with the embedded xform. |
+| **ReadAlembicArchive** | `fr.inria.built-in.ReadAlembicArchive` | Registered | Multi-mesh Alembic archive loader — reads full scene hierarchies, builds per-entry world transforms from the archive chain. Supports animated xforms + animated deforming vertex meshes per entry. Used by ScanlineRender / 3D viewport for whole-scene `.abc` ingest. |
 | **ReadVDB** | `fr.inria.built-in.ReadVDB` | Registered | OpenVDB volume loader. PrincipledVolume fire rendering via Cycles (density/temperature/flame grids, absorption, remap curves). Animated sequences with frame padding. Viewport wireframe bbox from grid bounds. |
 | **Group3D** | `fr.inria.built-in.Group3D` | Registered | Groups 3D objects with unified transform |
 
@@ -33,7 +33,7 @@ Updated: 2026-05-23
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
-| **Camera3D** | `fr.inria.built-in.Camera3D` | Registered | Camera with T/R, focal length, aperture, DOF |
+| **Camera3D** | `fr.inria.built-in.Camera3D` | Registered | Camera with T/R, focal length, aperture, DOF. V Aperture default is computed from the project format (24.576mm H × projectH/projectW) so a fresh camera matches the project aspect out of the box. |
 | **ReadAlembicCamera** | `fr.inria.built-in.ReadAlembicCamera` | Registered | Import animated camera from .abc |
 | **ReadAlembicTransform** | `fr.inria.built-in.ReadAlembicTransform` | Registered | Import animated transform/null/locator from .abc. Outputs translate/rotate/scale. Connect to ParticleEmitter transform input. |
 | **Light3D** | `fr.inria.built-in.Light3D` | Registered | Point/Spot/Area/Distant/Dome light with HDRI |

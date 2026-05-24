@@ -366,3 +366,4 @@ in `Engine/Dev/TODO.md` per subsystem.
 | 2026-05-22 | Phase 3A–3D: GLSL/MRT migration, 6 per-pixel AOVs (Depth/WorldPos/Normal/UV/Pref/Velocity) |
 | 2026-05-23 | Phase 3E: particles migrated to GLSL, fixed-function path retired, AOVs on particles |
 | 2026-05-23 | Shading Modes (Shaded/Flat/Wireframe) for ScanlineRender + viewport, headlight fallback |
+| 2026-05-24 | Animated Alembic vertex meshes (ReadGeo + Archive), ReadGeo user TRS honored, viewport two-sided imported-mesh lighting, Camera3D V aperture project-aware by default |
