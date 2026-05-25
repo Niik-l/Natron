@@ -164,6 +164,8 @@ Two executables are produced:
 - `build-qt6/App/Natron.exe` — interactive GUI
 - `build-qt6/Renderer/NatronRenderer.exe` — CLI batch renderer (headless, no Qt window)
 
+> **Standalone launch:** §9b's DLL bundling targets `App/`. For a standalone `NatronRenderer.exe` you need to bundle DLLs into `Renderer/` too — running `NatronRenderer.exe` from `Renderer/` with no DLLs adjacent (or a clean PATH) exits 127 / silently fails Python init. The Python stdlib at `build-qt6/lib/` is shared by both binaries; only the per-binary DLLs need duplicating.
+
 ---
 
 ## 6. Build OFX Plugins (optional but recommended)
@@ -204,8 +206,15 @@ cmake .. -G "MinGW Makefiles" \
 mingw32-make -j2     # builds BOTH Misc.ofx (~170 MB) and CImg.ofx (~60 MB)
 ```
 
-> **CMake error about CMAKE_SYSTEM_PROCESSOR?** If you get an error about empty `CMAKE_SYSTEM_PROCESSOR`,
-> edit the plugin's `CMakeLists.txt` and quote it: change `${CMAKE_SYSTEM_PROCESSOR}` to `"${CMAKE_SYSTEM_PROCESSOR}"`.
+> **CMake error about CMAKE_SYSTEM_PROCESSOR?** On recent MSYS2 cmake builds `CMAKE_SYSTEM_PROCESSOR` is empty even when targeting x86_64 (`CMAKE_SIZEOF_VOID_P=8`). The bare `if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")` parses as `if(STREQUAL "x86_64")` → cmake error. **Quoting alone isn't enough** — `if("" STREQUAL "x86_64")` evaluates false, so `OFX_ARCH` silently stays `Win32` (wrong; the .ofx ends up under `Contents/Win64`). In the `if(MINGW)` block of `openfx-misc/CMakeLists.txt` (~line 528) AND `openfx-io/CMakeLists.txt` (~line 402), change:
+> ```cmake
+> if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")
+> ```
+> to:
+> ```cmake
+> if("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR CMAKE_SIZEOF_VOID_P EQUAL 8)
+> ```
+> The `CMAKE_SIZEOF_VOID_P` fallback catches the empty-processor case.
 
 > **CImg.h fetch fails or you get hundreds of `'cimg_library_suffixed' has not been declared` errors?**
 > You're building against the wrong CImg version. The `mingw32-make CImg.h` step above pulls the exact commit `b33dcc8f9f1acf1f276ded92c04f8231f6c23fcd` (CImg 2.9.9) which openfx-misc requires; newer upstream CImg removed the private-namespace machinery this code depends on. If `make CImg.h` fails (e.g. curl TLS hiccup), download manually using the URLs in `CImg/Makefile` — never use CImg `master`.
@@ -280,9 +289,12 @@ openfx-io has not been updated for OpenImageIO 3.x and FFmpeg 8.x. You will need
 
 **5. FFmpeg 8.x — pkt_duration renamed** (`FFmpeg/FFmpegFile.cpp`):
 ```cpp
-// Change: decodedFrame->pkt_duration
-// To:     decodedFrame->duration
-// (two occurrences)
+// AVFrame::pkt_duration was renamed to AVFrame::duration in FFmpeg 8.
+// Two occurrences in this file but on different objects:
+//   decodedFrame->pkt_duration
+//   avFrameOut->pkt_duration = avFrameIn->pkt_duration;
+// Change every `->pkt_duration` to `->duration` — all of them refer to
+// AVFrame fields, none refer to AVPacket.
 ```
 
 **6. OpenImageIO_Util linking** (`cmake/Modules/FindOpenImageIO.cmake`):
@@ -419,6 +431,7 @@ cp /c/msys64/mingw64/share/qt6/plugins/platforms/qwindows.dll platforms/
 
 # Python standard library (required for scripting)
 # Check your Python version with: python3 --version
+mkdir -p ../lib                                                  # build-qt6/lib doesn't exist yet
 cp -r /c/msys64/mingw64/lib/python3.14 ../lib/python3.14
 ```
 
@@ -502,20 +515,24 @@ git checkout v5.0.0
 # Apply MinGW compatibility patch (from Natron repo)
 git apply $NATRON_ROOT/Natron/patches/cycles-mingw.patch
 
-# Patch 1 — FindTBB.cmake doesn't recognize MSYS2's libtbb12. Without this,
-# configure fails with "Could NOT find TBB (missing: TBB_LIBRARY)".
-sed -i 's/NAMES tbb$/NAMES tbb tbb12/' src/cmake/Modules/FindTBB.cmake
+# Patch 1 — FindTBB.cmake doesn't recognize MSYS2's libtbb12. In Cycles
+# v5.0.0 the `find_library(TBB_LIBRARY ...)` block puts NAMES on its own
+# line followed by `tbb` on the next, so the obvious one-line sed never
+# matches. Match the `    tbb` line directly:
+sed -i 's/^    tbb$/    tbb tbb12/' src/cmake/Modules/FindTBB.cmake
 
 # Patch 2 — MinGW doesn't expose M_PI from <cmath> unless _USE_MATH_DEFINES
 # is set first. Otherwise cycles/src/subd/dice.cpp (via OpenSubdiv headers)
-# fails with `'M_PI' was not declared in this scope`.
-cat <<'EOF' >> CMakeLists.txt
-
-# Niik-l fork: ensure MinGW exposes M_PI for OpenSubdiv-using sources.
-if(WIN32)
-  add_compile_definitions(_USE_MATH_DEFINES)
-endif()
-EOF
+# fails with `'M_PI' was not declared in this scope`. CRITICAL: the block
+# must be inserted BEFORE `add_subdirectory(src)` (≈line 251) so the
+# definition propagates to subdirectories. Appending with `cat >>` lands
+# AFTER add_subdirectory(src) — silent no-op, build still dies at ~26%.
+sed -i '/^add_subdirectory(src)/i\
+# Niik-l fork: ensure MinGW exposes M_PI for OpenSubdiv-using sources.\
+if(WIN32)\
+  add_compile_definitions(_USE_MATH_DEFINES)\
+endif()\
+' CMakeLists.txt
 
 mkdir build && cd build
 cmake .. -G "MinGW Makefiles" \
@@ -594,16 +611,19 @@ mingw32-make NatronRenderer -j2
 
 ### "Failed to import qtpy.QtCore" / "Failed to import qtpy.QtGui" at startup
 
-The error log shows these on Natron launch. Upstream Natron does `import qtpy` during Python init — required for PyPlug scripting. Two preconditions:
+The error log shows these on Natron launch. Upstream Natron does `import qtpy` during Python init — required for PyPlug scripting. **Three** possible causes (check in this order):
 
-1. **qtpy must be installed** — `pacman -S mingw-w64-x86_64-python-qtpy`. It lives in MSYS2's system site-packages, which Natron leaves on `sys.path` (only user site-packages are disabled).
-2. **QT_API env var must match the Qt binding actually installed.** Our `AppManager::initPython()` already gates this on `QT_VERSION` so Qt6 builds get `pyside6` (Qt5 builds get `pyside2`). If you've inherited a pre-fix Natron build that hardcodes `pyside2` on Qt6, the symptom is this same error.
+1. **PySide6 `.pyd` extension modules can't find Qt6 DLLs.** Most common on dev builds running from `build-qt6/App/`. Since Python 3.8, `PATH` is ignored when resolving a `.pyd`'s dependent DLLs — they must sit next to the running `.exe`. The actual underlying error is `ImportError: DLL load failed while importing QtGui`, but qtpy hides that behind the friendlier "Failed to import qtpy.QtCore" message. **Fix:** complete §9b (bundle DLLs into the binary's directory). For `App/Natron.exe`, bundle into `App/`. For standalone `NatronRenderer.exe`, also bundle the DLLs into `Renderer/`.
 
-Quick verify after fix:
-```bash
-/c/msys64/mingw64/bin/python3.exe -c "import qtpy; print(qtpy.__version__)"
-# → prints a version string (e.g. 2.4.x)
-```
+2. **qtpy not installed.** `pacman -S mingw-w64-x86_64-python-qtpy`. Lives in MSYS2's system site-packages, which Natron leaves on `sys.path` (only user site-packages are disabled). Verify with:
+   ```bash
+   /c/msys64/mingw64/bin/python3.exe -c "import qtpy; print(qtpy.__version__)"
+   # → prints a version string (e.g. 2.4.x)
+   ```
+
+3. **QT_API mismatch.** Our `AppManager::initPython()` gates `QT_API` on `QT_VERSION` so Qt6 builds get `pyside6` and Qt5 builds get `pyside2`. If you've inherited a pre-fix Natron build that hardcodes `pyside2` on Qt6, the symptom is this same error. Confirm by grepping `AppManager.cpp` for the `qputenv("QT_API", ...)` call.
+
+> **Implementation note:** `qputenv("QT_API", ...)` runs at the *end* of `initPython()`, after the interpreter is already initialized. Python snapshots `os.environ` at startup, so a later `qputenv` may not reach the `os.environ` that qtpy reads. It happens to resolve in practice (qtpy reads the live env on import), but setting `QT_API` in the *process* environment before launch (or earlier in `initPython` before `Py_Initialize`) would be more robust. Not yet patched — file an issue if you hit this.
 
 ### Harmless build warning: `wmain` missing declaration
 
@@ -694,7 +714,9 @@ Note: `-j4` or higher generally works fine for the main Natron build on 16GB+ ma
 
 ## What This Build Includes
 
-| Component | Version |
+Versions below are the ones this doc was originally tested against. **Newer MSYS2 toolchain versions are known to work** — a fresh 2026-05-25 verification built cleanly on GCC 16.1.0 / Qt 6.11.0 / PySide6 6.11.0 / Python 3.14.5 / Boost 1.91.0 / OIIO 3.1.13 / OpenEXR 3.4.11 / FFmpeg 8.1.1. No patches needed beyond what's already documented here.
+
+| Component | Version (originally tested) |
 |-----------|---------|
 | Natron | 2.6 |
 | Qt | 6.10.1 |
