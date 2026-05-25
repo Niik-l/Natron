@@ -3,8 +3,11 @@
 # (run everything in the MSYS2 *MINGW64* shell)
 # =====================================================================
 
-# Parent directory that holds (or will hold) all source trees + builds.
-NATRON_ROOT="/d/_vfx_claude_2025/Natron_2026_git_pulls/v03"
+# Parent dir holding your Natron checkout + sibling builds (cycles/, openfx-*/, etc.).
+# Auto-detected from this file's location: ../../.. = the folder that contains Natron/.
+# Advanced: override by exporting NATRON_ROOT before running.
+_CFG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NATRON_ROOT="${NATRON_ROOT:-$(cd "$_CFG_DIR/../../.." && pwd)}"
 
 # Clean, self-contained, relocatable install folder (built fresh from outputs).
 INSTALL_DIR="$NATRON_ROOT/Natron-install"

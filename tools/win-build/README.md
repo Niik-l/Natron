@@ -10,18 +10,45 @@ shell. (Distinct from `tools/jenkins/` and `tools/buildmaster/`, which are the L
 > two ever disagree, **trust `BUILDING.md`** and fix the scripts. The scripts are convenience
 > automation; the manual guide is the source of truth.
 
+## Before you start (first time only)
+
+1. **Install MSYS2** from https://www.msys2.org/ — accept the defaults (installs to `C:\msys64`).
+2. **Open the *MINGW64* terminal.** From the Start menu choose **"MSYS2 MINGW64"** — not
+   "MSYS2 MSYS" or "UCRT64". The prompt must show **MINGW64** in purple. (The build fails in
+   the other shells.)
+3. **Get the code** (need ~15 GB free on the build drive). In the MINGW64 shell:
+   ```bash
+   pacman -S --needed git          # if git isn't installed yet
+   cd /d                           # pick a drive: /c = C:, /d = D:, ...
+   git clone --branch RB-2.6 https://github.com/Niik-l/Natron.git
+   cd Natron/tools/win-build
+   ```
+
+You don't edit any paths — `NATRON_ROOT` auto-detects from where you cloned.
+
 ## Quick start
 
+From `Natron/tools/win-build` in the MINGW64 shell:
+
 ```bash
-# 1. edit config.sh  (at minimum: NATRON_ROOT, INSTALL_DIR, WITH_CYCLES)
-# 2. run it all:
-./build-all.sh
-# ...or run/resume a single phase:
-./04-natron.sh
+bash build-all.sh
 ```
 
-On success the install is at `$INSTALL_DIR` (default `$NATRON_ROOT/Natron-install`).
-Launch `$INSTALL_DIR/App/Natron.exe` (double-clickable — DLLs are bundled).
+This does everything: installs dependencies, clones the helper repos next to Natron, applies
+patches, builds Cycles + Natron + plugins, and stages a ready-to-run install. Expect **~1–2
+hours**; a clean run leaves **~14 GB on the build drive** (the install you keep is **~6 GB**;
+the rest is the build tree + sources, deletable afterward). `WITH_CYCLES=0` is well under half
+that. When it finishes it prints:
+
+```
+Launch: .../Natron-install/App/Natron.exe     ← double-click this
+```
+
+**Only optional tweak:** to skip the long Cycles build, set `WITH_CYCLES=0` in `config.sh`
+first (`nano config.sh`; Ctrl+O saves, Ctrl+X exits).
+
+**If a phase fails**, it stops with a red message naming the phase. Fix the cause and re-run
+`bash build-all.sh` — finished phases are skipped, so it resumes where it stopped.
 
 ## Phases (each idempotent and individually runnable)
 
