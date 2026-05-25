@@ -75,8 +75,14 @@ pacman -S --noconfirm \
 
 ## 3. Clone the Repository
 
+Pick a parent directory for your projects and stash it in `NATRON_ROOT` — the rest of this doc refers to `$NATRON_ROOT` rather than any hardcoded path. Add the `export` line to your `~/.bashrc` if you want it persistent across MSYS2 sessions.
+
 ```bash
-cd /d/projects  # or wherever you want to put it
+# Wherever you keep source trees — adjust to your preference.
+# Examples: /d/projects   /c/Users/$USER/code   /e/dev   ~/projects
+export NATRON_ROOT=/d/projects
+mkdir -p $NATRON_ROOT
+cd $NATRON_ROOT
 
 # Clone Natron
 git clone https://github.com/Niik-l/Natron.git
@@ -123,8 +129,8 @@ cmake .. -G "MinGW Makefiles" \
   -DNATRON_LLVM_INSTALL_DIR=C:/msys64/mingw64
   # Optional — enable Cycles:
   # -DNATRON_CYCLES=ON \
-  # -DNATRON_CYCLES_DIR=/d/projects/cycles \
-  # -DNATRON_CYCLES_BUILD_DIR=/d/projects/cycles/build
+  # -DNATRON_CYCLES_DIR=$NATRON_ROOT/cycles \
+  # -DNATRON_CYCLES_BUILD_DIR=$NATRON_ROOT/cycles/build
 ```
 
 You should see output ending with:
@@ -167,7 +173,7 @@ Without plugins, Natron has no Read/Write/Blur/Merge nodes. You need two plugin 
 ### openfx-misc (Blur, Merge, Transform, etc.)
 
 ```bash
-cd /d/projects  # same parent directory as Natron
+cd $NATRON_ROOT  # same parent directory as Natron
 git clone https://github.com/NatronGitHub/openfx-misc.git
 cd openfx-misc
 git submodule update --init --recursive
@@ -197,7 +203,7 @@ mingw32-make -j2
 ### openfx-io (Read, Write — EXR, PNG, FFmpeg, etc.)
 
 ```bash
-cd /d/projects
+cd $NATRON_ROOT
 git clone https://github.com/NatronGitHub/openfx-io.git
 cd openfx-io
 git submodule update --init --recursive
@@ -281,15 +287,15 @@ Copy the built `.ofx` files into Natron's plugin directory:
 
 ```bash
 # Create plugin directories
-NATRON_DIR="/d/projects/Natron/build-qt6"
+NATRON_DIR="$NATRON_ROOT/Natron/build-qt6"
 mkdir -p "$NATRON_DIR/Plugins/OFX/Natron/Misc.ofx.bundle/Contents/Win64"
 mkdir -p "$NATRON_DIR/Plugins/OFX/Natron/IO.ofx.bundle/Contents/Win64"
 
 # Copy plugins
-cp /d/projects/openfx-misc/build/Misc.ofx \
+cp $NATRON_ROOT/openfx-misc/build/Misc.ofx \
    "$NATRON_DIR/Plugins/OFX/Natron/Misc.ofx.bundle/Contents/Win64/Misc.ofx"
 
-cp /d/projects/openfx-io/build/IO.ofx \
+cp $NATRON_ROOT/openfx-io/build/IO.ofx \
    "$NATRON_DIR/Plugins/OFX/Natron/IO.ofx.bundle/Contents/Win64/IO.ofx"
 ```
 
@@ -303,7 +309,7 @@ The [`NatronGitHub/natron-plugins`](https://github.com/NatronGitHub/natron-plugi
 
 ```bash
 # Clone alongside your Natron build
-cd /d/projects
+cd $NATRON_ROOT
 git clone https://github.com/NatronGitHub/natron-plugins.git
 
 # Copy into Natron's runtime plugin search path
@@ -322,7 +328,7 @@ Natron uses OpenColorIO for color management. The default config presets (nuke-d
 At runtime, Natron searches `<binary>/../Resources/OpenColorIO-Configs/` (see `Engine/Settings.cpp`). For a dev build run from `build-qt6/App/Natron.exe`, that resolves to `build-qt6/Resources/OpenColorIO-Configs/`.
 
 ```bash
-cd /d/projects/Natron
+cd $NATRON_ROOT/Natron
 curl -L https://github.com/NatronGitHub/OpenColorIO-Configs/archive/Natron-v2.4.tar.gz \
   -o ocio-configs.tar.gz
 tar xzf ocio-configs.tar.gz
@@ -348,7 +354,7 @@ Natron needs MSYS2's DLLs and Python standard library to run. You can either lau
 ### 9a. Run from MSYS2 terminal (quick)
 
 ```bash
-cd /d/projects/Natron/build-qt6/App
+cd $NATRON_ROOT/Natron/build-qt6/App
 export PATH="/c/msys64/mingw64/bin:$PATH"
 ./Natron.exe
 ```
@@ -363,7 +369,7 @@ Walks Natron's actual dependency tree and copies only what's needed. Result is r
 
 ```bash
 pacman -S mingw-w64-x86_64-ntldd
-cd /d/projects/Natron/build-qt6/App
+cd $NATRON_ROOT/Natron/build-qt6/App
 ntldd -R Natron.exe | grep mingw64 | awk '{print $3}' | xargs -I {} cp {} .
 ```
 
@@ -374,7 +380,7 @@ Caveat: may miss DLLs loaded dynamically at runtime (Qt plugins, OCIO config plu
 Simplest and most reliable — no extra tooling, no risk of missing a dynamically-loaded dependency.
 
 ```bash
-cd /d/projects/Natron/build-qt6/App
+cd $NATRON_ROOT/Natron/build-qt6/App
 cp /c/msys64/mingw64/bin/*.dll .
 ```
 
@@ -462,13 +468,13 @@ pacman -S --noconfirm \
 ### Build Cycles standalone
 
 ```bash
-cd /d/projects
+cd $NATRON_ROOT
 git clone https://github.com/blender/cycles.git
 cd cycles
 git checkout v5.0.0
 
 # Apply MinGW compatibility patch (from Natron repo)
-git apply /d/projects/Natron/patches/cycles-mingw.patch
+git apply $NATRON_ROOT/Natron/patches/cycles-mingw.patch
 
 # Patch 1 — FindTBB.cmake doesn't recognize MSYS2's libtbb12. Without this,
 # configure fails with "Could NOT find TBB (missing: TBB_LIBRARY)".
@@ -517,12 +523,12 @@ mingw32-make -j2
 Go back to your Natron build directory and reconfigure:
 
 ```bash
-cd /d/projects/Natron/build-qt6
+cd $NATRON_ROOT/Natron/build-qt6
 
 cmake .. -G "MinGW Makefiles" \
   -DNATRON_CYCLES=ON \
-  -DNATRON_CYCLES_DIR=/d/projects/cycles \
-  -DNATRON_CYCLES_BUILD_DIR=/d/projects/cycles/build
+  -DNATRON_CYCLES_DIR=$NATRON_ROOT/cycles \
+  -DNATRON_CYCLES_BUILD_DIR=$NATRON_ROOT/cycles/build
 
 mingw32-make -j2
 ```
@@ -606,7 +612,7 @@ The MSYS2 DLLs aren't bundled with the exe. Either launch from the MSYS2 termina
 ### "Failed to import encodings module" on launch
 Python's standard library isn't bundled. Copy it with:
 ```bash
-cp -r /c/msys64/mingw64/lib/python3.14 /d/projects/Natron/build-qt6/lib/python3.14
+cp -r /c/msys64/mingw64/lib/python3.14 $NATRON_ROOT/Natron/build-qt6/lib/python3.14
 ```
 
 ### "Could not find a decoder to read exr file format"
