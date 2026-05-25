@@ -20,19 +20,18 @@ If you add a new source file or rename one, run `cmake .. -G "MinGW Makefiles"` 
 
 **Read `GIT_WORKFLOW.md` for full details.** Key rules:
 
-1. **NEVER commit directly to `RB-2.6`** — always use a feature branch
-2. **NEVER rewrite published history** — no `git rebase -i`, no `git push --force` on pushed commits
+1. **Direct commits to `RB-2.6` are fine for small verified fixes / incremental features** — this is a solo fork, not a team repo. Use a `feature/*` or `experiment/*` branch only for multi-week refactors or risky work that might be thrown away. If/when collaborators join, default back to feature branches for everything.
+2. **NEVER rewrite published history** — no `git rebase -i`, no `git push --force` on pushed commits. Amending a local-only commit before pushing is fine.
 3. **NEVER commit build artifacts** — `build-qt6/` is gitignored, keep it that way
 4. **Logical commits** — one commit per logical change, not lumps of unrelated work
-5. **Branch naming:** `feature/short-name`, `fix/short-name`, `docs/short-name` (kebab-case)
-6. **Always confirm with the user before pushing** — `git push` is a shared-state operation
+5. **Branch naming (when you do use one):** `feature/short-name`, `fix/short-name`, `docs/short-name` (kebab-case)
+6. **Commit anytime, push only after work hours** — Claude commits freely; the user runs `git push` themselves when they're off the clock.
 
-When the user asks to commit/push:
+When the user asks to commit:
 - Check `git status --short | grep -v "build-qt6/"` to see real changes
-- Suggest a feature branch if not already on one
 - Group related files into logical commits
-- Write clear commit messages: `<area>: <summary>`
-- Confirm before pushing
+- Write clear commit messages: `<area>: <summary>` with a `Co-Authored-By: Claude` trailer (bare — no email, no version)
+- Don't push — the user does that themselves
 
 ## Project Structure
 
@@ -49,7 +48,7 @@ When the user asks to commit/push:
 - `Engine/Dev/WIKI.md` — particle system reference (all nodes, knobs, attributes, examples)
 - `Engine/Dev/TODO.md` — known issues + user TODO list at the top
 - `NODE_REGISTRY.md` — list of all registered plugin nodes
-- `GIT_WORKFLOW.md` — git rules and feature branch workflow
+- `GIT_WORKFLOW.md` — full git rules (commit grouping, branch policy, what NOT to do)
 
 ## Particle System Status (2026-04-08)
 
