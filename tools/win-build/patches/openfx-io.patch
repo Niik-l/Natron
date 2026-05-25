@@ -1,0 +1,128 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 415277e..8288932 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -399,7 +399,9 @@ set(OFX_ARCH UNKNOWN)
+ # Win
+ if(MINGW)
+     set(OFX_ARCH "Win32")
+-    if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")
++    # MSYS2's CMake leaves CMAKE_SYSTEM_PROCESSOR empty; quote it to avoid a parse
++    # error and fall back to pointer size (8 == 64-bit) to select Win64.
++    if("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR CMAKE_SIZEOF_VOID_P EQUAL 8)
+         set(OFX_ARCH "Win64")
+     endif()
+ # Visual Studio    
+diff --git a/FFmpeg/FFmpegFile.cpp b/FFmpeg/FFmpegFile.cpp
+index 0b2a2a2..c16ba34 100644
+--- a/FFmpeg/FFmpegFile.cpp
++++ b/FFmpeg/FFmpegFile.cpp
+@@ -1374,7 +1374,7 @@ FFmpegFile::demuxAndDecode(AVFrame* avFrameOut, int64_t frame)
+             found = true;
+         }
+         // If the current frame needs to be displayed longer than current_pts - prev_pts
+-        else if ((decodedFrameIdx < targetFrameIdx) && (stream->ptsToFrame(decodedFrame->pts + decodedFrame->pkt_duration) > targetFrameIdx)) {
++        else if ((decodedFrameIdx < targetFrameIdx) && (stream->ptsToFrame(decodedFrame->pts + decodedFrame->duration) > targetFrameIdx)) {
+             found = true;
+         }
+ 
+@@ -1443,7 +1443,7 @@ FFmpegFile::imageConvert(AVFrame* avFrameIn, AVFrame* avFrameOut)
+ 
+     avFrameOut->pts = avFrameIn->pts;
+     avFrameOut->pkt_dts = avFrameIn->pkt_dts;
+-    avFrameOut->pkt_duration = avFrameIn->pkt_duration;
++    avFrameOut->duration = avFrameIn->duration;
+ 
+     if (!avFrameOut->data[0]) {
+         int res = av_image_alloc(avFrameOut->data, avFrameOut->linesize, avFrameOut->width, avFrameOut->height, dstPixFmt, 32);
+diff --git a/OIIO/ReadOIIO.cpp b/OIIO/ReadOIIO.cpp
+index 8e1eec6..e662a9b 100644
+--- a/OIIO/ReadOIIO.cpp
++++ b/OIIO/ReadOIIO.cpp
+@@ -499,7 +499,7 @@ private:
+     void getConfig(ImageSpec* config) const;
+ 
+     //// OIIO image cache
+-    ImageCache* _cache;
++    std::shared_ptr<ImageCache> _cache;
+ 
+     BooleanParam* _rawAutoBright;
+     BooleanParam* _rawUseCameraWB;
+@@ -546,7 +546,7 @@ ReadOIIOPlugin::ReadOIIOPlugin(OfxImageEffectHandle handle,
+                           false
+ #endif
+                           )
+-    , _cache(NULL)
++    , _cache(nullptr)
+     , _outputLayer(NULL)
+     , _outputLayerString(NULL)
+     , _availableViews(NULL)
+@@ -2560,7 +2560,9 @@ ReadOIIOPlugin::decodePlane(const string& filename,
+                 if (spec.tile_width == 0) {
+                     // Read by scanlines
+ 
+-                    if (!img->read_scanlines(ybeginClamped, // y begin
++                    if (!img->read_scanlines(subImageIndex, // subimage
++                                             0, // miplevel
++                                             ybeginClamped, // y begin
+                                              yendClamped, // y end
+                                              zbegin, // z
+                                              chbegin, // chan begin
+@@ -2633,7 +2635,9 @@ ReadOIIOPlugin::decodePlane(const string& filename,
+ 
+                     // Pass the valid tile range and buffer to OIIO and decode with a negative Y stride from
+                     // top to bottom
+-                    if (!img->read_tiles(tiledXBegin, // x begin
++                    if (!img->read_tiles(subImageIndex, // subimage
++                                         0, // miplevel
++                                         tiledXBegin, // x begin
+                                          tiledXEnd, // x end
+                                          tiledYBegin, // y begin
+                                          tiledYEnd, // y end
+@@ -2960,7 +2964,7 @@ ReadOIIOPlugin::metadata(const string& filename)
+             ss << std::endl;
+         }
+ 
+-        for (ImageIOParameterList::const_iterator p = subImages[sIt].extra_attribs.begin(); p != subImages[sIt].extra_attribs.end(); ++p) {
++        for (auto p = subImages[sIt].extra_attribs.cbegin(); p != subImages[sIt].extra_attribs.cend(); ++p) {
+             string s = subImages[sIt].metadata_val(*p, true);
+             ss << "    " << p->name() << ": ";
+             if (s == "1.#INF") {
+@@ -3145,7 +3149,7 @@ ReadOIIOPluginFactory::unload()
+ 
+ #ifdef OFX_READ_OIIO_SHARED_CACHE
+     // get the shared image cache (may be shared with other plugins using OIIO)
+-    ImageCache* sharedcache = ImageCache::create(true);
++    std::shared_ptr<ImageCache> sharedcache = ImageCache::create(true);
+     // purge it
+     // teardown is dangerous if there are other users
+     ImageCache::destroy(sharedcache);
+diff --git a/OIIO/WriteOIIO.cpp b/OIIO/WriteOIIO.cpp
+index 801a9a4..96208e6 100644
+--- a/OIIO/WriteOIIO.cpp
++++ b/OIIO/WriteOIIO.cpp
+@@ -935,7 +935,7 @@ WriteOIIOPlugin::beginEncodeParts(void* user_data,
+         return;
+     }
+ 
+-    OIIO_NAMESPACE::TypeDesc oiioBitDepth;
++    OIIO::TypeDesc oiioBitDepth;
+     // size_t sizeOfChannel = 0;
+     int bitsPerSample = 0;
+     int finalBitDepth_i;
+diff --git a/cmake/Modules/FindOpenImageIO.cmake b/cmake/Modules/FindOpenImageIO.cmake
+index 4d4a7ee..760b9a6 100644
+--- a/cmake/Modules/FindOpenImageIO.cmake
++++ b/cmake/Modules/FindOpenImageIO.cmake
+@@ -98,6 +98,11 @@ if (OpenImageIO_FOUND)
+     set (OPENIMAGEIO_INCLUDES ${OPENIMAGEIO_INCLUDE_DIR})
+     set (OPENIMAGEIO_LIBRARIES ${OPENIMAGEIO_LIBRARY})
+     get_filename_component (OPENIMAGEIO_LIBRARY_DIRS "${OPENIMAGEIO_LIBRARY}" DIRECTORY)
++    # OIIO 3.x split OpenImageIO_Util into a separate library that ReadOIIO/WriteOIIO need.
++    find_library(OPENIMAGEIO_UTIL_LIBRARY NAMES OpenImageIO_Util HINTS ${OPENIMAGEIO_LIBRARY_DIRS})
++    if (OPENIMAGEIO_UTIL_LIBRARY)
++        list(APPEND OPENIMAGEIO_LIBRARIES ${OPENIMAGEIO_UTIL_LIBRARY})
++    endif()
+     if (NOT OpenImageIO_FIND_QUIETLY)
+         message ( STATUS "OpenImageIO includes     = ${OPENIMAGEIO_INCLUDE_DIR}" )
+         message ( STATUS "OpenImageIO libraries    = ${OPENIMAGEIO_LIBRARIES}" )
