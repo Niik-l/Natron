@@ -2,6 +2,14 @@
 
 A step-by-step guide to building Natron from source with Qt6, PySide6, and Python 3.14 on Windows using MSYS2. Includes the 3D system, Cycles renderer, and OFX plugins.
 
+> **Two ways to build:**
+> - **Automated (easiest, best for repeat builds):** the `tools/win-build/` script set runs
+>   this whole process for you — edit `config.sh`, then `./build-all.sh`. See
+>   `tools/win-build/README.md`.
+> - **Manual (this document):** full control, and the place to start if you want to
+>   understand each step or debug a failure. The scripts are generated from these
+>   instructions — so when something breaks, come back here.
+
 **Disk space:** A core Natron build (`build-qt6/`, no Cycles/plugins/DLL bundling) is ~4 GB with debug info (`Natron.exe` is ~819 MB, or ~1.2 GB once Cycles is statically linked). The **full** setup in this guide — Cycles + OFX plugins + community PyPlugs + OCIO configs + DLLs bundled into both `App/` and `Renderer/` — totals **~12 GB** (measured 2026-05-25). Biggest contributors: debug symbols in the two executables, ~1.1 GB of bundled DLLs per binary, build intermediates, and ~940 MB of OCIO configs.
 
 ---
