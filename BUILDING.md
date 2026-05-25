@@ -2,7 +2,7 @@
 
 A step-by-step guide to building Natron from source with Qt6, PySide6, and Python 3.14 on Windows using MSYS2. Includes the 3D system, Cycles renderer, and OFX plugins.
 
-**Disk space:** Expect ~2-3GB for the full build directory (Natron.exe alone is ~819MB with debug info).
+**Disk space:** A core Natron build (`build-qt6/`, no Cycles/plugins/DLL bundling) is ~4 GB with debug info (`Natron.exe` is ~819 MB, or ~1.2 GB once Cycles is statically linked). The **full** setup in this guide — Cycles + OFX plugins + community PyPlugs + OCIO configs + DLLs bundled into both `App/` and `Renderer/` — totals **~12 GB** (measured 2026-05-25). Biggest contributors: debug symbols in the two executables, ~1.1 GB of bundled DLLs per binary, build intermediates, and ~940 MB of OCIO configs.
 
 ---
 
@@ -658,6 +658,7 @@ The MSYS2 DLLs aren't bundled with the exe. Either launch from the MSYS2 termina
 ### "Failed to import encodings module" on launch
 Python's standard library isn't bundled. Copy it with:
 ```bash
+mkdir -p $NATRON_ROOT/Natron/build-qt6/lib
 cp -r /c/msys64/mingw64/lib/python3.14 $NATRON_ROOT/Natron/build-qt6/lib/python3.14
 ```
 
