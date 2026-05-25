@@ -177,6 +177,22 @@ cd $NATRON_ROOT  # same parent directory as Natron
 git clone https://github.com/NatronGitHub/openfx-misc.git
 cd openfx-misc
 git submodule update --init --recursive
+
+# Fetch the pinned CImg.h + patched inpaint.h required by the CImg.ofx
+# target. The version pin (CIMGVERSION) + the dtschump/CImg URL live in
+# openfx-misc's own CImg/Makefile — this fetch mechanism is upstream
+# (NatronGitHub/openfx-misc), not anything our fork adds. Future openfx-misc
+# clones will pick up newer pins automatically.
+#
+# Skipping this step makes `mingw32-make` exit with code 2 after `Misc.ofx`
+# builds — and any community PyPlug that uses an `eu.cimg.*` / `net.sf.cimg.*`
+# node (e.g. zDefocus) then fails at instantiation. Only safe to skip if
+# you're NOT installing the community PyPlug pack in §7.5.
+#
+# CImg 2.9.9 (commit b33dcc8f9f1acf1f276ded92c04f8231f6c23fcd) is verified to
+# build cleanly with GCC 15.2.0 — no extra compiler workaround needed.
+(cd CImg && mingw32-make CImg.h)
+
 mkdir build && cd build
 
 cmake .. -G "MinGW Makefiles" \
@@ -185,20 +201,20 @@ cmake .. -G "MinGW Makefiles" \
   -DCMAKE_MAKE_PROGRAM=/c/msys64/mingw64/bin/mingw32-make.exe \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
-mingw32-make -j2
+mingw32-make -j2     # builds BOTH Misc.ofx (~170 MB) and CImg.ofx (~60 MB)
 ```
 
 > **CMake error about CMAKE_SYSTEM_PROCESSOR?** If you get an error about empty `CMAKE_SYSTEM_PROCESSOR`,
 > edit the plugin's `CMakeLists.txt` and quote it: change `${CMAKE_SYSTEM_PROCESSOR}` to `"${CMAKE_SYSTEM_PROCESSOR}"`.
 
+> **CImg.h fetch fails or you get hundreds of `'cimg_library_suffixed' has not been declared` errors?**
+> You're building against the wrong CImg version. The `mingw32-make CImg.h` step above pulls the exact commit `b33dcc8f9f1acf1f276ded92c04f8231f6c23fcd` (CImg 2.9.9) which openfx-misc requires; newer upstream CImg removed the private-namespace machinery this code depends on. If `make CImg.h` fails (e.g. curl TLS hiccup), download manually using the URLs in `CImg/Makefile` — never use CImg `master`.
+
 > **`mingw32-make` exits with code 2 even when `Misc.ofx` built fine?**
-> openfx-misc has a sibling `CImg` target alongside `Misc`. The CImg target
-> requires headers from a separate [CImg](https://github.com/dtschump/CImg)
-> clone — if you skip it, the build continues past `[100%] Built target Misc`
-> into `CImg.ofx`, fails with `fatal error: CImg.h: No such file or directory`,
-> and propagates the non-zero exit. **Check that `build/Misc.ofx` exists
-> before treating it as a real failure** — the standard plugin set doesn't
-> need CImg.
+> The CImg target is failing while Misc succeeded — usually because the
+> CImg.h fetch above was skipped. Re-run the `mingw32-make CImg.h` step,
+> then `mingw32-make -j2` again. Only treat this as harmless if you're
+> intentionally skipping the community PyPlug pack (§7.5).
 
 ### openfx-io (Read, Write — EXR, PNG, FFmpeg, etc.)
 
@@ -289,23 +305,33 @@ Copy the built `.ofx` files into Natron's plugin directory:
 # Create plugin directories
 NATRON_DIR="$NATRON_ROOT/Natron/build-qt6"
 mkdir -p "$NATRON_DIR/Plugins/OFX/Natron/Misc.ofx.bundle/Contents/Win64"
+mkdir -p "$NATRON_DIR/Plugins/OFX/Natron/CImg.ofx.bundle/Contents/Win64"
 mkdir -p "$NATRON_DIR/Plugins/OFX/Natron/IO.ofx.bundle/Contents/Win64"
 
 # Copy plugins
 cp $NATRON_ROOT/openfx-misc/build/Misc.ofx \
    "$NATRON_DIR/Plugins/OFX/Natron/Misc.ofx.bundle/Contents/Win64/Misc.ofx"
 
+cp $NATRON_ROOT/openfx-misc/build/CImg.ofx \
+   "$NATRON_DIR/Plugins/OFX/Natron/CImg.ofx.bundle/Contents/Win64/CImg.ofx"
+
 cp $NATRON_ROOT/openfx-io/build/IO.ofx \
    "$NATRON_DIR/Plugins/OFX/Natron/IO.ofx.bundle/Contents/Win64/IO.ofx"
 ```
 
-> **Built-in PyPlugs:** Natron ships 10 built-in PyPlugs (AngleBlur, DropShadow, EdgeBlur, Fill, Glow, LightWrap, PIKColor, SplitAndJoin, ZMask, ZRemap) at `Gui/Resources/PyPlugs/`. The build's `App/CMakeLists.txt` includes a `POST_BUILD` step that copies them into `build-qt6/Plugins/PyPlugs/` automatically — no manual step needed. Without this, community PyPlugs that depend on built-in ones (e.g. `zDefocus` calling `createNode("fr.inria.ZRemap")`) crash with the misleading "`'NoneType' object has no attribute 'setScriptName'`".
+> **Built-in PyPlugs:** Natron ships 10 built-in PyPlugs (AngleBlur, DropShadow, EdgeBlur, Fill, Glow, LightWrap, PIKColor, SplitAndJoin, ZMask, ZRemap) at `Gui/Resources/PyPlugs/`. The build's `App/CMakeLists.txt` includes a `POST_BUILD` step that copies them into `build-qt6/Plugins/PyPlugs/` automatically — no manual step needed.
+>
+> **The `'NoneType' object has no attribute 'setScriptName'` error** when instantiating a community PyPlug has two known causes:
+> 1. **Built-in PyPlug missing** — community plugin called `createNode("fr.inria.<built-in name>")` and got `None`. Fixed automatically by the POST_BUILD step above; if it ever recurs, check `build-qt6/Plugins/PyPlugs/` for the source files.
+> 2. **`CImg.ofx` missing** — community plugin called `createNode("eu.cimg.*" / "net.sf.cimg.*")` and got `None` because the CImg target was skipped in §6. Build CImg.ofx (the `mingw32-make CImg.h` step in §6) and install it via the `cp` line above.
 
 ---
 
 ## 7.5. Install Community PyPlugs (optional, ~296 nodes)
 
 The [`NatronGitHub/natron-plugins`](https://github.com/NatronGitHub/natron-plugins) repo is the canonical community PyPlug collection. ~296 nodes across 18 categories (Lens flares, Edge tools, Mattes, Light wraps, etc.). Most VFX users expect these to be present.
+
+> **Prerequisites:** `qtpy` (in §2's pacman list) and **`CImg.ofx`** (built + installed in §6 / §7). Many community PyPlugs — including `zDefocus` — depend on `eu.cimg.*` / `net.sf.cimg.*` nodes that ship in `CImg.ofx`. Without it those PyPlugs fail at instantiation with the misleading `'NoneType' object has no attribute 'setScriptName'` error (see §7 troubleshooting note).
 
 ```bash
 # Clone alongside your Natron build
