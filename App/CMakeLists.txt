@@ -34,6 +34,24 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/DevCrashHandler.cpp")
         target_link_libraries(Natron PRIVATE dbghelp psapi)
     endif()
 endif()
+
+# Copy bundled PyPlugs into the runtime plugin search path. Natron's runtime
+# loader scans <CMAKE_BINARY_DIR>/Plugins/PyPlugs/ (relative to the executable
+# parent), NOT Gui/Resources/PyPlugs/ where the source files live. Without
+# this step, the built-in PyPlugs (AngleBlur, DropShadow, EdgeBlur, Fill,
+# Glow, LightWrap, PIKColor, SplitAndJoin, ZMask, ZRemap) are silently absent
+# in dev builds — and any community PyPlug that calls `createNode("fr.inria.ZRemap")`
+# crashes with `'NoneType' object has no attribute 'setScriptName'` without
+# mentioning ZRemap or PyPlugs anywhere in the error.
+file(GLOB BUILTIN_PYPLUG_FILES
+    "${CMAKE_SOURCE_DIR}/Gui/Resources/PyPlugs/*.py"
+    "${CMAKE_SOURCE_DIR}/Gui/Resources/PyPlugs/*.png"
+    "${CMAKE_SOURCE_DIR}/Gui/Resources/PyPlugs/*.svg"
+    "${CMAKE_SOURCE_DIR}/Gui/Resources/PyPlugs/*.xml")
+add_custom_command(TARGET Natron POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/Plugins/PyPlugs"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${BUILTIN_PYPLUG_FILES} "${CMAKE_BINARY_DIR}/Plugins/PyPlugs/"
+    COMMENT "Copying built-in PyPlugs to ${CMAKE_BINARY_DIR}/Plugins/PyPlugs/")
 if(APPLE)
     set_target_properties(Natron PROPERTIES
         MACOSX_BUNDLE TRUE
