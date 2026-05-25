@@ -47,14 +47,14 @@ Recent milestones:
 | **ReadVDB** | `fr.inria.built-in.ReadVDB` | OpenVDB volume loader (PrincipledVolume rendering via Cycles) |
 | **Group3D** | `fr.inria.built-in.Group3D` | Groups 3D objects with unified transform |
 
-### 3D Scene & Render (6 nodes)
+### 3D Scene & Render (6 nodes — 5 registered, Project3D disabled)
 | Node | Plugin ID | Description |
 |------|-----------|-------------|
 | **Scene3D** | `fr.inria.built-in.Scene3D` | Aggregates 3D objects for rendering |
 | **RenderPass** | `fr.inria.built-in.RenderPass` | Multi-pass filter: visibility, holdout, shadow catcher, light selection |
 | **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | GLSL 3.3 + MRT rasterizer; 6 AOVs; Shading modes; particle render |
 | **CyclesRender** | `fr.inria.built-in.CyclesRender` | Cycles path tracer (NATRON_CYCLES); 12 AOVs |
-| **Project3D** | `fr.inria.built-in.Project3D` | Camera projection onto geometry |
+| ~~**Project3D**~~ | ~~`fr.inria.built-in.Project3D`~~ | **Disabled 2026-05-24** — ~~Camera projection onto geometry~~. Superseded by UVProject. |
 | **UVProject** | `fr.inria.built-in.UVProject` | Rewrite mesh UVs (6 projection modes incl. STW perspective) |
 
 ### Camera & Lighting (4 nodes)

@@ -18,7 +18,7 @@ Updated: 2026-05-24
 | **ReadVDB** | `fr.inria.built-in.ReadVDB` | Registered | OpenVDB volume loader. PrincipledVolume fire rendering via Cycles (density/temperature/flame grids, absorption, remap curves). Animated sequences with frame padding. Viewport wireframe bbox from grid bounds. |
 | **Group3D** | `fr.inria.built-in.Group3D` | Registered | Groups 3D objects with unified transform |
 
-## 3D Scene & Render (6 nodes)
+## 3D Scene & Render (6 nodes — 5 registered, Project3D disabled)
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
