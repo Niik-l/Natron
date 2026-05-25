@@ -50,6 +50,7 @@ pacman -S --noconfirm \
 # Required libraries
 pacman -S --noconfirm \
   mingw-w64-x86_64-python \
+  mingw-w64-x86_64-python-qtpy \
   mingw-w64-x86_64-boost \
   mingw-w64-x86_64-cairo \
   mingw-w64-x86_64-expat \
@@ -291,6 +292,26 @@ cp /d/projects/openfx-misc/build/Misc.ofx \
 cp /d/projects/openfx-io/build/IO.ofx \
    "$NATRON_DIR/Plugins/OFX/Natron/IO.ofx.bundle/Contents/Win64/IO.ofx"
 ```
+
+> **Built-in PyPlugs:** Natron ships 10 built-in PyPlugs (AngleBlur, DropShadow, EdgeBlur, Fill, Glow, LightWrap, PIKColor, SplitAndJoin, ZMask, ZRemap) at `Gui/Resources/PyPlugs/`. The build's `App/CMakeLists.txt` includes a `POST_BUILD` step that copies them into `build-qt6/Plugins/PyPlugs/` automatically — no manual step needed. Without this, community PyPlugs that depend on built-in ones (e.g. `zDefocus` calling `createNode("fr.inria.ZRemap")`) crash with the misleading "`'NoneType' object has no attribute 'setScriptName'`".
+
+---
+
+## 7.5. Install Community PyPlugs (optional, ~296 nodes)
+
+The [`NatronGitHub/natron-plugins`](https://github.com/NatronGitHub/natron-plugins) repo is the canonical community PyPlug collection. ~296 nodes across 18 categories (Lens flares, Edge tools, Mattes, Light wraps, etc.). Most VFX users expect these to be present.
+
+```bash
+# Clone alongside your Natron build
+cd /d/projects
+git clone https://github.com/NatronGitHub/natron-plugins.git
+
+# Copy into Natron's runtime plugin search path
+mkdir -p Natron/build-qt6/Plugins/PyPlugs
+cp -r natron-plugins/* Natron/build-qt6/Plugins/PyPlugs/
+```
+
+The plugins appear in the Tab menu under their respective category groups on next Natron launch. Requires `qtpy` (the Python Qt abstraction layer) to be installed — included in §2's pacman list.
 
 ---
 
@@ -537,6 +558,19 @@ This only affects the test binary — the main `Natron.exe` is unaffected.
 After fixing either, retest with:
 ```bash
 mingw32-make NatronRenderer -j2
+```
+
+### "Failed to import qtpy.QtCore" / "Failed to import qtpy.QtGui" at startup
+
+The error log shows these on Natron launch. Upstream Natron does `import qtpy` during Python init — required for PyPlug scripting. Two preconditions:
+
+1. **qtpy must be installed** — `pacman -S mingw-w64-x86_64-python-qtpy`. It lives in MSYS2's system site-packages, which Natron leaves on `sys.path` (only user site-packages are disabled).
+2. **QT_API env var must match the Qt binding actually installed.** Our `AppManager::initPython()` already gates this on `QT_VERSION` so Qt6 builds get `pyside6` (Qt5 builds get `pyside2`). If you've inherited a pre-fix Natron build that hardcodes `pyside2` on Qt6, the symptom is this same error.
+
+Quick verify after fix:
+```bash
+/c/msys64/mingw64/bin/python3.exe -c "import qtpy; print(qtpy.__version__)"
+# → prints a version string (e.g. 2.4.x)
 ```
 
 ### Harmless build warning: `wmain` missing declaration

@@ -3160,7 +3160,19 @@ AppManager::initPython()
     }
     // Set QT_API for QtPy
     // https://github.com/spyder-ide/qtpy
+    //
+    // Upstream Natron hardcoded "pyside2" here in 2021 (commit b713ac4927)
+    // before Qt6 support existed. On NATRON_QT6 builds we ship PySide6, not
+    // PySide2, so the hardcoded value made qtpy fail to find a working Qt
+    // binding at startup — surfacing as "Failed to import qtpy.QtCore" in
+    // the error log and silently degrading any PyPlug that depended on
+    // `from qtpy import ...`. Gated on QT_VERSION (a macro Qt headers always
+    // provide) so the same source compiles correctly under both Qt5 and Qt6.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    qputenv("QT_API", "pyside6");
+#else
     qputenv("QT_API", "pyside2");
+#endif
 } // AppManager::initPython
 
 void
