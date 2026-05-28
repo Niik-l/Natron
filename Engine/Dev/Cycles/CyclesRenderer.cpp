@@ -68,6 +68,7 @@
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
+#include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
 #include "Engine/Dev/Scene3D/RenderPass.h"
 #include "Engine/Dev/Scene3D/ReadVDB.h"
 #include "Engine/Dev/Scene3D/Volume3D.h"
@@ -1208,6 +1209,21 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
     scene->integrator->tag_update(scene, ccl::Integrator::UPDATE_ALL);
 
+    // Motion blur shutter timing — used by ParticleInstance, mesh, and any
+    // other path that needs sub-time samples. Hoisted out of the per-branch
+    // duplication so all paths agree.
+    const bool  mbEnabled    = motionBlur && motionBlur->enabled;
+    float       mbShutterOpen  = 0.0f;
+    float       mbShutterClose = 0.0f;
+    if (mbEnabled) {
+        const float st = motionBlur->shutterTime;
+        switch (motionBlur->shutterPosition) {
+            case 0: mbShutterOpen = 0;          mbShutterClose = st;        break; // Start
+            case 1: mbShutterOpen = -st * 0.5f; mbShutterClose = st * 0.5f; break; // Center
+            case 2: mbShutterOpen = -st;        mbShutterClose = 0;         break; // End
+        }
+    }
+
     // --- Sync geometry from SceneGraph ---
     const std::vector<SceneNode>& sceneNodes = sg.nodes();
     for (size_t i = 0; i < sceneNodes.size(); ++i) {
@@ -1308,17 +1324,10 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     if (protoMeshes[g]) protoMeshes[g]->set_used_shaders(shaders);
                 }
 
-                // Motion blur setup — compute shutter open/close offsets
-                bool mbEnabled = motionBlur && motionBlur->enabled;
-                float shutterOpen = 0, shutterClose = 0;
-                if (mbEnabled) {
-                    float st = motionBlur->shutterTime;
-                    switch (motionBlur->shutterPosition) {
-                        case 0: shutterOpen = 0; shutterClose = st; break;           // Start
-                        case 1: shutterOpen = -st * 0.5f; shutterClose = st * 0.5f; break; // Center
-                        case 2: shutterOpen = -st; shutterClose = 0; break;          // End
-                    }
-                }
+                // Motion blur shutter timing — now hoisted outside the loop.
+                // Local aliases for readability inside this branch.
+                const float shutterOpen  = mbShutterOpen;
+                const float shutterClose = mbShutterClose;
 
                 // Enable motion blur on all prototype meshes so Cycles allocates motion attribute space
                 if (mbEnabled) {
@@ -1979,6 +1988,75 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     uvDst[t*3+0] = (i0 < (int)uvs.size()) ? uvs[i0] : ccl::make_float2(0,0);
                     uvDst[t*3+1] = (i1 < (int)uvs.size()) ? uvs[i1] : ccl::make_float2(0,0);
                     uvDst[t*3+2] = (i2 < (int)uvs.size()) ? uvs[i2] : ccl::make_float2(0,0);
+                }
+            }
+        }
+
+        // Motion blur for animated meshes (vertex deformation only — Cycles
+        // reads ATTR_STD_MOTION_VERTEX_POSITION and interpolates between the
+        // shutter-open and shutter-close vertex positions). Works for both
+        // ReadAlembicArchive entries (via archiveEntryIdx) and ReadGeo
+        // single-mesh sources. Xform motion would need to re-evaluate the
+        // SceneGraph parent chain at sub-time — deferred.
+        if (mbEnabled && sn.type == eSceneNodeMesh && srcNode) {
+            EffectInstancePtr effInst = srcNode->getEffectInstance();
+            ReadAlembicArchive* abcArch = dynamic_cast<ReadAlembicArchive*>(effInst.get());
+            ReadGeo*            readGeo = dynamic_cast<ReadGeo*>(effInst.get());
+
+            // Number of vertices on the Cycles mesh — also the size in float3s
+            // we expect from each sub-time query (3 floats per vertex).
+            const size_t N = verts.size();
+
+            // Lambda: fetch vertices at sub-time into outVerts. Returns false
+            // if the result isn't usable. Note this mutates the shared
+            // ReadAlembicArchive/ReadGeo mesh data in place; we copy the
+            // vertices out immediately and restore the shared data to the
+            // center time at the end of this block.
+            auto fetchMeshAt = [&](double t, std::vector<float>& outVerts) -> bool {
+                MeshDataPtr md;
+                if (abcArch && sn.archiveEntryIdx >= 0) {
+                    md = abcArch->getMeshDataAt(sn.archiveEntryIdx, t);
+                } else if (readGeo) {
+                    md = readGeo->getMeshData(t);
+                }
+                if (!md || md->numVertices != N) return false;
+                outVerts = md->vertices; // deep copy
+                return true;
+            };
+
+            std::vector<float> vertsOpen, vertsClose;
+            const bool gotOpen  = fetchMeshAt(time + mbShutterOpen,  vertsOpen);
+            const bool gotClose = fetchMeshAt(time + mbShutterClose, vertsClose);
+
+            // Restore shared mesh data to center time so any subsequent reads
+            // of sn.meshData (or the source node's _lastMeshData) get
+            // consistent data.
+            {
+                std::vector<float> tmp;
+                (void)fetchMeshAt(time, tmp);
+            }
+
+            if (gotOpen && gotClose &&
+                vertsOpen.size()  == N * 3 &&
+                vertsClose.size() == N * 3) {
+                mesh->set_use_motion_blur(true);
+                mesh->set_motion_steps(3);
+                ccl::Attribute* attrMotion = mesh->attributes.add(ccl::ATTR_STD_MOTION_VERTEX_POSITION);
+                ccl::float3* motionData = attrMotion->data_float3();
+                // Layout: [step 0: open verts] [step 2: close verts] —
+                // motion_steps = 3 means (steps - 1) = 2 motion samples, the
+                // center step is the mesh's own verts (already set above).
+                for (size_t vi = 0; vi < N; ++vi) {
+                    motionData[vi] = ccl::make_float3(
+                        vertsOpen[vi * 3 + 0],
+                        vertsOpen[vi * 3 + 1],
+                        vertsOpen[vi * 3 + 2]);
+                }
+                for (size_t vi = 0; vi < N; ++vi) {
+                    motionData[N + vi] = ccl::make_float3(
+                        vertsClose[vi * 3 + 0],
+                        vertsClose[vi * 3 + 1],
+                        vertsClose[vi * 3 + 2]);
                 }
             }
         }

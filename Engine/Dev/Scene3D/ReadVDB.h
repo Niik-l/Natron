@@ -97,8 +97,8 @@ public:
 
     // Volume data for ScanlineRender
     struct VDBVolumeData {
-        std::vector<float> densityData; // dense 3D array
-        int resolution;                  // cube resolution
+        std::vector<float> densityData; // dense 3D array, resX*resY*resZ floats, X-major
+        int resX, resY, resZ;            // per-axis resolution (non-cubic — preserves VDB aspect)
         float bboxMinX, bboxMinY, bboxMinZ;
         float bboxMaxX, bboxMaxY, bboxMaxZ;
         float colorR, colorG, colorB;

@@ -79,11 +79,20 @@ struct SceneNode {
     // Natron source). ReadGeo populates this too so the code path is uniform.
     MeshDataPtr meshData;
 
+    // For SceneNodes emitted by a multi-emit source (currently only
+    // ReadAlembicArchive), this is the entry index used to look up the
+    // mesh + transform via getMeshDataAt(idx, time) / getEntryWorldMatrix(idx,
+    // time, m). -1 for single-emit sources (ReadGeo, procedurals) and for the
+    // root SceneNode of a multi-emit source. Used by CyclesRenderer's
+    // motion-blur path to re-query upstream at sub-frame times.
+    int archiveEntryIdx;
+
     SceneNode()
         : type(eSceneNodeGroup)
         , parentIndex(-1)
         , subIndex(-1)
         , visible(true)
+        , archiveEntryIdx(-1)
     {
         setIdentity(localMatrix);
         setIdentity(worldMatrix);

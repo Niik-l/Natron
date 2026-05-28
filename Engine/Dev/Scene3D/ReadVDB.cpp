@@ -743,15 +743,23 @@ ReadVDB::getVolumeData(double time, VDBVolumeData& outData)
         openvdb::Coord bMax = bbox.max();
         openvdb::Coord bSize = bMax - bMin + openvdb::Coord(1, 1, 1);
 
-        // Determine output resolution (fit to maxRes cube)
+        // Determine output resolution — preserve the VDB's voxel aspect ratio.
+        // Map the largest dimension to maxRes, scale the others proportionally
+        // and floor to at least 8. Without this we'd squash non-cubic VDBs into
+        // a uniform cube, which made smoke look like a soft blob filling the
+        // bounding box instead of matching the Cycles render.
         int maxDim = std::max({bSize.x(), bSize.y(), bSize.z()});
-        int res = std::min(maxRes, maxDim);
-        if (res < 8) res = 8;
+        if (maxDim < 1) maxDim = 1;
+        const double scale = (double)std::min(maxRes, maxDim) / (double)maxDim;
+        int resX = std::max(8, (int)std::round((double)bSize.x() * scale));
+        int resY = std::max(8, (int)std::round((double)bSize.y() * scale));
+        int resZ = std::max(8, (int)std::round((double)bSize.z() * scale));
 
         std::cerr << "[ReadVDB] Index bbox: (" << bMin.x() << "," << bMin.y() << "," << bMin.z()
                   << ") to (" << bMax.x() << "," << bMax.y() << "," << bMax.z() << ")"
                   << " size: " << bSize.x() << "x" << bSize.y() << "x" << bSize.z()
-                  << " maxDim=" << maxDim << " res=" << res << std::endl;
+                  << " maxDim=" << maxDim
+                  << " sampled at " << resX << "x" << resY << "x" << resZ << std::endl;
 
         // World-space bounds from VDB transform
         openvdb::Vec3d worldMin = floatGrid->transform().indexToWorld(bMin.asVec3d());
@@ -766,25 +774,29 @@ ReadVDB::getVolumeData(double time, VDBVolumeData& outData)
         outData.bboxMaxX = (float)worldMax.x();
         outData.bboxMaxY = (float)worldMax.y();
         outData.bboxMaxZ = (float)worldMax.z();
-        outData.resolution = res;
+        outData.resX = resX;
+        outData.resY = resY;
+        outData.resZ = resZ;
 
-        // Sample the VDB grid into a dense 3D array
-        outData.densityData.resize(res * res * res, 0.0f);
+        // Sample the VDB grid into a dense 3D array sized to match the VDB's
+        // aspect ratio. Storage order (X-major): index = z*resY*resX + y*resX + x.
+        outData.densityData.assign((size_t)resX * (size_t)resY * (size_t)resZ, 0.0f);
 
         openvdb::FloatGrid::ConstAccessor accessor = floatGrid->getConstAccessor();
 
-        for (int z = 0; z < res; ++z) {
-            for (int y = 0; y < res; ++y) {
-                for (int x = 0; x < res; ++x) {
-                    // Map dense [0,res) to VDB index space
-                    float fx = bMin.x() + (float)x / (float)res * bSize.x();
-                    float fy = bMin.y() + (float)y / (float)res * bSize.y();
-                    float fz = bMin.z() + (float)z / (float)res * bSize.z();
+        for (int z = 0; z < resZ; ++z) {
+            for (int y = 0; y < resY; ++y) {
+                for (int x = 0; x < resX; ++x) {
+                    // Map dense [0,resN) to VDB index space along each axis.
+                    float fx = bMin.x() + ((float)x + 0.5f) / (float)resX * bSize.x();
+                    float fy = bMin.y() + ((float)y + 0.5f) / (float)resY * bSize.y();
+                    float fz = bMin.z() + ((float)z + 0.5f) / (float)resZ * bSize.z();
 
                     openvdb::Coord ijk((int)fx, (int)fy, (int)fz);
                     float val = accessor.getValue(ijk);
 
-                    outData.densityData[z * res * res + y * res + x] = std::max(0.0f, val);
+                    outData.densityData[(size_t)z * resY * resX + (size_t)y * resX + (size_t)x]
+                        = std::max(0.0f, val);
                 }
             }
         }

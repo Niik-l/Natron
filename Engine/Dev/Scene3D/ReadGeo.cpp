@@ -1045,17 +1045,32 @@ ReadGeo::updateTransformAtTime(MeshData* mesh, double time) const
         return;
     }
 
-    // Map Natron frame (1-based) to Alembic sample index.
-    // Assume 24fps, frame 1 = sample 0.
-    int sampleIdx = static_cast<int>(time - 1.0);
-    if (sampleIdx < 0) {
-        sampleIdx = 0;
-    }
-    if (sampleIdx >= static_cast<int>(_imp->numXformSamples)) {
-        sampleIdx = static_cast<int>(_imp->numXformSamples) - 1;
-    }
+    // Continuous sample index (frame 1 = sample 0). Bracket with floor/ceil
+    // and linearly interpolate matrix components — without this, motion blur
+    // sub-frame sampling returns snapped data and animated xforms don't blur.
+    // Linear matrix interp isn't strictly correct for large rotations (would
+    // need slerp on the rotation block) but at sub-frame deltas the error is
+    // negligible.
+    const int N = static_cast<int>(_imp->numXformSamples);
+    double tCont = time - 1.0;
+    if (tCont < 0.0) tCont = 0.0;
+    if (tCont > (double)(N - 1)) tCont = (double)(N - 1);
 
-    std::memcpy(mesh->transform, &_imp->xformMatrices[sampleIdx * 16], 16 * sizeof(float));
+    const int idx0 = static_cast<int>(std::floor(tCont));
+    const int idx1 = std::min(idx0 + 1, N - 1);
+    const double alpha = tCont - (double)idx0;
+
+    const float* m0 = &_imp->xformMatrices[idx0 * 16];
+    const float* m1 = &_imp->xformMatrices[idx1 * 16];
+    if (idx0 == idx1 || alpha < 1e-9) {
+        std::memcpy(mesh->transform, m0, 16 * sizeof(float));
+    } else {
+        const float a = static_cast<float>(alpha);
+        const float oneMinusA = 1.0f - a;
+        for (int i = 0; i < 16; ++i) {
+            mesh->transform[i] = m0[i] * oneMinusA + m1[i] * a;
+        }
+    }
 }
 
 void
@@ -1065,25 +1080,51 @@ ReadGeo::updateVerticesAtTime(MeshData* mesh, double time) const
         return;
     }
 
-    // Same frame→sample mapping as updateTransformAtTime (Natron frame 1
-    // == Alembic sample 0). For 24fps source + project we get 1:1; for
-    // mismatched rates the playback will be off until we add a proper
-    // time-to-sample mapping with sourceFps + projectFps + Frame Offset.
-    int sampleIdx = static_cast<int>(time - 1.0);
-    if (sampleIdx < 0) {
-        sampleIdx = 0;
-    }
-    if (sampleIdx >= static_cast<int>(_imp->numVertexSamples)) {
-        sampleIdx = static_cast<int>(_imp->numVertexSamples) - 1;
-    }
+    // Continuous sample index (frame 1 = sample 0), then lerp between the
+    // two bracket samples. Without sub-frame interpolation, motion blur
+    // sampling at non-integer times returns snapped vertices and animated
+    // meshes don't blur.
+    // For 24fps source + project we still get 1:1 at integer frames; for
+    // mismatched rates the playback will be off until we add proper
+    // sourceFps + projectFps + Frame Offset mapping (mirrors ReadAlembicArchive's
+    // timeMode 1 path).
+    const int N = static_cast<int>(_imp->numVertexSamples);
+    double tCont = time - 1.0;
+    if (tCont < 0.0) tCont = 0.0;
+    if (tCont > (double)(N - 1)) tCont = (double)(N - 1);
 
-    const std::vector<float>& src = _imp->vertexSamples[sampleIdx];
-    if (src.empty() || src.size() != mesh->vertices.size()) {
+    const int idx0 = static_cast<int>(std::floor(tCont));
+    const int idx1 = std::min(idx0 + 1, N - 1);
+    const double alpha = tCont - (double)idx0;
+
+    const std::vector<float>& s0 = _imp->vertexSamples[idx0];
+    if (s0.empty() || s0.size() != mesh->vertices.size()) {
         // Sample missing or mismatched topology — skip (mesh keeps its current
         // verts, no flicker).
         return;
     }
-    std::memcpy(mesh->vertices.data(), src.data(), src.size() * sizeof(float));
+
+    if (idx0 == idx1 || alpha < 1e-9) {
+        std::memcpy(mesh->vertices.data(), s0.data(), s0.size() * sizeof(float));
+        return;
+    }
+
+    const std::vector<float>& s1 = _imp->vertexSamples[idx1];
+    if (s1.size() != s0.size()) {
+        // Topology mismatch between brackets — fall back to lower sample.
+        std::memcpy(mesh->vertices.data(), s0.data(), s0.size() * sizeof(float));
+        return;
+    }
+
+    const float a = static_cast<float>(alpha);
+    const float oneMinusA = 1.0f - a;
+    float* dst = mesh->vertices.data();
+    const float* src0 = s0.data();
+    const float* src1 = s1.data();
+    const size_t n = s0.size();
+    for (size_t k = 0; k < n; ++k) {
+        dst[k] = src0[k] * oneMinusA + src1[k] * a;
+    }
 }
 
 // ---------------------------------------------------------------------------

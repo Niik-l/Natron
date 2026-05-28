@@ -1654,27 +1654,27 @@ DevViewport3D::keyPressEvent(QKeyEvent* e)
         _imp->imguizmoOp = ImGuizmo::SCALE;
         update();
     } else if (e->key() == Qt::Key_F) {
-        // Frame selected — try point cloud first, then selected node, then reset
-        bool framed = false;
+        // Frame selected — try point cloud first, then selected node, then reset.
+        // Picks a single (targetX,Y,Z + distance) and dispatches to the right
+        // camera mover: in perspective mode we just update camTarget/camDistance;
+        // in look-through mode (on an editable Camera3D) we move the camera node
+        // along its current view direction so the framed target sits at the
+        // desired distance with the camera's orientation preserved.
+        float targetX = 0, targetY = 0, targetZ = 0;
+        float distance = 5.0f;
+        bool  framed   = false;
 
-        // If a point cloud is visible, frame it (F always frames the cloud)
         {
             QMutexLocker lock(&_imp->cloudMutex);
             if (_imp->pointCloud && _imp->pointCloud->numPoints() > 0) {
-                float cx, cy, cz;
-                _imp->pointCloud->getCenter(cx, cy, cz);
+                _imp->pointCloud->getCenter(targetX, targetY, targetZ);
                 float radius = _imp->pointCloud->getRadius();
                 if (radius < 0.1f) radius = 2.0f;
-                lock.unlock();
-                _imp->camTarget[0] = cx;
-                _imp->camTarget[1] = cy;
-                _imp->camTarget[2] = cz;
-                _imp->camDistance = radius * 2.5f;
+                distance = radius * 2.5f;
                 framed = true;
             }
         }
 
-        // If no point cloud, frame selected node
         if (!framed && !_imp->selectedNodeName.empty()) {
             const std::vector<SceneNode>& nodes = _imp->sceneGraph.nodes();
             for (size_t i = 0; i < nodes.size(); ++i) {
@@ -1684,10 +1684,8 @@ DevViewport3D::keyPressEvent(QKeyEvent* e)
                         EffectInstancePtr effect = node->getEffectInstance();
                         float t[3], r[3], s[3];
                         readTRSFromNode(effect, t, r, s);
-                        _imp->camTarget[0] = t[0];
-                        _imp->camTarget[1] = t[1];
-                        _imp->camTarget[2] = t[2];
-                        _imp->camDistance = 5.0f;
+                        targetX = t[0]; targetY = t[1]; targetZ = t[2];
+                        distance = 5.0f;
                         framed = true;
                     }
                     break;
@@ -1698,6 +1696,33 @@ DevViewport3D::keyPressEvent(QKeyEvent* e)
         if (!framed) {
             resetCamera();
             return;
+        }
+
+        // Look-through path: editable Camera3D — translate the camera node
+        // along its current view direction (-Z in camera frame). For
+        // ReadAlembicCamera (or any non-editable look-through source),
+        // getEditableCamera3D returns null and we fall back to the
+        // perspective-camera update so the user still sees a framed view
+        // even if they're nominally "looking through" a read-only camera.
+        if (Camera3DNode* editCam = getEditableCamera3D(_imp->lookThroughCam)) {
+            double time = 0.0;
+            if (getGui() && getGui()->getApp()) {
+                time = getGui()->getApp()->getTimeLine()->currentFrame();
+            }
+            double R[3][3];
+            camRotFromKnobs(editCam, time, R);
+            // View direction in world space = -(rotation column 2). Same
+            // convention as applyDollyToCamera3D.
+            const double vdx = -R[0][2], vdy = -R[1][2], vdz = -R[2][2];
+            const double newTx = (double)targetX - vdx * (double)distance;
+            const double newTy = (double)targetY - vdy * (double)distance;
+            const double newTz = (double)targetZ - vdz * (double)distance;
+            writeCamPos(editCam, newTx, newTy, newTz);
+        } else {
+            _imp->camTarget[0] = targetX;
+            _imp->camTarget[1] = targetY;
+            _imp->camTarget[2] = targetZ;
+            _imp->camDistance  = distance;
         }
         update();
     } else if (e->key() == Qt::Key_A) {

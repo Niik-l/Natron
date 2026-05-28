@@ -82,8 +82,15 @@ struct ScanlineRenderPrivate
     KnobBoolWPtr   particleSolid;  // edge alpha = p.a (true) vs fade-to-0 (false)
     KnobDoubleWPtr particleScale;  // global size multiplier
     KnobDoubleWPtr particleMotionBlur; // velocity stretch amount (legacy cheat mode)
-    KnobIntWPtr motionSamples;      // number of sub-frame samples (1 = off)
-    KnobDoubleWPtr motionShutter;   // shutter open fraction (0-1, default 0.5)
+
+    // Global multi-sample motion blur — applies to every geo + particle +
+    // camera transform path. Knobs live on the Output tab in a "Motion Blur"
+    // group; they cover the whole scene rather than the particle pass alone.
+    KnobIntWPtr    motionSamples;        // number of sub-frame samples (1 = off)
+    KnobDoubleWPtr motionShutter;        // shutter open fraction (0-1, default 0.5)
+    KnobChoiceWPtr shutterOffset;        // Centered / Start / End / Custom
+    KnobDoubleWPtr shutterCustomOffset;  // frames added to shutter start when offset = Custom
+    KnobDoubleWPtr temporalJitter;       // randomize sample timing within shutter (0-1)
 
     // Shading mode for mesh geometry. 0 = Shaded (N.L diffuse + ambient,
     // using Light3D if connected), 1 = Flat (no lighting, just texture/color),
@@ -205,6 +212,68 @@ ScanlineRender::initializeKnobs()
         outPage->addKnob(k); _imp->shadingMode = k;
     }
 
+    // -------- Motion Blur group (Output tab) --------
+    // Scene-wide multi-sample motion blur — samples + shutter + offset modes
+    // for camera, geometry, particles, and instances.
+    KnobGroupPtr mbGroup = AppManager::createKnob<KnobGroup>(this, tr("Motion Blur"));
+    mbGroup->setName("motionBlur");
+    mbGroup->setDefaultValue(true);
+    outPage->addKnob(mbGroup);
+
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Samples"));
+        k->setName("motionSamples"); k->setDefaultValue(1);
+        k->setMinimum(1); k->setMaximum(32);
+        k->setDisplayMinimum(1); k->setDisplayMaximum(16);
+        k->setHintToolTip(tr("Physically-accurate motion blur via multi-sample accumulation. "
+                              "1 = off. 4-8 = typical quality. 16 = film quality. "
+                              "Render cost scales linearly with sample count."));
+        mbGroup->addKnob(k); _imp->motionSamples = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Shutter"));
+        k->setName("motionShutter"); k->setDefaultValue(0.5);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Shutter open duration as a fraction of frame time. "
+                              "0.5 = 180-degree shutter (film standard). "
+                              "Only used when Samples > 1."));
+        mbGroup->addKnob(k); _imp->motionShutter = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Shutter Offset"));
+        k->setName("shutterOffset"); k->setAnimationEnabled(false);
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("Centered", "", "Shutter open from t - shutter/2 to t + shutter/2 (real-camera behaviour, default)."));
+        entries.push_back(ChoiceOption("Start",    "", "Shutter open from t to t + shutter (motion happens after the frame)."));
+        entries.push_back(ChoiceOption("End",      "", "Shutter open from t - shutter to t (motion happens before the frame)."));
+        entries.push_back(ChoiceOption("Custom",   "", "Use Custom Offset (in frames, added to t) for the shutter start."));
+        k->populateChoices(entries);
+        k->setDefaultValue(0); // Centered
+        k->setHintToolTip(tr("Where the shutter opens relative to the current frame. "
+                              "Matches Nuke's ScanlineRender shutter offset semantics."));
+        mbGroup->addKnob(k); _imp->shutterOffset = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Custom Offset"));
+        k->setName("shutterCustomOffset"); k->setDefaultValue(0.0);
+        k->setMinimum(-5.0); k->setMaximum(5.0);
+        k->setDisplayMinimum(-1.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("When Shutter Offset = Custom, this is added to the current frame time "
+                              "to position the shutter start. Negative values open the shutter before the current frame."));
+        mbGroup->addKnob(k); _imp->shutterCustomOffset = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Temporal Jitter"));
+        k->setName("temporalJitter"); k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Randomize sample timing within the shutter, breaking the stepped-look "
+                              "of low sample counts on slow motion. 0 = uniform spacing (default), "
+                              "1 = full random within the shutter window."));
+        mbGroup->addKnob(k); _imp->temporalJitter = k;
+    }
+
     // Particle rendering knobs
     KnobPagePtr partPage = AppManager::createKnob<KnobPage>(this, tr("Particles"));
     {
@@ -258,22 +327,9 @@ ScanlineRender::initializeKnobs()
                               "averages every AOV through the integration."));
         partPage->addKnob(k); _imp->particleMotionBlur = k;
     }
-    {
-        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Motion Samples"));
-        k->setName("motionSamples"); k->setDefaultValue(1);
-        k->setMinimum(1); k->setMaximum(32);
-        k->setDisplayMinimum(1); k->setDisplayMaximum(16);
-        k->setHintToolTip(tr("Physically-accurate motion blur via multi-sample accumulation. 1 = off. 4-8 = typical quality. 16 = film quality. Render cost scales linearly."));
-        partPage->addKnob(k); _imp->motionSamples = k;
-    }
-    {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Shutter"));
-        k->setName("motionShutter"); k->setDefaultValue(0.5);
-        k->setMinimum(0.0); k->setMaximum(1.0);
-        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
-        k->setHintToolTip(tr("Shutter open duration as fraction of frame time. 0.5 = 180 degree shutter (film standard). Only used when Motion Samples > 1."));
-        partPage->addKnob(k); _imp->motionShutter = k;
-    }
+    // Motion blur knobs (Samples / Shutter / Shutter Offset / Custom Offset /
+    // Temporal Jitter) moved to Output tab — see Motion Blur group above.
+    // They're scene-wide settings, not particle-specific.
 
     // Phase 3D — AOV outputs page. Each toggle adds a per-pixel arbitrary
     // output variable on top of beauty. They only fire when the GLSL pipeline
@@ -976,17 +1032,142 @@ drawParticlePrimitives(GLenum primitive, const std::vector<ParticleVertex>& vert
     glDeleteVertexArrays(1, &vao);
 }
 
+// ==================== ParticleInstance shaders ====================
+//
+// Dedicated shader pair for the ParticleInstance draw path. Modeled on
+// kBeautyVert/Frag but trimmed to instance concerns:
+//   - no texture / no STW projective texturing — instances are solid-colored
+//   - no per-vertex UV / Pref AOVs — instances don't expose those
+//   - per-instance color comes via u_instanceColor uniform
+//   - cheat-mode motion-blur stretch fade computed in the vertex shader from
+//     three uniforms (u_fadeEnabled, u_fadeCenterY, u_fadeHalfY) — matches
+//     the legacy immediate-mode behaviour exactly. Multi-sample mode passes
+//     u_fadeEnabled=0 and gets uniform alpha.
+//
+// Vertices are kept in object-local space (one VBO per geo type, built once
+// per frame). Per-instance state lives in uniforms (u_localMatrix /
+// u_normalMatrix / u_instanceColor / fade params), so one VBO is reused
+// across all instances of a geo type via N small draw calls.
+
+static const char* kInstanceVert =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 in_pos;\n"
+    "layout(location = 1) in vec3 in_normal;\n"
+    "layout(location = 2) in vec2 in_uv;\n"
+    "uniform mat4 u_projView;\n"
+    "uniform mat4 u_prevProjView;\n"
+    "uniform mat4 u_localMatrix;\n"
+    "uniform mat4 u_prevLocalMatrix;\n"
+    "uniform mat3 u_normalMatrix;\n"
+    "uniform vec4 u_instanceColor;\n"
+    "uniform int  u_fadeEnabled;     // 1 = apply stretch-mode alpha fade based on object-Y\n"
+    "uniform float u_fadeCenterY;\n"
+    "uniform float u_fadeHalfY;\n"
+    "out vec3 v_worldNormal;\n"
+    "out vec3 v_worldPos;\n"
+    "out vec3 v_objPos;              // object-space position — drives Pref AOV\n"
+    "out vec2 v_uv;\n"
+    "out vec4 v_color;\n"
+    "out vec4 v_currClip;\n"
+    "out vec4 v_prevClip;\n"
+    "void main() {\n"
+    "    vec4 worldPos4 = u_localMatrix * vec4(in_pos, 1.0);\n"
+    "    v_worldPos    = worldPos4.xyz;\n"
+    "    v_objPos      = in_pos;\n"
+    "    v_uv          = in_uv;\n"
+    "    v_worldNormal = u_normalMatrix * in_normal;\n"
+    "    v_currClip    = u_projView * worldPos4;\n"
+    "    v_prevClip    = u_prevProjView * (u_prevLocalMatrix * vec4(in_pos, 1.0));\n"
+    "    gl_Position   = v_currClip;\n"
+    // Cheat-mode stretch fade: normalize object-Y to [-1, 1] across bbox, fade
+    // alpha toward the stretched ends. Matches the legacy immediate-mode code
+    // verbatim (1.0 - clamp(|normY|, 0, 1) * 0.7 → 30% min alpha at extremes).
+    "    float fade = 1.0;\n"
+    "    if (u_fadeEnabled == 1) {\n"
+    "        float normY = (in_pos.y - u_fadeCenterY) / u_fadeHalfY;\n"
+    "        float t01   = clamp(abs(normY), 0.0, 1.0);\n"
+    "        fade        = 1.0 - t01 * 0.7;\n"
+    "    }\n"
+    "    v_color = vec4(u_instanceColor.rgb, u_instanceColor.a * fade);\n"
+    "}\n";
+
+static const char* kInstanceFrag =
+    "#version 330 core\n"
+    "in vec3 v_worldNormal;\n"
+    "in vec3 v_worldPos;\n"
+    "in vec3 v_objPos;\n"
+    "in vec2 v_uv;\n"
+    "in vec4 v_color;\n"
+    "in vec4 v_currClip;\n"
+    "in vec4 v_prevClip;\n"
+    "uniform int  u_shadingMode;     // 0=Shaded, 1=Flat, 2=Wireframe\n"
+    "uniform int  u_hasLight;\n"
+    "uniform vec3 u_lightPos;\n"
+    "uniform vec3 u_lightColor;\n"
+    "uniform float u_lightIntensity;\n"
+    "uniform vec3 u_cameraPos;\n"
+    "uniform int  u_writeNormal;\n"
+    "uniform int  u_writeUV;\n"
+    "uniform int  u_writePref;\n"
+    "uniform int  u_writeVelocity;\n"
+    "uniform vec2 u_viewportSize;\n"
+    "layout(location = 0) out vec4 out_color;\n"
+    "layout(location = 1) out vec4 out_normal;\n"
+    "layout(location = 2) out vec4 out_uv;\n"
+    "layout(location = 3) out vec4 out_pref;\n"
+    "layout(location = 4) out vec4 out_velocity;\n"
+    "void main() {\n"
+    "    if (u_shadingMode == 2) {\n"
+    "        out_color = vec4(1.0);\n"
+    "    } else if (u_shadingMode == 0) {\n"
+    "        vec3 N = normalize(v_worldNormal);\n"
+    "        vec3 L; vec3 lCol; float lInt;\n"
+    "        if (u_hasLight == 1) {\n"
+    "            L = normalize(u_lightPos - v_worldPos); lCol = u_lightColor; lInt = u_lightIntensity;\n"
+    "        } else {\n"
+    "            L = normalize(u_cameraPos - v_worldPos); lCol = vec3(1.0); lInt = 1.0;\n"
+    "        }\n"
+    "        float NL = max(0.0, dot(N, L));\n"
+    "        vec3 lit = v_color.rgb * (0.15 + NL * lCol * lInt);\n"
+    "        out_color = vec4(lit, v_color.a);\n"
+    "    } else {\n"
+    "        out_color = v_color;\n"
+    "    }\n"
+    "    out_normal = (u_writeNormal == 1)   ? vec4(normalize(v_worldNormal), 1.0) : vec4(0.0);\n"
+    "    out_uv     = (u_writeUV == 1)       ? vec4(v_uv, 0.0, 1.0)                 : vec4(0.0);\n"
+    "    out_pref   = (u_writePref == 1)     ? vec4(v_objPos, 1.0)                  : vec4(0.0);\n"
+    "    if (u_writeVelocity == 1) {\n"
+    "        vec2 cNdc = v_currClip.xy / v_currClip.w;\n"
+    "        vec2 pNdc = v_prevClip.xy / v_prevClip.w;\n"
+    "        vec2 dPix = (cNdc - pNdc) * 0.5 * u_viewportSize;\n"
+    "        out_velocity = vec4(dPix, 0.0, 1.0);\n"
+    "    } else { out_velocity = vec4(0.0); }\n"
+    "}\n";
+
 // ==================== Volume ray marching shaders ====================
+// GLSL 3.30 core profile, uniform-driven matrices. The draw site uploads
+// u_modelView / u_projView from the current camera state directly; no
+// dependency on the fixed-function matrix stack.
 
 static const char* volumeVertexShader =
-    "varying vec3 v_WorldPos;\n"
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 a_position;\n"
+    "uniform mat4 u_modelView;\n"
+    "uniform mat4 u_projView;\n"
+    "out vec3 v_WorldPos;\n"
     "void main() {\n"
-    "    v_WorldPos = vec3(gl_ModelViewMatrix * gl_Vertex);\n"
-    "    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+    // Same math as the legacy shader — `v_WorldPos` is actually view-space
+    // (modelview = camera view matrix since we never set an extra model
+    // transform), but the fragment shader's ray-march logic was written
+    // assuming this convention. Preserved verbatim to keep behaviour
+    // identical to the legacy path.
+    "    v_WorldPos  = vec3(u_modelView * vec4(a_position, 1.0));\n"
+    "    gl_Position = u_projView * vec4(a_position, 1.0);\n"
     "}\n";
 
 static const char* volumeFragmentShader =
-    "varying vec3 v_WorldPos;\n"
+    "#version 330 core\n"
+    "in vec3 v_WorldPos;\n"
     "uniform sampler3D u_VolumeData;\n"
     "uniform vec3 u_VolumeMin;\n"
     "uniform vec3 u_VolumeMax;\n"
@@ -1000,6 +1181,7 @@ static const char* volumeFragmentShader =
     "uniform float u_ShadowDensity;\n"
     "uniform int u_ShadowSteps;\n"
     "uniform int u_LightEnabled;\n"
+    "out vec4 outColor;\n"
     "\n"
     "vec2 intersectBox(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {\n"
     "    vec3 invR = vec3(1.0) / rd;\n"
@@ -1025,7 +1207,7 @@ static const char* volumeFragmentShader =
     "    for (float t = tNear; t < tFar; t += u_StepSize) {\n"
     "        vec3 pos = u_CameraPos + rayDir * t;\n"
     "        vec3 texCoord = (pos - u_VolumeMin) / boxSize;\n"
-    "        float samp = texture3D(u_VolumeData, texCoord).r;\n"
+    "        float samp = texture(u_VolumeData, texCoord).r;\n"
     "        if (samp < 0.001) continue;\n"
     "\n"
     "        float d = samp * u_Density * u_StepSize;\n"
@@ -1043,7 +1225,7 @@ static const char* volumeFragmentShader =
     "                if (shadowTC.x >= 0.0 && shadowTC.x <= 1.0 &&\n"
     "                    shadowTC.y >= 0.0 && shadowTC.y <= 1.0 &&\n"
     "                    shadowTC.z >= 0.0 && shadowTC.z <= 1.0) {\n"
-    "                    shadowAccum += texture3D(u_VolumeData, shadowTC).r * shadowStep;\n"
+    "                    shadowAccum += texture(u_VolumeData, shadowTC).r * shadowStep;\n"
     "                }\n"
     "            }\n"
     "            float lightAmount = exp(-shadowAccum * u_ShadowDensity);\n"
@@ -1055,7 +1237,7 @@ static const char* volumeFragmentShader =
     "        accum.a += (1.0 - accum.a) * sampleColor.a;\n"
     "        if (accum.a > 0.98) break;\n"
     "    }\n"
-    "    gl_FragColor = accum;\n"
+    "    outColor = accum;\n"
     "}\n";
 
 // ==================== Geometry extraction helper ====================
@@ -1120,6 +1302,111 @@ fanTriangulate(const std::vector<int>& faceIndices,
             outTris.push_back(faceIndices[offset + i + 1]);
         }
         offset += (size_t)c;
+    }
+}
+
+// Render the volume ray-march proxy cube via a transient VBO
+// + glDrawArrays. Replaces the legacy glBegin(GL_QUADS) immediate-mode
+// path. Caller must have bound the volume shader and set its uniforms
+// (u_modelView / u_projView / volume params) before invoking.
+//
+// 12 triangles (6 faces × 2 tris) = 36 vertices. Cheap enough to upload
+// each call; the alternative (static unit-cube VBO with a per-instance
+// transform uniform) is more efficient but adds state-management overhead
+// for what's typically a once-per-frame, 36-vertex draw call.
+static void
+drawVolumeProxyCube(float x0, float y0, float z0,
+                    float x1, float y1, float z1)
+{
+    const float v[] = {
+        // -Z face (CCW when viewed from -Z)
+        x0,y0,z0,  x1,y0,z0,  x1,y1,z0,   x0,y0,z0,  x1,y1,z0,  x0,y1,z0,
+        // +Z face
+        x0,y0,z1,  x0,y1,z1,  x1,y1,z1,   x0,y0,z1,  x1,y1,z1,  x1,y0,z1,
+        // -X face
+        x0,y0,z0,  x0,y1,z0,  x0,y1,z1,   x0,y0,z0,  x0,y1,z1,  x0,y0,z1,
+        // +X face
+        x1,y0,z0,  x1,y0,z1,  x1,y1,z1,   x1,y0,z0,  x1,y1,z1,  x1,y1,z0,
+        // -Y face
+        x0,y0,z0,  x0,y0,z1,  x1,y0,z1,   x0,y0,z0,  x1,y0,z1,  x1,y0,z0,
+        // +Y face
+        x0,y1,z0,  x1,y1,z0,  x1,y1,z1,   x0,y1,z0,  x1,y1,z1,  x0,y1,z1,
+    };
+
+    GLuint vao = 0, vbo = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(v), v, GL_STREAM_DRAW);
+    glEnableVertexAttribArray(0); // a_position (layout(location = 0))
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+}
+
+// Compute per-vertex normals from triangle indices via face-normal averaging.
+// Fallback for mesh sources (ReadGeo, ReadAlembicArchive) that don't carry an
+// explicit per-vertex normal channel. Without this the GLSL Normal AOV reads
+// (0,0,0) from the vertex attribute, normalize() returns NaN, and the AOV
+// renders as solid white (NaN in a float framebuffer).
+//
+// Algorithm: for each triangle (v0,v1,v2), compute face normal via cross
+// product, accumulate to each contributing vertex, then normalize per-vertex.
+// Winding is whatever the upstream mesh exported; renderers that care
+// (ScanlineRender Shaded mode) use `abs(N.L)` to be winding-agnostic.
+static void
+computeVertexNormalsFromTris(const std::vector<float>& verts,
+                              const std::vector<int>& triIndices,
+                              std::vector<float>& outNormals)
+{
+    const int nv = (int)(verts.size() / 3);
+    if (nv <= 0 || triIndices.empty()) {
+        outNormals.clear();
+        return;
+    }
+    outNormals.assign((size_t)nv * 3, 0.0f);
+
+    const size_t nTris = triIndices.size() / 3;
+    for (size_t t = 0; t < nTris; ++t) {
+        const int i0 = triIndices[t * 3 + 0];
+        const int i1 = triIndices[t * 3 + 1];
+        const int i2 = triIndices[t * 3 + 2];
+        if (i0 < 0 || i1 < 0 || i2 < 0 ||
+            i0 >= nv || i1 >= nv || i2 >= nv) continue;
+
+        const float* p0 = &verts[i0 * 3];
+        const float* p1 = &verts[i1 * 3];
+        const float* p2 = &verts[i2 * 3];
+        const float ex = p1[0] - p0[0], ey = p1[1] - p0[1], ez = p1[2] - p0[2];
+        const float fx = p2[0] - p0[0], fy = p2[1] - p0[1], fz = p2[2] - p0[2];
+        const float nx = ey * fz - ez * fy;
+        const float ny = ez * fx - ex * fz;
+        const float nz = ex * fy - ey * fx;
+        // Unnormalized cross product — accumulating raw values is equivalent
+        // to area-weighted averaging, which is what we want for smooth shading.
+        outNormals[i0 * 3 + 0] += nx; outNormals[i0 * 3 + 1] += ny; outNormals[i0 * 3 + 2] += nz;
+        outNormals[i1 * 3 + 0] += nx; outNormals[i1 * 3 + 1] += ny; outNormals[i1 * 3 + 2] += nz;
+        outNormals[i2 * 3 + 0] += nx; outNormals[i2 * 3 + 1] += ny; outNormals[i2 * 3 + 2] += nz;
+    }
+
+    for (int v = 0; v < nv; ++v) {
+        float* n = &outNormals[v * 3];
+        const float len2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        if (len2 > 1e-20f) {
+            const float invLen = 1.0f / std::sqrt(len2);
+            n[0] *= invLen; n[1] *= invLen; n[2] *= invLen;
+        } else {
+            // Degenerate (isolated vertex or zero-area faces) — pick a stable
+            // fallback so the Normal AOV doesn't NaN out.
+            n[0] = 0.0f; n[1] = 1.0f; n[2] = 0.0f;
+        }
     }
 }
 
@@ -1234,6 +1521,12 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         out.verts = mesh->vertices;
         fanTriangulate(mesh->faceIndices, mesh->faceCounts, out.triIndices);
         const int nv = (int)(out.verts.size() / 3);
+
+        // Per-vertex normals via face-cross-product averaging — needed by the
+        // Normal AOV (without this, the AOV NaNs out → solid white). MeshData
+        // currently doesn't carry an explicit normals channel, so we compute
+        // them here from the triangulated topology.
+        computeVertexNormalsFromTris(out.verts, out.triIndices, out.normals);
 
         // Per-vertex UVs from the per-face-vertex array. First occurrence of each
         // vertex wins (lossy for UV seams; correct for typical clean DMP meshes).
@@ -1368,6 +1661,13 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
             g.verts = mesh->vertices;
             fanTriangulate(mesh->faceIndices, mesh->faceCounts, g.triIndices);
             const int nv = (int)(g.verts.size() / 3);
+
+            // Per-vertex normals via face-cross-product averaging — needed
+            // by the Normal AOV (without this, the AOV NaNs out → white).
+            // Alembic's optional N property isn't read here; if the file
+            // carries normals we'd want to prefer them in a future revision.
+            computeVertexNormalsFromTris(g.verts, g.triIndices, g.normals);
+
             g.uvs.assign(nv * 2, 0.5f);
             if (mesh->hasUVs && mesh->uvs.size() == mesh->faceIndices.size() * 2) {
                 std::vector<char> set((size_t)nv, 0);
@@ -1868,6 +2168,9 @@ ScanlineRender::render(const RenderActionArgs& args)
     // --- Motion blur setup ---
     int motionSamples = _imp->motionSamples.lock() ? _imp->motionSamples.lock()->getValue() : 1;
     float motionShutter = _imp->motionShutter.lock() ? (float)_imp->motionShutter.lock()->getValueAtTime(args.time) : 0.5f;
+    int shutterOffsetMode = _imp->shutterOffset.lock() ? _imp->shutterOffset.lock()->getValue() : 0;
+    float shutterCustomOffset = _imp->shutterCustomOffset.lock() ? (float)_imp->shutterCustomOffset.lock()->getValueAtTime(args.time) : 0.0f;
+    float temporalJitter = _imp->temporalJitter.lock() ? (float)_imp->temporalJitter.lock()->getValueAtTime(args.time) : 0.0f;
     if (motionSamples < 1) motionSamples = 1;
 
     // Stretch cheat: only active when multi-sample is off. Shutter multiplies the stretch.
@@ -1913,6 +2216,14 @@ ScanlineRender::render(const RenderActionArgs& args)
     GLuint glslParticleProg = glslBuildProgram(kParticleVert, kParticleFrag);
     if (!glslParticleProg) {
         std::fprintf(stderr, "[GLSL FAIL] particle program build failed — particles will be skipped for this render.\n");
+        std::fflush(stderr);
+    }
+
+    // ParticleInstance program — VBO/VAO + uniform-driven draw. On build
+    // failure instance rendering is skipped silently for this render.
+    GLuint glslInstanceProg = glslBuildProgram(kInstanceVert, kInstanceFrag);
+    if (!glslInstanceProg) {
+        std::fprintf(stderr, "[GLSL FAIL] instance program build failed — particle instances will be skipped for this render.\n");
         std::fflush(stderr);
     }
 
@@ -1999,12 +2310,58 @@ ScanlineRender::render(const RenderActionArgs& args)
         }
     }
 
+    // Per-sample camera evaluation mutates viewMatrix / projMatrix /
+    // projViewMatrix inside the multi-sample loop. Post-loop code (the
+    // WorldPos AOV reconstruction at the end of render()) expects the
+    // frame-time matrices, so save them here and restore after the loop.
+    float frameViewMatrix[16], frameProjMatrix[16], frameProjViewMatrix[16];
+    std::memcpy(frameViewMatrix,     viewMatrix,     16 * sizeof(float));
+    std::memcpy(frameProjMatrix,     projMatrix,     16 * sizeof(float));
+    std::memcpy(frameProjViewMatrix, projViewMatrix, 16 * sizeof(float));
+
     // === MULTI-SAMPLE RENDER LOOP ===
     for (int sample = 0; sample < motionSamples; ++sample) {
-        // Compute sub-frame time offset, centered around 0
-        float sampleDt = (motionSamples > 1)
-            ? (((float)sample / (motionSamples - 1)) - 0.5f) * motionShutter
-            : 0.0f;
+        // Compute sub-frame time offset per the chosen shutter offset mode.
+        //   Centered: shutter window is [-shutter/2, +shutter/2] (real-camera)
+        //   Start:    shutter window is [0,         +shutter]    (motion after frame)
+        //   End:      shutter window is [-shutter,  0]           (motion before frame)
+        //   Custom:   shutter window is [customOffset, customOffset+shutter]
+        float sampleDt = 0.0f;
+        if (motionSamples > 1) {
+            const float t01 = (float)sample / (float)(motionSamples - 1);  // 0..1 across samples
+            switch (shutterOffsetMode) {
+            case 0: // Centered
+                sampleDt = (t01 - 0.5f) * motionShutter;
+                break;
+            case 1: // Start — shutter opens at current frame
+                sampleDt = t01 * motionShutter;
+                break;
+            case 2: // End — shutter closes at current frame
+                sampleDt = (t01 - 1.0f) * motionShutter;
+                break;
+            case 3: // Custom
+                sampleDt = t01 * motionShutter + shutterCustomOffset;
+                break;
+            default:
+                sampleDt = (t01 - 0.5f) * motionShutter;
+                break;
+            }
+
+            // Temporal jitter — perturb each sample's time within its slot.
+            // Deterministic hash on (sample, integer frame) so the same shot
+            // renders the same way across launches; magnitude scaled to one
+            // slot width so high jitter values don't collide samples.
+            if (temporalJitter > 0.0f) {
+                uint32_t h = (uint32_t)sample * 2654435761u
+                           ^ (uint32_t)(int)args.time * 1597334677u;
+                h ^= h >> 16;
+                h *= 0x7feb352du;
+                h ^= h >> 15;
+                const float r = ((h & 0xFFFFu) / 65535.0f) - 0.5f;        // [-0.5, 0.5]
+                const float slot = motionShutter / (float)motionSamples;  // width of one sample's slot
+                sampleDt += temporalJitter * r * slot;
+            }
+        }
 
         // Apply offset to particle positions (affects both sprites and instances)
         if (motionSamples > 1 && motionBlurPData) {
@@ -2013,6 +2370,56 @@ ScanlineRender::render(const RenderActionArgs& args)
                 p.px = origParticlePos[i][0] + p.vx * sampleDt;
                 p.py = origParticlePos[i][1] + p.vy * sampleDt;
                 p.pz = origParticlePos[i][2] + p.vz * sampleDt;
+            }
+        }
+
+        // Re-evaluate the camera at sub-frame time. viewMatrix / projMatrix /
+        // projViewMatrix are mutated here; the frame-time copies (saved before
+        // the loop) are restored after. Rebuilding projViewMatrix is critical
+        // — every GLSL draw path reads it as the `u_projView` uniform, and
+        // renderGeoObjectGlsl takes it as an argument.
+        const double sampleTime = args.time + (double)sampleDt;
+        if (cam && motionSamples > 1) {
+            double sTx = camTX, sTy = camTY, sTz = camTZ;
+            double sRx = camRX, sRy = camRY, sRz = camRZ;
+            cam->getCameraPosition(sampleTime, sTx, sTy, sTz, sRx, sRy, sRz);
+            const double sFL   = cam->getCameraFocalLength(sampleTime);
+            const double sHA   = cam->getCameraHAperture(sampleTime);
+            const double sVA   = cam->getCameraVAperture(sampleTime);
+            const double sNear = cam->getCameraNear(sampleTime);
+            const double sFar  = cam->getCameraFar(sampleTime);
+            buildViewMatrix((float)sTx, (float)sTy, (float)sTz,
+                            (float)sRx, (float)sRy, (float)sRz, viewMatrix);
+            CameraMath::composeProjectionMatrix((float)sFL, (float)sHA, (float)sVA,
+                                                 (float)sNear, (float)sFar, projMatrix);
+            mat4Mul(projViewMatrix, projMatrix, viewMatrix);
+        }
+
+        // Re-extract geometry at sub-frame time so animated transforms
+        // (rotating Sphere3D, translating Card3D, animated Alembic xforms)
+        // actually motion-blur. Mirrors the outer extraction logic but at
+        // sampleTime and skipping non-geo types (particles handle their own
+        // sub-frame extrapolation, lights are static).
+        // Performance: this re-extracts every geo every sample. Procedural
+        // geo (Sphere3D etc.) is cheap (just transform recomputation);
+        // animated Alembic re-reads its pre-loaded sample table (cheap).
+        if (motionSamples > 1 && !particleData) {
+            geoObjects.clear();
+            Scene3D* sceneMb = dynamic_cast<Scene3D*>(geoEffect.get());
+            if (sceneMb) {
+                for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
+                    EffectInstancePtr sceneInput = sceneMb->getInput(i);
+                    if (!sceneInput) continue;
+                    if (sceneInput->getNode() && sceneInput->getNode()->isNodeDisabled()) continue;
+                    if (dynamic_cast<Volume3D*>(sceneInput.get())) continue;
+                    if (dynamic_cast<ReadVDB*>(sceneInput.get())) continue;
+                    if (dynamic_cast<Light3D*>(sceneInput.get())) continue;
+                    if (dynamic_cast<ParticleInstance*>(sceneInput.get())) continue;
+                    if (dynamic_cast<ParticleProvider*>(sceneInput.get())) continue;
+                    extractGeometries(sceneInput, sampleTime, args.view, geoObjects);
+                }
+            } else {
+                extractGeometries(geoEffect, sampleTime, args.view, geoObjects);
             }
         }
 
@@ -2037,11 +2444,6 @@ ScanlineRender::render(const RenderActionArgs& args)
         }
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        glMatrixMode(GL_PROJECTION);
-        glLoadMatrixf(projMatrix);
-        glMatrixMode(GL_MODELVIEW);
-        glLoadMatrixf(viewMatrix);
 
         // --- Render all geometry objects ---
         glEnable(GL_BLEND);
@@ -2569,14 +2971,19 @@ ScanlineRender::render(const RenderActionArgs& args)
     }
 
     // --- Render geo instances at particle positions ---
-    if (particleInstancer) {
+    // VBO/VAO + uniform-driven kInstanceVert/Frag. One VBO per geo type
+    // (built once per render), one small draw call per instance. Instances
+    // participate in MRT: Normal / UV / Pref / Velocity AOVs are all written.
+    // Use sub-frame time so multi-sample motion blur actually queries the
+    // particle/instance state at each shutter slot. Falls back to args.time
+    // outside the multi-sample loop (sampleTime == args.time when sample == 0
+    // and motionSamples == 1).
+    const double instanceTime = (motionSamples > 1) ? sampleTime : args.time;
+    if (particleInstancer && glslInstanceProg) {
         std::vector<ParticleInstance::GeoInstance> instances;
-        particleInstancer->getInstances(args.time, instances);
+        particleInstancer->getInstances(instanceTime, instances);
 
         if (!instances.empty()) {
-            // 3D geo with blending + back-face culling
-            // Depth writes OFF only when using stretch cheat (translucent blending needs it)
-            // Depth writes ON for solid geo in all other cases (including multi-sample mode)
             glEnable(GL_DEPTH_TEST);
             if (motionBlur > 0.001f) {
                 glDepthMask(GL_FALSE); // stretch cheat mode — translucent
@@ -2588,160 +2995,400 @@ ScanlineRender::render(const RenderActionArgs& args)
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-            // Collect mesh data from each connected geo input
+            // Re-enable MRT so instances can write Normal/UV/Pref/Velocity AOVs
+            // (same pattern as the particle pass — beauty keeps over-blend, AOV
+            // attachments use replace so AOV values don't accumulate across
+            // overlapping fragments).
+            if (wantsAnyMrt) {
+                GLenum drawBufs[5] = {
+                    (GLenum)GL_COLOR_ATTACHMENT0,
+                    (GLenum)(wantsNormalMrt   ? GL_COLOR_ATTACHMENT1 : GL_NONE),
+                    (GLenum)(wantsUvMrt       ? GL_COLOR_ATTACHMENT2 : GL_NONE),
+                    (GLenum)(wantsPrefMrt     ? GL_COLOR_ATTACHMENT3 : GL_NONE),
+                    (GLenum)(wantsVelocityMrt ? GL_COLOR_ATTACHMENT4 : GL_NONE),
+                };
+                glDrawBuffers(5, drawBufs);
+                glBlendFunci(1, GL_ONE, GL_ZERO);
+                glBlendFunci(2, GL_ONE, GL_ZERO);
+                glBlendFunci(3, GL_ONE, GL_ZERO);
+                glBlendFunci(4, GL_ONE, GL_ZERO);
+            }
+
+            // Per-geo local-space mesh cache. One VBO per geo type, reused
+            // across every instance of that type via uniform-driven transforms.
+            // Interleaved stride = 8 floats (pos3 + normal3 + uv2).
             struct InstanceGeo {
-                std::vector<float> verts; // x,y,z triples
-                std::vector<int> tris;    // triangle indices
-                bool valid;
-                // Bounding box in local space (for per-vertex alpha normalization)
-                float bboxMinY, bboxMaxY;
-                float bboxCenterY, bboxHalfY;
+                std::vector<float> interleaved; // pos.xyz, normal.xyz, uv.xy per vertex
+                int numVerts = 0;
+                GLuint vao = 0;
+                GLuint vbo = 0;
+                bool valid = false;
+                float bboxCenterY = 0.0f;
+                float bboxHalfY   = 1.0f;
             };
             InstanceGeo geos[4] = {};
 
+            // Builds per-vertex flat normals from triangles. The triangulated
+            // mesh is expanded into a flat-shaded one (3 unique vertices per
+            // triangle, each with the triangle's face normal + the source
+            // vertex's UV). Cube/sphere both look correct under this scheme.
+            auto buildFlatGeo = [](InstanceGeo& g,
+                                   const std::vector<float>& verts,
+                                   const std::vector<float>& uvs,
+                                   const std::vector<int>& tris) {
+                const int numTris = (int)(tris.size() / 3);
+                g.interleaved.assign((size_t)numTris * 3 * 8, 0.0f);
+                const bool hasUvs = ((int)uvs.size() >= ((int)verts.size() / 3) * 2);
+                for (int t = 0; t < numTris; ++t) {
+                    int i0 = tris[t*3 + 0];
+                    int i1 = tris[t*3 + 1];
+                    int i2 = tris[t*3 + 2];
+                    float ax = verts[i0*3+0], ay = verts[i0*3+1], az = verts[i0*3+2];
+                    float bx = verts[i1*3+0], by = verts[i1*3+1], bz = verts[i1*3+2];
+                    float cx = verts[i2*3+0], cy = verts[i2*3+1], cz = verts[i2*3+2];
+                    float ex = bx - ax, ey = by - ay, ez = bz - az;
+                    float fx = cx - ax, fy = cy - ay, fz = cz - az;
+                    float nx = ey*fz - ez*fy;
+                    float ny = ez*fx - ex*fz;
+                    float nz = ex*fy - ey*fx;
+                    float nl = std::sqrt(nx*nx + ny*ny + nz*nz);
+                    if (nl > 1e-8f) { nx /= nl; ny /= nl; nz /= nl; }
+                    int idx[3] = { i0, i1, i2 };
+                    float pos[3][3] = { {ax,ay,az}, {bx,by,bz}, {cx,cy,cz} };
+                    for (int k = 0; k < 3; ++k) {
+                        float* row = &g.interleaved[(size_t)(t*3 + k) * 8];
+                        row[0] = pos[k][0]; row[1] = pos[k][1]; row[2] = pos[k][2];
+                        row[3] = nx;        row[4] = ny;        row[5] = nz;
+                        if (hasUvs) {
+                            row[6] = uvs[idx[k]*2 + 0];
+                            row[7] = uvs[idx[k]*2 + 1];
+                        }
+                    }
+                }
+                g.numVerts = numTris * 3;
+                g.valid = (g.numVerts > 0);
+            };
+
+            // Extract local meshes from each connected geo input.
             for (int g = 0; g < 4; ++g) {
                 EffectInstancePtr geoInput = particleInstancer->getInput(g + 1);
                 if (!geoInput) continue;
+
+                std::vector<float> verts;
+                std::vector<float> uvs;
+                std::vector<int> tris;
 
                 // Try Cube3D
                 Cube3D* cube = dynamic_cast<Cube3D*>(geoInput.get());
                 if (cube) {
                     std::vector<Cube3D::CubeVertex> cv;
-                    std::vector<int> ci;
-                    cube->generateCubeMesh(args.time, cv, ci);
-                    geos[g].verts.resize(cv.size() * 3);
+                    cube->generateCubeMesh(args.time, cv, tris);
+                    verts.resize(cv.size() * 3);
+                    uvs.resize(cv.size() * 2);
                     for (size_t v = 0; v < cv.size(); ++v) {
-                        geos[g].verts[v*3] = cv[v].x;
-                        geos[g].verts[v*3+1] = cv[v].y;
-                        geos[g].verts[v*3+2] = cv[v].z;
+                        verts[v*3]   = cv[v].x;
+                        verts[v*3+1] = cv[v].y;
+                        verts[v*3+2] = cv[v].z;
+                        uvs[v*2]     = cv[v].u;
+                        uvs[v*2+1]   = cv[v].v;
                     }
-                    geos[g].tris = ci;
-                    geos[g].valid = true;
-                    continue;
-                }
-
-                // Try Sphere3D — generate a simple sphere mesh
-                Sphere3D* sphere = dynamic_cast<Sphere3D*>(geoInput.get());
-                if (sphere) {
-                    const int rings = 16, sectors = 24;
-                    float rad = 0.5f; // unit sphere, scaled by instance
-                    for (int r = 0; r <= rings; ++r) {
-                        float phi = (float)M_PI * r / rings;
-                        for (int s = 0; s <= sectors; ++s) {
-                            float theta = 2.0f * (float)M_PI * s / sectors;
-                            geos[g].verts.push_back(rad * std::sin(phi) * std::cos(theta));
-                            geos[g].verts.push_back(rad * std::cos(phi));
-                            geos[g].verts.push_back(rad * std::sin(phi) * std::sin(theta));
+                } else {
+                    // Try Sphere3D — generate a simple unit-radius mesh with
+                    // spherical UVs (longitude=u, latitude=v).
+                    Sphere3D* sphere = dynamic_cast<Sphere3D*>(geoInput.get());
+                    if (sphere) {
+                        const int rings = 16, sectors = 24;
+                        float rad = 0.5f;
+                        for (int r = 0; r <= rings; ++r) {
+                            float phi = (float)M_PI * r / rings;
+                            float vCoord = (float)r / (float)rings;
+                            for (int s = 0; s <= sectors; ++s) {
+                                float theta = 2.0f * (float)M_PI * s / sectors;
+                                float uCoord = (float)s / (float)sectors;
+                                verts.push_back(rad * std::sin(phi) * std::cos(theta));
+                                verts.push_back(rad * std::cos(phi));
+                                verts.push_back(rad * std::sin(phi) * std::sin(theta));
+                                uvs.push_back(uCoord);
+                                uvs.push_back(vCoord);
+                            }
+                        }
+                        for (int r = 0; r < rings; ++r) {
+                            for (int s = 0; s < sectors; ++s) {
+                                int i0 = r * (sectors + 1) + s;
+                                int i1 = i0 + sectors + 1;
+                                tris.push_back(i0);     tris.push_back(i1);     tris.push_back(i0 + 1);
+                                tris.push_back(i0 + 1); tris.push_back(i1);     tris.push_back(i1 + 1);
+                            }
                         }
                     }
-                    for (int r = 0; r < rings; ++r) {
-                        for (int s = 0; s < sectors; ++s) {
-                            int i0 = r * (sectors + 1) + s;
-                            int i1 = i0 + sectors + 1;
-                            geos[g].tris.push_back(i0);
-                            geos[g].tris.push_back(i1);
-                            geos[g].tris.push_back(i0 + 1);
-                            geos[g].tris.push_back(i0 + 1);
-                            geos[g].tris.push_back(i1);
-                            geos[g].tris.push_back(i1 + 1);
-                        }
-                    }
-                    geos[g].valid = true;
-                    continue;
                 }
-            }
 
-            // Compute bounding box (Y axis) for each loaded geo — used for motion blur alpha fade
-            for (int g = 0; g < 4; ++g) {
-                if (!geos[g].valid || geos[g].verts.empty()) continue;
-                float mnY = geos[g].verts[1];
-                float mxY = geos[g].verts[1];
-                for (size_t v = 1; v < geos[g].verts.size() / 3; ++v) {
-                    float y = geos[g].verts[v * 3 + 1];
+                if (verts.empty() || tris.empty()) continue;
+
+                // Y-axis bbox for cheat-mode stretch-fade uniforms.
+                float mnY = verts[1], mxY = verts[1];
+                for (size_t v = 0; v < verts.size() / 3; ++v) {
+                    float y = verts[v * 3 + 1];
                     if (y < mnY) mnY = y;
                     if (y > mxY) mxY = y;
                 }
-                geos[g].bboxMinY = mnY;
-                geos[g].bboxMaxY = mxY;
                 geos[g].bboxCenterY = (mnY + mxY) * 0.5f;
-                geos[g].bboxHalfY = (mxY - mnY) * 0.5f;
-                if (geos[g].bboxHalfY < 0.0001f) geos[g].bboxHalfY = 0.0001f;
+                geos[g].bboxHalfY   = std::max(0.0001f, (mxY - mnY) * 0.5f);
+
+                buildFlatGeo(geos[g], verts, uvs, tris);
+                if (!geos[g].valid) continue;
+
+                // Upload to a per-geo-type VBO/VAO, reused across all instances.
+                glGenVertexArrays(1, &geos[g].vao);
+                glBindVertexArray(geos[g].vao);
+                glGenBuffers(1, &geos[g].vbo);
+                glBindBuffer(GL_ARRAY_BUFFER, geos[g].vbo);
+                glBufferData(GL_ARRAY_BUFFER,
+                             (GLsizeiptr)(geos[g].interleaved.size() * sizeof(float)),
+                             geos[g].interleaved.data(), GL_STREAM_DRAW);
+                glEnableVertexAttribArray(0);
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+                glEnableVertexAttribArray(1);
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float),
+                                      (void*)(3 * sizeof(float)));
+                glEnableVertexAttribArray(2);
+                glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float),
+                                      (void*)(6 * sizeof(float)));
+                glBindVertexArray(0);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
             }
 
-            // Render each instance
+            // Bind program + look up uniform locations once (cheaper than
+            // glGetUniformLocation per instance).
+            glUseProgram(glslInstanceProg);
+            const GLint locProjView      = glGetUniformLocation(glslInstanceProg, "u_projView");
+            const GLint locPrevProjView  = glGetUniformLocation(glslInstanceProg, "u_prevProjView");
+            const GLint locLocal         = glGetUniformLocation(glslInstanceProg, "u_localMatrix");
+            const GLint locPrevLocal     = glGetUniformLocation(glslInstanceProg, "u_prevLocalMatrix");
+            const GLint locNormal        = glGetUniformLocation(glslInstanceProg, "u_normalMatrix");
+            const GLint locInstColor     = glGetUniformLocation(glslInstanceProg, "u_instanceColor");
+            const GLint locFadeOn        = glGetUniformLocation(glslInstanceProg, "u_fadeEnabled");
+            const GLint locFadeCenterY   = glGetUniformLocation(glslInstanceProg, "u_fadeCenterY");
+            const GLint locFadeHalfY     = glGetUniformLocation(glslInstanceProg, "u_fadeHalfY");
+            const GLint locShadingMode   = glGetUniformLocation(glslInstanceProg, "u_shadingMode");
+            const GLint locHasLight      = glGetUniformLocation(glslInstanceProg, "u_hasLight");
+            const GLint locLightPos      = glGetUniformLocation(glslInstanceProg, "u_lightPos");
+            const GLint locLightColor    = glGetUniformLocation(glslInstanceProg, "u_lightColor");
+            const GLint locLightInt      = glGetUniformLocation(glslInstanceProg, "u_lightIntensity");
+            const GLint locCameraPos     = glGetUniformLocation(glslInstanceProg, "u_cameraPos");
+            const GLint locWriteNormal   = glGetUniformLocation(glslInstanceProg, "u_writeNormal");
+            const GLint locWriteUV       = glGetUniformLocation(glslInstanceProg, "u_writeUV");
+            const GLint locWritePref     = glGetUniformLocation(glslInstanceProg, "u_writePref");
+            const GLint locWriteVelocity = glGetUniformLocation(glslInstanceProg, "u_writeVelocity");
+            const GLint locViewportSize  = glGetUniformLocation(glslInstanceProg, "u_viewportSize");
+
+            if (locProjView     >= 0) glUniformMatrix4fv(locProjView,     1, GL_FALSE, projViewMatrix);
+            if (locPrevProjView >= 0) glUniformMatrix4fv(locPrevProjView, 1, GL_FALSE, prevProjViewMatrix);
+            if (locShadingMode  >= 0) glUniform1i(locShadingMode, shadingMode);
+            if (locHasLight     >= 0) glUniform1i(locHasLight, hasLight ? 1 : 0);
+            if (locLightPos     >= 0) glUniform3fv(locLightPos,   1, lightPos);
+            if (locLightColor   >= 0) glUniform3fv(locLightColor, 1, lightColor);
+            if (locLightInt     >= 0) glUniform1f(locLightInt, lightIntensity);
+            if (locCameraPos    >= 0) glUniform3fv(locCameraPos, 1, cameraPos);
+            if (locWriteNormal  >= 0) glUniform1i(locWriteNormal,   wantsNormalMrt   ? 1 : 0);
+            if (locWriteUV      >= 0) glUniform1i(locWriteUV,       wantsUvMrt       ? 1 : 0);
+            if (locWritePref    >= 0) glUniform1i(locWritePref,     wantsPrefMrt     ? 1 : 0);
+            if (locWriteVelocity>= 0) glUniform1i(locWriteVelocity, wantsVelocityMrt ? 1 : 0);
+            if (locViewportSize >= 0) glUniform2f(locViewportSize, (float)outW, (float)outH);
+
+            // Per-instance loop — build localMatrix + normalMatrix, set
+            // instance-specific uniforms, draw the per-geo VBO.
             for (size_t i = 0; i < instances.size(); ++i) {
                 const ParticleInstance::GeoInstance& inst = instances[i];
                 int gi = inst.geoSourceIndex;
                 if (gi < 0 || gi >= 4 || !geos[gi].valid) continue;
+                const InstanceGeo& geo = geos[gi];
 
-                glPushMatrix();
-                glTranslatef(inst.px, inst.py, inst.pz);
+                // Build the 4x4 local matrix (translate * rotate * scale).
+                // Column-major layout, matching the rest of the file.
+                //
+                // Multi-sample MB: ParticleInstance only runs its sim once per
+                // frame, so getInstances(sampleTime) returns frame-time data
+                // for every sample. Extrapolate sub-frame position using the
+                // per-instance velocity vector — same trick the particle MB
+                // path uses. When motionSamples == 1 sampleDt is 0 and this
+                // collapses to the frame-time position.
+                const float instPx = inst.px + inst.vx * sampleDt;
+                const float instPy = inst.py + inst.vy * sampleDt;
+                const float instPz = inst.pz + inst.vz * sampleDt;
+                float T[16] = {
+                    1,0,0,0,  0,1,0,0,  0,0,1,0,
+                    instPx, instPy, instPz, 1
+                };
 
-                // Motion blur: stretch the instance along velocity direction
+                // Rotation/scale path depends on stretch-mode.
+                float RS[16];
+                bool fadeEnabled = false;
                 if (motionBlur > 0.001f) {
-                    float vLen = std::sqrt(inst.vx * inst.vx + inst.vy * inst.vy + inst.vz * inst.vz);
+                    float vLen = std::sqrt(inst.vx*inst.vx + inst.vy*inst.vy + inst.vz*inst.vz);
                     if (vLen > 0.0001f) {
-                        // Build a frame where Y axis is along velocity
+                        // Align local Y to velocity, then stretch Y by speed * motionBlur.
                         float vy_n = inst.vy / vLen;
                         float vx_n = inst.vx / vLen;
                         float vz_n = inst.vz / vLen;
-                        // Rotation: align world Y to velocity direction
-                        float angle = std::acos(std::max(-1.0f, std::min(1.0f, vy_n))) * 180.0f / (float)M_PI;
-                        // Axis = cross(Y, velocity)
+                        float angleRad = std::acos(std::max(-1.0f, std::min(1.0f, vy_n)));
+                        // axis = cross(Y, velocity) — only the XZ components survive
                         float axX = vz_n;
                         float axZ = -vx_n;
                         float axLen = std::sqrt(axX*axX + axZ*axZ);
-                        if (axLen > 0.0001f && std::abs(angle) > 0.01f) {
-                            glRotatef(angle, axX/axLen, 0, axZ/axLen);
+                        float R[16] = {
+                            1,0,0,0,  0,1,0,0,  0,0,1,0,  0,0,0,1
+                        };
+                        if (axLen > 0.0001f && std::abs(angleRad) > 0.0001f) {
+                            float c = std::cos(angleRad);
+                            float s = std::sin(angleRad);
+                            float ax = axX / axLen, az = axZ / axLen, ay = 0.0f;
+                            // Rodrigues rotation, column-major
+                            R[0]  = c + ax*ax*(1-c);  R[1]  = ay*ax*(1-c) + az*s; R[2]  = az*ax*(1-c) - ay*s; R[3]  = 0;
+                            R[4]  = ax*ay*(1-c) - az*s; R[5] = c + ay*ay*(1-c);   R[6]  = az*ay*(1-c) + ax*s; R[7]  = 0;
+                            R[8]  = ax*az*(1-c) + ay*s; R[9] = ay*az*(1-c) - ax*s; R[10] = c + az*az*(1-c);   R[11] = 0;
+                            R[12] = 0; R[13] = 0; R[14] = 0; R[15] = 1;
                         }
-                        // Stretch Y by speed * motionBlur, keep XZ uniform
                         float stretchAmt = 1.0f + vLen * motionBlur;
-                        glScalef(inst.sx, inst.sy * stretchAmt, inst.sz);
+                        float S[16] = {
+                            inst.sx, 0, 0, 0,
+                            0, inst.sy * stretchAmt, 0, 0,
+                            0, 0, inst.sz, 0,
+                            0, 0, 0, 1
+                        };
+                        mat4Mul(RS, R, S);
+                        fadeEnabled = true;
                     } else {
-                        if (inst.ry != 0) glRotatef(inst.ry, 0, 1, 0);
-                        if (inst.rx != 0) glRotatef(inst.rx, 1, 0, 0);
-                        if (inst.rz != 0) glRotatef(inst.rz, 0, 0, 1);
-                        glScalef(inst.sx, inst.sy, inst.sz);
+                        // No velocity → falls back to standard Euler rotations.
+                        float Rx[16], Ry[16], Rz[16], Sm[16], tmp[16];
+                        const float dx = inst.rx * (float)M_PI / 180.0f;
+                        const float dy = inst.ry * (float)M_PI / 180.0f;
+                        const float dz = inst.rz * (float)M_PI / 180.0f;
+                        float cx = std::cos(dx), sx = std::sin(dx);
+                        float cy = std::cos(dy), sy = std::sin(dy);
+                        float cz = std::cos(dz), sz = std::sin(dz);
+                        // X rotation
+                        Rx[0]=1; Rx[1]=0;  Rx[2]=0;   Rx[3]=0;
+                        Rx[4]=0; Rx[5]=cx; Rx[6]=sx;  Rx[7]=0;
+                        Rx[8]=0; Rx[9]=-sx;Rx[10]=cx; Rx[11]=0;
+                        Rx[12]=0;Rx[13]=0; Rx[14]=0;  Rx[15]=1;
+                        // Y rotation
+                        Ry[0]=cy;Ry[1]=0;  Ry[2]=-sy; Ry[3]=0;
+                        Ry[4]=0; Ry[5]=1;  Ry[6]=0;   Ry[7]=0;
+                        Ry[8]=sy;Ry[9]=0;  Ry[10]=cy; Ry[11]=0;
+                        Ry[12]=0;Ry[13]=0; Ry[14]=0;  Ry[15]=1;
+                        // Z rotation
+                        Rz[0]=cz; Rz[1]=sz; Rz[2]=0;  Rz[3]=0;
+                        Rz[4]=-sz;Rz[5]=cz; Rz[6]=0;  Rz[7]=0;
+                        Rz[8]=0;  Rz[9]=0;  Rz[10]=1; Rz[11]=0;
+                        Rz[12]=0; Rz[13]=0; Rz[14]=0; Rz[15]=1;
+                        Sm[0]=inst.sx; Sm[1]=0;  Sm[2]=0;  Sm[3]=0;
+                        Sm[4]=0;  Sm[5]=inst.sy; Sm[6]=0;  Sm[7]=0;
+                        Sm[8]=0;  Sm[9]=0;  Sm[10]=inst.sz;Sm[11]=0;
+                        Sm[12]=0; Sm[13]=0; Sm[14]=0; Sm[15]=1;
+                        // Same composition order as the legacy code:
+                        // glRotatef(ry,Y) glRotatef(rx,X) glRotatef(rz,Z) glScalef
+                        mat4Mul(tmp, Ry, Rx);
+                        mat4Mul(RS, tmp, Rz);
+                        mat4Mul(tmp, RS, Sm);
+                        std::memcpy(RS, tmp, sizeof(RS));
                     }
                 } else {
-                    if (inst.ry != 0) glRotatef(inst.ry, 0, 1, 0);
-                    if (inst.rx != 0) glRotatef(inst.rx, 1, 0, 0);
-                    if (inst.rz != 0) glRotatef(inst.rz, 0, 0, 1);
-                    glScalef(inst.sx, inst.sy, inst.sz);
+                    // Standard rotation + scale (no stretch).
+                    float Rx[16], Ry[16], Rz[16], Sm[16], tmp[16];
+                    const float dx = inst.rx * (float)M_PI / 180.0f;
+                    const float dy = inst.ry * (float)M_PI / 180.0f;
+                    const float dz = inst.rz * (float)M_PI / 180.0f;
+                    float cx = std::cos(dx), sx = std::sin(dx);
+                    float cy = std::cos(dy), sy = std::sin(dy);
+                    float cz = std::cos(dz), sz = std::sin(dz);
+                    Rx[0]=1; Rx[1]=0;  Rx[2]=0;   Rx[3]=0;
+                    Rx[4]=0; Rx[5]=cx; Rx[6]=sx;  Rx[7]=0;
+                    Rx[8]=0; Rx[9]=-sx;Rx[10]=cx; Rx[11]=0;
+                    Rx[12]=0;Rx[13]=0; Rx[14]=0;  Rx[15]=1;
+                    Ry[0]=cy;Ry[1]=0;  Ry[2]=-sy; Ry[3]=0;
+                    Ry[4]=0; Ry[5]=1;  Ry[6]=0;   Ry[7]=0;
+                    Ry[8]=sy;Ry[9]=0;  Ry[10]=cy; Ry[11]=0;
+                    Ry[12]=0;Ry[13]=0; Ry[14]=0;  Ry[15]=1;
+                    Rz[0]=cz; Rz[1]=sz; Rz[2]=0;  Rz[3]=0;
+                    Rz[4]=-sz;Rz[5]=cz; Rz[6]=0;  Rz[7]=0;
+                    Rz[8]=0;  Rz[9]=0;  Rz[10]=1; Rz[11]=0;
+                    Rz[12]=0; Rz[13]=0; Rz[14]=0; Rz[15]=1;
+                    Sm[0]=inst.sx; Sm[1]=0;  Sm[2]=0;  Sm[3]=0;
+                    Sm[4]=0;  Sm[5]=inst.sy; Sm[6]=0;  Sm[7]=0;
+                    Sm[8]=0;  Sm[9]=0;  Sm[10]=inst.sz;Sm[11]=0;
+                    Sm[12]=0; Sm[13]=0; Sm[14]=0; Sm[15]=1;
+                    mat4Mul(tmp, Ry, Rx);
+                    mat4Mul(RS, tmp, Rz);
+                    mat4Mul(tmp, RS, Sm);
+                    std::memcpy(RS, tmp, sizeof(RS));
                 }
 
-                // Per-vertex alpha for cheat motion blur (stretch mode only).
-                // motionBlur is already 0 when motionSamples > 1, so this is clean.
-                bool useVertexAlpha = (motionBlur > 0.001f &&
-                                        std::sqrt(inst.vx*inst.vx + inst.vy*inst.vy + inst.vz*inst.vz) > 0.0001f);
+                float localMatrix[16];
+                mat4Mul(localMatrix, T, RS);
 
-                const InstanceGeo& geo = geos[gi];
-                glBegin(GL_TRIANGLES);
-                for (size_t t = 0; t < geo.tris.size(); ++t) {
-                    int vi = geo.tris[t];
-                    float vx_local = geo.verts[vi*3];
-                    float vy_local = geo.verts[vi*3+1];
-                    float vz_local = geo.verts[vi*3+2];
-                    if (useVertexAlpha) {
-                        // Fade alpha by normalized distance from bbox center along local Y.
-                        // Works for any geo regardless of size or Y range.
-                        float normY = (vy_local - geo.bboxCenterY) / geo.bboxHalfY;
-                        float t01 = std::abs(normY);
-                        if (t01 > 1.0f) t01 = 1.0f;
-                        float fade = 1.0f - t01 * 0.7f; // 30% min alpha at bbox extremes
-                        float vertAlpha = inst.a * fade;
-                        glColor4f(inst.r, inst.g, inst.b, vertAlpha);
-                    } else {
-                        glColor4f(inst.r, inst.g, inst.b, inst.a);
+                // normalMatrix = transpose(inverse(localMatrix3x3)). Uses
+                // the same trick as renderGeoObjectGlsl: embed 3x3 in a 4x4,
+                // invert, transpose the upper-3x3 back out.
+                float normalMat[9] = { 1,0,0, 0,1,0, 0,0,1 };
+                {
+                    float m3[16] = {
+                        localMatrix[0], localMatrix[1], localMatrix[2],  0,
+                        localMatrix[4], localMatrix[5], localMatrix[6],  0,
+                        localMatrix[8], localMatrix[9], localMatrix[10], 0,
+                        0, 0, 0, 1
+                    };
+                    float inv[16];
+                    if (mat4Invert(inv, m3)) {
+                        normalMat[0] = inv[0];  normalMat[1] = inv[4];  normalMat[2] = inv[8];
+                        normalMat[3] = inv[1];  normalMat[4] = inv[5];  normalMat[5] = inv[9];
+                        normalMat[6] = inv[2];  normalMat[7] = inv[6];  normalMat[8] = inv[10];
                     }
-                    glVertex3f(vx_local, vy_local, vz_local);
                 }
-                glEnd();
 
-                glPopMatrix();
+                // Previous-frame local matrix: translate the instance back by
+                // its per-frame velocity vector. Rotation/scale assumed stable
+                // frame-to-frame (the standard particle simplification — same
+                // convention as kParticleVert's `in_pos - in_velocity`). This
+                // gives the Velocity AOV a per-instance contribution on top of
+                // the camera-motion contribution from u_prevProjView. Sub-frame
+                // offset preserved so multi-sample renders see a consistent
+                // velocity vector across the shutter.
+                float prevLocalMatrix[16];
+                std::memcpy(prevLocalMatrix, localMatrix, sizeof(prevLocalMatrix));
+                prevLocalMatrix[12] = instPx - inst.vx;
+                prevLocalMatrix[13] = instPy - inst.vy;
+                prevLocalMatrix[14] = instPz - inst.vz;
+
+                if (locLocal      >= 0) glUniformMatrix4fv(locLocal,     1, GL_FALSE, localMatrix);
+                if (locPrevLocal  >= 0) glUniformMatrix4fv(locPrevLocal, 1, GL_FALSE, prevLocalMatrix);
+                if (locNormal     >= 0) glUniformMatrix3fv(locNormal,    1, GL_FALSE, normalMat);
+                if (locInstColor  >= 0) glUniform4f(locInstColor, inst.r, inst.g, inst.b, inst.a);
+                if (locFadeOn     >= 0) glUniform1i(locFadeOn, fadeEnabled ? 1 : 0);
+                if (locFadeCenterY>= 0) glUniform1f(locFadeCenterY, geo.bboxCenterY);
+                if (locFadeHalfY  >= 0) glUniform1f(locFadeHalfY,   geo.bboxHalfY);
+
+                glBindVertexArray(geo.vao);
+                glDrawArrays(GL_TRIANGLES, 0, geo.numVerts);
             }
 
-            // Restore state
+            glBindVertexArray(0);
+            glUseProgram(0);
+
+            // Release per-geo GL objects.
+            for (int g = 0; g < 4; ++g) {
+                if (geos[g].vbo) glDeleteBuffers(1, &geos[g].vbo);
+                if (geos[g].vao) glDeleteVertexArrays(1, &geos[g].vao);
+            }
+
+            // Restore single-attachment draw buffer + unified blend for the
+            // downstream volume pass (mirrors the particle-pass teardown).
+            if (wantsAnyMrt) {
+                GLenum drawBufs[] = { GL_COLOR_ATTACHMENT0 };
+                glDrawBuffers(1, drawBufs);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            }
+
             glDisable(GL_CULL_FACE);
             glDepthMask(GL_TRUE);
         }
@@ -2750,7 +3397,8 @@ ScanlineRender::render(const RenderActionArgs& args)
     // --- Render ReadVDB volume with ray marching shader ---
     if (readVdb) {
         ReadVDB::VDBVolumeData vdbData;
-        if (readVdb->getVolumeData(args.time, vdbData) && vdbData.resolution > 0) {
+        if (readVdb->getVolumeData(args.time, vdbData)
+            && vdbData.resX > 0 && vdbData.resY > 0 && vdbData.resZ > 0) {
             GLuint volTex = 0;
             glGenTextures(1, &volTex);
             glBindTexture(GL_TEXTURE_3D, volTex);
@@ -2759,8 +3407,12 @@ ScanlineRender::render(const RenderActionArgs& args)
             glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-            glTexImage3D(GL_TEXTURE_3D, 0, GL_LUMINANCE, vdbData.resolution, vdbData.resolution, vdbData.resolution, 0,
-                         GL_LUMINANCE, GL_FLOAT, vdbData.densityData.data());
+            // Non-cubic 3D texture matching the VDB's voxel aspect ratio.
+            // GL_R32F + GL_RED replaces the deprecated GL_LUMINANCE — the
+            // fragment shader still reads .r, so behaviour is identical.
+            glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F,
+                         vdbData.resX, vdbData.resY, vdbData.resZ, 0,
+                         GL_RED, GL_FLOAT, vdbData.densityData.data());
 
             GLShaderPtr shader = std::make_shared<GLShader>();
             std::string shaderError;
@@ -2780,9 +3432,15 @@ ScanlineRender::render(const RenderActionArgs& args)
                 float y1 = vdbData.bboxMaxY * (float)vsy + (float)vty;
                 float z1 = vdbData.bboxMaxZ * (float)vsz + (float)vtz;
 
-                // Step size relative to volume size
-                float volSize = std::max({x1 - x0, y1 - y0, z1 - z0});
-                float stepSize = volSize / (float)vdbData.resolution;
+                // Step size relative to volume size — sized so we take about
+                // one sample per voxel along the densest axis. Using the max
+                // of (worldSize / resN) ratios keeps the step consistent
+                // regardless of which axis dominates.
+                float stepX = (x1 - x0) / (float)vdbData.resX;
+                float stepY = (y1 - y0) / (float)vdbData.resY;
+                float stepZ = (z1 - z0) / (float)vdbData.resZ;
+                float stepSize = std::min({stepX, stepY, stepZ});
+                if (stepSize <= 0.0f) stepSize = 0.02f;
 
                 shader->bind();
                 U32 progId = shader->getShaderID();
@@ -2815,6 +3473,13 @@ ScanlineRender::render(const RenderActionArgs& args)
                     glUniform1i(glGetUniformLocation(progId, "u_LightEnabled"), 0);
                 }
 
+                // Camera matrices upload — per-sample state, drives the
+                // shader's u_modelView / u_projView.
+                glUniformMatrix4fv(glGetUniformLocation(progId, "u_modelView"),
+                                   1, GL_FALSE, viewMatrix);
+                glUniformMatrix4fv(glGetUniformLocation(progId, "u_projView"),
+                                   1, GL_FALSE, projViewMatrix);
+
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_3D, volTex);
 
@@ -2824,15 +3489,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                 glEnable(GL_CULL_FACE);
                 glCullFace(GL_FRONT);
 
-                glBegin(GL_QUADS);
-                // 6 faces
-                glVertex3f(x0,y0,z0); glVertex3f(x1,y0,z0); glVertex3f(x1,y1,z0); glVertex3f(x0,y1,z0);
-                glVertex3f(x0,y0,z1); glVertex3f(x0,y1,z1); glVertex3f(x1,y1,z1); glVertex3f(x1,y0,z1);
-                glVertex3f(x0,y0,z0); glVertex3f(x0,y1,z0); glVertex3f(x0,y1,z1); glVertex3f(x0,y0,z1);
-                glVertex3f(x1,y0,z0); glVertex3f(x1,y0,z1); glVertex3f(x1,y1,z1); glVertex3f(x1,y1,z0);
-                glVertex3f(x0,y0,z0); glVertex3f(x0,y0,z1); glVertex3f(x1,y0,z1); glVertex3f(x1,y0,z0);
-                glVertex3f(x0,y1,z0); glVertex3f(x1,y1,z0); glVertex3f(x1,y1,z1); glVertex3f(x0,y1,z1);
-                glEnd();
+                drawVolumeProxyCube(x0, y0, z0, x1, y1, z1);
 
                 glDisable(GL_CULL_FACE);
                 glDepthMask(GL_TRUE);
@@ -2861,8 +3518,9 @@ ScanlineRender::render(const RenderActionArgs& args)
             glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-            glTexImage3D(GL_TEXTURE_3D, 0, GL_LUMINANCE, volRes, volRes, volRes, 0,
-                         GL_LUMINANCE, GL_FLOAT, volData.data());
+            // GL_R32F + GL_RED replaces GL_LUMINANCE (removed in core profile).
+            glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, volRes, volRes, volRes, 0,
+                         GL_RED, GL_FLOAT, volData.data());
 
             // Compile ray marching shader
             GLShaderPtr shader = std::make_shared<GLShader>();
@@ -2922,42 +3580,19 @@ ScanlineRender::render(const RenderActionArgs& args)
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 glDepthMask(GL_FALSE);
 
+                // Camera matrices upload — per-sample state, drives the
+                // shader's u_modelView / u_projView.
+                glUniformMatrix4fv(glGetUniformLocation(progId, "u_modelView"),
+                                   1, GL_FALSE, viewMatrix);
+                glUniformMatrix4fv(glGetUniformLocation(progId, "u_projView"),
+                                   1, GL_FALSE, projViewMatrix);
+
                 // Draw proxy cube (back faces for correct ray entry when camera outside)
                 glEnable(GL_CULL_FACE);
                 glCullFace(GL_FRONT); // render back faces
 
-                glBegin(GL_QUADS);
-                // -Z face
-                glVertex3f(volMinX, volMinY, volMinZ);
-                glVertex3f(volMaxX, volMinY, volMinZ);
-                glVertex3f(volMaxX, volMaxY, volMinZ);
-                glVertex3f(volMinX, volMaxY, volMinZ);
-                // +Z face
-                glVertex3f(volMinX, volMinY, volMaxZ);
-                glVertex3f(volMinX, volMaxY, volMaxZ);
-                glVertex3f(volMaxX, volMaxY, volMaxZ);
-                glVertex3f(volMaxX, volMinY, volMaxZ);
-                // -X face
-                glVertex3f(volMinX, volMinY, volMinZ);
-                glVertex3f(volMinX, volMaxY, volMinZ);
-                glVertex3f(volMinX, volMaxY, volMaxZ);
-                glVertex3f(volMinX, volMinY, volMaxZ);
-                // +X face
-                glVertex3f(volMaxX, volMinY, volMinZ);
-                glVertex3f(volMaxX, volMinY, volMaxZ);
-                glVertex3f(volMaxX, volMaxY, volMaxZ);
-                glVertex3f(volMaxX, volMaxY, volMinZ);
-                // -Y face
-                glVertex3f(volMinX, volMinY, volMinZ);
-                glVertex3f(volMinX, volMinY, volMaxZ);
-                glVertex3f(volMaxX, volMinY, volMaxZ);
-                glVertex3f(volMaxX, volMinY, volMinZ);
-                // +Y face
-                glVertex3f(volMinX, volMaxY, volMinZ);
-                glVertex3f(volMaxX, volMaxY, volMinZ);
-                glVertex3f(volMaxX, volMaxY, volMaxZ);
-                glVertex3f(volMinX, volMaxY, volMaxZ);
-                glEnd();
+                drawVolumeProxyCube(volMinX, volMinY, volMinZ,
+                                    volMaxX, volMaxY, volMaxZ);
 
                 glDisable(GL_CULL_FACE);
                 glDepthMask(GL_TRUE);
@@ -3070,6 +3705,19 @@ ScanlineRender::render(const RenderActionArgs& args)
         glDeleteProgram(glslParticleProg);
         glslParticleProg = 0;
     }
+
+    // Release the instance GLSL program.
+    if (glslInstanceProg) {
+        glDeleteProgram(glslInstanceProg);
+        glslInstanceProg = 0;
+    }
+
+    // Restore frame-time view/proj matrices for post-loop work — the
+    // WorldPos AOV reconstruction below needs the original matrices, not
+    // the last motion-blur sample's.
+    std::memcpy(viewMatrix,     frameViewMatrix,     16 * sizeof(float));
+    std::memcpy(projMatrix,     frameProjMatrix,     16 * sizeof(float));
+    std::memcpy(projViewMatrix, frameProjViewMatrix, 16 * sizeof(float));
 
     // Restore original particle positions
     if (motionSamples > 1 && motionBlurPData) {

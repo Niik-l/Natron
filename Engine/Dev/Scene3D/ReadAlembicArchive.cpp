@@ -616,30 +616,73 @@ ReadAlembicArchive::getMeshDataAt(int idx, double time) const
     // The time-to-sample mapping mirrors getEntryWorldMatrix below: timeMode 0 is
     // simple per-frame indexing with Frame Offset, timeMode 1 uses the source
     // TimeSampling values to find the nearest sample (handles fps mismatches).
+    //
+    // Sub-frame interpolation: bracket the requested time between idx0 (floor)
+    // and idx1 (ceil), then linearly blend vertices. Without this, motion blur
+    // sampling at non-integer times returns snapped data and animated meshes
+    // don't blur.
     if (time >= 0.0 && e.hasAnimatedVerts && !e.vertexSamples.empty() && e.meshData) {
         const int N = (int)e.vertexSamples.size();
         const int frameOffset = _imp->frameOffset.lock() ? _imp->frameOffset.lock()->getValue() : 0;
         const int timeMode    = _imp->timeMode.lock()    ? _imp->timeMode.lock()->getValue()    : 0;
 
-        int sampleIdx = 0;
+        double tCont = 0.0; // continuous sample index (e.g. 49.25)
         if (timeMode == 1 && _imp->sourceFps > 0.0 && (int)e.vertexSampleTimes.size() == N) {
+            // Find the bracket [idx0, idx1] whose sample times sandwich abcTimeWanted,
+            // then express the wanted time as a fractional index between them.
             const double projectFps = getApp() ? getApp()->getProjectFrameRate() : 24.0;
             const double abcTimeWanted = (time - 1.0 - frameOffset) / projectFps;
-            double bestDelta = 1e18;
-            for (int i = 0; i < N; ++i) {
-                const double d = std::abs(e.vertexSampleTimes[i] - abcTimeWanted);
-                if (d < bestDelta) { bestDelta = d; sampleIdx = i; }
+            int idx0 = 0;
+            for (int i = 0; i + 1 < N; ++i) {
+                if (e.vertexSampleTimes[i] <= abcTimeWanted &&
+                    abcTimeWanted <= e.vertexSampleTimes[i + 1]) {
+                    idx0 = i; break;
+                }
+                if (abcTimeWanted < e.vertexSampleTimes[i]) break;
+                idx0 = i;
             }
+            const int idx1 = std::min(idx0 + 1, N - 1);
+            const double t0 = e.vertexSampleTimes[idx0];
+            const double t1 = e.vertexSampleTimes[idx1];
+            const double span = (t1 - t0);
+            const double alpha = (span > 1e-12)
+                ? std::max(0.0, std::min(1.0, (abcTimeWanted - t0) / span))
+                : 0.0;
+            tCont = (double)idx0 + alpha;
         } else {
-            sampleIdx = (int)std::floor(time - 1.0 - frameOffset + 0.5);
-            if (sampleIdx < 0) sampleIdx = 0;
-            if (sampleIdx >= N) sampleIdx = N - 1;
+            tCont = time - 1.0 - (double)frameOffset;
+            if (tCont < 0.0) tCont = 0.0;
+            if (tCont > (double)(N - 1)) tCont = (double)(N - 1);
         }
 
-        const std::vector<float>& src = e.vertexSamples[sampleIdx];
-        if (!src.empty() && src.size() == e.meshData->vertices.size()) {
-            std::memcpy(e.meshData->vertices.data(), src.data(),
-                        src.size() * sizeof(float));
+        const int    idx0  = (int)std::floor(tCont);
+        const int    idx1  = std::min(idx0 + 1, N - 1);
+        const double alpha = tCont - (double)idx0;
+        const std::vector<float>& s0 = e.vertexSamples[idx0];
+        const std::vector<float>& s1 = e.vertexSamples[idx1];
+
+        if (!s0.empty() && s0.size() == e.meshData->vertices.size()) {
+            if (idx0 == idx1 || alpha < 1e-9) {
+                // Exact-sample fast path (and the only correct path if the
+                // upper bracket sample size mismatches the lower).
+                std::memcpy(e.meshData->vertices.data(), s0.data(),
+                            s0.size() * sizeof(float));
+            } else if (s1.size() == s0.size()) {
+                const float a = (float)alpha;
+                const float oneMinusA = 1.0f - a;
+                float* dst = e.meshData->vertices.data();
+                const float* src0 = s0.data();
+                const float* src1 = s1.data();
+                const size_t n = s0.size();
+                for (size_t k = 0; k < n; ++k) {
+                    dst[k] = src0[k] * oneMinusA + src1[k] * a;
+                }
+            } else {
+                // Topology mismatch between brackets (shouldn't happen for
+                // standard exports). Fall back to lower sample.
+                std::memcpy(e.meshData->vertices.data(), s0.data(),
+                            s0.size() * sizeof(float));
+            }
         }
     }
 
@@ -679,25 +722,54 @@ ReadAlembicArchive::getEntryWorldMatrix(int idx, double time, float outWorld[16]
             const int frameOffset = _imp->frameOffset.lock() ? _imp->frameOffset.lock()->getValue() : 0;
             const int timeMode    = _imp->timeMode.lock()    ? _imp->timeMode.lock()->getValue()    : 0;
             const int N = (int)e.sampleMatrices.size();
-            int sampleIdx = 0;
-            if (timeMode == 1 && _imp->sourceFps > 0.0) {
+
+            // Sub-frame interpolation: continuous sample index, then lerp
+            // matrix components between brackets. Linear matrix interp isn't
+            // strictly correct for large rotations (would need slerp on the
+            // rotation block), but for the small sub-frame deltas motion blur
+            // uses (~1/N of one frame), the error is negligible — and the
+            // alternative is animated xforms not blurring at all.
+            double tCont = 0.0;
+            if (timeMode == 1 && _imp->sourceFps > 0.0 && (int)e.sampleTimes.size() == N) {
                 const double projectFps = getApp() ? getApp()->getProjectFrameRate() : 24.0;
                 const double abcTimeWanted = (time - 1.0 - frameOffset) / projectFps;
-                double bestDelta = 1e18;
-                for (int i = 0; i < N; ++i) {
-                    const double d = std::abs(e.sampleTimes[i] - abcTimeWanted);
-                    if (d < bestDelta) { bestDelta = d; sampleIdx = i; }
+                int idx0 = 0;
+                for (int i = 0; i + 1 < N; ++i) {
+                    if (e.sampleTimes[i] <= abcTimeWanted &&
+                        abcTimeWanted <= e.sampleTimes[i + 1]) {
+                        idx0 = i; break;
+                    }
+                    if (abcTimeWanted < e.sampleTimes[i]) break;
+                    idx0 = i;
                 }
+                const int idx1 = std::min(idx0 + 1, N - 1);
+                const double t0 = e.sampleTimes[idx0];
+                const double t1 = e.sampleTimes[idx1];
+                const double span = (t1 - t0);
+                const double alpha = (span > 1e-12)
+                    ? std::max(0.0, std::min(1.0, (abcTimeWanted - t0) / span))
+                    : 0.0;
+                tCont = (double)idx0 + alpha;
             } else {
-                sampleIdx = (int)std::floor(time - 1.0 - frameOffset + 0.5);
-                if (sampleIdx < 0) sampleIdx = 0;
-                if (sampleIdx >= N) sampleIdx = N - 1;
+                tCont = time - 1.0 - (double)frameOffset;
+                if (tCont < 0.0) tCont = 0.0;
+                if (tCont > (double)(N - 1)) tCont = (double)(N - 1);
             }
-            const Imath::M44d& m = e.sampleMatrices[sampleIdx];
-            for (int c = 0; c < 4; ++c) {
-                for (int r = 0; r < 4; ++r) {
-                    local[c * 4 + r] = (float)m[c][r];
-                }
+
+            const int    idx0  = (int)std::floor(tCont);
+            const int    idx1  = std::min(idx0 + 1, N - 1);
+            const double alpha = tCont - (double)idx0;
+            const Imath::M44d& m0 = e.sampleMatrices[idx0];
+            const Imath::M44d& m1 = e.sampleMatrices[idx1];
+            if (idx0 == idx1 || alpha < 1e-9) {
+                for (int c = 0; c < 4; ++c)
+                    for (int r = 0; r < 4; ++r)
+                        local[c * 4 + r] = (float)m0[c][r];
+            } else {
+                const double oneMinusA = 1.0 - alpha;
+                for (int c = 0; c < 4; ++c)
+                    for (int r = 0; r < 4; ++r)
+                        local[c * 4 + r] = (float)(m0[c][r] * oneMinusA + m1[c][r] * alpha);
             }
         }
 

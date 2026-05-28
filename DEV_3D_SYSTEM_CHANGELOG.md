@@ -17,6 +17,24 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Scene-wide motion blur + GLSL closeout (2026-05-28)** — ScanlineRender
+  gains a scene-wide multi-sample motion-blur pass (Centered / Start / End /
+  Custom shutter offset, temporal jitter) covering camera, geometry,
+  particles, and geo instances. Animated Alembic archive paths gain
+  sub-frame interpolation for both xform and vertex animation; ReadGeo
+  gains the same sub-frame interp. CyclesRender wires
+  `ATTR_STD_MOTION_VERTEX_POSITION` for Alembic archive meshes (vertex
+  motion blur). The last two legacy fixed-function holdouts inside
+  ScanlineRender (volume ray-march + ParticleInstance immediate-mode draw)
+  are migrated to GLSL 3.30 core; ParticleInstance now participates in
+  MRT (Normal / UV / Pref / Velocity AOVs). ReadVDB's dense 3D texture
+  switches from a cubic 64³ to non-cubic `resX/resY/resZ` preserving the
+  VDB voxel aspect. ReadGeo + ReadAlembicArchive paths populate per-vertex
+  normals so the Normal AOV no longer renders white on file-loaded meshes.
+  3D viewport's `F` (Frame Selected) shortcut now also works when looking
+  through an editable Camera3D — the camera node's translate is rewritten
+  so the framed target sits at framing distance along the camera's view
+  direction, preserving its rotation.
 - **Phase 3 (2026-05-22)** — ScanlineRender migrated from fixed-function GL to a
   GLSL 3.3 + MRT pipeline. Adds 6 per-pixel AOVs (Depth / WorldPos / Normal /
   UV / Pref / Velocity) for both meshes and particles.

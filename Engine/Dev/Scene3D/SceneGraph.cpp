@@ -342,6 +342,7 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
                 }
                 sn.name = nodeName + entryName; // e.g. "ReadAlembicArchive1/Camera01Trackers/Tracker1"
                 sn.sourceNode = node;
+                sn.archiveEntryIdx = i;  // remember the entry index for sub-time re-queries (Cycles motion blur)
                 std::memcpy(sn.localMatrix, lm, sizeof(lm));
                 sn.parentIndex = (parentLocalIdx < 0) ? rootSgIdx : (baseSgIdx + parentLocalIdx);
                 _nodes[sn.parentIndex].childIndices.push_back((int)_nodes.size());
