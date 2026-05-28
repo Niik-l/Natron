@@ -35,10 +35,12 @@ bash build-all.sh
 ```
 
 This does everything: installs dependencies, clones the helper repos next to Natron, applies
-patches, builds Cycles + Natron + plugins, and stages a ready-to-run install. Expect **~1–2
-hours**; a clean run leaves **~14 GB on the build drive** (the install you keep is **~6 GB**;
-the rest is the build tree + sources, deletable afterward). `WITH_CYCLES=0` is well under half
-that. When it finishes it prints:
+patches, builds Cycles + Natron + plugins, and stages a ready-to-run install. Time:
+**~30 min on a fast multi-core machine with dependencies already installed; 1–2 hours on a
+cold setup** (first-time `pacman` downloads of Qt6/Boost/etc. on slower hardware). A clean run
+leaves **~14 GB on the build drive** (the install you keep is **~6 GB**; the rest is the
+build tree + sources, deletable afterward — see "Cleanup" below). `WITH_CYCLES=0` is well
+under half that. When it finishes it prints:
 
 ```
 Launch: .../Natron-install/App/Natron.exe     ← double-click this
@@ -64,6 +66,46 @@ first (`nano config.sh`; Ctrl+O saves, Ctrl+X exits).
 | `07-verify.sh`  | launch the staged binary headless with a clean PATH; assert version + plugins + Cycles |
 
 `build-all.sh` runs 00→07, tee-ing each phase to `logs/<phase>.log`, and stops loudly on failure.
+
+## After building — two folders, two purposes
+
+A finished build leaves **two copies of `Natron.exe` / `NatronRenderer.exe`**:
+
+| Folder | Role | Who needs it |
+|---|---|---|
+| `Natron/build-qt6/` | **develop + run here.** Edit code, `mingw32-make`, launch `build-qt6/App/Natron.exe` from the MINGW64 shell. Incremental rebuilds = seconds to minutes. | developers |
+| `Natron-install/` | **shippable, relocatable bundle.** A deliberate self-contained copy with DLLs + Python + plugins staged in. Phase 07 proves it launches with a clean PATH. | distribution / non-dev users / standalone QA |
+
+They're **different deliverables, not redundant builds.** For a developer iterating on code,
+`Natron-install/` is the deployment artifact and not needed for day-to-day work — you can
+delete it and re-stage when you next want a clean bundle.
+
+## Cleanup — reclaim disk after a successful build
+
+After a clean script run the drive holds ~14 GB. Only `Natron-install/` (~6 GB) is needed to
+*run* Natron — phase 07 proves it's self-contained.
+
+**If you only want to run Natron and won't touch the code** — delete everything except
+`Natron-install/` (reclaims ~8 GB):
+
+```bash
+rm -rf Natron/build-qt6 cycles openfx-misc openfx-io natron-plugins
+# Or even the whole source checkout if you keep Natron-install/ elsewhere:
+# rm -rf Natron
+```
+
+`Natron-install/` can be moved, copied to another drive, or zipped and run on another machine.
+
+**If you plan to edit the code** — keep `Natron/build-qt6/`. It enables fast incremental
+rebuilds (`mingw32-make` recompiles just what changed, seconds to minutes, vs. ~30 min from
+scratch). After rebuilding, re-run `06-install.sh` to re-stage the new exes into
+`Natron-install/`. If you later delete `build-qt6/` and want to develop again, regenerate it
+with `cmake .. -G "MinGW Makefiles"` (the first rebuild is then a full one).
+
+> **Why the duplicate?** `06-install.sh` *copies* `Natron.exe` / `NatronRenderer.exe` from
+> `build-qt6/` into `Natron-install/` and stages DLLs + Python + plugins around them — that's
+> the relocatable bundle. The duplicate (~2 GB) is the cost of having a shippable copy
+> separate from the dev build tree.
 
 ## config.sh knobs
 

@@ -49,6 +49,9 @@ install_ofx IO   "$NATRON_ROOT/openfx-io/build/IO.ofx"
 log "PyPlugs (built-in + community)"
 [ -d "$B/Plugins/PyPlugs" ] && cp -r "$B/Plugins/PyPlugs/." "$I/Plugins/PyPlugs/" || warn "no built-in PyPlugs found in build tree"
 cp -r "$NATRON_ROOT/natron-plugins/." "$I/Plugins/PyPlugs/"
+# Drop the upstream .git metadata — it shouldn't ship in a deployable
+# bundle (and adds ~100 MB of dead weight).
+rm -rf "$I/Plugins/PyPlugs/.git"
 
 # --- OpenColorIO configs: reuse local copy if present, else download (non-fatal) ---
 if [ -d "$I/Resources/OpenColorIO-Configs" ]; then

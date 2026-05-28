@@ -10,7 +10,7 @@ A step-by-step guide to building Natron from source with Qt6, PySide6, and Pytho
 >   understand each step or debug a failure. The scripts are generated from these
 >   instructions — so when something breaks, come back here.
 
-**Disk space:** A core Natron build (`build-qt6/`, no Cycles/plugins/DLL bundling) is ~4 GB with debug info (`Natron.exe` is ~819 MB, or ~1.2 GB once Cycles is statically linked). The **full** setup in this guide — Cycles + OFX plugins + community PyPlugs + OCIO configs + DLLs bundled into both `App/` and `Renderer/` — totals **~12 GB** (measured 2026-05-25). Biggest contributors: debug symbols in the two executables, ~1.1 GB of bundled DLLs per binary, build intermediates, and ~940 MB of OCIO configs.
+**Disk space:** A core Natron build (`build-qt6/`, no Cycles/plugins/DLL bundling) is ~4 GB with debug info (`Natron.exe` is ~819 MB, or ~1.2 GB once Cycles is statically linked). The **full** setup in this guide — Cycles + OFX plugins + community PyPlugs + OCIO configs + DLLs bundled into both `App/` and `Renderer/` — totals **~12 GB** for the Natron tree itself, or **~14 GB** including the sibling source repos (`cycles/`, `openfx-misc/`, `openfx-io/`, `natron-plugins/`) cloned next to it. Biggest contributors: debug symbols in the two executables, ~1.1 GB of bundled DLLs per binary, build intermediates, and ~940 MB of OCIO configs. **Stripping debug symbols** (`strip Natron.exe NatronRenderer.exe` or building with `-DCMAKE_BUILD_TYPE=RelWithDebInfo`) cuts each executable from ~1 GB to roughly 100-200 MB — worth doing for distribution, but keep an unstripped copy if you want usable crash backtraces.
 
 ---
 
@@ -21,6 +21,8 @@ A step-by-step guide to building Natron from source with Qt6, PySide6, and Pytho
 Pick one of:
 - **Uninstall Strawberry Perl**
 - **Remove it from Windows PATH** before building: Settings → Environment Variables → remove any `C:\Strawberry\...` entries from `Path`
+
+> **If you're using the `tools/win-build/` automated scripts:** they prepend `mingw64/bin` to PATH before invoking any build tool, so MSYS2's GCC wins lookup regardless of whether Strawberry Perl is installed. You can skip this step on the script path.
 - **Leave it installed and on PATH, but always prepend `/c/msys64/mingw64/bin` to `PATH` inside the MINGW64 shell** so MSYS2's GCC wins lookup. Step 4 already does this with `export PATH="/c/msys64/mingw64/bin:$PATH"` — extend the same pattern to any extra build scripts you write.
 
 ---
@@ -588,6 +590,22 @@ The **CyclesRender** node will now appear in the 3D menu group. Connect Scene3D 
 
 > **Note:** If enabling Cycles for the first time on an existing build, you may need to clear the AUTOMOC cache:
 > `rm -rf Engine/NatronEngine_autogen && cmake .. -G "MinGW Makefiles"` then rebuild.
+
+---
+
+## 11. Cleanup — what you can delete
+
+In this manual flow the app **lives in `build-qt6/`** — DLLs were bundled there in §9b, so `build-qt6/App/Natron.exe` *is* your runnable Natron. Do **not** delete `build-qt6/`.
+
+You *can* delete the sibling source repos once everything is built (~2 GB):
+
+```bash
+rm -rf cycles openfx-misc openfx-io natron-plugins
+```
+
+Their outputs are already installed inside `build-qt6/`'s `Plugins/` tree.
+
+> The `tools/win-build/` automated script flow instead stages a **separate, relocatable `Natron-install/`** folder via `06-install.sh` — different deliverable, different cleanup story. See `tools/win-build/README.md` for that flow's specifics.
 
 ---
 
