@@ -91,7 +91,7 @@ Updated: 2026-05-24
 | **DeepSplit** | `fr.inria.built-in.DeepSplit` | Not registered | Split deep by criteria |
 | **DeepVelocityMatte** | `fr.inria.built-in.DeepVelocityMatte` | Not registered | Velocity-based deep matte |
 
-## Particles (13 nodes)
+## Particles (16 nodes)
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
@@ -105,8 +105,11 @@ Updated: 2026-05-24
 | **ParticleAttract** | `fr.inria.built-in.ParticleAttract` | Registered | Attract/repel from a point (linear/inverse square falloff) |
 | **ParticleVortex** | `fr.inria.built-in.ParticleVortex` | Registered | Spiral vortex force around an axis with inward pull |
 | **ParticleSpawn** | `fr.inria.built-in.ParticleSpawn` | Registered | Secondary particle emitter (trails, sparks) — On Birth/Death/Collision triggers |
-| **ParticleSolver** | `fr.inria.built-in.ParticleSolver` | Registered | Particle solver + collision. Owns simulation loop (forces → integrate → collide). Reads Cube3D/Sphere3D geo for collision (OBB with rotation). Works without geo as pure solver. Elasticity, friction, spawn-inside push-out. |
+| **ParticleSolver** | `fr.inria.built-in.ParticleSolver` | Registered | Particle solver + collision. Owns simulation loop (forces → integrate → collide). Reads Cube3D/Sphere3D geo for collision (OBB with rotation). Works without geo as pure solver. Elasticity, friction, spawn-inside push-out. **Multi-frame RAM cache (Phase A+B 2026-05-27):** `getParticleData()` consults a per-instance `std::map<int, CachedFrame>`; hash-based invalidation on upstream change; exact-frame hit skips integration; miss resumes from nearest cached frame. Cache page knobs: Cache Simulation / Max Cache MB / Cached Frames + Cache RAM (read-only) / Clear Cache. (Eviction in Phase C.) |
 | **ParticleInstance** | `fr.inria.built-in.ParticleInstance` | Registered | Instance geo at particle positions. 4 geo inputs (A-D). Distribution: Sequential/Random/ByID. Orient to velocity, scale multiplier, max instances. |
+| **WriteAlembicParticles** | `fr.inria.built-in.WriteAlembicParticles` | Registered (2026-05-27) | **First disk-writing 3D node.** Passthrough particle node — particles flow through input 0 unchanged. Knobs: File (.abc output) + Bake button. Click Bake → iterates project frame range, writes OPoints sample per frame (positions, IDs, velocities, Cd color, size). Synchronous (UI freezes during bake; per-frame progress on stdout). Uses Alembic OArchive (Ogawa backend) + OPoints schema. |
+| **ReadAlembicParticles** | `fr.inria.built-in.ReadAlembicParticles` | Registered (2026-05-27) | Source node — reads OPoints from an Alembic archive back into a particle stream. Knobs: File + Reload + Info label. Pre-loads all samples on file open (positions/IDs/velocities + optional Cd color and size from arbGeomParams). Per-frame lookup snaps to nearest sample via Alembic TimeSampling. V1 picks the first IPoints object; multi-points dropdown future work. Marks itself frame-varying when sample count > 1. Closes the bake-once round-trip with WriteAlembicParticles. |
+| **ParticleAttribute** | `fr.inria.built-in.ParticleAttribute` | Registered (2026-05-27) | Per-particle attribute editor with **three always-visible sections** (Color / Pscale / Alpha) so users can shape the full particle look in one node and see all three contribute together. Each section is independent: Enable (on/off), Isolate (solos this section, radio-like across the three), Source (Age/Lifetime / Speed / Velocity X-Z / Position X-Z / BounceCount / SpawnIndex), Source Min/Max (range remap, animatable), **Fit button** (sample upstream → auto-fill min/max), editor (custom **Gradient** widget for Color via the new `KnobGradient`; `KnobParametric` curve for Pscale + Alpha), Mix (animatable lerp), Reset (per-section), and a live **Summary** label showing the current config. Top-level **Reset All** restores every section to defaults. Apply order: Color → Pscale → Alpha; an enabled Isolate solos that section. Placement: downstream of `ParticleSolver` (so the solver's appearance-resync doesn't overwrite the modifications). |
 | **ParticleMerge** | `fr.inria.built-in.ParticleMerge` | Registered | Combine multiple particle streams (4 inputs) |
 
 ## Channel (1 node)
@@ -147,9 +150,9 @@ Updated: 2026-05-24
 | Materials | 2 | 0 | 2 |
 | Deep (Tier 1+2) | 17 | 0 | 17 |
 | Deep (Tier 3) | 0 | 19 | 19 |
-| Particles | 13 | 0 | 13 |
+| Particles | 16 | 0 | 16 |
 | Channel | 1 | 0 | 1 |
 | Transform | 1 | 0 | 1 |
 | Color | 3 | 0 | 3 |
 | Other | 1 | 0 | 1 |
-| **Total** | **56** | **19** | **75** |
+| **Total** | **59** | **19** | **78** |

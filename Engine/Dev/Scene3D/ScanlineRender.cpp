@@ -79,6 +79,7 @@ struct ScanlineRenderPrivate
     // Particle rendering
     KnobChoiceWPtr particleMode;   // Point, Disc, Sphere, Sprite
     KnobChoiceWPtr particleBlend;  // Additive, Over
+    KnobBoolWPtr   particleSolid;  // edge alpha = p.a (true) vs fade-to-0 (false)
     KnobDoubleWPtr particleScale;  // global size multiplier
     KnobDoubleWPtr particleMotionBlur; // velocity stretch amount (legacy cheat mode)
     KnobIntWPtr motionSamples;      // number of sub-frame samples (1 = off)
@@ -227,6 +228,15 @@ ScanlineRender::initializeKnobs()
         k->populateChoices(entries);
         k->setDefaultValue(0); // Additive default
         partPage->addKnob(k); _imp->particleBlend = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Solid"));
+        k->setName("particleSolid"); k->setAnimationEnabled(false);
+        k->setDefaultValue(false);
+        k->setHintToolTip(tr("Render Disc / Sphere / Sprite with full alpha at the edges "
+                             "instead of fading to transparent. Off (default): soft "
+                             "anti-aliased falloff. On: hard edge, solid look."));
+        partPage->addKnob(k); _imp->particleSolid = k;
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Particle Scale"));
@@ -2061,6 +2071,7 @@ ScanlineRender::render(const RenderActionArgs& args)
         int partMode = _imp->particleMode.lock() ? _imp->particleMode.lock()->getValue() : 3;
         int blendMode = _imp->particleBlend.lock() ? _imp->particleBlend.lock()->getValue() : 0;
         float globalScale = _imp->particleScale.lock() ? (float)_imp->particleScale.lock()->getValueAtTime(args.time) : 1.0f;
+        bool solidParticles = _imp->particleSolid.lock() ? _imp->particleSolid.lock()->getValue() : false;
 
         // Camera right/up/forward vectors directly from the view matrix
         // (column-major float[16]: out[col*4 + row]). Used for billboarding
@@ -2071,14 +2082,22 @@ ScanlineRender::render(const RenderActionArgs& args)
         float fwdX   = viewMatrix[2], fwdY   = viewMatrix[6], fwdZ   = viewMatrix[10];
 
         glEnable(GL_BLEND);
-        if (blendMode == 0)
+        if (solidParticles) {
+            // Solid mode: foreground particle completely replaces what's
+            // behind. Combined with depth write below, this gives the
+            // "opaque, no see-through" look the knob promises.
+            glBlendFunc(GL_ONE, GL_ZERO);
+        } else if (blendMode == 0) {
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);         // Additive
-        else
+        } else {
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // Over
+        }
 
-        // Disable depth writes so particles blend instead of occluding each other,
-        // but keep depth test so they still respect scene geometry
-        glDepthMask(GL_FALSE);
+        // Solid: write to depth so particles occlude each other (and the
+        // scene). Default: keep depth-write off so particles blend
+        // through each other while still respecting scene geometry's
+        // depth (depth test stays on).
+        glDepthMask(solidParticles ? GL_TRUE : GL_FALSE);
 
         // Note: GL_LINE_SMOOTH/POLYGON_SMOOTH removed — MSAA handles AA properly.
         // GL_POINT_SMOOTH still useful for round point sprites in Point mode.
@@ -2261,6 +2280,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                         float cz = p.pz - dz * halfLen * 0.5f;
 
                         const int segs = 16;
+                        const float edgeAlpha = solidParticles ? alpha : 0.0f;
                         ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
                         fillAovs(center, p);
                         // Pre-compute ring of edge verts once
@@ -2271,7 +2291,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                             float ex = dx * ca * halfLen + px * sa * halfWid;
                             float ey = dy * ca * halfLen + py * sa * halfWid;
                             float ez = dz * ca * halfLen + pz * sa * halfWid;
-                            ring[s] = { cx + ex, cy + ey, cz + ez, p.r, p.g, p.b, 0.0f };
+                            ring[s] = { cx + ex, cy + ey, cz + ez, p.r, p.g, p.b, edgeAlpha };
                             fillAovs(ring[s], p);
                         }
                         for (int s = 0; s < segs; ++s) {
@@ -2284,6 +2304,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                 }
 
                 if (!didMotionBlur) {
+                    const float edgeAlpha = solidParticles ? alpha : 0.0f;
                     ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
                     fillAovs(center, p);
                     // Pre-compute ring of edge verts once
@@ -2293,7 +2314,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                         float ey = rightY * cosTable[s] + upY * sinTable[s];
                         float ez = rightZ * cosTable[s] + upZ * sinTable[s];
                         ring[s] = { p.px + ex * hs, p.py + ey * hs, p.pz + ez * hs,
-                                    p.r, p.g, p.b, 0.0f };
+                                    p.r, p.g, p.b, edgeAlpha };
                         fillAovs(ring[s], p);
                     }
                     for (int s = 0; s < segments; ++s) {
@@ -2356,6 +2377,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                         float cz = p.pz - ddz * halfLen * 0.5f;
 
                         const int segs = 16;
+                        const float edgeAlpha = solidParticles ? alpha : 0.0f;
                         ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
                         fillAovs(center, p);
                         std::vector<ParticleVertex> ring((size_t)segs + 1);
@@ -2365,7 +2387,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                             float ex = ddx * ca * halfLen + ppx * sa * halfWid;
                             float ey = ddy * ca * halfLen + ppy * sa * halfWid;
                             float ez = ddz * ca * halfLen + ppz * sa * halfWid;
-                            ring[s] = { cx + ex, cy + ey, cz + ez, p.r, p.g, p.b, 0.0f };
+                            ring[s] = { cx + ex, cy + ey, cz + ez, p.r, p.g, p.b, edgeAlpha };
                             fillAovs(ring[s], p);
                         }
                         for (int s = 0; s < segs; ++s) {
@@ -2429,10 +2451,13 @@ ScanlineRender::render(const RenderActionArgs& args)
 
             drawParticlePrimitives(GL_TRIANGLES, verts);
 
-            // Restore for subsequent rendering
+            // Restore for subsequent rendering. Keep depth-write enabled
+            // if Solid mode is on (otherwise we'd undo the global state
+            // set above and subsequent particle batches would no longer
+            // occlude properly).
             if (motionBlur < 0.001f) {
                 glDisable(GL_CULL_FACE);
-                glDepthMask(GL_FALSE);
+                if (!solidParticles) glDepthMask(GL_FALSE);
             }
 
         } else if (partMode == 3 && glslParticleProg) {
@@ -2480,6 +2505,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                         float ellLen = halfLen;
 
                         const int segs = 16;
+                        const float edgeAlpha = solidParticles ? alpha : 0.0f;
                         ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
                         fillAovs(center, p);
                         std::vector<ParticleVertex> ring((size_t)segs + 1);
@@ -2489,7 +2515,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                             float ex = dx * ca * ellLen + px * sa * halfWid;
                             float ey = dy * ca * ellLen + py * sa * halfWid;
                             float ez = dz * ca * ellLen + pz * sa * halfWid;
-                            ring[s] = { cx + ex, cy + ey, cz + ez, p.r, p.g, p.b, 0.0f };
+                            ring[s] = { cx + ex, cy + ey, cz + ez, p.r, p.g, p.b, edgeAlpha };
                             fillAovs(ring[s], p);
                         }
                         for (int s = 0; s < segs; ++s) {

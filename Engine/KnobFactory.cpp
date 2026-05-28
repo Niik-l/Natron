@@ -34,6 +34,7 @@
 #include "Engine/KnobFile.h"
 #include "Engine/KnobTypes.h"
 #include "Dev/Channel/KnobShuffle.h"
+#include "Dev/Particles/KnobGradient.h"
 
 #include "Engine/AppManager.h"
 #include "Engine/LibraryBinary.h"
@@ -95,6 +96,7 @@ KnobFactory::loadBultinKnobs()
     _loadedKnobs.insert( knobFactoryEntry<KnobPage>() );
     _loadedKnobs.insert( knobFactoryEntry<KnobLayers>() );
     _loadedKnobs.insert( knobFactoryEntry<KnobShuffle>() );
+    _loadedKnobs.insert( knobFactoryEntry<KnobGradient>() );
 }
 
 KnobHelperPtr KnobFactory::createKnob(const std::string &id,

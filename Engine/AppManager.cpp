@@ -187,6 +187,9 @@
 #include "Dev/Particles/ParticleSolver.h"
 #include "Dev/Particles/ParticleInstance.h"
 #include "Dev/Particles/ParticleMerge.h"
+#include "Dev/Particles/WriteAlembicParticles.h"
+#include "Dev/Particles/ReadAlembicParticles.h"
+#include "Dev/Particles/ParticleAttribute.h"
 
 // Dev nodes — 3D System
 #include "Dev/Scene3D/Camera3DNode.h"
@@ -1695,6 +1698,9 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<ParticleSolver>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ParticleInstance>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ParticleMerge>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<WriteAlembicParticles>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ReadAlembicParticles>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleAttribute>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
     // Dev nodes — Transform
     registerBuiltInPlugin<SphericalTransform>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/transform_grouping_2.png"), false, false);

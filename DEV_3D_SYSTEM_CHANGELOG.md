@@ -79,10 +79,11 @@ DeepExpression, DeepColorCorrect, DeepDefocus, Blast.
 Tier 3 (19 more) exists in code but is unregistered pending further testing —
 see `NODE_REGISTRY.md`.
 
-### Particles (13 nodes, "Phase 2 complete")
+### Particles (16 nodes, "Phase 2 complete")
 ParticleEmitter, ParticleGravity, ParticleDrag, ParticleTurbulence,
 ParticleTurbulence2D, ParticleWind, ParticleKillBox, ParticleAttract,
-ParticleVortex, ParticleSpawn, ParticleSolver, ParticleInstance, ParticleMerge.
+ParticleVortex, ParticleSpawn, ParticleSolver, ParticleInstance, ParticleMerge,
+WriteAlembicParticles, ReadAlembicParticles, ParticleAttribute.
 
 ### Channel (1 node)
 DevShuffle.
@@ -186,6 +187,7 @@ Replaced hand-rolled Viewport3D with ImGuizmo-based DevViewport3D:
 - Natron's ImageKey cache ignores time for "non-animated" nodes
 - CyclesRender uses a hidden animated knob + `setIsFrameVarying(true)` to force per-frame cache invalidation
 - Scene hash built from ALL camera, light, geometry, and material parameters
+- **ParticleSolver frame cache (Phase A skeleton + Phase B wired-in, landed 2026-05-27)** — multi-frame in-RAM cache on each `ParticleSolver` instance, keyed by frame number. Stored in `ParticleSolverPrivate` as `std::map<int, CachedFrame>` (where each entry carries a deep-copied `ParticleDataPtr` + per-frame `knownIDs`) + `std::mutex` + `frameCacheHash` (U64 sentinel) + `frameCacheBytes` (memory accounting). New "Cache" page on the node: Cache Simulation / Max Cache (MB) / read-only Cached Frames + Cache RAM labels / Clear Cache button. `getParticleData()` consults the cache: hash mismatch → wipe and resim; exact-frame hit → restore + skip integration; miss → resume from nearest cached frame ≤ endFrame via `upper_bound`, integrate forward, cache each frame as it goes. Hash combines `input0->getHash()`, `input1->getHash()`, and the solver's own knob values. Debug coloring (showCollisions tint) is applied after cache reads, so the cache stores uncolored state. **No LRU eviction yet** — Phase C adds the actual cap-and-evict on `Max Cache (MB)`.
 
 ### Undo
 - Natron has TWO undo stacks: per-node and global (NodeGraph)

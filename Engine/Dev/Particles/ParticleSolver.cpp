@@ -25,7 +25,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <functional>
+#include <map>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -300,11 +304,34 @@ struct ParticleSolverPrivate
     KnobIntWPtr substeps;
     KnobBoolWPtr showCollisions;
 
+    // Cache page knobs (Phase A skeleton).
+    KnobBoolWPtr   cacheEnabled;
+    KnobIntWPtr    cacheMaxMB;
+    KnobStringWPtr cacheFramesLabel;
+    KnobStringWPtr cacheRamLabel;
+    KnobButtonWPtr cacheClear;
+
     // Solver cache — the single authoritative particle state.
     // All forces, integration, and collision happen on this data.
     ParticleDataPtr cachedData;
     double cachedFrame;
     std::unordered_set<uint32_t> knownIDs;
+
+    // Multi-frame RAM cache (Phase A skeleton — declared, not yet wired into
+    // the render path). The existing cachedData/cachedFrame above is the
+    // "remember last evaluated frame" single-slot cache. The frameCache map
+    // here will hold many simulated frames in RAM for instant scrubbing
+    // (populated in Phase B; LRU-evicted in Phase C).
+    struct CachedFrame {
+        ParticleDataPtr              state;
+        std::unordered_set<uint32_t> knownIDs;       // restored alongside state
+        std::int64_t                 lastAccessUs = 0;   // for LRU eviction (Phase C)
+        std::size_t                  memoryBytes  = 0;
+    };
+    mutable std::mutex         frameCacheMutex;
+    std::map<int, CachedFrame> frameCache;
+    U64                        frameCacheHash  = 0;
+    std::size_t                frameCacheBytes = 0;
 
     ParticleSolverPrivate() : cachedFrame(-1e9) {}
 };
@@ -374,6 +401,110 @@ ParticleSolver::initializeKnobs()
         k->setHintToolTip(tr("Debug: tint collided particles red to visualize collision hits."));
         mainPage->addKnob(k); _imp->showCollisions = k;
     }
+
+    // ----- Cache page (Phase A skeleton) -----
+    // Knobs are visible and the Clear button works, but the cache itself
+    // is not yet consulted by the render path. Phase B wires it in.
+    KnobPagePtr cachePage = AppManager::createKnob<KnobPage>(this, tr("Cache"));
+
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Cache Simulation"));
+        k->setName("cacheEnabled"); k->setDefaultValue(true); k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Hold simulated frames in RAM so timeline scrubbing reuses them "
+                             "instead of re-integrating from the start."));
+        cachePage->addKnob(k); _imp->cacheEnabled = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Cache (MB)"));
+        k->setName("cacheMaxMB"); k->setDefaultValue(1024); k->setAnimationEnabled(false);
+        k->setMinimum(64); k->setMaximum(16384);
+        k->setDisplayMinimum(64); k->setDisplayMaximum(8192);
+        k->setHintToolTip(tr("LRU memory cap. Oldest frames are evicted first when the limit is reached."));
+        cachePage->addKnob(k); _imp->cacheMaxMB = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Cached Frames"));
+        k->setName("cacheFramesLabel"); k->setDefaultValue("0"); k->setAsLabel();
+        k->setHintToolTip(tr("Number of frames currently held in the cache."));
+        cachePage->addKnob(k); _imp->cacheFramesLabel = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Cache RAM"));
+        k->setName("cacheRamLabel"); k->setDefaultValue("0 MB"); k->setAsLabel();
+        k->setHintToolTip(tr("Memory used by cached frames."));
+        cachePage->addKnob(k); _imp->cacheRamLabel = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Clear Cache"));
+        k->setName("cacheClear");
+        k->setHintToolTip(tr("Discard all cached frames now."));
+        cachePage->addKnob(k); _imp->cacheClear = k;
+    }
+}
+
+// ============================================================
+// Frame cache helpers (Phase A skeleton — populated in B/C)
+// ============================================================
+
+void
+ParticleSolver::clearFrameCache()
+{
+    std::lock_guard<std::mutex> lk(_imp->frameCacheMutex);
+    _imp->frameCache.clear();
+    _imp->frameCacheBytes = 0;
+    _imp->frameCacheHash  = 0;
+}
+
+void
+ParticleSolver::refreshCacheStatusLabels()
+{
+    std::size_t count;
+    std::size_t bytes;
+    {
+        std::lock_guard<std::mutex> lk(_imp->frameCacheMutex);
+        count = _imp->frameCache.size();
+        bytes = _imp->frameCacheBytes;
+    }
+    KnobStringPtr framesLabel = _imp->cacheFramesLabel.lock();
+    KnobStringPtr ramLabel    = _imp->cacheRamLabel.lock();
+    if (framesLabel) framesLabel->setValue(std::to_string(count));
+    if (ramLabel)    ramLabel->setValue(std::to_string(bytes / (1024 * 1024)) + " MB");
+}
+
+// Hash of inputs that affect the simulation. Mismatch with the stored
+// frameCacheHash means upstream changed — flush the cache and resim.
+// Natron's per-node getHash() already incorporates transitive upstream
+// state, so XOR'ing input hashes + own knob values is enough.
+U64
+ParticleSolver::computeUpstreamHash() const
+{
+    U64 h = 0;
+    EffectInstancePtr in0 = getInput(0);
+    EffectInstancePtr in1 = getInput(1);
+    if (in0) h ^= in0->getHash();
+    if (in1) h ^= (in1->getHash() << 1);
+
+    KnobDoublePtr eK = _imp->elasticity.lock();
+    KnobDoublePtr fK = _imp->friction.lock();
+    KnobIntPtr    bK = _imp->maxBounces.lock();
+    KnobIntPtr    sK = _imp->substeps.lock();
+    if (eK) h ^= (std::hash<double>{}(eK->getValue()) << 2);
+    if (fK) h ^= (std::hash<double>{}(fK->getValue()) << 3);
+    if (bK) h ^= (std::hash<int>{}(bK->getValue())   << 4);
+    if (sK) h ^= (std::hash<int>{}(sK->getValue())   << 5);
+    return h;
+}
+
+bool
+ParticleSolver::knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec /*view*/,
+                            double /*time*/, bool /*originatedFromMainThread*/)
+{
+    if (k == _imp->cacheClear.lock().get() && reason == eValueChangedReasonUserEdited) {
+        clearFrameCache();
+        refreshCacheStatusLabels();
+        return true;
+    }
+    return false;
 }
 
 // ============================================================
@@ -389,10 +520,48 @@ ParticleSolver::initializeKnobs()
 ParticleDataPtr
 ParticleSolver::getParticleData(double time)
 {
-    // Return cached if already at this frame
+    // Single-slot fast path — same frame as the previous call.
     if (_imp->cachedData && time == _imp->cachedFrame) {
         return _imp->cachedData;
     }
+
+    const bool cacheEnabled = _imp->cacheEnabled.lock()
+                              ? _imp->cacheEnabled.lock()->getValue()
+                              : true;
+
+    int endFrame = (int)std::floor(time);
+    if (endFrame < 1) endFrame = 1;
+
+    auto nowUs = []() {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
+    // 1. Hash-based invalidation — wipe the cache if any upstream input changed.
+    if (cacheEnabled) {
+        const U64 currentHash = computeUpstreamHash();
+        std::lock_guard<std::mutex> lk(_imp->frameCacheMutex);
+        if (currentHash != _imp->frameCacheHash) {
+            _imp->frameCache.clear();
+            _imp->frameCacheBytes = 0;
+            _imp->frameCacheHash  = currentHash;
+        }
+    }
+
+    // 2. Exact-frame cache hit — deep-copy state out, skip the integration loop.
+    bool servedFromExactCache = false;
+    if (cacheEnabled) {
+        std::lock_guard<std::mutex> lk(_imp->frameCacheMutex);
+        auto it = _imp->frameCache.find(endFrame);
+        if (it != _imp->frameCache.end()) {
+            _imp->cachedData       = std::make_shared<ParticleData>(*it->second.state);
+            _imp->knownIDs         = it->second.knownIDs;
+            it->second.lastAccessUs = nowUs();
+            servedFromExactCache   = true;
+        }
+    }
+
+    if (!servedFromExactCache) {
 
     // Walk upstream: collect force nodes and find the emitter
     std::vector<ParticleModifier*> forces;
@@ -408,16 +577,29 @@ ParticleSolver::getParticleData(double time)
     }
     if (!emitter) return ParticleDataPtr();
 
-    int endFrame = (int)std::floor(time);
-    if (endFrame < 1) endFrame = 1;
-
-    // Determine start frame — use cache if moving forward
+    // 3. Determine start frame — prefer nearest cached frame ≤ endFrame;
+    //    fall back to the legacy single-slot forward step; else from frame 1.
     int startFrame = 1;
-    if (_imp->cachedData && _imp->cachedFrame > 0 && time > _imp->cachedFrame) {
-        startFrame = (int)_imp->cachedFrame + 1;
-    } else {
-        _imp->cachedData.reset();
-        _imp->knownIDs.clear();
+    if (cacheEnabled) {
+        std::lock_guard<std::mutex> lk(_imp->frameCacheMutex);
+        if (!_imp->frameCache.empty()) {
+            auto it = _imp->frameCache.upper_bound(endFrame); // first > endFrame
+            if (it != _imp->frameCache.begin()) {
+                --it; // largest ≤ endFrame
+                _imp->cachedData       = std::make_shared<ParticleData>(*it->second.state);
+                _imp->knownIDs         = it->second.knownIDs;
+                it->second.lastAccessUs = nowUs();
+                startFrame             = it->first + 1;
+            }
+        }
+    }
+    if (startFrame == 1) {
+        if (_imp->cachedData && _imp->cachedFrame > 0 && time > _imp->cachedFrame) {
+            startFrame = (int)_imp->cachedFrame + 1;
+        } else {
+            _imp->cachedData.reset();
+            _imp->knownIDs.clear();
+        }
     }
 
     if (!_imp->cachedData) {
@@ -539,15 +721,37 @@ ParticleSolver::getParticleData(double time)
             }
         }
         _imp->cachedData->particles.swap(alive);
+
+        // 8. Write this frame's integrated state into the multi-frame cache
+        //    (uncolored — debug coloring is applied after the loop).
+        if (cacheEnabled) {
+            std::lock_guard<std::mutex> lk(_imp->frameCacheMutex);
+            ParticleSolverPrivate::CachedFrame& entry = _imp->frameCache[frame];
+            _imp->frameCacheBytes -= entry.memoryBytes;
+            entry.state        = std::make_shared<ParticleData>(*_imp->cachedData);
+            entry.knownIDs     = _imp->knownIDs;
+            entry.lastAccessUs = nowUs();
+            entry.memoryBytes  = sizeof(Particle) * _imp->cachedData->particles.size()
+                               + sizeof(uint32_t) * _imp->knownIDs.size() + 128;
+            _imp->frameCacheBytes += entry.memoryBytes;
+        }
     }
 
-    // Debug: tint collided particles red
+    }  // end if (!servedFromExactCache)
+
+    // Debug: tint collided particles red. Applied to the *return* copy, not
+    // the cached state — cache stores uncolored particles so toggling the
+    // knob does not require flushing.
     bool showCol = _imp->showCollisions.lock() ? _imp->showCollisions.lock()->getValue() : false;
-    if (showCol) {
+    if (showCol && _imp->cachedData) {
         for (size_t i = 0; i < _imp->cachedData->particles.size(); ++i) {
             Particle& p = _imp->cachedData->particles[i];
             if (p.collided) { p.r = 1.0f; p.g = 0.15f; p.b = 0.1f; }
         }
+    }
+
+    if (cacheEnabled) {
+        refreshCacheStatusLabels();
     }
 
     _imp->cachedFrame = time;

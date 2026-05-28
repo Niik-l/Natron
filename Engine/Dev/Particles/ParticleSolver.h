@@ -92,9 +92,21 @@ public:
     // This is the only node that owns particle position/velocity state.
     virtual ParticleDataPtr getParticleData(double time) OVERRIDE;
 
+    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view,
+                             double time, bool originatedFromMainThread) OVERRIDE FINAL;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
+
+    // Frame cache (multi-frame, RAM-resident).
+    //   Phase A — skeleton (knobs + data in _imp).
+    //   Phase B — wired into getParticleData: hit/miss/resume-from-nearest +
+    //             hash-based invalidation. No eviction yet (unbounded).
+    //   Phase C — adds LRU eviction.
+    void clearFrameCache();
+    void refreshCacheStatusLabels();
+    U64  computeUpstreamHash() const;
 
     // Per-particle collision dispatch (called after integration). `dt` is
     // the substep size (1.0/numSubsteps); threaded through to bounceParticle
