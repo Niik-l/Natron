@@ -1123,6 +1123,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             {"Normal",    ccl::PASS_NORMAL},
             {"UV",        ccl::PASS_UV},
             {"Depth",     ccl::PASS_DEPTH},
+            {"Mist",      ccl::PASS_MIST},
         };
 
         // Build the set of passes to create. Always include "Combined".

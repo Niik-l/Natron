@@ -17,6 +17,15 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **CyclesRender — Mist AOV + display fix for single-value passes (2026-05-29)** —
+  added `PASS_MIST` via the standard 5-step add-pass recipe (knob → enabled
+  list → plane → standardPasses[] → broadcast). While shipping it caught a
+  long-standing display trap: 1-channel "A" planes (Depth / AO) render
+  black in the viewer's default RGB display mode because R/G/B are
+  undefined. Switched all three single-value AOVs (Depth / AO / Mist) to
+  3-channel R/G/B planes with the scalar broadcast in the per-pixel blit
+  block. Trap captured in `feedback_natron_single_channel_plane_display.md`
+  and the recipe in `reference_cycles_add_pass_recipe.md`.
 - **SphericalTransform Faces format (2026-05-29)** — adds 6 per-face cubemap
   inputs (`-Z, +Z, -X, +X, -Y, +Y` canonical order) so HDRIs can be split
   into individual face streams, edited per face, and recombined via a

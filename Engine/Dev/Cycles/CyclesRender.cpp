@@ -90,7 +90,7 @@ struct CyclesRenderPrivate
     KnobBoolWPtr aovDiffDir, aovDiffInd, aovDiffCol;
     KnobBoolWPtr aovGlossDir, aovGlossInd, aovGlossCol;
     KnobBoolWPtr aovEmission, aovEnv, aovAO;
-    KnobBoolWPtr aovNormal, aovDepth, aovUV;
+    KnobBoolWPtr aovNormal, aovDepth, aovUV, aovMist;
 
     // Focus helper
     KnobChoiceWPtr focusObject;
@@ -302,6 +302,14 @@ CyclesRender::initializeKnobs()
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("UV")); k->setName("aovUV"); k->setDefaultValue(false);
         aovPage->addKnob(k); _imp->aovUV = k;
     }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Mist"));
+        k->setName("aovMist"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Distance-attenuated mist factor [0,1]. "
+            "Uses Cycles' default Film mist range; expose Mist Start / Depth / "
+            "Falloff knobs later if tuning is needed."));
+        aovPage->addKnob(k); _imp->aovMist = k;
+    }
 
     // --- Depth of Field tab ---
     KnobPagePtr dofPage = AppManager::createKnob<KnobPage>(this, tr("Depth of Field"));
@@ -464,6 +472,7 @@ getEnabledPasses(const CyclesRenderPrivate* imp)
     check(imp->aovNormal,   "Normal");
     check(imp->aovDepth,    "Depth");
     check(imp->aovUV,       "UV");
+    check(imp->aovMist,     "Mist");
     return passes;
 }
 
@@ -486,10 +495,12 @@ passNameToPlane(const std::string& name)
     if (name == "Normal")   return ImagePlaneDesc("Normal",         "Normal",          "", rgb3, 3);
     if (name == "UV")       return ImagePlaneDesc("UV",             "UV",              "", rgb3, 3);
 
-    // 1-channel passes
-    static const char* a1[] = {"A"};
-    if (name == "AO")       return ImagePlaneDesc("AO",    "Ambient Occlusion", "", a1, 1);
-    if (name == "Depth")    return ImagePlaneDesc("Depth", "Depth",             "", a1, 1);
+    // Single-value passes broadcast to 3-channel R/G/B so Natron's viewer
+    // displays them as grayscale directly. (1-channel "A" planes render
+    // black in the viewer's default RGB mode — display trap not data loss.)
+    if (name == "AO")       return ImagePlaneDesc("AO",    "Ambient Occlusion", "", rgb3, 3);
+    if (name == "Depth")    return ImagePlaneDesc("Depth", "Depth",             "", rgb3, 3);
+    if (name == "Mist")     return ImagePlaneDesc("Mist",  "Mist",              "", rgb3, 3);
 
     // Light group passes (Combined_<name>)
     if (name.substr(0, 9) == "Combined_") {
@@ -1045,10 +1056,17 @@ CyclesRender::render(const RenderActionArgs& args)
                 float b = srcPixels[idx + 2];
                 float a = srcPixels[idx + 3];
 
-                // Depth pass: output raw camera-space Z as grayscale
-                // Use Grade node in comp to remap range
+                // Depth pass: output raw camera-space Z as grayscale.
+                // Use Grade node in comp to remap range.
                 if (passName == "Depth") {
                     if (r >= 1e9f) r = 0.0f; // infinity → black
+                    g = b = r;
+                    a = 1.0f;
+                }
+                // Mist / AO: single-value passes — broadcast R to G/B for
+                // grayscale display. Cycles writes the scalar to R; G/B may
+                // contain stale values from the 4-channel buffer.
+                else if (passName == "Mist" || passName == "AO") {
                     g = b = r;
                     a = 1.0f;
                 }

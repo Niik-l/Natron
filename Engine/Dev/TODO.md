@@ -110,6 +110,23 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
 
+### Completed (2026-05-29) — CyclesRender Mist AOV + single-value display fix
+
+- **`Engine/Dev/Cycles/CyclesRender.cpp` + `CyclesRenderer.cpp`** — added
+  PASS_MIST end-to-end via the now-canonical 5-step add-pass recipe: knob
+  → `getEnabledPasses` → `passNameToPlane` → `standardPasses[]` table →
+  per-pixel broadcast block. Proves the pattern is reusable for the ~33
+  remaining unwired Cycles passes (cryptomatte, motion vector, position,
+  denoising aux, volume direct/indirect, etc.).
+- **Display fix for single-value AOVs.** Depth / AO / Mist were defined as
+  1-channel "A" planes, which Natron's viewer in default RGB mode renders
+  as black (R/G/B undefined). Switched all three to 3-channel R/G/B
+  planes with the scalar broadcast in the per-pixel blit. Bonus: AO now
+  displays correctly too.
+- **Recipe + trap saved as memory entries** — `reference_cycles_add_pass_recipe.md`
+  (5-step pattern) and `feedback_natron_single_channel_plane_display.md`
+  (the 1-ch "A" display trap).
+
 ### Completed (2026-05-29) — SphericalTransform Faces format
 
 - **`Engine/Dev/Transform/SphericalTransform.{cpp,h}`** — input count 1 → 7;
