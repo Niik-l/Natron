@@ -41,7 +41,7 @@ NATRON_NAMESPACE_ENTER
 using namespace SphericalProjections;
 
 // ---- Projection choice labels ----
-// Projection choices — matches Nuke's dropdown order
+// Projection choices — order conventional across compositing hosts
 enum UIProjection {
     eUIProjectionLatLong = 0,
     eUIProjectionCubemap,
@@ -66,7 +66,42 @@ static const char* kCubemapPackingLabels[] = {
     "3x2",
 };
 
-// Fisheye sub-type choices — matches Nuke's "Type" dropdown
+// Cubemap Format choice — picks how the cubemap data reaches the node.
+// Standard cubemap-format labels ("Image" / "Views" / "Faces").
+//   Image: single packed image on slot 0 (uses the Packing knob to pick
+//          LL-Cross / 6x1 / 3x2 layout).
+//   Faces: 6 face images on slots 1-6 (-Z, +Z, -X, +X, -Y, +Y).
+// Views (multi-view) is not yet implemented.
+enum CubemapFormat {
+    eCubemapFormatImage = 0,
+    eCubemapFormatViews,
+    eCubemapFormatFaces,
+    eCubemapFormatCount,
+};
+
+// Input slot layout — slot 0 is the existing single-image source ("img"),
+// slots 1-6 are the per-face cubemap inputs in canonical order: -Z, +Z,
+// -X, +X, -Y, +Y. Used only when the input projection is Cubemap with
+// Format = Faces.
+static const int kNumFaceInputs = 6;
+static const char* kFaceInputLabels[kNumFaceInputs] = {
+    "-Z", "+Z", "-X", "+X", "-Y", "+Y",
+};
+
+// Map internal cubeFaceFromDirection index → face-input slot.
+// The internal axis ordering (in SphericalProjections.h) is
+//   0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+// Indexed by internal face index (0..5); returns the slot in 0..5 order.
+static const int kInternalFaceToFaceSlot[6] = {
+    3,  // +X is on slot 3
+    2,  // -X is on slot 2
+    5,  // +Y is on slot 5
+    4,  // -Y is on slot 4
+    1,  // +Z is on slot 1
+    0,  // -Z is on slot 0
+};
+
+// Fisheye sub-type choices — standard optical models
 enum UIFisheyeType {
     eUIFisheyeEquidistant = 0,
     eUIFisheyeEquisolid,
@@ -112,7 +147,7 @@ enum FilterType {
 
 // ---- Private data ----
 
-// Rotation modes — matches Nuke's dropdown
+// Rotation modes — Look / Pan-Tilt-Roll / Rotation Angles
 enum RotationMode {
     eRotationModeLook = 0,
     eRotationModePanTiltRoll,
@@ -215,19 +250,34 @@ SphericalTransform::getPluginDescription() const
               "Fisheye (Equidistant, Equisolid, Stereographic, Orthographic), "
               "and MirrorBall (chrome sphere). "
               "Each of Input and Output has independent projection and rotation controls. "
-              "Equivalent to Nuke's SphericalTransform node.").toStdString();
+              "Comparable to SphericalTransform nodes found in other "
+              "compositing DCCs.").toStdString();
 }
 
 std::string
-SphericalTransform::getInputLabel(int /*inputNb*/) const
+SphericalTransform::getInputLabel(int inputNb) const
 {
-    return "Source";
+    if (inputNb == 0) {
+        return "img";
+    }
+    const int slot = inputNb - 1;
+    if (slot >= 0 && slot < kNumFaceInputs) {
+        return kFaceInputLabels[slot];
+    }
+    return "?";
 }
 
 bool
 SphericalTransform::isInputOptional(int /*inputNb*/) const
 {
-    return false;
+    // All inputs are optional. In Faces format slot 0 is unused (faces feed
+    // slots 1-6); in other modes slots 1-6 are unused (img feeds slot 0).
+    // The viewer's checkTreeCanRender pre-flight (Engine/ViewerInstance.cpp)
+    // bails out before render() is ever called if a non-optional input is
+    // empty, so marking the unused slot mandatory would dead-lock that mode.
+    // The render path enforces the right input is present for the active
+    // mode at runtime.
+    return true;
 }
 
 void
@@ -315,12 +365,15 @@ SphericalTransform::initializeKnobs()
         cubeFmt->setName("cubemapFormatInput");
         {
             std::vector<ChoiceOption> entries;
-            entries.push_back(ChoiceOption("Image", "", "Single packed image"));
-            entries.push_back(ChoiceOption("Views", "", "Multi-view (not yet supported)"));
-            entries.push_back(ChoiceOption("Faces", "", "Separate face inputs (not yet supported)"));
+            entries.push_back(ChoiceOption("Image", "",
+                "Single packed image on the img input"));
+            entries.push_back(ChoiceOption("Views", "",
+                "Multi-view (not yet supported)"));
+            entries.push_back(ChoiceOption("Faces", "",
+                "6 separate face images on inputs -Z, +Z, -X, +X, -Y, +Y"));
             cubeFmt->populateChoices(entries);
         }
-        cubeFmt->setDefaultValue(0);
+        cubeFmt->setDefaultValue(eCubemapFormatImage);
         cubeFmt->setAnimationEnabled(false);
         cubeFmt->setSecret(true);
         page->addKnob(cubeFmt);
@@ -773,7 +826,7 @@ SphericalTransform::initializeKnobs()
             std::vector<ChoiceOption> entries;
             entries.push_back(ChoiceOption("Impulse", "", "Nearest neighbor (no filtering)"));
             entries.push_back(ChoiceOption("Bilinear", "", "Bilinear interpolation"));
-            entries.push_back(ChoiceOption("Cubic", "", "Catmull-Rom bicubic (sharp, Nuke default)"));
+            entries.push_back(ChoiceOption("Cubic", "", "Catmull-Rom bicubic (sharp)"));
             entries.push_back(ChoiceOption("Mitchell", "", "Mitchell-Netravali (smooth, hides pixelation)"));
             filter->populateChoices(entries);
         }
@@ -858,8 +911,12 @@ SphericalTransform::knobChanged(KnobI* k,
         _imp->cubemapFormatInput.lock()->setSecret(!showCube);
         if (showCube) {
             int fmt = _imp->cubemapFormatInput.lock()->getValue();
-            _imp->cubemapPackingInput.lock()->setSecret(fmt != 0);  // Image
-            _imp->cubemapFaceInput.lock()->setSecret(fmt != 2);     // Faces
+            // Packing layout only applies to the single-packed-image format.
+            _imp->cubemapPackingInput.lock()->setSecret(fmt != eCubemapFormatImage);
+            // Face picker has no meaning on the input side — packed images
+            // are fully sampled, and Faces format carries the per-face
+            // selection in the input slots themselves.
+            _imp->cubemapFaceInput.lock()->setSecret(true);
         } else {
             _imp->cubemapPackingInput.lock()->setSecret(true);
             _imp->cubemapFaceInput.lock()->setSecret(true);
@@ -867,6 +924,7 @@ SphericalTransform::knobChanged(KnobI* k,
         _imp->focalInput.lock()->setSecret(!showCam);
         _imp->sensorInputW.lock()->setSecret(!showCam);
         _imp->sensorInputH.lock()->setSecret(!showCam);
+        refreshMetadata_public(true);
         return true;
     }
 
@@ -895,11 +953,12 @@ SphericalTransform::knobChanged(KnobI* k,
         return true;
     }
 
-    // Cubemap format change — show Packing or Face
+    // Cubemap format change — show Packing only for the packed-image format.
     if (_imp->cubemapFormatInput.lock().get() == k) {
         int fmt = _imp->cubemapFormatInput.lock()->getValue();
-        _imp->cubemapPackingInput.lock()->setSecret(fmt != 0);
-        _imp->cubemapFaceInput.lock()->setSecret(fmt != 2);
+        _imp->cubemapPackingInput.lock()->setSecret(fmt != eCubemapFormatImage);
+        _imp->cubemapFaceInput.lock()->setSecret(true);
+        refreshMetadata_public(true);
         return true;
     }
     if (_imp->cubemapFormatOutput.lock().get() == k) {
@@ -1043,8 +1102,24 @@ SphericalTransform::getRegionOfDefinition(U64 /*hash*/,
                                            ViewIdx view,
                                            RectD* rod)
 {
+    // Slot 0 may be empty when Faces format is active (faces feed slots
+    // 1-6). Fall through to any connected input unconditionally — keeping
+    // the fallback non-mode-specific avoids leaving stale state behind for
+    // future projection switches.
     EffectInstancePtr input = getInput(0);
-    if (!input) return eStatusFailed;
+    if (!input) {
+        for (int slot = 0; slot < kNumFaceInputs; ++slot) {
+            input = getInput(slot + 1);
+            if (input) break;
+        }
+    }
+    if (!input) {
+        // No inputs at all — return an empty-but-valid RoD so the engine
+        // doesn't cache a failure state.
+        rod->x1 = 0; rod->y1 = 0;
+        rod->x2 = 1920; rod->y2 = 1080;
+        return eStatusOK;
+    }
 
     RectD inputRod;
     bool isProjectFormat = false;
@@ -1104,7 +1179,14 @@ SphericalTransform::getRegionOfDefinition(U64 /*hash*/,
 StatusEnum
 SphericalTransform::getPreferredMetadata(NodeMetadata& metadata)
 {
+    // Mirror the RoD fallback.
     EffectInstancePtr input = getInput(0);
+    if (!input) {
+        for (int slot = 0; slot < kNumFaceInputs; ++slot) {
+            input = getInput(slot + 1);
+            if (input) break;
+        }
+    }
     if (!input) return eStatusOK;
 
     RectI inputFormat = input->getOutputFormat();
@@ -1161,27 +1243,8 @@ SphericalTransform::render(const RenderActionArgs& args)
 {
     auto renderStart = std::chrono::high_resolution_clock::now();
 
-    // Get source image
-    auto fetchStart = std::chrono::high_resolution_clock::now();
-    RectI srcRoi;
-    ImagePtr srcImg = getImage(0, args.time, args.mappedScale, args.view,
-                               NULL, NULL, false, false,
-                               eStorageModeRAM, 0, &srcRoi);
-    if (!srcImg) return eStatusFailed;
-    auto fetchEnd = std::chrono::high_resolution_clock::now();
-    double fetchMs = std::chrono::duration<double, std::milli>(fetchEnd - fetchStart).count();
-    fprintf(stderr, "[SphericalTransform] Image fetch: %.1f ms (%dx%d)\n",
-            fetchMs,
-            srcImg->getBounds().x2 - srcImg->getBounds().x1,
-            srcImg->getBounds().y2 - srcImg->getBounds().y1);
-    fflush(stderr);
-
-    // Get output image
-    if (args.outputPlanes.empty()) return eStatusFailed;
-    ImagePtr outImg = args.outputPlanes.front().second;
-    if (!outImg) return eStatusFailed;
-
-    // Read parameters
+    // Read parameters first — Faces format doesn't need slot 0, so we want
+    // to know the format before we fetch.
     int inUIProj  = _imp->inputProjection.lock()->getValue();
     int outUIProj = _imp->outputProjection.lock()->getValue();
     int inFishType  = _imp->fisheyeTypeInput.lock()->getValue();
@@ -1192,6 +1255,33 @@ SphericalTransform::render(const RenderActionArgs& args)
     int outCubeFormat = _imp->cubemapFormatOutput.lock()->getValue();
     int inCubeFace  = _imp->cubemapFaceInput.lock()->getValue();
     int outCubeFace = _imp->cubemapFaceOutput.lock()->getValue();
+    (void)inCubeFace;  // Hidden on input side; kept for project-load compat.
+
+    const bool facesFormat = (inUIProj == eUIProjectionCubemap)
+                          && (inCubeFormat == eCubemapFormatFaces);
+
+    // Get source image (slot 0). In Faces format this is optional — faces
+    // come from slots 1-6 — so a missing slot 0 is not an error there.
+    auto fetchStart = std::chrono::high_resolution_clock::now();
+    RectI srcRoi;
+    ImagePtr srcImg = getImage(0, args.time, args.mappedScale, args.view,
+                               NULL, NULL, false, false,
+                               eStorageModeRAM, 0, &srcRoi);
+    if (!srcImg && !facesFormat) return eStatusFailed;
+    auto fetchEnd = std::chrono::high_resolution_clock::now();
+    double fetchMs = std::chrono::duration<double, std::milli>(fetchEnd - fetchStart).count();
+    if (srcImg) {
+        fprintf(stderr, "[SphericalTransform] Image fetch: %.1f ms (%dx%d)\n",
+                fetchMs,
+                srcImg->getBounds().x2 - srcImg->getBounds().x1,
+                srcImg->getBounds().y2 - srcImg->getBounds().y1);
+        fflush(stderr);
+    }
+
+    // Get output image
+    if (args.outputPlanes.empty()) return eStatusFailed;
+    ImagePtr outImg = args.outputPlanes.front().second;
+    if (!outImg) return eStatusFailed;
 
     double focalIn  = _imp->focalInput.lock()->getValue();
     double sensorInW = _imp->sensorInputW.lock()->getValue();
@@ -1259,32 +1349,83 @@ SphericalTransform::render(const RenderActionArgs& args)
                        _imp->rotAngleXOutput, _imp->rotAngleYOutput, _imp->rotAngleZOutput,
                        matOut);
 
-    // Source image info
-    RectI srcBounds = srcImg->getBounds();
-    int srcW = srcBounds.x2 - srcBounds.x1;
-    int srcH = srcBounds.y2 - srcBounds.y1;
-    int srcNComp = srcImg->getComponents().getNumComponents();
+    // Source image info — slot 0 only. In Separate Inputs mode srcImg may
+    // be null, in which case these defaults stand in until we pick a face.
+    RectI srcBounds  = srcImg ? srcImg->getBounds() : RectI();
+    int   srcW       = srcImg ? (srcBounds.x2 - srcBounds.x1) : 0;
+    int   srcH       = srcImg ? (srcBounds.y2 - srcBounds.y1) : 0;
+    int   srcNComp   = srcImg ? srcImg->getComponents().getNumComponents() : 4;
 
     // Output image info
     RectI outBounds = outImg->getBounds();
     int outW = outBounds.x2 - outBounds.x1;
     int outH = outBounds.y2 - outBounds.y1;
 
-    if (outW <= 0 || outH <= 0 || srcW <= 0 || srcH <= 0) return eStatusOK;
+    if (outW <= 0 || outH <= 0) return eStatusOK;
+    if (!facesFormat && (srcW <= 0 || srcH <= 0)) return eStatusOK;
 
-    // Get source pixels
-    Image::ReadAccess srcRa(srcImg.get());
+    // Separate Inputs: pre-fetch the 6 face images + their ReadAccess. Any
+    // missing slot stays as a null entry and renders black in the per-pixel
+    // path. nComp comes from the first connected face so all 4 filter modes
+    // (Impulse / Bilinear / Cubic / Mitchell) operate on a consistent
+    // channel count.
+    struct FaceSource {
+        ImagePtr                          img;
+        std::unique_ptr<Image::ReadAccess> ra;
+        RectI                             bounds;
+        int                               w = 0;
+        int                               h = 0;
+        int                               nComp = 0;
+    };
+    FaceSource faceSources[kNumFaceInputs];
+    if (facesFormat) {
+        int firstFaceNComp = 0;
+        for (int slot = 0; slot < kNumFaceInputs; ++slot) {
+            // Input 0 is "img"; face slots map to inputs 1..6.
+            const int inputIdx = slot + 1;
+            if (!getInput(inputIdx)) continue;
+            RectI faceRoi;
+            ImagePtr faceImg = getImage(inputIdx, args.time, args.mappedScale, args.view,
+                                        NULL, NULL, false, false,
+                                        eStorageModeRAM, 0, &faceRoi);
+            if (!faceImg) continue;
+            FaceSource& fs = faceSources[slot];
+            fs.img    = faceImg;
+            fs.ra.reset(new Image::ReadAccess(faceImg.get()));
+            fs.bounds = faceImg->getBounds();
+            fs.w      = fs.bounds.x2 - fs.bounds.x1;
+            fs.h      = fs.bounds.y2 - fs.bounds.y1;
+            fs.nComp  = faceImg->getComponents().getNumComponents();
+            if (firstFaceNComp == 0) firstFaceNComp = fs.nComp;
+        }
+        if (firstFaceNComp > 0) srcNComp = firstFaceNComp;
+    }
+
+    // Get source pixels (slot 0). When Separate Inputs is active we still
+    // construct a ReadAccess only if srcImg exists — but the sampling code
+    // re-points its bounds/access to the chosen face per pixel.
+    std::unique_ptr<Image::ReadAccess> srcRaPtr;
+    if (srcImg) srcRaPtr.reset(new Image::ReadAccess(srcImg.get()));
     int nComp = std::min(srcNComp, 4);
 
     static const float zero[4] = {0, 0, 0, 0};
 
-    // Helper: fetch pixel with bounds check, returns zero if out of bounds
+    // Per-pixel sampling state — overridden each pixel in Separate Inputs
+    // mode to point at the cube face the current direction hits. In
+    // single-image mode these hold slot-0 state and are never reseated.
+    Image::ReadAccess* curRa     = srcRaPtr.get();
+    RectI              curBounds = srcBounds;
+    int                curW      = srcW;
+    int                curH      = srcH;
+
+    // Helper: fetch pixel with bounds check, returns zero if out of bounds.
     auto safePixel = [&](int cx, int cy) -> const float* {
-        if (cx < srcBounds.x1 || cx >= srcBounds.x2 ||
-            cy < srcBounds.y1 || cy >= srcBounds.y2) {
+        if (!curRa) return zero;
+        if (cx < curBounds.x1 || cx >= curBounds.x2 ||
+            cy < curBounds.y1 || cy >= curBounds.y2) {
             return zero;
         }
-        const float* p = (const float*)srcRa.pixelAt(cx, cy);
+        const float* p = (const float*)curRa->pixelAt(cx, cy);
         return p ? p : zero;
     };
 
@@ -1331,13 +1472,25 @@ SphericalTransform::render(const RenderActionArgs& args)
                 // Step 4: 3D direction → source pixel
                 double su, sv;
                 bool valid;
-                if (inProj == eProjectionCubemap && inCubeFormat == 2) {
-                    // Faces mode input: map direction to single face UV
+                if (facesFormat) {
+                    // Direction → which cube face → which input slot.
                     double fu, fv;
-                    int hitFace = cubeFaceFromDirection(rx2, ry2, rz2, fu, fv);
-                    valid = (hitFace == inCubeFace);
+                    int internalFace = cubeFaceFromDirection(rx2, ry2, rz2, fu, fv);
+                    int slot = kInternalFaceToFaceSlot[internalFace];
+                    const FaceSource& fs = faceSources[slot];
+                    if (!fs.img) {
+                        // Missing face — black per spec.
+                        for (int c = 0; c < nComp; ++c) dst[c] = 0.0f;
+                        continue;
+                    }
+                    // Reseat sampling state at the chosen face for safePixel.
+                    curRa     = fs.ra.get();
+                    curBounds = fs.bounds;
+                    curW      = fs.w;
+                    curH      = fs.h;
                     su = fu;
                     sv = fv;
+                    valid = true;
                 } else {
                     valid = directionToPixel(inProj, rx2, ry2, rz2,
                                               focalIn, sensorInW, sensorInH,
@@ -1352,8 +1505,8 @@ SphericalTransform::render(const RenderActionArgs& args)
 
                 // Convert normalized [0,1] to source pixel coordinates
                 // Flip sv back: projection v=0 is top, Natron y1 is bottom
-                double srcFx = su * (double)srcW + (double)srcBounds.x1;
-                double srcFy = (1.0 - sv) * (double)srcH + (double)srcBounds.y1;
+                double srcFx = su * (double)curW + (double)curBounds.x1;
+                double srcFy = (1.0 - sv) * (double)curH + (double)curBounds.y1;
 
                 // Step 5: Sample source image with selected filter
                 if (filterType == eFilterImpulse) {

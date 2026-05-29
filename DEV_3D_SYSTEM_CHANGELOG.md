@@ -17,6 +17,16 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **SphericalTransform Faces format (2026-05-29)** — adds 6 per-face cubemap
+  inputs (`-Z, +Z, -X, +X, -Y, +Y` canonical order) so HDRIs can be split
+  into individual face streams, edited per face, and recombined via a
+  second SphericalTransform with `Input Format = Faces`. Each output pixel
+  resolves its 3D direction, picks the matching cube face, and samples
+  the corresponding input. Missing faces render black. Also surfaces a
+  Natron-engine gotcha (`isInputOptional` must be true for slots that
+  can legitimately be empty, else `checkTreeCanRender_internal` bails
+  before any RoD/render call) — captured in
+  `feedback_natron_input_optional_required.md`.
 - **Scene-wide motion blur + GLSL closeout (2026-05-28)** — ScanlineRender
   gains a scene-wide multi-sample motion-blur pass (Centered / Start / End /
   Custom shutter offset, temporal jitter) covering camera, geometry,

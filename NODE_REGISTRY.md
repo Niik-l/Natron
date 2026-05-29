@@ -122,7 +122,7 @@ Updated: 2026-05-24
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
-| **SphericalTransform** | `fr.inria.built-in.SphericalTransform` | Registered | 8 projection types (equirect, cubemap, fisheye, etc.), rotation, interpolation |
+| **SphericalTransform** | `fr.inria.built-in.SphericalTransform` | Registered | 8 projection types (equirect, cubemap, fisheye, etc.), rotation, interpolation. **Faces format** (cubemap mode): 6 per-face inputs in canonical order `-Z, +Z, -X, +X, -Y, +Y` enables split → edit → recombine HDRI workflows (each face is a separate image stream). |
 
 ## Color (3 nodes)
 

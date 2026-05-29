@@ -40,7 +40,7 @@ struct SphericalTransformPrivate;
  * models (Equidistant, Equisolid, Stereographic, Orthographic), and MirrorBall.
  * Each of Input and Output has its own projection type and rotation controls.
  *
- * Equivalent to Nuke's SphericalTransform node.
+ * Comparable to SphericalTransform nodes found in other compositing DCCs.
  */
 class SphericalTransform
     : public EffectInstance
@@ -58,7 +58,10 @@ public:
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
+    // 7 inputs: 0 = "img" (used by every projection mode), 1-6 = per-face
+    // cubemap inputs (-Z, +Z, -X, +X, -Y, +Y canonical order) used only when
+    // the input projection is Cubemap with packing = "Separate Inputs".
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 7; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN

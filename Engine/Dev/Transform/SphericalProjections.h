@@ -50,7 +50,7 @@ enum CubemapPacking {
 // ---- Rotation ----
 
 // Build rotation matrix from pan (X), tilt (Y), roll (Z) in degrees.
-// Nuke convention: x=pan (left/right), y=tilt (up/down, positive=up), z=roll.
+// Convention: x=pan (left/right), y=tilt (up/down, positive=up), z=roll.
 // Order: roll * tilt * pan (ZYX).
 inline void buildRotationMatrix(double panDeg, double tiltDeg, double rollDeg,
                                 double m[9])
@@ -345,7 +345,7 @@ inline int cubeFaceFromDirection(double x, double y, double z,
     int face;
     double sc, tc, ma; // s-coord, t-coord, major axis
 
-    // Nuke convention: Y-up, right-handed
+    // Convention: Y-up, right-handed
     if (ax >= ay && ax >= az) {
         ma = ax;
         if (x > 0) { face = 0; sc = -z; tc = -y; }    // +X: right=-Z, down=-Y

@@ -110,6 +110,31 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
 
+### Completed (2026-05-29) — SphericalTransform Faces format
+
+- **`Engine/Dev/Transform/SphericalTransform.{cpp,h}`** — input count 1 → 7;
+  slot 0 is the legacy single-image source (`img`), slots 1-6 are per-face
+  cubemap inputs labeled `-Z, +Z, -X, +X, -Y, +Y` (canonical / Nuke order).
+  When `Input Projection = Cubemap` AND `Input Format = Faces`, render()
+  pre-fetches each connected face into a `FaceSource` array and per output
+  pixel computes its 3D direction → `cubeFaceFromDirection()` → looks up
+  the internal-face → slot mapping via `kInternalFaceToFaceSlot[]` →
+  reseats sampling state at that face. Missing faces output black per spec.
+- **`getRegionOfDefinition` + `getPreferredMetadata` fallback** — slot 0
+  may legitimately be empty in Faces mode; both fall through to the first
+  connected face input as the size reference instead of returning failure
+  (an early failure poisons the engine cache for subsequent knob changes).
+- **`isInputOptional` returns `true` for all slots.** The root-cause bug
+  fix — when slot 0 is mandatory and disconnected, the viewer's
+  `checkTreeCanRender_internal` (`Engine/ViewerInstance.cpp:702-730`)
+  silently bails out before any RoD/render call. Matches the pattern in
+  Scene3D / DevShuffle / ScanlineRender / ParticleInstance / ParticleMerge
+  / Group3D / CyclesRender.
+- **Trademark scrub** — replaced 9 references to a competing compositing
+  host with neutral phrasing (`"canonical order"`, `"compositing DCCs"`,
+  `"standard optical models"`, etc.) across `SphericalTransform.{cpp,h}`
+  and `SphericalProjections.h`.
+
 ### Completed (2026-05-28) — Scene-wide motion blur + GLSL closeout + 3D viewport `F` in look-through
 
 - **Scene-wide multi-sample motion blur** — `Engine/Dev/Scene3D/ScanlineRender.cpp`. New "Motion Blur" group on the Output tab: `Samples`, `Shutter`, `Shutter Offset` (Centered / Start / End / Custom — mirrors Nuke's ScanlineRender), `Custom Offset`, `Temporal Jitter` (deterministic per-(sample, frame) hash). Per-sample loop re-evaluates the camera (view + proj + projView), re-extracts every animated geo at sub-frame time, and re-queries instances with manual `pos + vel * sampleDt` extrapolation (the particle sim only runs once per frame, so getInstances/getParticles at sampleTime return frame-time data — extrapolation is required). Particle velocity-stretch cheat mode preserved for `motionSamples == 1`.
