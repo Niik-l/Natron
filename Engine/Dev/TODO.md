@@ -110,6 +110,61 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
 
+### Completed (2026-05-29) — CyclesRenderPassManager MVP 1-5C (new sink node)
+
+- **`Engine/Dev/Cycles/CyclesRenderPassManager.{h,cpp}`** — new sink node
+  registered as `fr.inria.built-in.CyclesRenderPassManager` in the 3D
+  category. Mirrors CyclesRender's input layout (bg / obj / cam) so it
+  drops into existing scene wiring.
+- **JSON-backed pass list.** Single `passesJson` `KnobString`
+  (multi-line) seeded with a 2-pass default (beauty Combined + data
+  Depth/Normal/UV). Persists in project files via normal knob
+  serialization — verified round-trip on save/load.
+- **Reset to Default button** — restores the seed JSON without
+  re-creating the node.
+- **Render to Disk button (5C scope)** — parses the JSON via Qt's
+  `QJsonDocument`, filters by the data.js active rule
+  (`enabled && output && !mute && (!soloActive || solo)`), resolves
+  dollar-token paths (`$PASS` from the spec, `$SHOT` / `$RENDER` from
+  env vars with `"shot"` / `"/tmp"` fallbacks), then frame-pattern
+  resolves (`####` / `%04d` / trailing digit group, same logic as
+  `CyclesRenderer::resolveTextureFrame`), and writes synthetic 64×64
+  multi-layer EXRs at the resolved paths. Layer/channel names match
+  the existing `CyclesRenderer::saveMultiLayerEXR` convention so files
+  open in Read with the expected layer dropdown.
+- **Architecture + open questions** documented in
+  `RENDER_PASS_MANAGER_DESIGN.md` (local-only). Tracks the batching
+  rule (group passes by shared scene state — camera+vis+light+samples+
+  overrides — and run one Cycles session per batch with the union of
+  AOVs), open questions (preview output, custom widget priority,
+  token vocabulary, material override scope), and the MVP slice that
+  validates each.
+- **Audits + catalog** in `CYCLES_PASS_AUDIT.md` and `CYCLES_PASS_CATALOG.md`
+  (local-only). The audit documents the current pass plumbing in
+  `CyclesRender.cpp` (12 enabled passes via 12 knobs, single-Cycles-call
+  multi-pass via `NatronMultiPassOutputDriver`, what controls already
+  exist via the upstream `RenderPass` node, what's missing for the
+  spec). The catalog enumerates all 49 `PassType` enums from
+  `D:\_vfx_claude_2025\cycles\src\kernel\types.h:497-581` bucketed
+  across the 6 categories the UI uses (Beauty / Shadows / Additive /
+  Data / Reflection-Refraction / Matte-ID), plus the non-enum mechanisms
+  (cryptomatte bitmask, light groups, AOVs, shadow catcher, holdout,
+  denoising auto-allocation).
+
+### Pending — CyclesRenderPassManager MVP 5A + 5B + 6
+
+- **5A** — refactor `CyclesRender::render()` (`Engine/Dev/Cycles/CyclesRender.cpp:670-1080`)
+  so its scene-graph build + Material3D bake + hash + multi-pass
+  renderer call can be invoked from the Manager. Replaces the synthetic
+  stub EXR with real Cycles output.
+- **5B** (implicit) — extend the existing `saveMultiLayerEXR` to take
+  per-pass format / bitdepth / compression from the JSON spec.
+- **6** — batching engine: group active passes by hash of
+  (camera + vis config + light config + shader override + samples) and
+  run one Cycles session per batch, emitting the union of all batch
+  members' AOV lists. Per-pass file output demuxes the rendered buffers
+  to each pass's output path.
+
 ### Completed (2026-05-29) — CyclesRender Mist AOV + single-value display fix
 
 - **`Engine/Dev/Cycles/CyclesRender.cpp` + `CyclesRenderer.cpp`** — added

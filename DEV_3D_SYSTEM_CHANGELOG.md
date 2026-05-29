@@ -17,6 +17,20 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **CyclesRenderPassManager — sink node MVP 1-5C (2026-05-29)** — new node
+  in `Engine/Dev/Cycles/CyclesRenderPassManager.{cpp,h}`. Owns a
+  JSON-backed list of pass specs (multi-line `KnobString`, persisted in
+  project files via normal knob serialization). "Render to Disk" button
+  parses the JSON, filters the active set by the data.js semantics
+  (`enabled && output && !mute && (!soloActive || solo)`), resolves
+  dollar-token paths (`$PASS` / `$SHOT` / `$RENDER` from env, frame
+  pattern via the same `####` / `%04d` / digit-group logic
+  CyclesRenderer already has at `:500-540`), and writes synthetic
+  multi-layer EXRs at the resolved paths as proof-of-life for the
+  full pipeline. Real Cycles invocation comes in step 5A (refactor
+  `CyclesRender::render()` so its scene-state setup + multi-pass call
+  can be shared with the Manager). Architecture sketch:
+  `RENDER_PASS_MANAGER_DESIGN.md` (local-only).
 - **CyclesRender — Mist AOV + display fix for single-value passes (2026-05-29)** —
   added `PASS_MIST` via the standard 5-step add-pass recipe (knob → enabled
   list → plane → standardPasses[] → broadcast). While shipping it caught a
