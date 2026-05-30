@@ -185,9 +185,33 @@ public:
      * @brief Save pass buffers to a multi-layer EXR file using OIIO.
      * Each entry maps pass name → float buffer (w*h*4 floats).
      */
+    /**
+     * @brief Output settings overlay for saveMultiLayerEXR.
+     * Strings are matched case-insensitively; unknown values fall back
+     * to defaults so a user-typed JSON spec can't silently break the
+     * write path.
+     */
+    struct ExrOutputOptions {
+        // Pixel type. "32-bit Full" (default), "16-bit Half", or
+        // "8-bit Integer" (ignored for EXR — falls back to half).
+        std::string bitDepth;
+        // EXR compression: ZIP (default), ZIPS, PIZ, DWAA, DWAB, RLE,
+        // PXR24, B44, B44A, None.
+        std::string compression;
+    };
+
+    // Existing 3-arg form kept for backward compatibility with the
+    // manual "Save Multi-Layer EXR" button in CyclesRender.
     static bool saveMultiLayerEXR(const std::string& filepath,
                                    const std::map<std::string, std::vector<float>>& passBuffers,
                                    int width, int height);
+
+    // Per-pass form — used by CyclesRenderPassManager so each pass can
+    // carry its own bit-depth / compression spec from the JSON.
+    static bool saveMultiLayerEXR(const std::string& filepath,
+                                   const std::map<std::string, std::vector<float>>& passBuffers,
+                                   int width, int height,
+                                   const ExrOutputOptions& opts);
 
     /**
      * @brief Quick smoke test — create and destroy a session.

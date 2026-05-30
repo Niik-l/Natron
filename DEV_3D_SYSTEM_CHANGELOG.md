@@ -17,6 +17,28 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **CyclesRenderPassManager — real Cycles output + batching + frame range + per-pass output (2026-05-29)** —
+  graduates the Manager from the synthetic stub MVP to a usable disk
+  renderer. New `Engine/Dev/Cycles/CyclesPassRender.{h,cpp}` exposes
+  `renderCyclesPassesForEffect(effect, request, outBuffers, errOut)`
+  which builds the scene graph from input 1 (walking through optional
+  `RenderPass`, then `Scene3D`/`Group3D` containers), bakes Material3D
+  textures, pulls camera params from input 2, and calls
+  `CyclesRenderer::renderToBufferWithCameraMultiPass`. Logic duplicates
+  the corresponding block in `CyclesRender::render()` for now; the
+  cleanup pass (5A.2) will rewire CyclesRender to also call the helper
+  and delete the duplicate. The Manager's Render to Disk path: parse
+  JSON → filter active set → loop frame range → per frame group active
+  passes into batches keyed on shared scene state (currently `samples`)
+  → render union of AOVs per batch → demux per-pass and save EXR with
+  the pass's own bit-depth + compression. Frame Mode knob picks
+  Current / Range / Range No Re-render (the last skips frames whose
+  output files already exist — for fast resume). Output resolution
+  auto-detected from `app->getProject()->getProjectDefaultFormat()`.
+  `CyclesRenderer::saveMultiLayerEXR` gets a new 5-arg overload taking
+  `ExrOutputOptions { bitDepth, compression }`; the existing 3-arg form
+  still exists for backward compatibility with the manual EXR button on
+  CyclesRender.
 - **CyclesRenderPassManager — sink node MVP 1-5C (2026-05-29)** — new node
   in `Engine/Dev/Cycles/CyclesRenderPassManager.{cpp,h}`. Owns a
   JSON-backed list of pass specs (multi-line `KnobString`, persisted in

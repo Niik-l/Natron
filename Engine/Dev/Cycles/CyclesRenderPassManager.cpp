@@ -37,13 +37,18 @@
 #include <QString>
 #include <QStringList>
 
-#include <OpenImageIO/imageio.h>
-
+#include "../../AppInstance.h"
 #include "../../AppManager.h"
+#include "../../Format.h"
 #include "../../Image.h"
 #include "../../KnobTypes.h"
 #include "../../KnobFile.h"
 #include "../../Node.h"
+#include "../../Project.h"
+#include "../../TimeLine.h"
+
+#include "CyclesPassRender.h"
+#include "CyclesRenderer.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -57,11 +62,21 @@ struct CyclesRenderPassManagerPrivate
     KnobButtonWPtr resetToDefault;
     KnobButtonWPtr renderToDisk;
 
-    // MVP step 4 will add: token-resolver helper context.
-    // MVP step 5+: per-pass output state, batching engine.
+    // Frame range
+    KnobChoiceWPtr frameMode;
+    KnobIntWPtr    frameStart;
+    KnobIntWPtr    frameEnd;
+    KnobIntWPtr    frameIncrement;
 
     CyclesRenderPassManagerPrivate()
     {}
+};
+
+// Frame mode choice (top-level frame iteration policy on Render to Disk).
+enum FrameMode {
+    eFrameModeCurrent      = 0,  // Render the current timeline frame only
+    eFrameModeRange        = 1,  // Render [start, end] step inc
+    eFrameModeRangeNoReRender = 2, // Same as Range, but skip frames whose ALL output files already exist
 };
 
 // Default seed JSON — two passes covering the MVP cases.
@@ -199,6 +214,48 @@ CyclesRenderPassManager::initializeKnobs()
         _imp->resetToDefault = k;
     }
 
+    // Frame range controls — mirrors the data.js toolbar layout.
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Frame Mode"));
+        k->setName("frameMode");
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("Render Current Frame", "",
+            "Render only the timeline's current frame on each button press."));
+        entries.push_back(ChoiceOption("Render Frame Range", "",
+            "Render every frame in [Start, End] stepping by Increment. Re-renders existing files."));
+        entries.push_back(ChoiceOption("Render Frame Range (No Re-render)", "",
+            "Same as Range, but skip any frame whose output EXR(s) already exist on disk."));
+        k->populateChoices(entries);
+        k->setDefaultValue((int)eFrameModeCurrent);
+        page->addKnob(k);
+        _imp->frameMode = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Start"));
+        k->setName("frameStart");
+        k->setDefaultValue(1);
+        k->setHintToolTip(tr("First frame to render in Range modes."));
+        page->addKnob(k);
+        _imp->frameStart = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("End"));
+        k->setName("frameEnd");
+        k->setDefaultValue(100);
+        k->setHintToolTip(tr("Last frame to render (inclusive) in Range modes."));
+        page->addKnob(k);
+        _imp->frameEnd = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Increment"));
+        k->setName("frameIncrement");
+        k->setDefaultValue(1);
+        k->setMinimum(1);
+        k->setHintToolTip(tr("Frame step in Range modes. 1 = every frame, 2 = every other, etc."));
+        page->addKnob(k);
+        _imp->frameIncrement = k;
+    }
+
     // The submit button. MVP step 3 wires it to parse + dump only —
     // actual disk write lands in step 5. Verifies the JSON schema is
     // intact and the active-pass filter behaves correctly before we
@@ -308,147 +365,68 @@ expandPassPath(const std::string& template_, const std::string& passName, int fr
     return resolveFramePadding(after, frame);
 }
 
-// MVP step 5C — stub disk writer.
-//
-// Per AOV in the pass, look up the channel set the same way
-// CyclesRenderer::saveMultiLayerEXR does (so the layer names look real
-// when the EXR is opened in a Read node). Fill each channel set with a
-// recognizable synthetic pattern so we can spot which file is which.
-//
-// Proves: token resolver → directory creation → OIIO write → readable EXR.
-// Real Cycles render lands in step 5A after the refactor.
-struct AovChannels {
-    std::string prefix;       // EXR layer prefix; empty = "beauty" mode (R/G/B/A unprefixed)
-    std::vector<std::string> chans;
+// Per-spec info captured from the JSON during the per-pass diagnostic
+// dump, then consumed in the batching phase. Path stays as the raw
+// template ($PASS / $SHOT / $RENDER / #### unresolved) so the frame
+// loop can re-resolve it per frame.
+struct ActiveSpec {
+    int                       index;        // original index in the JSON array
+    std::string               name;
+    int                       samples = 0;
+    std::vector<std::string>  aovs;
+    std::string               rawPath;      // template with tokens unresolved
+    // Output format spec (per-pass) — empty strings → defaults.
+    std::string               format;       // "EXR (Multilayer)", "PNG (16-bit)", etc. MVP: EXR only.
+    std::string               bitDepth;     // "32-bit Full" (default), "16-bit Half"
+    std::string               compression;  // ZIP / ZIPS / PIZ / DWAA / DWAB / RLE / PXR24 / B44 / B44A / None
 };
 
-static AovChannels
-aovChannelDef(const std::string& aovName)
+// Render one frame: re-resolve paths for `frame`, partition into batches,
+// run one Cycles session per batch, demux per-pass and save EXR.
+// Returns the number of batches actually rendered (0 if skipped or
+// nothing to do; -1 if any render failed).
+static int
+renderFrameForBatches(EffectInstance*                effect,
+                       const std::vector<ActiveSpec>& activeSpecs,
+                       int                            frame,
+                       FrameMode                      mode,
+                       int                            width,
+                       int                            height);
+
+// Resolve output dimensions: prefer the project's default format, fall
+// back to 1920×1080 if the project hasn't set one (or no app instance).
+static void
+resolveOutputDimensions(EffectInstance* effect, int& w, int& h)
 {
-    if (aovName == "Combined")    return {"",                {"R", "G", "B", "A"}};
-    if (aovName == "DiffDir")     return {"DiffuseDirect",   {"R", "G", "B"}};
-    if (aovName == "DiffInd")     return {"DiffuseIndirect", {"R", "G", "B"}};
-    if (aovName == "DiffCol")     return {"DiffuseColor",    {"R", "G", "B"}};
-    if (aovName == "GlossDir")    return {"GlossyDirect",    {"R", "G", "B"}};
-    if (aovName == "GlossInd")    return {"GlossyIndirect",  {"R", "G", "B"}};
-    if (aovName == "GlossCol")    return {"GlossyColor",     {"R", "G", "B"}};
-    if (aovName == "Emit")        return {"Emission",        {"R", "G", "B"}};
-    if (aovName == "Env")         return {"Environment",     {"R", "G", "B"}};
-    if (aovName == "AO")          return {"AO",              {"A"}};
-    if (aovName == "Normal")      return {"Normal",          {"X", "Y", "Z"}};
-    if (aovName == "Depth")       return {"depth",           {"Z"}};
-    if (aovName == "UV")          return {"UV",              {"U", "V", "W"}};
-    if (aovName == "Mist")        return {"Mist",            {"A"}};
-    // Unknown AOV — best-effort 3-channel.
-    return {aovName, {"R", "G", "B"}};
+    w = 1920;
+    h = 1080;
+    if (!effect) return;
+    AppInstancePtr app = effect->getApp();
+    if (!app || !app->getProject()) return;
+    Format fmt;
+    app->getProject()->getProjectDefaultFormat(&fmt);
+    const int pw = fmt.width();
+    const int ph = fmt.height();
+    if (pw > 0 && ph > 0) {
+        w = pw;
+        h = ph;
+    }
 }
 
-// 32-bit name hash used to colorize each AOV's synthetic pattern.
-static uint32_t
-hashName(const std::string& s)
-{
-    uint32_t h = 2166136261u;
-    for (char c : s) { h ^= (uint8_t)c; h *= 16777619u; }
-    return h;
-}
-
+// Parse the passes JSON, filter to the active set, expand token-bearing
+// paths, then iterate the frame range (or just the current frame), and
+// for each frame group active passes into batches (one render per shared
+// scene-state config) and demux each batch's rendered AOVs into per-pass
+// EXR files. Returns false on JSON parse failure so the caller can
+// surface a UI message.
 static bool
-writeStubExr(const std::string& filepath,
-             const std::vector<std::string>& aovs,
-             std::string& errOut)
-{
-    if (aovs.empty()) {
-        errOut = "no AOVs in pass";
-        return false;
-    }
-
-    // Make the parent directory if needed.
-    const QString qpath = QString::fromStdString(filepath);
-    const QString parent = QFileInfo(qpath).absolutePath();
-    if (!parent.isEmpty()) {
-        QDir dir;
-        if (!dir.mkpath(parent)) {
-            errOut = "failed to create directory '" + parent.toStdString() + "'";
-            return false;
-        }
-    }
-
-    // Assemble channel list + total count.
-    const int W = 64;
-    const int H = 64;
-    std::vector<std::string> chanNames;
-    std::vector<AovChannels> defs;
-    defs.reserve(aovs.size());
-    for (const auto& a : aovs) {
-        const AovChannels d = aovChannelDef(a);
-        defs.push_back(d);
-        for (const auto& c : d.chans) {
-            chanNames.push_back(d.prefix.empty() ? c : (d.prefix + "." + c));
-        }
-    }
-    const int totalCh = (int)chanNames.size();
-    if (totalCh == 0) {
-        errOut = "no channels resolved from AOV list";
-        return false;
-    }
-
-    // Build the synthetic interleaved buffer. Each AOV's channels get a
-    // distinct mid-tone color tinted by hashName(aov) so different passes
-    // are visually distinguishable when opened in a Read node.
-    std::vector<float> pixels((size_t)W * H * totalCh, 0.0f);
-    int offset = 0;
-    for (size_t a = 0; a < aovs.size(); ++a) {
-        const AovChannels& d = defs[a];
-        const uint32_t h = hashName(aovs[a]);
-        const float tintR = 0.3f + ((h >>  0) & 0xFF) / 510.0f; // [0.3, 0.8]
-        const float tintG = 0.3f + ((h >>  8) & 0xFF) / 510.0f;
-        const float tintB = 0.3f + ((h >> 16) & 0xFF) / 510.0f;
-        for (int y = 0; y < H; ++y) {
-            for (int x = 0; x < W; ++x) {
-                const size_t base = ((size_t)y * W + x) * totalCh + offset;
-                for (size_t c = 0; c < d.chans.size(); ++c) {
-                    // For 3-channel chunks: spread the tint across R/G/B.
-                    // For 1-channel: use averaged tint.
-                    // For 4-channel (Combined): R/G/B from tint, A = 1.
-                    float v;
-                    if (d.chans.size() >= 3) {
-                        v = (c == 0) ? tintR : (c == 1) ? tintG : (c == 2) ? tintB : 1.0f;
-                    } else {
-                        v = (tintR + tintG + tintB) / 3.0f;
-                    }
-                    pixels[base + c] = v;
-                }
-            }
-        }
-        offset += (int)d.chans.size();
-    }
-
-    // Write through OIIO. Float32 multi-channel EXR with channel names.
-    OIIO::ImageSpec spec(W, H, totalCh, OIIO::TypeDesc::FLOAT);
-    spec.channelnames = chanNames;
-    auto out = OIIO::ImageOutput::create(filepath);
-    if (!out) {
-        errOut = "OIIO::ImageOutput::create returned null for '" + filepath + "'";
-        return false;
-    }
-    if (!out->open(filepath, spec)) {
-        errOut = "ImageOutput::open failed: " + out->geterror();
-        return false;
-    }
-    if (!out->write_image(OIIO::TypeDesc::FLOAT, pixels.data())) {
-        errOut = "write_image failed: " + out->geterror();
-        out->close();
-        return false;
-    }
-    out->close();
-    return true;
-}
-
-// MVP step 3: parse the passes JSON, filter the active set, dump to
-// stderr. No rendering. Returns false on parse failure so the caller
-// can surface a UI message later.
-static bool
-parseAndDumpActivePasses(const std::string& jsonStr)
+parseAndDumpActivePasses(EffectInstance*    callerEffect,
+                          double             renderTime,
+                          const std::string& jsonStr,
+                          FrameMode          mode,
+                          int                frameStart,
+                          int                frameEnd,
+                          int                frameInc)
 {
     QJsonParseError err;
     QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(jsonStr), &err);
@@ -483,10 +461,13 @@ parseAndDumpActivePasses(const std::string& jsonStr)
     int muted    = 0;
     int hidden   = 0; // soloActive && !solo
 
-    // MVP step 4: frame stub. Real submission (step 5+) iterates over a
-    // frame range; for the parse-dump path we just expand at frame 1001
-    // so the user can see token resolution working.
-    const int dbgFrame = 1001;
+    // Frame for path resolution + the renderer's args.time. Step 6 will
+    // iterate a real frame range; for now we render the timeline's
+    // current frame on every button press.
+    const int dbgFrame = (int)renderTime;
+
+    std::vector<ActiveSpec> activeSpecs;
+    activeSpecs.reserve(arr.size());
 
     fprintf(stderr, "[PassManager] Render to Disk — parsing %d pass(es)%s\n",
             total, soloActive ? " (SOLO active)" : "");
@@ -545,34 +526,211 @@ parseAndDumpActivePasses(const std::string& jsonStr)
         fprintf(stderr, "[PassManager]       raw      = %s\n", rawPath.c_str());
         fprintf(stderr, "[PassManager]       resolved = %s\n", resolved.c_str());
 
-        // Step 5C: stub write for actives. Real Cycles render replaces
-        // this in step 5A.
         if (wouldRender) {
-            std::vector<std::string> aovsStd;
-            aovsStd.reserve(aovList.size());
-            for (const QString& a : aovList) aovsStd.push_back(a.toStdString());
-
-            std::string err;
-            if (writeStubExr(resolved, aovsStd, err)) {
-                fprintf(stderr, "[PassManager]       WROTE STUB EXR %s\n", resolved.c_str());
-            } else {
-                fprintf(stderr, "[PassManager]       WRITE FAILED   %s :: %s\n",
-                        resolved.c_str(), err.c_str());
-            }
+            ActiveSpec spec;
+            spec.index        = i;
+            spec.name         = nameStd;
+            spec.samples      = samples;
+            spec.rawPath      = rawPath;
+            spec.format       = p.value(QStringLiteral("format")).toString().toStdString();
+            spec.bitDepth     = p.value(QStringLiteral("bitDepth")).toString().toStdString();
+            spec.compression  = p.value(QStringLiteral("compression")).toString().toStdString();
+            spec.aovs.reserve(aovList.size());
+            for (const QString& a : aovList) spec.aovs.push_back(a.toStdString());
+            activeSpecs.push_back(std::move(spec));
         }
     }
 
     fprintf(stderr, "[PassManager] Summary: %d active / %d disabled / %d muted / %d hidden of %d total\n",
             active, disabled, muted, hidden, total);
+
+    if (activeSpecs.empty()) {
+        fprintf(stderr, "[PassManager] Nothing to render.\n");
+        fflush(stderr);
+        return true;
+    }
+
+    // ---- Frame iteration ----
+    int firstFrame = dbgFrame;
+    int lastFrame  = dbgFrame;
+    int frameStep  = 1;
+    if (mode == eFrameModeRange || mode == eFrameModeRangeNoReRender) {
+        firstFrame = frameStart;
+        lastFrame  = frameEnd;
+        frameStep  = (frameInc > 0) ? frameInc : 1;
+        if (firstFrame > lastFrame) std::swap(firstFrame, lastFrame);
+    }
+
+    const char* modeLabel =
+        mode == eFrameModeCurrent          ? "Current"        :
+        mode == eFrameModeRange            ? "Range"          :
+                                              "Range NoReRender";
+    int outW = 1920, outH = 1080;
+    resolveOutputDimensions(callerEffect, outW, outH);
+    fprintf(stderr, "[PassManager] Frame mode: %s, range=[%d..%d step %d], output=%dx%d\n",
+            modeLabel, firstFrame, lastFrame, frameStep, outW, outH);
+
+    int framesRendered = 0;
+    int framesSkipped  = 0;
+    for (int f = firstFrame; f <= lastFrame; f += frameStep) {
+        const int rc = renderFrameForBatches(callerEffect, activeSpecs, f, mode, outW, outH);
+        if (rc < 0) {
+            fprintf(stderr, "[PassManager] Frame %d aborted due to render failure.\n", f);
+        } else if (rc == 0 && mode == eFrameModeRangeNoReRender) {
+            ++framesSkipped;
+        } else {
+            ++framesRendered;
+        }
+    }
+    if (firstFrame != lastFrame) {
+        fprintf(stderr, "[PassManager] Range done: %d frame(s) rendered, %d skipped (existing files).\n",
+                framesRendered, framesSkipped);
+    }
     fflush(stderr);
     return true;
+}
+
+static int
+renderFrameForBatches(EffectInstance*                effect,
+                       const std::vector<ActiveSpec>& activeSpecs,
+                       int                            frame,
+                       FrameMode                      mode,
+                       int                            width,
+                       int                            height)
+{
+    // Resolve all paths for this frame up front. Used by both the
+    // existence-check (No Re-render mode) and the per-pass save step.
+    std::vector<std::string> resolvedPaths(activeSpecs.size());
+    for (size_t i = 0; i < activeSpecs.size(); ++i) {
+        resolvedPaths[i] = expandPassPath(activeSpecs[i].rawPath,
+                                           activeSpecs[i].name, frame);
+    }
+
+    // No Re-render: if every output file already exists, skip the whole
+    // frame. Per-batch granularity is an optimization for later.
+    if (mode == eFrameModeRangeNoReRender) {
+        bool allExist = true;
+        for (const auto& p : resolvedPaths) {
+            if (!QFileInfo::exists(QString::fromStdString(p))) {
+                allExist = false;
+                break;
+            }
+        }
+        if (allExist) {
+            fprintf(stderr, "[PassManager] Frame %d — all %d output(s) exist, skipping (No Re-render).\n",
+                    frame, (int)resolvedPaths.size());
+            return 0;
+        }
+    }
+
+    // ---- Batching ----
+    // MVP rule: two passes share a Cycles session iff their `samples`
+    // value matches. (Future per-pass overrides — camera, visibility
+    // map, shader override, light sets — extend the key by being
+    // concatenated into the bucket identifier here.) Within a batch,
+    // the Cycles session renders the UNION of all batched passes' AOV
+    // lists; per-pass output files are then demuxed via filtered
+    // buffer maps before saveMultiLayerEXR runs.
+    std::map<int, std::vector<size_t>> batches; // samples -> indices into activeSpecs
+    for (size_t i = 0; i < activeSpecs.size(); ++i) {
+        batches[activeSpecs[i].samples].push_back(i);
+    }
+    fprintf(stderr, "[PassManager] Frame %d — batching: %d active pass(es) → %d batch(es) (key=samples)\n",
+            frame, (int)activeSpecs.size(), (int)batches.size());
+
+    int batchesRendered = 0;
+    bool anyFailure = false;
+    int batchIdx = 0;
+    for (const auto& kv : batches) {
+        ++batchIdx;
+        const int batchSamples = kv.first;
+        const std::vector<size_t>& specIdxs = kv.second;
+
+        // Union of AOVs across all specs in this batch.
+        std::set<std::string> unionSet;
+        for (size_t idx : specIdxs) {
+            for (const auto& a : activeSpecs[idx].aovs) unionSet.insert(a);
+        }
+        std::vector<std::string> unionAovs(unionSet.begin(), unionSet.end());
+
+        // Diagnostic header for this batch.
+        std::string memberList;
+        for (size_t idx : specIdxs) {
+            if (!memberList.empty()) memberList += ", ";
+            memberList += activeSpecs[idx].name;
+        }
+        std::string unionList;
+        for (const auto& a : unionAovs) {
+            if (!unionList.empty()) unionList += ",";
+            unionList += a;
+        }
+        fprintf(stderr, "[PassManager]   Batch %d/%d: samples=%d, %d pass(es): [%s], union AOVs=[%s]\n",
+                batchIdx, (int)batches.size(),
+                batchSamples, (int)specIdxs.size(),
+                memberList.c_str(), unionList.c_str());
+
+        // Pre-create every output's parent directory.
+        for (size_t idx : specIdxs) {
+            const QString qpath = QString::fromStdString(resolvedPaths[idx]);
+            const QString parent = QFileInfo(qpath).absolutePath();
+            if (!parent.isEmpty()) QDir().mkpath(parent);
+        }
+
+        // Render once for the whole batch with the union AOV list.
+        CyclesPassRequest reqBatch;
+        reqBatch.time            = (double)frame;
+        reqBatch.view            = ViewIdx(0);
+        reqBatch.width           = width;
+        reqBatch.height          = height;
+        reqBatch.samples         = batchSamples;
+        reqBatch.requestedPasses = unionAovs;
+        reqBatch.transparentBg   = false;
+
+        std::map<std::string, std::vector<float>> passBuffers;
+        std::string err;
+        const bool rendered = renderCyclesPassesForEffect(
+            effect, reqBatch, passBuffers, err);
+        if (!rendered) {
+            fprintf(stderr, "[PassManager]   RENDER FAILED batch %d :: %s\n",
+                    batchIdx, err.c_str());
+            anyFailure = true;
+            continue;
+        }
+        ++batchesRendered;
+
+        // Demux: for each pass in this batch, build a filtered map
+        // containing only that pass's AOVs and hand it to
+        // saveMultiLayerEXR with the pass's own bit-depth / compression.
+        for (size_t idx : specIdxs) {
+            const ActiveSpec& spec = activeSpecs[idx];
+            std::map<std::string, std::vector<float>> filtered;
+            for (const auto& aov : spec.aovs) {
+                auto it = passBuffers.find(aov);
+                if (it != passBuffers.end()) filtered[aov] = it->second;
+            }
+            CyclesRenderer::ExrOutputOptions opts;
+            opts.bitDepth    = spec.bitDepth;
+            opts.compression = spec.compression;
+            const bool saved = CyclesRenderer::saveMultiLayerEXR(
+                resolvedPaths[idx], filtered, reqBatch.width, reqBatch.height, opts);
+            if (saved) {
+                fprintf(stderr, "[PassManager]   WROTE EXR  %s\n",
+                        resolvedPaths[idx].c_str());
+            } else {
+                fprintf(stderr, "[PassManager]   SAVE FAILED %s\n",
+                        resolvedPaths[idx].c_str());
+            }
+        }
+    }
+
+    return anyFailure ? -1 : batchesRendered;
 }
 
 bool
 CyclesRenderPassManager::knobChanged(KnobI* k,
                                      ValueChangedReasonEnum /*reason*/,
                                      ViewSpec /*view*/,
-                                     double /*time*/,
+                                     double time,
                                      bool /*originatedFromMainThread*/)
 {
     KnobButtonPtr reset = _imp->resetToDefault.lock();
@@ -588,7 +746,24 @@ CyclesRenderPassManager::knobChanged(KnobI* k,
     if (submit && submit.get() == k) {
         KnobStringPtr passes = _imp->passesJson.lock();
         if (!passes) return true;
-        parseAndDumpActivePasses(passes->getValue());
+        // Resolve the render time. Prefer the current timeline frame so
+        // a button press doesn't render whatever stale frame value Natron
+        // passed into knobChanged.
+        double renderTime = time;
+        if (getApp() && getApp()->getTimeLine()) {
+            renderTime = getApp()->getTimeLine()->currentFrame();
+        }
+        // Read frame range knobs.
+        FrameMode mode = eFrameModeCurrent;
+        int frameStart = (int)renderTime;
+        int frameEnd   = (int)renderTime;
+        int frameInc   = 1;
+        if (KnobChoicePtr fm = _imp->frameMode.lock())     mode       = (FrameMode)fm->getValue();
+        if (KnobIntPtr    fs = _imp->frameStart.lock())     frameStart = fs->getValue();
+        if (KnobIntPtr    fe = _imp->frameEnd.lock())       frameEnd   = fe->getValue();
+        if (KnobIntPtr    fi = _imp->frameIncrement.lock()) frameInc   = fi->getValue();
+        parseAndDumpActivePasses(this, renderTime, passes->getValue(),
+                                  mode, frameStart, frameEnd, frameInc);
         return true;
     }
 

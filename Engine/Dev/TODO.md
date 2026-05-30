@@ -110,6 +110,47 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
 
+### Completed (2026-05-29) — CyclesRenderPassManager — real Cycles output + batching + frame range + per-pass output
+
+- **`Engine/Dev/Cycles/CyclesPassRender.{h,cpp}` (new)** — exposes
+  `renderCyclesPassesForEffect(effect, CyclesPassRequest, outBuffers,
+  errOut)`. Builds the scene graph from the effect's input 1 (walking
+  through optional `RenderPass`, then `Scene3D`/`Group3D` containers),
+  bakes Material3D textures, pulls camera params from input 2, and
+  calls `CyclesRenderer::renderToBufferWithCameraMultiPass`. Logic
+  intentionally duplicates the corresponding block of
+  `CyclesRender::render()` for this phase (5A.1); 5A.2 will refactor
+  CyclesRender to call the helper too and delete the duplicate.
+- **Batching engine (step 6).** Active passes grouped by hash of
+  `samples` (the only per-pass override wired today; future per-pass
+  camera / visibility / lights / shader keys extend the bucket). Per
+  batch: render the union of all batch members' AOVs in ONE Cycles
+  session, then demux per-pass via a filtered buffer map and call
+  `saveMultiLayerEXR` once per pass. Common case (passes share
+  scene state): N passes from 1 Cycles session instead of N sessions.
+- **Frame range support.** New knobs: `frameMode`
+  (Current / Range / Range No Re-render), `frameStart` (default 1),
+  `frameEnd` (default 100), `frameIncrement` (default 1). Render to
+  Disk wraps the batching engine in a frame loop; each frame
+  re-resolves `####` etc. and runs the batches independently. No
+  Re-render mode skips frames whose ALL output files already exist on
+  disk — useful for resume after interrupt or for incremental updates.
+- **Project format auto-detect.** Resolves output width/height via
+  `effect->getApp()->getProject()->getProjectDefaultFormat()` and uses
+  that for every Cycles request. Falls back to 1920×1080 only if no
+  project is available. Logged in stderr alongside the frame mode
+  banner (`Frame mode: ..., output=WxH`).
+- **Per-pass output settings.** JSON fields `bitDepth` (`16-bit Half` /
+  `32-bit Full`) and `compression` (ZIP / ZIPS / PIZ / DWAA / DWAB /
+  RLE / PXR24 / B44 / B44A / None) are now parsed and threaded through
+  to a new `CyclesRenderer::saveMultiLayerEXR` 5-arg overload taking
+  `ExrOutputOptions { bitDepth, compression }`. Case-insensitive
+  matching with safe fallback to float32 + ZIP on anything unknown.
+  Existing 3-arg overload retained for backward compat with
+  CyclesRender's manual EXR button. `format` field is parsed too but
+  PNG/TIFF/JPEG remain on the future-work list — MVP supports
+  multi-layer EXR only.
+
 ### Completed (2026-05-29) — CyclesRenderPassManager MVP 1-5C (new sink node)
 
 - **`Engine/Dev/Cycles/CyclesRenderPassManager.{h,cpp}`** — new sink node

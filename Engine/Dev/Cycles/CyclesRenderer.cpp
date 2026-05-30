@@ -2194,10 +2194,60 @@ CyclesRenderer::getHeight() const
     return _impl->height;
 }
 
+// Map a case-insensitive copy of `in` for comparisons (channels / format
+// names from JSON come in with arbitrary casing).
+static std::string toLowerCopy_(const std::string& in)
+{
+    std::string out = in;
+    for (char& c : out) c = (char)std::tolower((unsigned char)c);
+    return out;
+}
+
+// Map the ExrOutputOptions strings to (TypeDesc, OIIO compression name).
+// Unknown values silently fall back to the defaults (FLOAT + zip).
+static void resolveExrOptions_(const CyclesRenderer::ExrOutputOptions& opts,
+                                OIIO::TypeDesc& outType,
+                                std::string& outCompression)
+{
+    outType        = OIIO::TypeDesc::FLOAT;
+    outCompression = "zip";
+
+    const std::string b = toLowerCopy_(opts.bitDepth);
+    if (b.find("half") != std::string::npos || b.find("16") != std::string::npos) {
+        outType = OIIO::TypeDesc::HALF;
+    } else if (b.find("full") != std::string::npos || b.find("32") != std::string::npos) {
+        outType = OIIO::TypeDesc::FLOAT;
+    }
+    // "8-bit Integer" is invalid for EXR — keep default float.
+
+    const std::string c = toLowerCopy_(opts.compression);
+    if      (c.find("zips")  != std::string::npos) outCompression = "zips";
+    else if (c.find("zip")   != std::string::npos) outCompression = "zip";
+    else if (c.find("piz")   != std::string::npos) outCompression = "piz";
+    else if (c.find("dwaa")  != std::string::npos) outCompression = "dwaa";
+    else if (c.find("dwab")  != std::string::npos) outCompression = "dwab";
+    else if (c.find("pxr24") != std::string::npos) outCompression = "pxr24";
+    else if (c.find("b44a")  != std::string::npos) outCompression = "b44a";
+    else if (c.find("b44")   != std::string::npos) outCompression = "b44";
+    else if (c.find("rle")   != std::string::npos) outCompression = "rle";
+    else if (c.find("none")  != std::string::npos) outCompression = "none";
+}
+
 bool
 CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
                                     const std::map<std::string, std::vector<float>>& passBuffers,
                                     int width, int height)
+{
+    // Defaults match the long-standing manual button: float32 + ZIP.
+    ExrOutputOptions defaults;
+    return saveMultiLayerEXR(filepath, passBuffers, width, height, defaults);
+}
+
+bool
+CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
+                                    const std::map<std::string, std::vector<float>>& passBuffers,
+                                    int width, int height,
+                                    const ExrOutputOptions& opts)
 {
     // Map pass names to EXR layer/channel names
     struct LayerDef { std::string passName; std::string prefix; int nCh; std::vector<std::string> chans; };
@@ -2243,8 +2293,15 @@ CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
         }
     }
 
-    OIIO::ImageSpec spec(width, height, totalCh, OIIO::TypeDesc::FLOAT);
+    // Resolve per-pass bit-depth / compression from the options. Falls
+    // back to FLOAT + ZIP when the spec strings are empty or unknown.
+    OIIO::TypeDesc pixelType = OIIO::TypeDesc::FLOAT;
+    std::string compression = "zip";
+    resolveExrOptions_(opts, pixelType, compression);
+
+    OIIO::ImageSpec spec(width, height, totalCh, pixelType);
     spec.channelnames = chanNames;
+    spec.attribute("compression", compression);
 
     auto out = OIIO::ImageOutput::create(filepath);
     if (!out) return false;
@@ -2271,11 +2328,15 @@ CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
         offset += l.nCh;
     }
 
+    // Always write the source buffer as 32-bit float — OIIO converts to
+    // the destination pixelType (HALF/FLOAT) per the spec we opened with.
     out->write_image(OIIO::TypeDesc::FLOAT, pixels.data());
     out->close();
 
-    printf("[CyclesRenderer] Saved EXR: %s (%dx%d, %d ch, %d layers)\n",
-           filepath.c_str(), width, height, totalCh, (int)layers.size());
+    const char* typeLabel = (pixelType == OIIO::TypeDesc::HALF) ? "half"  : "float";
+    printf("[CyclesRenderer] Saved EXR: %s (%dx%d, %d ch, %d layers, %s, %s)\n",
+           filepath.c_str(), width, height, totalCh, (int)layers.size(),
+           typeLabel, compression.c_str());
     return true;
 }
 
