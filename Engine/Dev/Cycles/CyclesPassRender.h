@@ -35,7 +35,8 @@
 #include "../../EngineFwd.h"
 
 #include "CyclesRenderer.h"
-#include "../Scene3D/RenderPass.h"  // ObjectVisibility
+#include "../Scene3D/RenderPass.h"     // ObjectVisibility
+#include "../Scene3D/CameraProvider.h" // CameraProvider (global scope)
 
 NATRON_NAMESPACE_ENTER
 
@@ -75,6 +76,12 @@ struct CyclesPassRequest
     // Optional scoping (sourced upstream from a RenderPass node when present).
     const std::map<std::string, ObjectVisibility>* visMap       = nullptr;
     const std::set<std::string>*                   activeLights = nullptr;
+
+    // Per-pass camera override. When non-null, the helper reads camera
+    // params from this CameraProvider INSTEAD of the effect's input slot 2.
+    // The caller is responsible for validating the pointer (and producing a
+    // clear error if the override was requested but no such node exists).
+    const CameraProvider*                          cameraOverride = nullptr;
 };
 
 // Render one Cycles submission for the given effect. The effect provides
@@ -96,6 +103,36 @@ bool renderCyclesPassesForEffect(EffectInstance*            effect,
                                   const CyclesPassRequest&   req,
                                   std::map<std::string, std::vector<float>>& outBuffers,
                                   std::string&               errOut);
+
+// One scene-graph Light3D entry — used by the CyclesRenderPassManager
+// diagnostic dump so the user can see exactly what names to put in the
+// light-scoping JSON fields (script name) and what light-group AOVs
+// will be produced (Light Group knob value).
+struct SceneLightInfo {
+    std::string scriptName;   // Natron node script name — matches activeLights
+    std::string lightGroup;   // Light3D's Light Group knob value — produces Combined_<group> AOV
+};
+
+// Walk the effect's obj input (input slot 1, traversing through optional
+// RenderPass / Scene3D / Group3D containers) and collect every Light3D
+// node found. Cheap — no SceneGraph rebuild, just dynamic_cast walks.
+void enumerateSceneLights(EffectInstance*              effect,
+                           double                       time,
+                           std::vector<SceneLightInfo>& out);
+
+// One scene-graph non-light entry (geo / particles / volumes / cameras).
+// Used by per-pass object scoping in CyclesRenderPassManager — the
+// renderer's visibilityMap is keyed by node script name, so callers need
+// the same names that ccl::Object lookups will use.
+struct SceneGeoInfo {
+    std::string scriptName;
+};
+
+// Same traversal as enumerateSceneLights but collects every node that
+// isn't a Light3D. Used to build the per-pass ObjectVisibility map.
+void enumerateSceneGeo(EffectInstance*            effect,
+                        double                     time,
+                        std::vector<SceneGeoInfo>& out);
 
 NATRON_NAMESPACE_EXIT
 

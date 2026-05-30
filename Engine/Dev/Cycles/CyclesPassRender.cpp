@@ -28,8 +28,10 @@
 
 #include "../Scene3D/CameraProvider.h"
 #include "../Scene3D/Group3D.h"
+#include "../Scene3D/Light3D.h"
 #include "../Scene3D/Material3D.h"
 #include "../Scene3D/MaterialProvider.h"
+#include "../Scene3D/RenderPass.h"
 #include "../Scene3D/Scene3D.h"
 #include "../Scene3D/SceneGraph.h"
 
@@ -122,11 +124,17 @@ renderCyclesPassesForEffect(EffectInstance*            effect,
         }
     }
 
-    // --- Resolve camera input + pull params. Defaults match the
-    // CyclesRender path: t=(0,2,-8), 50mm/24×18 sensor.
-    EffectInstancePtr camEffect = effect->getInput(2);
-    CameraProvider* cam =
-        camEffect ? dynamic_cast<CameraProvider*>(camEffect.get()) : nullptr;
+    // --- Resolve camera. Priority: explicit override on the request
+    // (per-pass camera selection), then input slot 2, then the renderer's
+    // hard-coded defaults below. The caller is responsible for validating
+    // the override pointer before passing it; we don't second-guess here.
+    // Defaults match the CyclesRender path: t=(0,2,-8), 50mm/24×18 sensor.
+    const CameraProvider* cam = req.cameraOverride;
+    EffectInstancePtr camEffect;
+    if (!cam) {
+        camEffect = effect->getInput(2);
+        if (camEffect) cam = dynamic_cast<const CameraProvider*>(camEffect.get());
+    }
     double camTX = 0,  camTY = 2,  camTZ = -8;
     double camRX = 0,  camRY = 0,  camRZ = 0;
     double camFL = 50.0, camHA = 24.576, camVA = 18.672;
@@ -161,6 +169,100 @@ renderCyclesPassesForEffect(EffectInstance*            effect,
         return false;
     }
     return true;
+}
+
+void
+enumerateSceneLights(EffectInstance*              effect,
+                      double                       /*time*/,
+                      std::vector<SceneLightInfo>& out)
+{
+    out.clear();
+    if (!effect) return;
+
+    // Same traversal as the renderer: input 1 → through RenderPass →
+    // Scene3D / Group3D containers. We collect every node we visit and
+    // then filter to Light3D via dynamic_cast.
+    EffectInstancePtr geoEffect = effect->getInput(1);
+    if (!geoEffect) return;
+    RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
+    if (renderPass) {
+        geoEffect = renderPass->getInput(0);
+        if (!geoEffect) return;
+    }
+
+    NodesList allNodes;
+    allNodes.push_back(geoEffect->getNode());
+    Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
+    if (scene3d) {
+        for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
+            EffectInstancePtr inp = scene3d->getInput(i);
+            if (inp) allNodes.push_back(inp->getNode());
+        }
+    }
+    Group3D* group3d = dynamic_cast<Group3D*>(geoEffect.get());
+    if (group3d) {
+        for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
+            EffectInstancePtr inp = group3d->getInput(i);
+            if (inp) allNodes.push_back(inp->getNode());
+        }
+    }
+
+    for (const NodePtr& n : allNodes) {
+        if (!n) continue;
+        EffectInstancePtr fx = n->getEffectInstance();
+        if (!fx) continue;
+        Light3D* light = dynamic_cast<Light3D*>(fx.get());
+        if (!light) continue;
+        SceneLightInfo info;
+        info.scriptName = n->getScriptName_mt_safe();
+        info.lightGroup = light->getLightGroup();
+        out.push_back(std::move(info));
+    }
+}
+
+void
+enumerateSceneGeo(EffectInstance*            effect,
+                   double                     /*time*/,
+                   std::vector<SceneGeoInfo>& out)
+{
+    out.clear();
+    if (!effect) return;
+
+    EffectInstancePtr geoEffect = effect->getInput(1);
+    if (!geoEffect) return;
+    RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
+    if (renderPass) {
+        geoEffect = renderPass->getInput(0);
+        if (!geoEffect) return;
+    }
+
+    NodesList allNodes;
+    allNodes.push_back(geoEffect->getNode());
+    Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
+    if (scene3d) {
+        for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
+            EffectInstancePtr inp = scene3d->getInput(i);
+            if (inp) allNodes.push_back(inp->getNode());
+        }
+    }
+    Group3D* group3d = dynamic_cast<Group3D*>(geoEffect.get());
+    if (group3d) {
+        for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
+            EffectInstancePtr inp = group3d->getInput(i);
+            if (inp) allNodes.push_back(inp->getNode());
+        }
+    }
+
+    for (const NodePtr& n : allNodes) {
+        if (!n) continue;
+        EffectInstancePtr fx = n->getEffectInstance();
+        if (!fx) continue;
+        // Skip lights — they're collected by enumerateSceneLights.
+        if (dynamic_cast<Light3D*>(fx.get())) continue;
+        SceneGeoInfo info;
+        info.scriptName = n->getScriptName_mt_safe();
+        out.push_back(std::move(info));
+    }
 }
 
 NATRON_NAMESPACE_EXIT

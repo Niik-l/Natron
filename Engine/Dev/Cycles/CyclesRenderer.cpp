@@ -2340,6 +2340,113 @@ CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
     return true;
 }
 
+// Detect lowercase extension (no leading dot). Returns empty for paths
+// without a recognizable extension. Local helper — saveSingleImage uses
+// this to dispatch on PNG/TIFF/JPEG output formats.
+static std::string
+extLower_(const std::string& path)
+{
+    size_t dot = path.rfind('.');
+    if (dot == std::string::npos) return std::string();
+    std::string e = path.substr(dot + 1);
+    for (char& c : e) c = (char)std::tolower((unsigned char)c);
+    return e;
+}
+
+bool
+CyclesRenderer::saveSingleImage(const std::string& filepath,
+                                  const std::vector<float>& rgbaBuffer,
+                                  int width, int height,
+                                  bool isCombined,
+                                  const ExrOutputOptions& opts)
+{
+    if ((int)rgbaBuffer.size() < width * height * 4) return false;
+
+    const std::string ext = extLower_(filepath);
+    const bool isPNG  = (ext == "png");
+    const bool isTIFF = (ext == "tif" || ext == "tiff");
+    const bool isJPEG = (ext == "jpg" || ext == "jpeg");
+    if (!isPNG && !isTIFF && !isJPEG) return false;
+
+    // Pick destination TypeDesc per format constraints + bitDepth hint.
+    // bitDepth strings already used elsewhere: "8-bit Integer", "16-bit Half",
+    // "16-bit", "32-bit Full". We treat any "16" hint as uint16 for PNG/TIFF
+    // (HALF only means anything for EXR) and any "32" as float32 (TIFF only).
+    OIIO::TypeDesc pixelType = OIIO::TypeDesc::UINT8;
+    const std::string b = toLowerCopy_(opts.bitDepth);
+    if (isJPEG) {
+        pixelType = OIIO::TypeDesc::UINT8;            // only legal option
+    } else if (b.find("32") != std::string::npos || b.find("full") != std::string::npos) {
+        pixelType = isTIFF ? OIIO::TypeDesc::FLOAT : OIIO::TypeDesc::UINT16;
+    } else if (b.find("16") != std::string::npos || b.find("half") != std::string::npos) {
+        pixelType = OIIO::TypeDesc::UINT16;
+    } else if (b.find("8") != std::string::npos) {
+        pixelType = OIIO::TypeDesc::UINT8;
+    }
+
+    // JPEG can't carry alpha; force RGB. Beauty in non-JPEG keeps alpha.
+    const int nCh = (isJPEG || !isCombined) ? 3 : 4;
+
+    OIIO::ImageSpec spec(width, height, nCh, pixelType);
+    if (isCombined && nCh == 4) {
+        spec.channelnames = { "R", "G", "B", "A" };
+        spec.alpha_channel = 3;
+    } else {
+        spec.channelnames = { "R", "G", "B" };
+    }
+
+    // Compression handling per format.
+    const std::string c = toLowerCopy_(opts.compression);
+    if (isTIFF) {
+        std::string tiffComp = "zip";                 // default
+        if      (c.find("none") != std::string::npos) tiffComp = "none";
+        else if (c.find("lzw")  != std::string::npos) tiffComp = "lzw";
+        else if (c.find("zip")  != std::string::npos) tiffComp = "zip";
+        spec.attribute("compression", tiffComp);
+    } else if (isJPEG) {
+        // opts.compression is a quality string ("95"), or "" → 95.
+        int quality = 95;
+        if (!c.empty()) {
+            try { quality = std::stoi(c); } catch (...) { quality = 95; }
+            if (quality < 1)   quality = 1;
+            if (quality > 100) quality = 100;
+        }
+        spec.attribute("CompressionQuality", quality);
+    }
+    // PNG: deflate is implicit, no attribute needed.
+
+    auto out = OIIO::ImageOutput::create(filepath);
+    if (!out) return false;
+    if (!out->open(filepath, spec)) return false;
+
+    // Repack to the requested channel count, flipping Y on the way.
+    std::vector<float> pixels((size_t)width * height * nCh, 0.0f);
+    for (int y = 0; y < height; ++y) {
+        const int srcY = (height - 1) - y;
+        for (int x = 0; x < width; ++x) {
+            const int si = (srcY * width + x) * 4;
+            const int di = (y * width + x) * nCh;
+            // RGB (and possibly A) — narrowing happens inside OIIO based
+            // on spec.format vs. the FLOAT source TypeDesc we pass below.
+            pixels[di + 0] = rgbaBuffer[si + 0];
+            pixels[di + 1] = rgbaBuffer[si + 1];
+            pixels[di + 2] = rgbaBuffer[si + 2];
+            if (nCh == 4) pixels[di + 3] = rgbaBuffer[si + 3];
+        }
+    }
+    out->write_image(OIIO::TypeDesc::FLOAT, pixels.data());
+    out->close();
+
+    const char* fmtLabel = isPNG ? "PNG" : (isTIFF ? "TIFF" : "JPEG");
+    const char* typeLabel =
+        pixelType == OIIO::TypeDesc::UINT8  ? "u8"  :
+        pixelType == OIIO::TypeDesc::UINT16 ? "u16" :
+                                              "float";
+    printf("[CyclesRenderer] Saved %s: %s (%dx%d, %d ch, %s)\n",
+           fmtLabel, filepath.c_str(), width, height, nCh, typeLabel);
+    return true;
+}
+
 bool
 CyclesRenderer::smokeTest()
 {

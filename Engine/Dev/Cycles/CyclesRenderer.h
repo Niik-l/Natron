@@ -214,6 +214,27 @@ public:
                                    const ExrOutputOptions& opts);
 
     /**
+     * @brief Save a single 4-float RGBA buffer to PNG / TIFF / JPEG via OIIO.
+     *
+     * Dispatch is by file extension on `filepath` (.png / .tif / .tiff /
+     * .jpg / .jpeg). The renderer always produces RGBA float; this writer
+     * narrows to the destination format:
+     *   - PNG  : 8 or 16 bit (per opts.bitDepth), RGBA if isCombined else RGB.
+     *   - TIFF : 8/16/32 bit + ZIP/LZW/none compression, RGBA if isCombined else RGB.
+     *   - JPEG : 8 bit RGB only; alpha always dropped; compression treated as quality 1-100.
+     *
+     * Y is flipped (Cycles bottom-up → image top-down). Returns false on
+     * any OIIO open / write failure or unknown extension. The CyclesRender
+     * Pass Manager uses this as the per-AOV save path when an output
+     * filePath doesn't end in .exr.
+     */
+    static bool saveSingleImage(const std::string& filepath,
+                                 const std::vector<float>& rgbaBuffer,
+                                 int width, int height,
+                                 bool isCombined,
+                                 const ExrOutputOptions& opts);
+
+    /**
      * @brief Quick smoke test — create and destroy a session.
      * Returns true if Cycles is functional.
      */

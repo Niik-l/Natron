@@ -17,6 +17,59 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **CyclesRenderPassManager — light-group / object / camera scoping + non-EXR output (2026-05-30)** —
+  rounds out the per-pass control surface. Four upgrades to the JSON spec
+  and one to the OIIO writer:
+  1. **`@all_light_groups` magic AOV token** — drops the misleading
+     separate-file light-group example in favor of the production
+     workflow: beauty carries every light group as layers so comp can
+     relight by mixing them. Set a Light3D's `Light Group` knob (e.g.
+     `keyLight`), add `"@all_light_groups"` to a pass's `aovs`, and the
+     manager expands it at render time to one `Combined_<group>` per
+     unique non-empty group found in the scene. Explicit
+     `Combined_<group>` entries are still allowed; the expander
+     deduplicates.
+  2. **Per-pass object scoping** — new `candidateObjects` /
+     `excludeObjects` / `soloObject` fields parallel to the light
+     scoping. `enumerateSceneGeo` walks the same input-1 → optional
+     RenderPass → Scene3D/Group3D traversal as `enumerateSceneLights`
+     and collects every non-Light3D node. `resolveActiveObjects` honors
+     solo > candidates > "all minus excludes". When scoped, a full
+     `ObjectVisibility` map covering every scene object is built
+     (visible → `rayVisibility = 0x7FF`, scoped-out → `isExcluded =
+     true`) and routed through `CyclesPassRequest::visMap`. Unscoped
+     batches still pass `nullptr` so the renderer skips the
+     per-object visibility code path entirely.
+  3. **Per-pass camera override** — new `cameraOverride` field takes
+     the fully-qualified script name of any `CameraProvider`-derived
+     node in the project (Camera3D / ReadAlembicCamera / …). The
+     manager resolves it via `getApp()->getNodeByFullySpecifiedName` +
+     `dynamic_cast<CameraProvider*>` and routes it through a new
+     `CyclesPassRequest::cameraOverride` pointer that the shared
+     helper consults before falling back to input slot 2. Empty →
+     input-2 fallback; non-empty-but-unresolvable → batch aborts with
+     a clear stderr line rather than silently rendering the wrong
+     angle. `enumerateProjectCameras` recurses the project tree and
+     dumps every candidate name so the user can match what to type.
+  4. **PNG / TIFF / JPEG output** — `CyclesRenderer::saveSingleImage`
+     joins `saveMultiLayerEXR`. Dispatches on extension; per-pass
+     `bitDepth` / `compression` strings are reinterpreted per format
+     (PNG 8/16-bit, TIFF 8/16/32-bit + ZIP/LZW/None, JPEG 8-bit RGB
+     with quality 1-100). Beauty `Combined` writes RGBA in non-JPEG
+     formats; other AOVs write RGB so depth/AO scalar-broadcast AOVs
+     don't end up with alpha=0. The manager's per-pass save loop
+     dispatches by extension on `resolvedPaths[idx]`: `.exr` → existing
+     multi-layer path; other formats loop over the spec's AOVs and
+     inject `_<AOVName>` before the extension on multi-AOV passes so
+     the per-AOV files don't overwrite each other. Single-AOV passes
+     write to the path as-is.
+
+  Batching key now covers `samples + active-lights + visible-objects +
+  camera-override` so each scoping config gets its own Cycles session
+  while still allowing identical scopings to share. Default seed JSON
+  shrinks to two passes (`beauty_main` + `data_utility`); the
+  formerly-disabled `lg_key_example` is gone now that
+  `@all_light_groups` is the canonical pattern.
 - **CyclesRenderPassManager — real Cycles output + batching + frame range + per-pass output (2026-05-29)** —
   graduates the Manager from the synthetic stub MVP to a usable disk
   renderer. New `Engine/Dev/Cycles/CyclesPassRender.{h,cpp}` exposes

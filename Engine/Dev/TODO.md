@@ -110,6 +110,57 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
 
+### Completed (2026-05-30) — CyclesRenderPassManager — light-group / object / camera scoping + non-EXR output
+
+- **`@all_light_groups` magic AOV token.** Drops the
+  separate-file `lg_key_example` from the seed JSON in favor of the
+  production relight pattern: beauty bundles every light group as a
+  layer. `parseAndDumpActivePasses` enumerates scene lights up front
+  (one `enumerateSceneLights` call, two consumers: the diagnostic dump
+  and the AOV expander). The per-pass AOV parser dedupes via a
+  `seen` set so explicit `Combined_<group>` + the token can co-exist.
+- **Per-pass object scoping** — `candidateObjects` / `excludeObjects` /
+  `soloObject` mirror the light-scoping JSON fields.
+  `CyclesPassRender.{h,cpp}` gains `SceneGeoInfo` + `enumerateSceneGeo`
+  (same input-1 → optional RenderPass → Scene3D/Group3D walk as
+  `enumerateSceneLights`, just collects everything that isn't a
+  Light3D). `resolveActiveObjects` honors solo > candidates >
+  "all-minus-excludes". When scoped, a full `ObjectVisibility` map
+  covering every scene node is built (visible = `rayVisibility=0x7FF`,
+  scoped-out = `isExcluded=true`) and routed through
+  `CyclesPassRequest::visMap`. Unscoped batches pass `nullptr` so the
+  renderer skips the visibility code path entirely.
+  `parseLightList` renamed to `parseNameList` (now used by both
+  scopings).
+- **Per-pass camera override** — `cameraOverride` takes a fully-
+  qualified script name of any `CameraProvider`-derived node anywhere
+  in the project. `CyclesPassRequest` grows a `const CameraProvider*
+  cameraOverride` (header pulls in `CameraProvider.h`); the helper
+  consults it first, falls back to input slot 2, then to the
+  renderer's hard-coded defaults. Resolution in the manager goes
+  `getApp()->getNodeByFullySpecifiedName` → `dynamic_cast`; a
+  non-empty-but-unresolvable name aborts the batch with a clear
+  stderr line instead of silently rendering the wrong angle.
+  `enumerateProjectCameras` (uses `getProject()->getNodes_recursive`)
+  dumps every candidate node so users can match what to type.
+- **PNG / TIFF / JPEG output.** `CyclesRenderer::saveSingleImage`
+  joins `saveMultiLayerEXR`, dispatching on file extension:
+  PNG = 8/16-bit + deflate; TIFF = 8/16/32-bit + ZIP/LZW/None; JPEG =
+  8-bit RGB only, `compression` reinterpreted as quality 1-100. Beauty
+  `Combined` writes RGBA in PNG/TIFF; other AOVs write RGB so
+  scalar-broadcast AOVs (Depth/AO) don't end up with alpha=0. The
+  manager's per-pass save loop dispatches by extension on
+  `resolvedPaths[idx]`: `.exr` → existing multi-layer; other formats
+  loop the spec's AOVs and inject `_<AOVName>` before the extension on
+  multi-AOV passes so AOV files don't overwrite each other. Single-AOV
+  passes write to the path as-is.
+- **Batching key** now spans samples + active-lights set +
+  visible-objects set + camera-override name. Specs with identical
+  scoping still batch together; any difference forces a new Cycles
+  session. Per-batch stderr line includes
+  `lights=[...] objects=[...] cam=<name|<input2>>` so each batch's
+  scope is visible at a glance.
+
 ### Completed (2026-05-29) — CyclesRenderPassManager — real Cycles output + batching + frame range + per-pass output
 
 - **`Engine/Dev/Cycles/CyclesPassRender.{h,cpp}` (new)** — exposes
@@ -192,19 +243,21 @@ Tracking known bugs, incomplete features, and planned improvements.
   (cryptomatte bitmask, light groups, AOVs, shadow catcher, holdout,
   denoising auto-allocation).
 
-### Pending — CyclesRenderPassManager MVP 5A + 5B + 6
+### Pending — CyclesRenderPassManager 5A.2 + nice-to-haves
 
-- **5A** — refactor `CyclesRender::render()` (`Engine/Dev/Cycles/CyclesRender.cpp:670-1080`)
-  so its scene-graph build + Material3D bake + hash + multi-pass
-  renderer call can be invoked from the Manager. Replaces the synthetic
-  stub EXR with real Cycles output.
-- **5B** (implicit) — extend the existing `saveMultiLayerEXR` to take
-  per-pass format / bitdepth / compression from the JSON spec.
-- **6** — batching engine: group active passes by hash of
-  (camera + vis config + light config + shader override + samples) and
-  run one Cycles session per batch, emitting the union of all batch
-  members' AOV lists. Per-pass file output demuxes the rendered buffers
-  to each pass's output path.
+- **5A.2** — collapse `CyclesRender::render()`
+  (`Engine/Dev/Cycles/CyclesRender.cpp:670-1080`) onto the shared
+  `renderCyclesPassesForEffect` helper. Currently the live-preview
+  path still has its own copy of the scene-build + Material3D bake +
+  multi-pass call logic; rewiring it through the helper deletes the
+  duplicate. No user-visible change — pure cleanup.
+- **Per-pass material override** (deferred). JSON `materialOverride`
+  naming a Material3D node; the manager swaps every renderable's
+  material to it for the batch (separate Cycles session per override).
+- **Custom UI widget for the pass table** (deferred). The MVP edits
+  JSON directly in the multi-line knob; the long-term UI is a
+  spreadsheet-style widget mirroring the data.js / app.jsx demo. Lands
+  when the JSON model is fully settled.
 
 ### Completed (2026-05-29) — CyclesRender Mist AOV + single-value display fix
 

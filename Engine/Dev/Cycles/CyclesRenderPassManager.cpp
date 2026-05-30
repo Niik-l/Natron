@@ -79,14 +79,17 @@ enum FrameMode {
     eFrameModeRangeNoReRender = 2, // Same as Range, but skip frames whose ALL output files already exist
 };
 
-// Default seed JSON — two passes covering the MVP cases.
-// Beauty: Combined only, default file path.
-// Data:   Depth + Normal + UV (the comp utility bundle).
-// Schema mirrors the data.js model from the UI demo, trimmed to fields
-// the MVP submission actually consults.
+// Default seed JSON — two passes covering the common production cases.
+// Beauty: Combined + all light groups (via @all_light_groups token) so a
+//         comp artist can relight by mixing layers. Light-group AOVs
+//         are auto-expanded from any Light3D in the scene whose Light
+//         Group knob is set.
+// Data:   Depth + Normal + UV (the comp utility bundle), 32-bit float.
+// Schema mirrors the data.js model from the UI demo.
 static const char* kDefaultPassesJson =
     "[\n"
     "  {\n"
+    "    \"_comment\": \"Beauty + every light group as layers. Set a Light3D's Light Group knob (e.g. 'keyLight') to add it to the bundle. @all_light_groups expands at render time.\",\n"
     "    \"id\": \"p1\",\n"
     "    \"name\": \"beauty_main\",\n"
     "    \"type\": \"bty\",\n"
@@ -95,12 +98,19 @@ static const char* kDefaultPassesJson =
     "    \"solo\": false,\n"
     "    \"mute\": false,\n"
     "    \"output\": true,\n"
-    "    \"aovs\": [\"Combined\"],\n"
+    "    \"aovs\": [\"Combined\", \"@all_light_groups\"],\n"
     "    \"filePath\": \"$RENDER/$SHOT/$PASS/$SHOT_$PASS.####.exr\",\n"
     "    \"format\": \"EXR (Multilayer)\",\n"
     "    \"bitDepth\": \"16-bit Half\",\n"
     "    \"compression\": \"ZIP\",\n"
-    "    \"samples\": 128\n"
+    "    \"samples\": 128,\n"
+    "    \"candidateLights\": \"*\",\n"
+    "    \"excludeLights\": \"\",\n"
+    "    \"soloLight\": \"\",\n"
+    "    \"candidateObjects\": \"*\",\n"
+    "    \"excludeObjects\": \"\",\n"
+    "    \"soloObject\": \"\",\n"
+    "    \"cameraOverride\": \"\"\n"
     "  },\n"
     "  {\n"
     "    \"id\": \"p2\",\n"
@@ -116,7 +126,11 @@ static const char* kDefaultPassesJson =
     "    \"format\": \"EXR (Multilayer)\",\n"
     "    \"bitDepth\": \"32-bit Full\",\n"
     "    \"compression\": \"ZIP\",\n"
-    "    \"samples\": 128\n"
+    "    \"samples\": 128,\n"
+    "    \"candidateObjects\": \"*\",\n"
+    "    \"excludeObjects\": \"\",\n"
+    "    \"soloObject\": \"\",\n"
+    "    \"cameraOverride\": \"\"\n"
     "  }\n"
     "]\n";
 
@@ -196,11 +210,51 @@ CyclesRenderPassManager::initializeKnobs()
         k->setAsMultiLine();
         k->setDefaultValue(kDefaultPassesJson);
         k->setHintToolTip(tr(
-            "JSON-serialized list of render passes. Each entry is a pass spec "
-            "with: id, name, type, group, enabled/solo/mute/output flags, "
-            "aovs (array), filePath, format, bitDepth, compression, samples. "
-            "Edit directly here for now; custom UI widget lands in a later phase. "
-            "Use the Reset button to restore the default 2-pass seed."));
+            "JSON-serialized list of render passes. Each entry: id, name, "
+            "type, group, enabled/solo/mute/output flags, aovs (array), "
+            "filePath, format, bitDepth, compression, samples, candidateLights, "
+            "excludeLights, soloLight, candidateObjects, excludeObjects, "
+            "soloObject, cameraOverride."
+            "\n\nLight handling — two mechanisms:"
+            "\n  1. Light-group AOVs (standard workflow): the beauty file "
+            "carries every light group as separate layers so comp can do "
+            "the relight. Set a Light3D node's Light Group knob (e.g. "
+            "'keyLight'), then either request \"Combined_keyLight\" "
+            "explicitly in aovs, OR use the magic token "
+            "\"@all_light_groups\" which auto-expands to one Combined_<group> "
+            "per unique Light Group in the scene."
+            "\n  2. Light scoping (rare — shadow/matte/bespoke passes): set "
+            "candidateLights / excludeLights / soloLight to Light3D script "
+            "names. The scene is physically rebuilt with only those lights, "
+            "forcing a separate Cycles session per scoping config."
+            "\n\nObject scoping (rare — matte/element/clean passes): "
+            "candidateObjects / excludeObjects / soloObject use the same "
+            "semicolon-separated script-name semantics. Visible objects are "
+            "rendered with full ray visibility; everything else is excluded "
+            "from the scene. \"*\" or empty candidates = all objects. An "
+            "exclude list without any candidates means \"all objects EXCEPT\". "
+            "Passes with the same scoping (and samples + light scoping) batch "
+            "into one Cycles session."
+            "\n\nCamera override: cameraOverride takes the fully-qualified "
+            "script name of any CameraProvider node in the project (Camera3D, "
+            "ReadAlembicCamera, …). Empty → fall back to the manager's input "
+            "slot 2 → renderer default. An unresolvable name fails that "
+            "batch loudly rather than silently rendering the wrong angle. "
+            "Different camera names force separate batches."
+            "\n\nOutput format is selected by the extension on filePath:"
+            "\n  .exr            → multi-layer EXR (default). bitDepth = "
+            "\"16-bit Half\" or \"32-bit Full\"; compression = ZIP / ZIPS / "
+            "PIZ / DWAA / DWAB / RLE / PXR24 / B44 / B44A / None."
+            "\n  .png            → bitDepth \"8\" or \"16\"; deflate compression (implicit)."
+            "\n  .tif / .tiff    → bitDepth \"8\", \"16\", or \"32\"; "
+            "compression = ZIP / LZW / None."
+            "\n  .jpg / .jpeg    → 8-bit RGB only; compression field is JPEG quality 1-100."
+            "\nMulti-AOV passes in non-EXR formats produce one file per AOV "
+            "with _<AOVName> injected before the extension (e.g. data.0001_Normal.png)."
+            "\n\nRender to Disk prints the scene's Light3D + non-light script "
+            "names AND every CameraProvider node in the project so you can "
+            "match them. Edit directly here for now; custom UI widget lands "
+            "in a later phase. Use Reset to Default to restore the seed."));
         page->addKnob(k);
         _imp->passesJson = k;
     }
@@ -379,19 +433,219 @@ struct ActiveSpec {
     std::string               format;       // "EXR (Multilayer)", "PNG (16-bit)", etc. MVP: EXR only.
     std::string               bitDepth;     // "32-bit Full" (default), "16-bit Half"
     std::string               compression;  // ZIP / ZIPS / PIZ / DWAA / DWAB / RLE / PXR24 / B44 / B44A / None
+    // Light scoping (per-pass). Semicolon-separated light names — glob
+    // pattern resolution deferred. Resolved at render time into the
+    // CyclesPassRequest::activeLights filter set.
+    std::string               candidateLights;  // "" or "*" = all; otherwise "lightA; lightB"
+    std::string               excludeLights;    // never include these (subtracted from candidates)
+    std::string               soloLight;        // if set: this overrides everything and is the only light
+    // Object scoping (per-pass). Same semicolon-separated semantics as
+    // lights. Resolved at render time into a CyclesPassRequest::visMap
+    // covering EVERY scene object (visible → ALL_VISIBILITY, scoped-out
+    // → isExcluded=true). Unscoped specs leave visMap null so the
+    // renderer skips the per-object visibility code path entirely.
+    std::string               candidateObjects;
+    std::string               excludeObjects;
+    std::string               soloObject;
+    // Per-pass camera override. Script name of a CameraProvider-derived
+    // node anywhere in the project (Camera3D, ReadAlembicCamera, …).
+    // Empty → fall back to the manager's input slot 2. Resolved at render
+    // time; an unresolvable name aborts the batch with a clear error.
+    std::string               cameraOverride;
 };
+
+// Split a semicolon-separated name list into a set of trimmed names.
+// "*" and the empty string both mean "no explicit list" → empty set.
+// Reused for both light and object scoping.
+static std::set<std::string>
+parseNameList(const std::string& s)
+{
+    std::set<std::string> out;
+    if (s.empty()) return out;
+    std::string trimmed = s;
+    // strip leading + trailing whitespace
+    while (!trimmed.empty() && std::isspace((unsigned char)trimmed.front())) trimmed.erase(trimmed.begin());
+    while (!trimmed.empty() && std::isspace((unsigned char)trimmed.back()))  trimmed.pop_back();
+    if (trimmed == "*") return out;  // wildcard = all lights
+
+    size_t start = 0;
+    while (start < trimmed.size()) {
+        size_t end = trimmed.find(';', start);
+        if (end == std::string::npos) end = trimmed.size();
+        std::string tok = trimmed.substr(start, end - start);
+        // trim per-token
+        while (!tok.empty() && std::isspace((unsigned char)tok.front())) tok.erase(tok.begin());
+        while (!tok.empty() && std::isspace((unsigned char)tok.back()))  tok.pop_back();
+        if (!tok.empty()) out.insert(tok);
+        start = end + 1;
+    }
+    return out;
+}
+
+// Resolve a spec's per-pass light-scoping fields into a final active set.
+//   solo non-empty       → {solo}
+//   candidates non-empty → candidates - excludes
+//   otherwise            → empty set (= all lights pass through)
+//
+// Returns true if the result is "scoped" (non-empty set or explicit
+// no-lights), false if it means "render with all lights" (empty
+// candidates and no solo). The caller uses this to decide whether to
+// pass a non-null pointer into CyclesPassRequest::activeLights.
+static bool
+resolveActiveLights(const ActiveSpec& spec, std::set<std::string>& out)
+{
+    out.clear();
+    if (!spec.soloLight.empty()) {
+        // Trim and use as the only active light.
+        std::string s = spec.soloLight;
+        while (!s.empty() && std::isspace((unsigned char)s.front())) s.erase(s.begin());
+        while (!s.empty() && std::isspace((unsigned char)s.back()))  s.pop_back();
+        if (!s.empty()) out.insert(s);
+        return true;
+    }
+    const std::set<std::string> candidates = parseNameList(spec.candidateLights);
+    const std::set<std::string> excludes   = parseNameList(spec.excludeLights);
+    if (candidates.empty()) {
+        // No candidates declared → "all lights" semantics, even if there
+        // are excludes. Excludes-without-candidates is ambiguous in the
+        // empty-set-means-all model; deferred until we enumerate the
+        // scene light tree (V2).
+        return false;
+    }
+    for (const auto& c : candidates) {
+        if (excludes.find(c) == excludes.end()) out.insert(c);
+    }
+    return true;
+}
+
+// Resolve a spec's per-pass object-scoping fields into a final visible set.
+//   solo non-empty       → {solo}
+//   candidates non-empty → candidates - excludes
+//   candidates empty, excludes non-empty → allSceneGeo - excludes
+//   otherwise            → unscoped (caller passes nullptr visMap)
+//
+// Returns true if scoped (visMap must be built), false if unscoped.
+// Unlike lights, we *can* honor excludes-without-candidates here because
+// we have the enumerated geo list to enumerate-and-subtract from.
+static bool
+resolveActiveObjects(const ActiveSpec&                spec,
+                     const std::vector<SceneGeoInfo>& allSceneGeo,
+                     std::set<std::string>&           outVisible)
+{
+    outVisible.clear();
+    if (!spec.soloObject.empty()) {
+        std::string s = spec.soloObject;
+        while (!s.empty() && std::isspace((unsigned char)s.front())) s.erase(s.begin());
+        while (!s.empty() && std::isspace((unsigned char)s.back()))  s.pop_back();
+        if (!s.empty()) outVisible.insert(s);
+        return true;
+    }
+    const std::set<std::string> candidates = parseNameList(spec.candidateObjects);
+    const std::set<std::string> excludes   = parseNameList(spec.excludeObjects);
+    if (candidates.empty()) {
+        if (excludes.empty()) return false;  // truly unscoped
+        for (const auto& g : allSceneGeo) {
+            if (excludes.find(g.scriptName) == excludes.end()) {
+                outVisible.insert(g.scriptName);
+            }
+        }
+        return true;
+    }
+    for (const auto& c : candidates) {
+        if (excludes.find(c) == excludes.end()) outVisible.insert(c);
+    }
+    return true;
+}
+
+// Trim leading/trailing whitespace in place. Local helper because we
+// already do this inline in a few spots; refactoring those out is
+// cosmetic and not in scope here.
+static std::string
+trimCopy(const std::string& s)
+{
+    std::string t = s;
+    while (!t.empty() && std::isspace((unsigned char)t.front())) t.erase(t.begin());
+    while (!t.empty() && std::isspace((unsigned char)t.back()))  t.pop_back();
+    return t;
+}
+
+// Walk the project's full node tree (sub-groups included) and collect
+// every node whose effect implements CameraProvider. Used for the
+// diagnostic dump and to surface the camera names the user can plug
+// into JSON cameraOverride fields.
+struct ProjectCameraInfo {
+    std::string fullName;   // suitable for getNodeByFullySpecifiedName
+};
+
+static void
+enumerateProjectCameras(EffectInstance* callerEffect,
+                        std::vector<ProjectCameraInfo>& out)
+{
+    out.clear();
+    if (!callerEffect) return;
+    AppInstancePtr app = callerEffect->getApp();
+    if (!app || !app->getProject()) return;
+    NodesList nodes;
+    app->getProject()->getNodes_recursive(nodes, /*onlyActive*/ false);
+    for (const NodePtr& n : nodes) {
+        if (!n) continue;
+        EffectInstancePtr fx = n->getEffectInstance();
+        if (!fx) continue;
+        if (!dynamic_cast<CameraProvider*>(fx.get())) continue;
+        ProjectCameraInfo info;
+        info.fullName = n->getFullyQualifiedName();
+        out.push_back(std::move(info));
+    }
+}
+
+// Build a string key that two specs MUST match on to share a Cycles
+// session. Components: samples, sorted active-lights set, sorted visible-
+// objects set, camera override (empty = input-2 default). Specs with the
+// same key render with the same Cycles scene state, so we can batch them
+// into a single submission.
+static std::string
+batchKeyFor(const ActiveSpec&                spec,
+            const std::vector<SceneGeoInfo>& allSceneGeo)
+{
+    std::set<std::string> activeL;
+    const bool lightScoped = resolveActiveLights(spec, activeL);
+    std::set<std::string> activeO;
+    const bool objScoped = resolveActiveObjects(spec, allSceneGeo, activeO);
+
+    auto joinSet = [](const std::set<std::string>& s) {
+        std::string out;
+        bool first = true;
+        for (const auto& n : s) {
+            if (!first) out += ",";
+            out += n;
+            first = false;
+        }
+        return out;
+    };
+
+    std::string key = std::to_string(spec.samples);
+    key += "|lights=";
+    key += lightScoped ? joinSet(activeL) : std::string("*");
+    key += "|objects=";
+    key += objScoped ? joinSet(activeO) : std::string("*");
+    key += "|cam=";
+    const std::string camTrim = trimCopy(spec.cameraOverride);
+    key += camTrim.empty() ? std::string("<input2>") : camTrim;
+    return key;
+}
 
 // Render one frame: re-resolve paths for `frame`, partition into batches,
 // run one Cycles session per batch, demux per-pass and save EXR.
 // Returns the number of batches actually rendered (0 if skipped or
 // nothing to do; -1 if any render failed).
 static int
-renderFrameForBatches(EffectInstance*                effect,
-                       const std::vector<ActiveSpec>& activeSpecs,
-                       int                            frame,
-                       FrameMode                      mode,
-                       int                            width,
-                       int                            height);
+renderFrameForBatches(EffectInstance*                  effect,
+                       const std::vector<ActiveSpec>&   activeSpecs,
+                       const std::vector<SceneGeoInfo>& allSceneGeo,
+                       int                              frame,
+                       FrameMode                        mode,
+                       int                              width,
+                       int                              height);
 
 // Resolve output dimensions: prefer the project's default format, fall
 // back to 1920×1080 if the project hasn't set one (or no app instance).
@@ -475,6 +729,23 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
             getEnvOrDefault("SHOT",   "shot").c_str(),
             getEnvOrDefault("RENDER", "/tmp").c_str(),
             dbgFrame);
+
+    // Enumerate scene lights + geo up front. Three consumers: the per-frame
+    // diagnostic dump below, the @all_light_groups AOV expansion in the
+    // per-pass loop, and the per-batch ObjectVisibility map built in
+    // renderFrameForBatches. Cheap — pure dynamic_cast walk, no SceneGraph
+    // rebuild.
+    std::vector<SceneLightInfo> sceneLights;
+    enumerateSceneLights(callerEffect, renderTime, sceneLights);
+
+    std::vector<SceneGeoInfo> sceneGeo;
+    enumerateSceneGeo(callerEffect, renderTime, sceneGeo);
+
+    // Collect unique non-empty light-group names — drives @all_light_groups.
+    std::set<std::string> sceneLightGroupSet;
+    for (const auto& li : sceneLights) {
+        if (!li.lightGroup.empty()) sceneLightGroupSet.insert(li.lightGroup);
+    }
     for (int i = 0; i < arr.size(); ++i) {
         if (!arr[i].isObject()) {
             fprintf(stderr, "[PassManager]   #%d : entry is not an object (skipping)\n", i);
@@ -491,10 +762,27 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
         const bool wouldRender = enabled && output && !mute &&
                                  (!soloActive || solo);
 
-        // Build a short AOV list summary for the line.
+        // Build the AOV list, expanding any magic tokens. Currently:
+        //   @all_light_groups → Combined_<group> for every unique
+        //                       non-empty lightGroup in the scene
+        // Other tokens (e.g. @cryptomatte) can be added the same way.
+        // The resulting list is deduplicated while preserving the user's
+        // ordering for non-token entries.
         QStringList aovList;
+        std::set<QString> seenAovs;
         const QJsonArray aovs = p.value(QStringLiteral("aovs")).toArray();
-        for (const QJsonValue& a : aovs) aovList << a.toString();
+        for (const QJsonValue& a : aovs) {
+            const QString s = a.toString();
+            if (s == QStringLiteral("@all_light_groups")) {
+                for (const auto& g : sceneLightGroupSet) {
+                    const QString expanded =
+                        QStringLiteral("Combined_") + QString::fromStdString(g);
+                    if (seenAovs.insert(expanded).second) aovList << expanded;
+                }
+            } else if (!s.isEmpty()) {
+                if (seenAovs.insert(s).second) aovList << s;
+            }
+        }
 
         const QString filePath = p.value(QStringLiteral("filePath")).toString();
         const int samples = p.value(QStringLiteral("samples")).toInt();
@@ -535,6 +823,13 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
             spec.format       = p.value(QStringLiteral("format")).toString().toStdString();
             spec.bitDepth     = p.value(QStringLiteral("bitDepth")).toString().toStdString();
             spec.compression  = p.value(QStringLiteral("compression")).toString().toStdString();
+            spec.candidateLights  = p.value(QStringLiteral("candidateLights")).toString().toStdString();
+            spec.excludeLights    = p.value(QStringLiteral("excludeLights")).toString().toStdString();
+            spec.soloLight        = p.value(QStringLiteral("soloLight")).toString().toStdString();
+            spec.candidateObjects = p.value(QStringLiteral("candidateObjects")).toString().toStdString();
+            spec.excludeObjects   = p.value(QStringLiteral("excludeObjects")).toString().toStdString();
+            spec.soloObject       = p.value(QStringLiteral("soloObject")).toString().toStdString();
+            spec.cameraOverride   = p.value(QStringLiteral("cameraOverride")).toString().toStdString();
             spec.aovs.reserve(aovList.size());
             for (const QString& a : aovList) spec.aovs.push_back(a.toStdString());
             activeSpecs.push_back(std::move(spec));
@@ -548,6 +843,48 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
         fprintf(stderr, "[PassManager] Nothing to render.\n");
         fflush(stderr);
         return true;
+    }
+
+    // Scene-light diagnostic — reuses the enumeration we already did above.
+    if (sceneLights.empty()) {
+        fprintf(stderr, "[PassManager] Scene lights: <none found>\n");
+    } else {
+        fprintf(stderr, "[PassManager] Scene lights (%d):\n", (int)sceneLights.size());
+        for (const auto& li : sceneLights) {
+            fprintf(stderr,
+                    "[PassManager]   scriptName='%s'  lightGroup='%s' → produces AOV '%s'\n",
+                    li.scriptName.c_str(),
+                    li.lightGroup.empty() ? "(none)" : li.lightGroup.c_str(),
+                    li.lightGroup.empty()
+                        ? "(no Combined_<group>)"
+                        : (std::string("Combined_") + li.lightGroup).c_str());
+        }
+    }
+
+    // Scene-geo diagnostic — same role for candidateObjects/excludeObjects/soloObject.
+    if (sceneGeo.empty()) {
+        fprintf(stderr, "[PassManager] Scene objects: <none found>\n");
+    } else {
+        fprintf(stderr, "[PassManager] Scene objects (%d):\n", (int)sceneGeo.size());
+        for (const auto& g : sceneGeo) {
+            fprintf(stderr, "[PassManager]   scriptName='%s'\n", g.scriptName.c_str());
+        }
+    }
+
+    // Project-camera diagnostic — every CameraProvider-derived node in the
+    // project tree, whether wired up or not. Use these names verbatim in
+    // a pass's cameraOverride field.
+    {
+        std::vector<ProjectCameraInfo> projCams;
+        enumerateProjectCameras(callerEffect, projCams);
+        if (projCams.empty()) {
+            fprintf(stderr, "[PassManager] Project cameras: <none found>\n");
+        } else {
+            fprintf(stderr, "[PassManager] Project cameras (%d):\n", (int)projCams.size());
+            for (const auto& c : projCams) {
+                fprintf(stderr, "[PassManager]   fullName='%s'\n", c.fullName.c_str());
+            }
+        }
     }
 
     // ---- Frame iteration ----
@@ -573,7 +910,8 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
     int framesRendered = 0;
     int framesSkipped  = 0;
     for (int f = firstFrame; f <= lastFrame; f += frameStep) {
-        const int rc = renderFrameForBatches(callerEffect, activeSpecs, f, mode, outW, outH);
+        const int rc = renderFrameForBatches(callerEffect, activeSpecs, sceneGeo,
+                                              f, mode, outW, outH);
         if (rc < 0) {
             fprintf(stderr, "[PassManager] Frame %d aborted due to render failure.\n", f);
         } else if (rc == 0 && mode == eFrameModeRangeNoReRender) {
@@ -591,12 +929,13 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
 }
 
 static int
-renderFrameForBatches(EffectInstance*                effect,
-                       const std::vector<ActiveSpec>& activeSpecs,
-                       int                            frame,
-                       FrameMode                      mode,
-                       int                            width,
-                       int                            height)
+renderFrameForBatches(EffectInstance*                  effect,
+                       const std::vector<ActiveSpec>&   activeSpecs,
+                       const std::vector<SceneGeoInfo>& allSceneGeo,
+                       int                              frame,
+                       FrameMode                        mode,
+                       int                              width,
+                       int                              height)
 {
     // Resolve all paths for this frame up front. Used by both the
     // existence-check (No Re-render mode) and the per-pass save step.
@@ -624,18 +963,18 @@ renderFrameForBatches(EffectInstance*                effect,
     }
 
     // ---- Batching ----
-    // MVP rule: two passes share a Cycles session iff their `samples`
-    // value matches. (Future per-pass overrides — camera, visibility
-    // map, shader override, light sets — extend the key by being
-    // concatenated into the bucket identifier here.) Within a batch,
-    // the Cycles session renders the UNION of all batched passes' AOV
-    // lists; per-pass output files are then demuxed via filtered
-    // buffer maps before saveMultiLayerEXR runs.
-    std::map<int, std::vector<size_t>> batches; // samples -> indices into activeSpecs
+    // Two passes share a Cycles session iff they share the same batch
+    // key — currently samples + active-lights set + visible-objects set +
+    // camera override. Future per-pass overrides (shader override, ...)
+    // extend the key by being concatenated into batchKeyFor() above.
+    // Within a batch the Cycles session renders the UNION of all batched
+    // passes' AOV lists; per-pass output files are then demuxed via
+    // filtered buffer maps before saveMultiLayerEXR runs.
+    std::map<std::string, std::vector<size_t>> batches;
     for (size_t i = 0; i < activeSpecs.size(); ++i) {
-        batches[activeSpecs[i].samples].push_back(i);
+        batches[batchKeyFor(activeSpecs[i], allSceneGeo)].push_back(i);
     }
-    fprintf(stderr, "[PassManager] Frame %d — batching: %d active pass(es) → %d batch(es) (key=samples)\n",
+    fprintf(stderr, "[PassManager] Frame %d — batching: %d active pass(es) → %d batch(es) (key=samples+lights+objects+camera)\n",
             frame, (int)activeSpecs.size(), (int)batches.size());
 
     int batchesRendered = 0;
@@ -643,8 +982,38 @@ renderFrameForBatches(EffectInstance*                effect,
     int batchIdx = 0;
     for (const auto& kv : batches) {
         ++batchIdx;
-        const int batchSamples = kv.first;
+        const std::string& batchKey = kv.first;
         const std::vector<size_t>& specIdxs = kv.second;
+        // All specs in this batch share key, so any one is representative.
+        const ActiveSpec& batchHead = activeSpecs[specIdxs[0]];
+        const int batchSamples = batchHead.samples;
+        std::set<std::string> batchActiveLights;
+        const bool batchScoped = resolveActiveLights(batchHead, batchActiveLights);
+        std::set<std::string> batchVisibleObjects;
+        const bool batchObjScoped = resolveActiveObjects(batchHead, allSceneGeo, batchVisibleObjects);
+        const std::string batchCamName = trimCopy(batchHead.cameraOverride);
+
+        // Resolve the per-batch camera override (if any). An empty string
+        // means "use the manager's input slot 2"; the helper handles that
+        // case itself. A non-empty string MUST resolve to a CameraProvider
+        // — if it doesn't, skip this batch with a clear error rather than
+        // silently falling back (silent fallback would produce the wrong
+        // angle with no indication to the user).
+        const CameraProvider* batchCamOverride = nullptr;
+        if (!batchCamName.empty()) {
+            AppInstancePtr app = effect ? effect->getApp() : AppInstancePtr();
+            NodePtr camNode;
+            if (app) camNode = app->getNodeByFullySpecifiedName(batchCamName);
+            EffectInstancePtr camFx = camNode ? camNode->getEffectInstance() : EffectInstancePtr();
+            if (camFx) batchCamOverride = dynamic_cast<const CameraProvider*>(camFx.get());
+            if (!batchCamOverride) {
+                fprintf(stderr,
+                        "[PassManager]   SKIP batch %d :: cameraOverride='%s' did not resolve to a CameraProvider node\n",
+                        batchIdx, batchCamName.c_str());
+                anyFailure = true;
+                continue;
+            }
+        }
 
         // Union of AOVs across all specs in this batch.
         std::set<std::string> unionSet;
@@ -664,9 +1033,31 @@ renderFrameForBatches(EffectInstance*                effect,
             if (!unionList.empty()) unionList += ",";
             unionList += a;
         }
-        fprintf(stderr, "[PassManager]   Batch %d/%d: samples=%d, %d pass(es): [%s], union AOVs=[%s]\n",
+        std::string lightSummary;
+        if (!batchScoped) {
+            lightSummary = "*";
+        } else {
+            for (const auto& n : batchActiveLights) {
+                if (!lightSummary.empty()) lightSummary += ",";
+                lightSummary += n;
+            }
+            if (lightSummary.empty()) lightSummary = "<none>";
+        }
+        std::string objectSummary;
+        if (!batchObjScoped) {
+            objectSummary = "*";
+        } else {
+            for (const auto& n : batchVisibleObjects) {
+                if (!objectSummary.empty()) objectSummary += ",";
+                objectSummary += n;
+            }
+            if (objectSummary.empty()) objectSummary = "<none>";
+        }
+        fprintf(stderr, "[PassManager]   Batch %d/%d: samples=%d, lights=[%s], objects=[%s], cam=%s, %d pass(es): [%s], union AOVs=[%s]\n",
                 batchIdx, (int)batches.size(),
-                batchSamples, (int)specIdxs.size(),
+                batchSamples, lightSummary.c_str(), objectSummary.c_str(),
+                batchCamName.empty() ? "<input2>" : batchCamName.c_str(),
+                (int)specIdxs.size(),
                 memberList.c_str(), unionList.c_str());
 
         // Pre-create every output's parent directory.
@@ -674,6 +1065,35 @@ renderFrameForBatches(EffectInstance*                effect,
             const QString qpath = QString::fromStdString(resolvedPaths[idx]);
             const QString parent = QFileInfo(qpath).absolutePath();
             if (!parent.isEmpty()) QDir().mkpath(parent);
+        }
+
+        // Object scoping: when scoped, build a full ObjectVisibility map
+        // that covers EVERY scene object. The renderer treats "object
+        // present in the map" as a visibility flag carrier; "object
+        // missing from a non-null map" is implicit visibility(0). So an
+        // unscoped batch MUST pass nullptr (skip the filter entirely),
+        // while a scoped batch MUST enumerate every object explicitly.
+        //
+        // 0x7FF mirrors RenderPass.cpp's PATH_RAY_ALL_VISIBILITY — the
+        // constant is private to that translation unit, so the value is
+        // hard-coded here with this comment as a pointer.
+        std::map<std::string, ObjectVisibility> batchVisMap;
+        if (batchObjScoped) {
+            for (const auto& g : allSceneGeo) {
+                ObjectVisibility v;
+                if (batchVisibleObjects.count(g.scriptName)) {
+                    v.rayVisibility   = 0x7FF; // PATH_RAY_ALL_VISIBILITY
+                    v.isHoldout       = false;
+                    v.isShadowCatcher = false;
+                    v.isExcluded      = false;
+                } else {
+                    v.rayVisibility   = 0;
+                    v.isHoldout       = false;
+                    v.isShadowCatcher = false;
+                    v.isExcluded      = true;
+                }
+                batchVisMap[g.scriptName] = v;
+            }
         }
 
         // Render once for the whole batch with the union AOV list.
@@ -685,6 +1105,13 @@ renderFrameForBatches(EffectInstance*                effect,
         reqBatch.samples         = batchSamples;
         reqBatch.requestedPasses = unionAovs;
         reqBatch.transparentBg   = false;
+        // Light scoping: pass the resolved set in only when the batch is
+        // actually scoped. An empty pointer means "all lights" — which is
+        // distinct from an empty set (= "no lights at all"). The renderer
+        // skips the filter check entirely when activeLights is nullptr.
+        if (batchScoped)    reqBatch.activeLights   = &batchActiveLights;
+        if (batchObjScoped) reqBatch.visMap         = &batchVisMap;
+        if (batchCamOverride) reqBatch.cameraOverride = batchCamOverride;
 
         std::map<std::string, std::vector<float>> passBuffers;
         std::string err;
@@ -698,27 +1125,73 @@ renderFrameForBatches(EffectInstance*                effect,
         }
         ++batchesRendered;
 
-        // Demux: for each pass in this batch, build a filtered map
-        // containing only that pass's AOVs and hand it to
-        // saveMultiLayerEXR with the pass's own bit-depth / compression.
+        // Demux: for each pass in this batch, dispatch by file extension.
+        //   .exr → multi-layer EXR with the pass's AOV list as layers.
+        //   .png / .tif{f} / .jpg{,eg} → single-image-per-AOV. When the
+        //     pass has more than one AOV, _<AOV> is injected before the
+        //     extension so the AOVs don't overwrite each other.
+        // Falls through to multi-layer EXR when the extension is unknown
+        // (legacy behavior). Per-pass bit-depth / compression strings are
+        // passed through verbatim; non-EXR formats reinterpret them.
         for (size_t idx : specIdxs) {
             const ActiveSpec& spec = activeSpecs[idx];
-            std::map<std::string, std::vector<float>> filtered;
-            for (const auto& aov : spec.aovs) {
-                auto it = passBuffers.find(aov);
-                if (it != passBuffers.end()) filtered[aov] = it->second;
-            }
             CyclesRenderer::ExrOutputOptions opts;
             opts.bitDepth    = spec.bitDepth;
             opts.compression = spec.compression;
-            const bool saved = CyclesRenderer::saveMultiLayerEXR(
-                resolvedPaths[idx], filtered, reqBatch.width, reqBatch.height, opts);
-            if (saved) {
-                fprintf(stderr, "[PassManager]   WROTE EXR  %s\n",
-                        resolvedPaths[idx].c_str());
-            } else {
-                fprintf(stderr, "[PassManager]   SAVE FAILED %s\n",
-                        resolvedPaths[idx].c_str());
+
+            const std::string& outPath = resolvedPaths[idx];
+            const std::string ext = [&]() {
+                size_t dot = outPath.rfind('.');
+                if (dot == std::string::npos) return std::string();
+                std::string e = outPath.substr(dot + 1);
+                for (char& ch : e) ch = (char)std::tolower((unsigned char)ch);
+                return e;
+            }();
+            const bool isSingleFormat = (ext == "png" || ext == "tif" ||
+                                          ext == "tiff" || ext == "jpg" ||
+                                          ext == "jpeg");
+
+            if (!isSingleFormat) {
+                std::map<std::string, std::vector<float>> filtered;
+                for (const auto& aov : spec.aovs) {
+                    auto it = passBuffers.find(aov);
+                    if (it != passBuffers.end()) filtered[aov] = it->second;
+                }
+                const bool saved = CyclesRenderer::saveMultiLayerEXR(
+                    outPath, filtered, reqBatch.width, reqBatch.height, opts);
+                if (saved) {
+                    fprintf(stderr, "[PassManager]   WROTE EXR  %s\n", outPath.c_str());
+                } else {
+                    fprintf(stderr, "[PassManager]   SAVE FAILED %s\n", outPath.c_str());
+                }
+                continue;
+            }
+
+            // PNG/TIFF/JPEG: write one image per AOV. The path gets
+            // "_<AOV>" injected before the extension when the pass owns
+            // more than one AOV; single-AOV passes write to the path as-is.
+            const bool multiAov = spec.aovs.size() > 1;
+            for (const auto& aov : spec.aovs) {
+                auto it = passBuffers.find(aov);
+                if (it == passBuffers.end()) continue;
+                std::string perAovPath = outPath;
+                if (multiAov) {
+                    size_t dot = perAovPath.rfind('.');
+                    const std::string suffix = std::string("_") + aov;
+                    if (dot == std::string::npos) perAovPath += suffix;
+                    else perAovPath.insert(dot, suffix);
+                }
+                const bool isCombined = (aov == "Combined");
+                const bool saved = CyclesRenderer::saveSingleImage(
+                    perAovPath, it->second, reqBatch.width, reqBatch.height,
+                    isCombined, opts);
+                if (saved) {
+                    fprintf(stderr, "[PassManager]   WROTE %s  %s\n",
+                            ext.c_str(), perAovPath.c_str());
+                } else {
+                    fprintf(stderr, "[PassManager]   SAVE FAILED %s\n",
+                            perAovPath.c_str());
+                }
             }
         }
     }
