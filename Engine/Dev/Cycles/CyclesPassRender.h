@@ -35,8 +35,9 @@
 #include "../../EngineFwd.h"
 
 #include "CyclesRenderer.h"
-#include "../Scene3D/RenderPass.h"     // ObjectVisibility
+#include "../Scene3D/RenderPass.h"     // ObjectVisibility, RenderPass*
 #include "../Scene3D/CameraProvider.h" // CameraProvider (global scope)
+#include "../Scene3D/SceneGraph.h"     // SceneGraph (held by CyclesPassPrepared)
 
 NATRON_NAMESPACE_ENTER
 
@@ -84,21 +85,63 @@ struct CyclesPassRequest
     const CameraProvider*                          cameraOverride = nullptr;
 };
 
-// Render one Cycles submission for the given effect. The effect provides
-// the inputs (slot 1 = obj/scene, slot 2 = cam) via its EffectInstance
-// interface, and the request describes what to render.
+// Resolved inputs ready for Cycles execution. Filled by
+// prepareCyclesPasses() so callers that need to inspect the resolved
+// values (CyclesRender's hash-based cache) can do so before deciding
+// whether to actually invoke Cycles.
 //
-// On success returns true and fills `outBuffers` (one entry per pass name
-// in `req.requestedPasses`, each 4-channel RGBA float matching
-// width × height × 4). On failure returns false with a short reason in
-// `errOut`.
+// All fields except `sceneGraph` start at the renderer's hard-coded
+// fallback values so a call site that never receives a real camera /
+// scene still ends up with a defined struct.
+struct CyclesPassPrepared
+{
+    SceneGraph sceneGraph;
+
+    // Camera, resolved with priority: req.cameraOverride > effect input 2 >
+    // these fallback defaults. `cameraResolved` is true iff a CameraProvider
+    // was actually consulted (false → defaults were used).
+    double camTX = 0.0,  camTY = 2.0,  camTZ = -8.0;
+    double camRX = 0.0,  camRY = 0.0,  camRZ = 0.0;
+    double camFL = 50.0, camHA = 24.576, camVA = 18.672;
+    bool   cameraResolved = false;
+
+    // RenderPass node found while walking input 1 (if any). Callers that
+    // pull visibility / lights from the RenderPass node can read it from
+    // here rather than re-walking input 1. Raw pointer; valid for the
+    // lifetime of the EffectInstance graph the prepared struct was built
+    // against.
+    RenderPass* renderPass = nullptr;
+};
+
+// Step 1 of the two-step render. Walks the effect's obj input
+// (slot 1) through any optional RenderPass node into Scene3D / Group3D
+// containers, builds the scene graph, bakes Material3D input textures,
+// then resolves the camera (override > input 2 > defaults). Returns
+// false with a reason in `errOut` if the obj input is missing or the
+// scene graph is empty after rebuild.
 //
-// The function is stateless — no caching, no shared scene reuse. Callers
-// that need caching (CyclesRender's hash-based cache) layer it on top.
-//
-// 5A.1: helper file lives alongside CyclesRender.cpp's existing render()
-// which still duplicates this logic. 5A.2 will collapse the duplication
-// by rewiring CyclesRender::render() to call this function too.
+// PassManager calls this via `renderCyclesPassesForEffect()`. CyclesRender
+// calls it directly so it can hash the resolved values + cache check
+// before deciding whether to run step 2.
+bool prepareCyclesPasses(EffectInstance*           effect,
+                          const CyclesPassRequest&  req,
+                          CyclesPassPrepared&       out,
+                          std::string&              errOut);
+
+// Step 2 of the two-step render. Invokes Cycles using a prepared scene
+// and the request's per-pass parameters. The renderer is supplied by the
+// caller so CyclesRender can keep a persistent renderer across frames
+// for `cancelRender()` support; PassManager hands in a fresh local
+// instance per batch via the convenience wrapper below.
+bool executeCyclesPasses(CyclesRenderer&            renderer,
+                          const CyclesPassPrepared&  prepared,
+                          const CyclesPassRequest&   req,
+                          std::map<std::string, std::vector<float>>& outBuffers,
+                          std::string&               errOut);
+
+// Convenience: prepare + execute in one call with a local renderer.
+// Used by CyclesRenderPassManager — it doesn't need to peek between
+// the two steps.
 bool renderCyclesPassesForEffect(EffectInstance*            effect,
                                   const CyclesPassRequest&   req,
                                   std::map<std::string, std::vector<float>>& outBuffers,

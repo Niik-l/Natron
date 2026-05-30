@@ -30,6 +30,7 @@
 
 #include "CyclesRenderer.h"
 #include "CyclesRenderSettings.h"
+#include "CyclesPassRender.h"
 
 #include "../Scene3D/CameraProvider.h"
 #include "../Scene3D/MaterialProvider.h"
@@ -699,63 +700,41 @@ CyclesRender::render(const RenderActionArgs& args)
         k = _imp->transmissionBounces.lock();  if (k) integParams.transmissionBounces = k->getValue();
     }
 
-    // --- Build scene graph FIRST (needed for hash) ---
-    EffectInstancePtr geoEffect = getInput(1);
-    if (!geoEffect) return eStatusFailed;
-
-    // If a RenderPass is connected, follow through to its Scene input
-    RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
-    if (renderPass) {
-        geoEffect = renderPass->getInput(0); // RenderPass input 0 = scene
-        if (!geoEffect) return eStatusFailed;
-    }
-
-    NodesList allNodes;
-    allNodes.push_back(geoEffect->getNode());
-
-    Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
-    if (scene3d) {
-        for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
-            EffectInstancePtr inp = scene3d->getInput(i);
-            if (inp) allNodes.push_back(inp->getNode());
-        }
-    }
-    Group3D* group3d = dynamic_cast<Group3D*>(geoEffect.get());
-    if (group3d) {
-        for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
-            EffectInstancePtr inp = group3d->getInput(i);
-            if (inp) allNodes.push_back(inp->getNode());
-        }
-    }
-
-    SceneGraph sceneGraph;
-    sceneGraph.rebuild(allNodes, args.time);
-
-    // Collect enabled passes early (needed for hash)
+    // Collect enabled passes early (needed for hash).
     std::vector<std::string> requestedPasses = getEnabledPasses(_imp.get());
 
-    if (sceneGraph.size() == 0) return eStatusFailed;
+    // --- Build the CyclesPassRequest and hand it to the shared helper
+    //     for scene graph + Material3D bake + camera resolve. The helper
+    //     also re-walks input 1 / input 2 internally; the local camera
+    //     resolution above runs in parallel so the apertureSize calc has
+    //     access to a CameraProvider* before this prepare call. ---
+    CyclesPassRequest req;
+    req.time            = args.time;
+    req.view            = ViewIdx(0);
+    req.width           = renderW;
+    req.height          = renderH;
+    req.samples         = renderSamples;
+    req.requestedPasses = requestedPasses;
+    req.transparentBg   = false;
+    if (dofParams.enabled) req.dof = &dofParams;
+    if (mbParams.enabled)  req.mb  = &mbParams;
+    req.integrator = &integParams;
 
-    // Bake Material3D input textures (Read → Grade → Material3D input pipeline)
+    CyclesPassPrepared prepared;
     {
-        const std::vector<SceneNode>& sceneNodes = sceneGraph.nodes();
-        for (size_t i = 0; i < sceneNodes.size(); ++i) {
-            NodePtr srcNode = sceneNodes[i].sourceNode.lock();
-            if (!srcNode) continue;
-            MaterialProvider* matProv = dynamic_cast<MaterialProvider*>(srcNode->getEffectInstance().get());
-            if (!matProv) continue;
-            // Check for connected Material3D
-            MaterialProvider* resolved = matProv;
-            if (matProv->hasMaterialInput()) {
-                MaterialProvider* connected = matProv->getConnectedMaterial();
-                if (connected) resolved = connected;
-            }
-            Material3D* mat3d = dynamic_cast<Material3D*>(resolved);
-            if (mat3d) {
-                mat3d->bakeInputTextures(args.time);
-            }
+        std::string prepErr;
+        if (!prepareCyclesPasses(this, req, prepared, prepErr)) {
+            // Match the historical failure mode: silent eStatusFailed.
+            // The helper's prepErr describes the reason (missing input 1,
+            // empty scene graph, etc.) but CyclesRender doesn't surface
+            // it through a persistent message — preserve that for now.
+            return eStatusFailed;
         }
     }
+    // Aliases so the hash block below reads naturally (the local sceneGraph
+    // / renderPass names predate the helper split).
+    const SceneGraph& sceneGraph = prepared.sceneGraph;
+    RenderPass* renderPass = prepared.renderPass;
 
     // --- Build scene hash for cache check ---
     // Hash EVERYTHING that affects the render: camera, settings, AND all scene node transforms/params
@@ -955,34 +934,24 @@ CyclesRender::render(const RenderActionArgs& args)
         }
 
         // --- Build RenderPass visibility map (if connected) ---
+        // Stored locally so the pointers in `req` remain valid for the
+        // duration of executeCyclesPasses below.
         std::map<std::string, ObjectVisibility> visMap;
         std::set<std::string> activeLightSet;
-        const std::map<std::string, ObjectVisibility>* visMapPtr = nullptr;
-        const std::set<std::string>* activeLightsPtr = nullptr;
         if (renderPass) {
             renderPass->refreshObjectLists();
             visMap = renderPass->getObjectVisibilityMap();
             activeLightSet = renderPass->getActiveLights();
-            if (!visMap.empty()) visMapPtr = &visMap;
-            if (!activeLightSet.empty()) activeLightsPtr = &activeLightSet;
+            if (!visMap.empty())        req.visMap       = &visMap;
+            if (!activeLightSet.empty()) req.activeLights = &activeLightSet;
         }
 
-        // --- Render with Cycles (multi-pass) ---
+        // --- Render with Cycles via the shared helper ---
         _imp->activeRenderer = std::make_unique<CyclesRenderer>();
-        bool ok = _imp->activeRenderer->renderToBufferWithCameraMultiPass(
-            sceneGraph,
-            camTX, camTY, camTZ,
-            camRX, camRY, camRZ,
-            camFL, camHA, camVA,
-            requestedPasses,
-            _imp->cachedPassBuffers, renderW, renderH, renderSamples,
-            args.time,
-            visMapPtr, activeLightsPtr,
-            dofParams.enabled ? &dofParams : nullptr,
-            mbParams.enabled ? &mbParams : nullptr,
-            &integParams);
-
-        if (!ok || _imp->cachedPassBuffers.empty()) {
+        std::string execErr;
+        bool ok = executeCyclesPasses(*_imp->activeRenderer, prepared, req,
+                                       _imp->cachedPassBuffers, execErr);
+        if (!ok) {
             _imp->activeRenderer.reset();
             return eStatusFailed;
         }

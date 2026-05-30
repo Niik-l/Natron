@@ -38,38 +38,28 @@
 NATRON_NAMESPACE_ENTER
 
 bool
-renderCyclesPassesForEffect(EffectInstance*            effect,
-                             const CyclesPassRequest&   req,
-                             std::map<std::string, std::vector<float>>& outBuffers,
-                             std::string&               errOut)
+prepareCyclesPasses(EffectInstance*           effect,
+                     const CyclesPassRequest&  req,
+                     CyclesPassPrepared&       out,
+                     std::string&              errOut)
 {
-    outBuffers.clear();
     errOut.clear();
+    out = CyclesPassPrepared(); // reset to defaults
 
     if (!effect) {
         errOut = "null effect";
         return false;
     }
-    if (req.width <= 0 || req.height <= 0) {
-        errOut = "non-positive width/height";
-        return false;
-    }
-    if (req.requestedPasses.empty()) {
-        errOut = "empty requestedPasses list";
-        return false;
-    }
 
-    // --- Resolve obj input + walk through optional RenderPass wrapper.
-    // Mirrors CyclesRender::render() at the corresponding block — see
-    // 5A.2 task to dedupe.
+    // --- Walk obj input (slot 1) + optional RenderPass wrapper.
     EffectInstancePtr geoEffect = effect->getInput(1);
     if (!geoEffect) {
         errOut = "no obj/scene connected on slot 1";
         return false;
     }
-    RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
-    if (renderPass) {
-        geoEffect = renderPass->getInput(0);
+    out.renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
+    if (out.renderPass) {
+        geoEffect = out.renderPass->getInput(0);
         if (!geoEffect) {
             errOut = "RenderPass has nothing on its input 0 (scene)";
             return false;
@@ -95,17 +85,16 @@ renderCyclesPassesForEffect(EffectInstance*            effect,
         }
     }
 
-    SceneGraph sceneGraph;
-    sceneGraph.rebuild(allNodes, req.time);
-    if (sceneGraph.size() == 0) {
+    out.sceneGraph.rebuild(allNodes, req.time);
+    if (out.sceneGraph.size() == 0) {
         errOut = "scene graph is empty after rebuild";
         return false;
     }
 
     // --- Bake Material3D input textures (Read → Grade → Material3D
-    // input pipeline). Mirrors CyclesRender::render().
+    // input pipeline).
     {
-        const std::vector<SceneNode>& sceneNodes = sceneGraph.nodes();
+        const std::vector<SceneNode>& sceneNodes = out.sceneGraph.nodes();
         for (size_t i = 0; i < sceneNodes.size(); ++i) {
             NodePtr srcNode = sceneNodes[i].sourceNode.lock();
             if (!srcNode) continue;
@@ -125,34 +114,51 @@ renderCyclesPassesForEffect(EffectInstance*            effect,
     }
 
     // --- Resolve camera. Priority: explicit override on the request
-    // (per-pass camera selection), then input slot 2, then the renderer's
-    // hard-coded defaults below. The caller is responsible for validating
-    // the override pointer before passing it; we don't second-guess here.
-    // Defaults match the CyclesRender path: t=(0,2,-8), 50mm/24×18 sensor.
+    // (per-pass camera selection), then input slot 2, then the hard-coded
+    // defaults already in out.cam*. The caller is responsible for
+    // validating the override pointer before passing it.
     const CameraProvider* cam = req.cameraOverride;
     EffectInstancePtr camEffect;
     if (!cam) {
         camEffect = effect->getInput(2);
         if (camEffect) cam = dynamic_cast<const CameraProvider*>(camEffect.get());
     }
-    double camTX = 0,  camTY = 2,  camTZ = -8;
-    double camRX = 0,  camRY = 0,  camRZ = 0;
-    double camFL = 50.0, camHA = 24.576, camVA = 18.672;
     if (cam) {
-        cam->getCameraPosition(req.time, camTX, camTY, camTZ, camRX, camRY, camRZ);
-        camFL = cam->getCameraFocalLength(req.time);
-        camHA = cam->getCameraHAperture(req.time);
-        camVA = cam->getCameraVAperture(req.time);
+        cam->getCameraPosition(req.time, out.camTX, out.camTY, out.camTZ,
+                                          out.camRX, out.camRY, out.camRZ);
+        out.camFL = cam->getCameraFocalLength(req.time);
+        out.camHA = cam->getCameraHAperture(req.time);
+        out.camVA = cam->getCameraVAperture(req.time);
+        out.cameraResolved = true;
     }
 
-    // --- Invoke Cycles. This is the same call CyclesRender::render()
-    // makes at its own site.
-    auto renderer = std::make_unique<CyclesRenderer>();
-    const bool ok = renderer->renderToBufferWithCameraMultiPass(
-        sceneGraph,
-        camTX, camTY, camTZ,
-        camRX, camRY, camRZ,
-        camFL, camHA, camVA,
+    return true;
+}
+
+bool
+executeCyclesPasses(CyclesRenderer&            renderer,
+                     const CyclesPassPrepared&  prepared,
+                     const CyclesPassRequest&   req,
+                     std::map<std::string, std::vector<float>>& outBuffers,
+                     std::string&               errOut)
+{
+    outBuffers.clear();
+    errOut.clear();
+
+    if (req.width <= 0 || req.height <= 0) {
+        errOut = "non-positive width/height";
+        return false;
+    }
+    if (req.requestedPasses.empty()) {
+        errOut = "empty requestedPasses list";
+        return false;
+    }
+
+    const bool ok = renderer.renderToBufferWithCameraMultiPass(
+        prepared.sceneGraph,
+        prepared.camTX, prepared.camTY, prepared.camTZ,
+        prepared.camRX, prepared.camRY, prepared.camRZ,
+        prepared.camFL, prepared.camHA, prepared.camVA,
         req.requestedPasses,
         outBuffers,
         req.width, req.height, req.samples,
@@ -169,6 +175,21 @@ renderCyclesPassesForEffect(EffectInstance*            effect,
         return false;
     }
     return true;
+}
+
+bool
+renderCyclesPassesForEffect(EffectInstance*            effect,
+                             const CyclesPassRequest&   req,
+                             std::map<std::string, std::vector<float>>& outBuffers,
+                             std::string&               errOut)
+{
+    CyclesPassPrepared prepared;
+    if (!prepareCyclesPasses(effect, req, prepared, errOut)) {
+        outBuffers.clear();
+        return false;
+    }
+    CyclesRenderer renderer;
+    return executeCyclesPasses(renderer, prepared, req, outBuffers, errOut);
 }
 
 void

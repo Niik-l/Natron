@@ -17,6 +17,22 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **CyclesPassRender — prepare/execute split, 5A.2 dedup landed (2026-05-30)** —
+  collapses the scene-build / Material3D bake / Cycles invocation
+  duplication between `CyclesRender::render()` and the shared helper.
+  `renderCyclesPassesForEffect()` is now a thin wrapper around two new
+  primitives: `prepareCyclesPasses()` (walks obj input → optional
+  RenderPass → Scene3D/Group3D, builds the scene graph, bakes materials,
+  resolves the camera) and `executeCyclesPasses()` (invokes Cycles with
+  a caller-owned `CyclesRenderer&`). The new `CyclesPassPrepared` struct
+  exposes the resolved sceneGraph, camera params, and RenderPass pointer
+  so callers can inspect/hash before deciding to execute.
+  `CyclesRender::render()` now does `prepare → hash → cache check →
+  execute`, swapping out ~70 lines of duplicated scene-build + Cycles
+  call code. The cache hash is bit-for-bit identical (the hash block
+  reads `sceneGraph` / `renderPass` via local aliases bound to
+  `prepared`), so existing render behavior is preserved.
+  CyclesRenderPassManager keeps calling the wrapper unchanged.
 - **CyclesRenderSettings — shared settings node + wiring (2026-05-30)** —
   splits sampling / integrator / DOF / motion-blur knobs out of CyclesRender
   into a dedicated `CyclesRenderSettings` sink node. Both `CyclesRender`

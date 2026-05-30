@@ -281,14 +281,8 @@ Tracking known bugs, incomplete features, and planned improvements.
   (cryptomatte bitmask, light groups, AOVs, shadow catcher, holdout,
   denoising auto-allocation).
 
-### Pending — CyclesRenderPassManager 5A.2 + nice-to-haves
+### Pending — CyclesRenderPassManager nice-to-haves
 
-- **5A.2** — collapse `CyclesRender::render()`
-  (`Engine/Dev/Cycles/CyclesRender.cpp:670-1080`) onto the shared
-  `renderCyclesPassesForEffect` helper. Currently the live-preview
-  path still has its own copy of the scene-build + Material3D bake +
-  multi-pass call logic; rewiring it through the helper deletes the
-  duplicate. No user-visible change — pure cleanup.
 - **Per-pass material override** (deferred). JSON `materialOverride`
   naming a Material3D node; the manager swaps every renderable's
   material to it for the batch (separate Cycles session per override).
@@ -296,6 +290,32 @@ Tracking known bugs, incomplete features, and planned improvements.
   JSON directly in the multi-line knob; the long-term UI is a
   spreadsheet-style widget mirroring the data.js / app.jsx demo. Lands
   when the JSON model is fully settled.
+
+### Completed (2026-05-30) — CyclesPassRender prepare/execute split (5A.2)
+
+- **`Engine/Dev/Cycles/CyclesPassRender.{h,cpp}`** — refactored from a
+  single `renderCyclesPassesForEffect()` into a two-step API:
+  - `prepareCyclesPasses(effect, req, out, err)` walks input 1 (through
+    optional RenderPass into Scene3D/Group3D), builds the scene graph,
+    bakes Material3D input textures, and resolves the camera
+    (override > input 2 > defaults). Fills a new `CyclesPassPrepared`
+    struct with the resolved `sceneGraph`, `camTX..camVA`, and the
+    discovered `RenderPass*`.
+  - `executeCyclesPasses(renderer, prepared, req, outBuffers, err)`
+    invokes `renderToBufferWithCameraMultiPass` on a caller-owned
+    `CyclesRenderer&`. CyclesRender uses `_imp->activeRenderer` for
+    cross-frame `cancelRender()`; PassManager hands in a fresh local
+    instance per batch via the wrapper.
+  - `renderCyclesPassesForEffect()` retained as a thin wrapper for the
+    PassManager (prepare + local renderer + execute).
+- **`Engine/Dev/Cycles/CyclesRender.cpp`** — `render()` swaps out two
+  large duplicated blocks for `prepareCyclesPasses` + `executeCyclesPasses`
+  calls. The cache hash block reads `sceneGraph` / `renderPass` via
+  local aliases bound to `prepared`, so hash inputs are bit-for-bit
+  identical pre/post-refactor and existing cache behavior is preserved.
+  RenderPass visibility resolution stays in the cache-miss branch but
+  writes into `req.visMap` / `req.activeLights` rather than separate
+  pointer locals. CyclesRender::render() drops ~70 lines net.
 
 ### Completed (2026-05-29) — CyclesRender Mist AOV + single-value display fix
 
