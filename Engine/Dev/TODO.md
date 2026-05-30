@@ -110,6 +110,44 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
 
+### Completed (2026-05-30) — CyclesRenderSettings node + wiring
+
+- **`Engine/Dev/Cycles/CyclesRenderSettings.{h,cpp}` (new)** — sink node
+  with ~13 getters covering samples + denoise + integrator bounces + DOF
+  (enabled/focus/blades/rotation in degrees) + motion blur
+  (enabled/shutter/position). Knob layout: Render (samples, denoise) /
+  Integrator (4 bounce counts) / Depth of Field (4 knobs) / Motion Blur
+  (3 knobs). Defaults match CyclesRender's existing knob defaults
+  verbatim so swapping the source of truth produces identical output.
+  Originally scoped with a `CyclesSettingsProvider` abstract interface
+  (mirroring `CameraProvider` / `MaterialProvider`), but Qt6's AUTOMOC
+  silently skipped Q_OBJECT under multi-inheritance with a non-QObject
+  second base — fell back to duck typing on the concrete class.
+- **Registration** — `PLUGINID_NATRON_CYCLESRENDERSETTINGS` added to
+  `Engine/EffectInstance.h`; `registerBuiltInPlugin<CyclesRenderSettings>`
+  added next to the other Cycles plugins in `AppManager.cpp`.
+- **CyclesRender wiring.** Input count 3 → 4; slot 3 = "settings",
+  optional. New `onInputChanged` hides the Render / Integrator / DOF /
+  Motion Blur knobs via `setSecret(true)` when a CyclesRenderSettings is
+  wired (Output / AOV / Focus helper / EXR knobs stay visible since they
+  remain CyclesRender-only). `render()` resolves the provider once at the
+  top of the function and threads each consumer through a ternary:
+  `settings ? settings->getX() : _imp->X.lock()->getValue()`. The
+  integrator resolution moved above the cache hash (was inside the
+  cache-miss branch); changing bounce counts now invalidates the hash and
+  triggers a re-render (was a latent bug).
+- **CyclesRenderPassManager wiring.** Input count 3 → 4; slot 3 =
+  "settings", optional. Provider resolved once in
+  `parseAndDumpActivePasses` and threaded into `renderFrameForBatches`
+  via a new parameter. Per batch, DOF / Motion Blur / Integrator structs
+  are populated from the provider when connected and set on
+  `CyclesPassRequest`. DOF apertureSize derives from the active camera's
+  focal length + F-Stop (cameraOverride first, then input 2). When the
+  Settings input isn't connected, the renderer falls back to its own
+  defaults (today's behavior). Per-pass JSON `samples` still wins over
+  the provider for that pass. New stderr line "Settings input: connected
+  / not connected" announces which path is taken.
+
 ### Completed (2026-05-30) — CyclesRenderPassManager — light-group / object / camera scoping + non-EXR output
 
 - **`@all_light_groups` magic AOV token.** Drops the

@@ -36,9 +36,12 @@ struct CyclesRenderPrivate;
 /**
  * @brief Render a 3D scene with Blender's Cycles path tracer.
  *
- * Input 0 (bg):      Optional background 2D image (composited behind, sets output resolution)
- * Input 1 (obj/scn): 3D geometry (Sphere3D, Card3D, Cube3D, Group3D, Scene3D, etc.)
- * Input 2 (cam):     Camera (Camera3D or ReadAlembicCamera)
+ * Input 0 (bg):       Optional background 2D image (composited behind, sets output resolution)
+ * Input 1 (obj/scn):  3D geometry (Sphere3D, Card3D, Cube3D, Group3D, Scene3D, etc.)
+ * Input 2 (cam):      Camera (Camera3D or ReadAlembicCamera)
+ * Input 3 (settings): Optional CyclesRenderSettings — when connected, the
+ *                     node's local Render / Integrator / DOF / Motion Blur
+ *                     knobs are hidden and values are pulled from there.
  *
  * Output: 2D rendered image (path-traced).
  *
@@ -61,7 +64,7 @@ public:
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 3; }
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 4; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
@@ -90,6 +93,7 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
+    virtual void onInputChanged(int inputNo) OVERRIDE FINAL;
 
     // Multi-plane AOV support
     virtual bool isMultiPlanar() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }

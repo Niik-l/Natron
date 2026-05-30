@@ -49,6 +49,7 @@
 
 #include "CyclesPassRender.h"
 #include "CyclesRenderer.h"
+#include "CyclesRenderSettings.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -163,6 +164,7 @@ CyclesRenderPassManager::getInputLabel(int inputNb) const
     case 0: return "bg";
     case 1: return "obj";
     case 2: return "cam";
+    case 3: return "settings";
     default: return "?";
     }
 }
@@ -642,6 +644,7 @@ static int
 renderFrameForBatches(EffectInstance*                  effect,
                        const std::vector<ActiveSpec>&   activeSpecs,
                        const std::vector<SceneGeoInfo>& allSceneGeo,
+                       const CyclesRenderSettings*    settings,
                        int                              frame,
                        FrameMode                        mode,
                        int                              width,
@@ -907,11 +910,26 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
     fprintf(stderr, "[PassManager] Frame mode: %s, range=[%d..%d step %d], output=%dx%d\n",
             modeLabel, firstFrame, lastFrame, frameStep, outW, outH);
 
+    // Settings provider (input 3, optional) — applies uniformly to every
+    // batch in every frame. Per-pass JSON `samples` still overrides the
+    // provider's getSamples() for that pass; everything else (DOF, MB,
+    // integrator) comes from the provider when connected.
+    const CyclesRenderSettings* settings = nullptr;
+    {
+        EffectInstancePtr settingsEffect = callerEffect ? callerEffect->getInput(3) : EffectInstancePtr();
+        if (settingsEffect) {
+            settings = dynamic_cast<const CyclesRenderSettings*>(settingsEffect.get());
+        }
+    }
+    fprintf(stderr, "[PassManager] Settings input: %s\n",
+            settings ? "connected (provider drives DOF/MB/integrator)"
+                     : "not connected (renderer defaults)");
+
     int framesRendered = 0;
     int framesSkipped  = 0;
     for (int f = firstFrame; f <= lastFrame; f += frameStep) {
         const int rc = renderFrameForBatches(callerEffect, activeSpecs, sceneGeo,
-                                              f, mode, outW, outH);
+                                              settings, f, mode, outW, outH);
         if (rc < 0) {
             fprintf(stderr, "[PassManager] Frame %d aborted due to render failure.\n", f);
         } else if (rc == 0 && mode == eFrameModeRangeNoReRender) {
@@ -932,6 +950,7 @@ static int
 renderFrameForBatches(EffectInstance*                  effect,
                        const std::vector<ActiveSpec>&   activeSpecs,
                        const std::vector<SceneGeoInfo>& allSceneGeo,
+                       const CyclesRenderSettings*    settings,
                        int                              frame,
                        FrameMode                        mode,
                        int                              width,
@@ -1096,6 +1115,46 @@ renderFrameForBatches(EffectInstance*                  effect,
             }
         }
 
+        // Settings provider → DOF / MB / Integrator params for this batch.
+        // The provider is global (applies to every batch in every frame);
+        // per-pass JSON `samples` already wins for samples since that's
+        // baked into batchSamples above. apertureSize for DOF is derived
+        // from the camera's focal length + F-Stop, so when DOF is enabled
+        // we resolve the active camera (override OR input 2) and compute it.
+        CyclesRenderer::DOFParams        batchDof;
+        CyclesRenderer::MotionBlurParams batchMb;
+        CyclesRenderer::IntegratorParams batchInteg;
+        if (settings) {
+            if (settings->getDOFEnabled((double)frame)) {
+                batchDof.enabled       = true;
+                batchDof.focusDistance = (float)settings->getFocusDistance((double)frame);
+                batchDof.blades        = settings->getBokehBlades((double)frame);
+                batchDof.bladeRotation = (float)(settings->getBladeRotation((double)frame) * 3.14159265358979323846 / 180.0);
+                const CameraProvider* dofCam = batchCamOverride;
+                if (!dofCam) {
+                    EffectInstancePtr camEffect = effect ? effect->getInput(2) : EffectInstancePtr();
+                    if (camEffect) dofCam = dynamic_cast<const CameraProvider*>(camEffect.get());
+                }
+                if (dofCam) {
+                    double fl    = dofCam->getCameraFocalLength((double)frame);
+                    double fstop = dofCam->getCameraFStop((double)frame);
+                    if (fstop < 0.1) fstop = 0.1;
+                    batchDof.apertureSize = (float)(fl / (2.0 * fstop) / 1000.0); // mm to meters
+                } else {
+                    batchDof.enabled = false; // no camera → DOF disabled
+                }
+            }
+            if (settings->getMotionBlurEnabled((double)frame)) {
+                batchMb.enabled         = true;
+                batchMb.shutterTime     = (float)settings->getShutterTime((double)frame);
+                batchMb.shutterPosition = settings->getShutterPosition((double)frame);
+            }
+            batchInteg.maxBounces          = settings->getMaxBounces((double)frame);
+            batchInteg.diffuseBounces      = settings->getDiffuseBounces((double)frame);
+            batchInteg.glossyBounces       = settings->getGlossyBounces((double)frame);
+            batchInteg.transmissionBounces = settings->getTransmissionBounces((double)frame);
+        }
+
         // Render once for the whole batch with the union AOV list.
         CyclesPassRequest reqBatch;
         reqBatch.time            = (double)frame;
@@ -1109,9 +1168,14 @@ renderFrameForBatches(EffectInstance*                  effect,
         // actually scoped. An empty pointer means "all lights" — which is
         // distinct from an empty set (= "no lights at all"). The renderer
         // skips the filter check entirely when activeLights is nullptr.
-        if (batchScoped)    reqBatch.activeLights   = &batchActiveLights;
-        if (batchObjScoped) reqBatch.visMap         = &batchVisMap;
+        if (batchScoped)      reqBatch.activeLights   = &batchActiveLights;
+        if (batchObjScoped)   reqBatch.visMap         = &batchVisMap;
         if (batchCamOverride) reqBatch.cameraOverride = batchCamOverride;
+        if (settings) {
+            if (batchDof.enabled) reqBatch.dof = &batchDof;
+            if (batchMb.enabled)  reqBatch.mb  = &batchMb;
+            reqBatch.integrator = &batchInteg;
+        }
 
         std::map<std::string, std::vector<float>> passBuffers;
         std::string err;

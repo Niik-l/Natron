@@ -17,6 +17,41 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **CyclesRenderSettings — shared settings node + wiring (2026-05-30)** —
+  splits sampling / integrator / DOF / motion-blur knobs out of CyclesRender
+  into a dedicated `CyclesRenderSettings` sink node. Both `CyclesRender`
+  and `CyclesRenderPassManager` gain a new optional input slot 3 ("settings");
+  when wired, the consumer `dynamic_cast`s the input effect to
+  `const CyclesRenderSettings*` and pulls values per-frame. (Originally
+  scoped with a `CyclesSettingsProvider` abstract interface in the
+  CameraProvider/MaterialProvider style, but Qt6's AUTOMOC silently
+  rejected Q_OBJECT under multi-inheritance with a non-QObject second
+  base — fall back to duck typing on the concrete class for now.) Default values on the Settings node
+  exactly mirror CyclesRender's existing knob defaults (samples=6,
+  maxBounces=8, diffuse/glossy=4, transmission=8, DOF off, MB off,
+  shutterTime=0.5, shutterPosition=Center) so a freshly-created Settings
+  node connected to a CyclesRender produces identical output to the
+  standalone path.
+
+  On CyclesRender, connecting a Settings node hides the Render / Integrator
+  / DOF / Motion Blur knobs via `setSecret(true)` from a new `onInputChanged`
+  handler so users can't accidentally edit values that aren't being read.
+  Output / AOV / Focus-helper / EXR knobs stay visible (those are
+  CyclesRender-only concerns, not shared settings). DOF apertureSize is
+  still derived from the active camera's focal length + F-Stop since
+  that's a lens property, not a render setting. As a side effect of moving
+  integrator resolution above the cache hash, a latent bug is fixed:
+  changing bounce knobs now invalidates the cache and triggers a re-render
+  (previously they were resolved inside the cache-miss branch and so never
+  participated in the hash).
+
+  On CyclesRenderPassManager, the provider applies uniformly to every batch
+  in every frame: per-pass JSON `samples` still wins over the provider for
+  that pass, but DOF / Motion Blur / Integrator come from the provider when
+  connected (PassManager has no local knobs for those). When the Settings
+  input isn't connected the renderer falls back to its own defaults (today's
+  behavior). The Render-to-Disk stderr dump now includes a "Settings input"
+  line saying whether the provider was found.
 - **CyclesRenderPassManager — light-group / object / camera scoping + non-EXR output (2026-05-30)** —
   rounds out the per-pass control surface. Four upgrades to the JSON spec
   and one to the OIIO writer:

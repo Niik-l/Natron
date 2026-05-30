@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "CyclesRenderer.h"
+#include "CyclesRenderSettings.h"
 
 #include "../Scene3D/CameraProvider.h"
 #include "../Scene3D/MaterialProvider.h"
@@ -140,6 +141,7 @@ CyclesRender::getInputLabel(int inputNb) const
         case 0: return "bg";
         case 1: return "obj/scn";
         case 2: return "cam";
+        case 3: return "settings";
         default: return "";
     }
 }
@@ -147,7 +149,7 @@ CyclesRender::getInputLabel(int inputNb) const
 bool
 CyclesRender::isInputOptional(int inputNb) const
 {
-    return (inputNb == 0 || inputNb == 2);
+    return (inputNb == 0 || inputNb == 2 || inputNb == 3);
 }
 
 void
@@ -600,9 +602,24 @@ CyclesRender::render(const RenderActionArgs& args)
         KnobBoolPtr pk = _imp->previewMode.lock();
         if (pk) isPreview = pk->getValue();
     }
+    // --- Settings provider (input 3, optional) ---
+    // When connected, all Render / Integrator / DOF / Motion Blur values are
+    // pulled from the provider; local knobs are ignored (and hidden via
+    // onInputChanged). The local-knob branches below remain so disconnecting
+    // the Settings input falls cleanly back to standalone behavior.
+    const CyclesRenderSettings* settings = nullptr;
+    {
+        EffectInstancePtr settingsEffect = getInput(3);
+        if (settingsEffect) {
+            settings = dynamic_cast<const CyclesRenderSettings*>(settingsEffect.get());
+        }
+    }
+
     int renderW = isPreview ? std::max(64, outW / 2) : outW;
     int renderH = isPreview ? std::max(64, outH / 2) : outH;
-    int renderSamples = _imp->samples.lock()->getValue();
+    int renderSamples = settings
+        ? settings->getSamples(args.time)
+        : _imp->samples.lock()->getValue();
 
     // --- Get camera from input 2 ---
     EffectInstancePtr camEffect = getInput(2);
@@ -619,30 +636,67 @@ CyclesRender::render(const RenderActionArgs& args)
         camVA = cam->getCameraVAperture(args.time);
     }
 
-    // --- DOF params (Enable/Focus/Bokeh from CyclesRender, F-Stop from Camera3D) ---
+    // --- DOF params (Enable/Focus/Bokeh from Settings or local knobs;
+    //     F-Stop always from Camera3D since it's a lens property) ---
     CyclesRenderer::DOFParams dofParams;
     {
-        KnobBoolPtr dofKnob = _imp->dofEnabled.lock();
-        if (dofKnob && dofKnob->getValue()) {
+        bool dofOn = settings
+            ? settings->getDOFEnabled(args.time)
+            : (_imp->dofEnabled.lock() && _imp->dofEnabled.lock()->getValue());
+        if (dofOn) {
             dofParams.enabled = true;
             double fstop = cam ? cam->getCameraFStop(args.time) : 2.8;
             if (fstop < 0.1) fstop = 0.1;
             dofParams.apertureSize = (float)(camFL / (2.0 * fstop) / 1000.0); // mm to meters
-            dofParams.focusDistance = (float)_imp->focusDistance.lock()->getValueAtTime(args.time);
-            dofParams.blades = _imp->bokehBlades.lock() ? _imp->bokehBlades.lock()->getValue() : 0;
-            dofParams.bladeRotation = (float)(_imp->bladeRotation.lock()->getValueAtTime(args.time) * M_PI / 180.0);
+            double focusDist = settings
+                ? settings->getFocusDistance(args.time)
+                : _imp->focusDistance.lock()->getValueAtTime(args.time);
+            int blades = settings
+                ? settings->getBokehBlades(args.time)
+                : (_imp->bokehBlades.lock() ? _imp->bokehBlades.lock()->getValue() : 0);
+            double rotDeg = settings
+                ? settings->getBladeRotation(args.time)
+                : _imp->bladeRotation.lock()->getValueAtTime(args.time);
+            dofParams.focusDistance = (float)focusDist;
+            dofParams.blades        = blades;
+            dofParams.bladeRotation = (float)(rotDeg * M_PI / 180.0);
         }
     }
 
     // --- Motion Blur params ---
     CyclesRenderer::MotionBlurParams mbParams;
     {
-        KnobBoolPtr mbKnob = _imp->motionBlur.lock();
-        if (mbKnob && mbKnob->getValue()) {
+        bool mbOn = settings
+            ? settings->getMotionBlurEnabled(args.time)
+            : (_imp->motionBlur.lock() && _imp->motionBlur.lock()->getValue());
+        if (mbOn) {
             mbParams.enabled = true;
-            mbParams.shutterTime = (float)_imp->shutterTime.lock()->getValueAtTime(args.time);
-            mbParams.shutterPosition = _imp->shutterPosition.lock() ? _imp->shutterPosition.lock()->getValue() : 1;
+            mbParams.shutterTime = (float)(settings
+                ? settings->getShutterTime(args.time)
+                : _imp->shutterTime.lock()->getValueAtTime(args.time));
+            mbParams.shutterPosition = settings
+                ? settings->getShutterPosition(args.time)
+                : (_imp->shutterPosition.lock() ? _imp->shutterPosition.lock()->getValue() : 1);
         }
+    }
+
+    // --- Integrator params (Settings node wins; else local knobs).
+    //     Resolved up here so the hash block below can fold them into the
+    //     cache key — previously they were resolved inside the cache-miss
+    //     branch and so changing maxBounces / diffuseBounces / glossyBounces
+    //     / transmissionBounces silently failed to invalidate the cache. ---
+    CyclesRenderer::IntegratorParams integParams;
+    if (settings) {
+        integParams.maxBounces          = settings->getMaxBounces(args.time);
+        integParams.diffuseBounces      = settings->getDiffuseBounces(args.time);
+        integParams.glossyBounces       = settings->getGlossyBounces(args.time);
+        integParams.transmissionBounces = settings->getTransmissionBounces(args.time);
+    } else {
+        KnobIntPtr k;
+        k = _imp->maxBounces.lock();           if (k) integParams.maxBounces          = k->getValue();
+        k = _imp->diffuseBounces.lock();       if (k) integParams.diffuseBounces      = k->getValue();
+        k = _imp->glossyBounces.lock();        if (k) integParams.glossyBounces       = k->getValue();
+        k = _imp->transmissionBounces.lock();  if (k) integParams.transmissionBounces = k->getValue();
     }
 
     // --- Build scene graph FIRST (needed for hash) ---
@@ -875,6 +929,15 @@ CyclesRender::render(const RenderActionArgs& args)
             hashFloat(mbParams.shutterTime);
             sceneHash = hashCombine(sceneHash, (U64)mbParams.shutterPosition);
         }
+
+        // Hash integrator params — changing bounce counts now invalidates
+        // the cache (previously a latent bug; harmless when the values
+        // never change, surprising when they do).
+        sceneHash = hashCombine(sceneHash, 0x12FAULL);
+        sceneHash = hashCombine(sceneHash, (U64)integParams.maxBounces);
+        sceneHash = hashCombine(sceneHash, (U64)integParams.diffuseBounces);
+        sceneHash = hashCombine(sceneHash, (U64)integParams.glossyBounces);
+        sceneHash = hashCombine(sceneHash, (U64)integParams.transmissionBounces);
     }
 
     // --- Cache check: skip render if nothing changed ---
@@ -902,16 +965,6 @@ CyclesRender::render(const RenderActionArgs& args)
             activeLightSet = renderPass->getActiveLights();
             if (!visMap.empty()) visMapPtr = &visMap;
             if (!activeLightSet.empty()) activeLightsPtr = &activeLightSet;
-        }
-
-        // --- Integrator params from knobs ---
-        CyclesRenderer::IntegratorParams integParams;
-        {
-            KnobIntPtr k;
-            k = _imp->maxBounces.lock(); if (k) integParams.maxBounces = k->getValue();
-            k = _imp->diffuseBounces.lock(); if (k) integParams.diffuseBounces = k->getValue();
-            k = _imp->glossyBounces.lock(); if (k) integParams.glossyBounces = k->getValue();
-            k = _imp->transmissionBounces.lock(); if (k) integParams.transmissionBounces = k->getValue();
         }
 
         // --- Render with Cycles (multi-pass) ---
@@ -1252,6 +1305,51 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
         return true;
     }
     return false;
+}
+
+// Toggle visibility of the Render / Integrator / DOF / Motion Blur knobs
+// based on whether a CyclesRenderSettings is wired to input slot 3. When
+// connected, those knobs become read-from-the-settings-node and showing the
+// local ones would be misleading. Output / AOV / Focus / EXR knobs stay
+// visible since they're CyclesRender-only concerns.
+static void
+setSettingsKnobsSecret(CyclesRenderPrivate* p, bool secret)
+{
+    auto hide = [secret](const auto& wp) {
+        auto k = wp.lock();
+        if (k) k->setSecret(secret);
+    };
+    // Render tab
+    hide(p->samples);
+    hide(p->denoise);
+    // Integrator
+    hide(p->maxBounces);
+    hide(p->diffuseBounces);
+    hide(p->glossyBounces);
+    hide(p->transmissionBounces);
+    // DOF (focus helper buttons stay — they target focusDistance which is now
+    // also hidden, but the buttons themselves remain visible; that's a minor
+    // UX wart we'll fix when the focus helper learns to write to the
+    // upstream Settings node directly.)
+    hide(p->dofEnabled);
+    hide(p->focusDistance);
+    hide(p->bokehBlades);
+    hide(p->bladeRotation);
+    // Motion blur
+    hide(p->motionBlur);
+    hide(p->shutterTime);
+    hide(p->shutterPosition);
+}
+
+void
+CyclesRender::onInputChanged(int inputNo)
+{
+    if (inputNo != 3) return;
+    EffectInstancePtr settingsEffect = getInput(3);
+    const bool connected =
+        settingsEffect &&
+        dynamic_cast<const CyclesRenderSettings*>(settingsEffect.get()) != nullptr;
+    setSettingsKnobsSecret(_imp.get(), connected);
 }
 
 NATRON_NAMESPACE_EXIT
