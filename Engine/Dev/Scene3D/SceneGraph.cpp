@@ -460,11 +460,24 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             double lexp_unused;
             light3d->getLightParams(time, ltx, lty, ltz, lr, lg, lb, lint, lexp_unused);
 
+            // Read the light's rotation knobs so its localMatrix carries the
+            // orientation — without this the viewport drew every light
+            // un-rotated (most visible on Spot/Area), even though the Cycles
+            // renderer DID rotate them via buildLightTransform. Mirrors the
+            // geometry / ReadVDB path so lights rotate in the viewport like geo.
+            float lrx = 0, lry = 0, lrz = 0;
+            {
+                KnobIPtr k;
+                k = effect->getKnobByName("rotateX"); if (k) lrx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+                k = effect->getKnobByName("rotateY"); if (k) lry = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+                k = effect->getKnobByName("rotateZ"); if (k) lrz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+            }
+
             SceneNode sn;
             sn.type = eSceneNodeLight;
             sn.name = nodeName;
             sn.sourceNode = node;
-            buildTRS((float)ltx, (float)lty, (float)ltz, 0, 0, 0, 1, 1, 1, sn.localMatrix);
+            buildTRS((float)ltx, (float)lty, (float)ltz, lrx, lry, lrz, 1, 1, 1, sn.localMatrix);
 
             nameToIndex[nodeName] = (int)_nodes.size();
             _nodes.push_back(sn);
