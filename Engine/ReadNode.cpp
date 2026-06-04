@@ -53,6 +53,8 @@ CLANG_DIAG_OFF(uninitialized)
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 
+#include <cstdlib> // std::getenv (NATRON_RV_PATH lookup, mirrors WriteNode)
+
 #include "Engine/AppInstance.h"
 #include "Engine/AppManager.h"
 #include "Engine/Node.h"
@@ -232,6 +234,11 @@ public:
     KnobStringWPtr pluginIDStringKnob;
     KnobSeparatorWPtr separatorKnob;
     KnobButtonWPtr fileInfosKnob;
+    // RV / OpenRV integration (mirror of WriteNode): open the source file in
+    // RV for fast input review. "Open in RV" button launches the executable
+    // in rvPathKnob (or NATRON_RV_PATH) on the Read node's source pattern.
+    KnobFileWPtr   rvPathKnob;
+    KnobButtonWPtr openInRvButton;
     std::list<KnobIWPtr> readNodeKnobs;
 
     //MT only
@@ -1137,6 +1144,38 @@ ReadNode::initializeKnobs()
     controlpage->addKnob(pluginID);
     _imp->pluginIDStringKnob = pluginID;
     _imp->readNodeKnobs.push_back(pluginID);
+
+    // RV / OpenRV integration — mirror of the Write node. Opens the Read
+    // node's source file/sequence directly in RV for fast input review.
+    {
+        KnobFilePtr rvPath = AppManager::createKnob<KnobFile>(this, tr("RV Executable"));
+        rvPath->setName("rvPath");
+        rvPath->setAnimationEnabled(false);
+        rvPath->setEvaluateOnChange(false);
+        rvPath->setHintToolTip(tr("Path to the RV / OpenRV executable (rv.exe on Windows, rv on macOS/Linux). "
+                                  "Used by the \"Open in RV\" button below. Persistent per-node.\n\n"
+                                  "Tip: set the NATRON_RV_PATH environment variable before launching Natron and "
+                                  "every new Read node will be pre-filled with that path."));
+        if (const char* envRv = std::getenv("NATRON_RV_PATH")) {
+            if (envRv[0] != '\0') {
+                rvPath->setDefaultValue(envRv);
+            }
+        }
+        controlpage->addKnob(rvPath);
+        _imp->rvPathKnob = rvPath;
+        _imp->readNodeKnobs.push_back(rvPath);
+    }
+    {
+        KnobButtonPtr btn = AppManager::createKnob<KnobButton>(this, tr("Open in RV"));
+        btn->setName("openInRv");
+        btn->setHintToolTip(tr("Launch RV / OpenRV on this Read node's source file. The file pattern is passed "
+                               "directly to RV — RV understands ####/%04d notation and plays the sequence. "
+                               "Requires the \"RV Executable\" path above to be set. RV runs detached; "
+                               "closing Natron does not affect it."));
+        controlpage->addKnob(btn);
+        _imp->openInRvButton = btn;
+        _imp->readNodeKnobs.push_back(btn);
+    }
 }
 
 void
@@ -1305,6 +1344,41 @@ ReadNode::knobChanged(KnobI* k,
                 QString procStdError = QString::fromUtf8( proc.readAllStandardError() );
                 QString procStdOutput = QString::fromUtf8( proc.readAllStandardOutput() );
                 Dialogs::informationDialog( getNode()->getLabel(), procStdError.toStdString() + procStdOutput.toStdString() );
+            }
+        }
+    } else if ( k == _imp->openInRvButton.lock().get() ) {
+        // "Open in RV" button — launch RV/OpenRV on this Read node's source file.
+        clearPersistentMessage(false);
+        KnobFilePtr rvPath   = _imp->rvPathKnob.lock();
+        KnobFilePtr fileKnob = _imp->inputFileKnob.lock();
+
+        std::string rvExe = rvPath  ? rvPath->getValue()  : std::string();
+        const std::string inF = fileKnob ? fileKnob->getValue() : std::string();
+
+        // Runtime fallback: when the knob is empty (e.g. project saved before
+        // NATRON_RV_PATH was set), use the env var directly.
+        if (rvExe.empty()) {
+            if (const char* envRv = std::getenv("NATRON_RV_PATH")) {
+                if (envRv[0] != '\0') rvExe = envRv;
+            }
+        }
+
+        if (rvExe.empty()) {
+            setPersistentMessage(eMessageTypeError,
+                "RV executable path is not set. Fill in \"RV Executable\" above, "
+                "or set the NATRON_RV_PATH environment variable before launching Natron.");
+        } else if (inF.empty()) {
+            setPersistentMessage(eMessageTypeError,
+                "Read node has no source filename to open.");
+        } else {
+            // RV understands ####/%04d notation natively — pass the pattern as-is.
+            // Detached: RV runs independently, closing Natron does not affect it.
+            QStringList rvArgs;
+            rvArgs << QString::fromUtf8(inF.c_str());
+            bool ok = QProcess::startDetached(QString::fromUtf8(rvExe.c_str()), rvArgs);
+            if (!ok) {
+                setPersistentMessage(eMessageTypeError,
+                    "Failed to launch RV. Verify the executable path and that RV is installed.");
             }
         }
     } else {
