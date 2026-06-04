@@ -124,12 +124,20 @@ private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
+    // Called once after all knobs are restored from a saved project. Loads the
+    // geometry from the restored file path so the scene shows up without the
+    // user having to hit "Reload" manually.
+    virtual void onKnobsLoaded() OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     void loadAlembicGeo(const std::string& path);
     void loadObjGeo(const std::string& path);
+    // Dispatch on file extension (.obj/.abc), guarded by _imp->isLoading, then
+    // refresh metadata. Shared by knobChanged (file/reload/object change) and
+    // onKnobsLoaded (project load).
+    void loadGeoFromFile(const std::string& path);
 
     std::unique_ptr<ReadGeoPrivate> _imp;
     mutable MeshDataPtr _lastMeshData;

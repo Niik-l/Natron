@@ -286,6 +286,21 @@ ReadAlembicTransform::knobChanged(KnobI* k,
 }
 
 void
+ReadAlembicTransform::onKnobsLoaded()
+{
+    // After a project load the file-path knob is restored but no knobChanged
+    // fires, so the transform is never read — the user used to have to hit
+    // "Reload". Re-read it here so the saved scene's transform appears immediately.
+    KnobFilePtr fp = _imp->filePath.lock();
+    if (fp) {
+        const std::string path = fp->getValue();
+        if (!path.empty()) {
+            loadAlembicFile(path);
+        }
+    }
+}
+
+void
 ReadAlembicTransform::loadAlembicFile(const std::string& path)
 {
 #ifdef NATRON_HAVE_ALEMBIC

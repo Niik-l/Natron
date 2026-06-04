@@ -486,6 +486,27 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         return false;
     }
 
+    if (_imp->filePath.lock().get() == k || _imp->reloadBtn.lock().get() == k) {
+        loadGeoFromFile(_imp->filePath.lock()->getValue());
+        return true;
+    }
+
+    // Object dropdown changed: reload the selected object from the already-open file
+    if (_imp->objectPath.lock().get() == k) {
+        loadGeoFromFile(_imp->filePath.lock()->getValue());
+        return true;
+    }
+
+    return false;
+}
+
+void
+ReadGeo::loadGeoFromFile(const std::string& path)
+{
+    if (path.empty()) {
+        return;
+    }
+
     // Helper: lowercase extension of `path` ("foo.OBJ" → ".obj").
     auto extOf = [](const std::string& p) -> std::string {
         const size_t dot = p.find_last_of('.');
@@ -496,51 +517,43 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         return e;
     };
 
-    auto loadByExt = [&](const std::string& path) {
-        const std::string e = extOf(path);
-        if (e == ".obj") {
-            loadObjGeo(path);
-        } else if (e == ".abc") {
+    // Re-entrancy guard: loading modifies knobs which would re-trigger knobChanged.
+    _imp->isLoading = true;
+
+    const std::string e = extOf(path);
+    if (e == ".obj") {
+        loadObjGeo(path);
+    } else if (e == ".abc") {
 #ifdef NATRON_HAVE_ALEMBIC
-            loadAlembicGeo(path);
+        loadAlembicGeo(path);
 #else
-            setPersistentMessage(eMessageTypeError,
-                "Alembic support not built into this Natron binary. "
-                "Use a .obj file, or rebuild Natron with Alembic.");
+        setPersistentMessage(eMessageTypeError,
+            "Alembic support not built into this Natron binary. "
+            "Use a .obj file, or rebuild Natron with Alembic.");
 #endif
-        } else {
-            setPersistentMessage(eMessageTypeError,
-                "Unsupported file extension. Use .abc (Alembic) or .obj (Wavefront).");
-        }
-    };
-
-    if (_imp->filePath.lock().get() == k || _imp->reloadBtn.lock().get() == k) {
-        std::string path = _imp->filePath.lock()->getValue();
-        if (!path.empty()) {
-            _imp->isLoading = true;
-            loadByExt(path);
-            _imp->isLoading = false;
-            // Re-read metadata so getPreferredMetadata picks up the new
-            // hasAnimatedXform / hasAnimatedVerts flags (Scene3D + ScanlineRender
-            // cache need to see frame-varying when the new file has animation).
-            refreshMetadata_public(true);
-        }
-        return true;
+    } else {
+        setPersistentMessage(eMessageTypeError,
+            "Unsupported file extension. Use .abc (Alembic) or .obj (Wavefront).");
     }
 
-    // Object dropdown changed: reload the selected object from the already-open file
-    if (_imp->objectPath.lock().get() == k) {
-        std::string path = _imp->filePath.lock()->getValue();
-        if (!path.empty()) {
-            _imp->isLoading = true;
-            loadByExt(path);
-            _imp->isLoading = false;
-            refreshMetadata_public(true);
-        }
-        return true;
-    }
+    _imp->isLoading = false;
+    // Re-read metadata so getPreferredMetadata picks up the new
+    // hasAnimatedXform / hasAnimatedVerts flags (Scene3D + ScanlineRender
+    // cache need to see frame-varying when the new file has animation).
+    refreshMetadata_public(true);
+}
 
-    return false;
+void
+ReadGeo::onKnobsLoaded()
+{
+    // After a project load the file-path knob is restored, but no knobChanged
+    // fires for it, so the geometry is never read into memory — the user used to
+    // have to hit "Reload" manually. Load it here so the saved scene appears
+    // immediately. (loadGeoFromFile is a no-op for an empty path.)
+    KnobFilePtr fileKnob = _imp->filePath.lock();
+    if (fileKnob) {
+        loadGeoFromFile( fileKnob->getValue() );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -365,6 +365,21 @@ ReadAlembicCamera::refreshAspectInfo()
 }
 
 void
+ReadAlembicCamera::onKnobsLoaded()
+{
+    // After a project load the file-path knob is restored but no knobChanged
+    // fires, so the camera is never read — the user used to have to hit "Reload".
+    // Re-read it here so the saved scene's camera appears immediately.
+    KnobFilePtr fp = _imp->filePath.lock();
+    if (fp) {
+        const std::string path = fp->getValue();
+        if (!path.empty()) {
+            loadAlembicFile(path);
+        }
+    }
+}
+
+void
 ReadAlembicCamera::loadAlembicFile(const std::string& path)
 {
 #ifdef NATRON_HAVE_ALEMBIC

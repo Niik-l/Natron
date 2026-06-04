@@ -471,6 +471,22 @@ ReadAlembicArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
 }
 
 void
+ReadAlembicArchive::onKnobsLoaded()
+{
+    // After a project load the file-path knob is restored but no knobChanged
+    // fires, so the archive is never parsed — the user used to have to hit
+    // "Reload". Re-read it here so the saved scene appears immediately.
+    KnobFilePtr fp = _imp->filePath.lock();
+    if (fp) {
+        const std::string path = fp->getValue();
+        if (!path.empty()) {
+            loadAlembicFile(path);
+            refreshMetadata_public(true);
+        }
+    }
+}
+
+void
 ReadAlembicArchive::loadAlembicFile(const std::string& path)
 {
 #ifdef NATRON_HAVE_ALEMBIC
