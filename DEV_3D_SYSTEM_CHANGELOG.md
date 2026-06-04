@@ -17,6 +17,32 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Geo auto-load on project open + viewport / review QoL (2026-06-04)** —
+  - **Geometry & Alembic nodes load on project open** — `ReadGeo`,
+    `ReadAlembicArchive`, `ReadAlembicCamera`, and `ReadAlembicTransform` only
+    read their file inside `knobChanged` (file-path change or a manual **Reload**
+    click). Restoring a saved knob value on project load does **not** fire
+    `knobChanged`, so the path was correct but the data was never read — every
+    loaded scene needed a manual Reload on each geo node. Each node now overrides
+    `onKnobsLoaded()` (Natron's post-deserialization hook, `Node.cpp`) and re-runs
+    its existing load path on the restored file. For `ReadGeo` the `.obj`/`.abc`
+    dispatch + `isLoading` guard + metadata refresh was pulled out of the
+    `knobChanged` lambda into a shared `loadGeoFromFile()` that both paths call;
+    `ReadAlembicArchive` also refreshes metadata (so animation flags reach the
+    cache). Empty paths stay a no-op, matching the existing `knobChanged` guards.
+  - **Backdrop renders as a flat color** — `NodeGraphRectItem` painted a subtle
+    top-to-bottom gradient over every node's base color, so a Backdrop's picked
+    color read differently from what was chosen. Added an opt-in flat mode
+    (`NodeGraphRectItem::setFlat`); `NodeGui::createGui` enables it for backdrops
+    only. Regular nodes keep their gradient; a Backdrop now shows the picked color
+    exactly, Nuke-style.
+  - **Read "Open in RV" button** — mirrors the Write node's RV integration on the
+    Read node: an "RV Executable" file knob (pre-filled from `NATRON_RV_PATH`) +
+    an "Open in RV" button that launches RV/OpenRV detached on the Read node's
+    source pattern (RV parses `####`/`%04d` natively). Falls back to the env var at
+    click time and reports a persistent message when the exe path or source file
+    is missing. Fast input review without spinning up a viewer.
+
 - **Lighting / scene-traversal fixes + CyclesRender holdout input + Material3D transmission map (2026-06-03)** —
   - **Light rotation in viewport** — `SceneGraph::rebuild`'s Light3D branch was
     calling `buildTRS(..., 0,0,0, ...)`, discarding the `rotateX/Y/Z` knobs, so

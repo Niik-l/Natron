@@ -110,6 +110,26 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
 
+### Completed (2026-06-04) — Geo auto-load on project open + viewport / review QoL
+
+- **Geometry & Alembic nodes load on project open** — `ReadGeo`,
+  `ReadAlembicArchive`, `ReadAlembicCamera`, `ReadAlembicTransform` only read
+  their file inside `knobChanged` (file change / **Reload** click); restoring a
+  saved knob value on project load doesn't fire `knobChanged`, so every loaded
+  scene needed a manual Reload per geo node. Each node now overrides
+  `onKnobsLoaded()` (post-deserialization hook) and re-runs its existing load
+  path on the restored file. `ReadGeo`'s `.obj`/`.abc` dispatch + `isLoading`
+  guard + metadata refresh was factored into a shared `loadGeoFromFile()`;
+  `ReadAlembicArchive` also refreshes metadata. Empty path = no-op.
+- **Backdrop renders as a flat color** — `NodeGraphRectItem` painted a
+  top-to-bottom gradient over every node; added an opt-in flat mode
+  (`setFlat`) enabled for backdrops only in `NodeGui::createGui`, so a Backdrop
+  shows the picked color exactly (Nuke-style) while other nodes keep the
+  gradient. (`Gui/NodeGraphRectItem.{h,cpp}`, `Gui/NodeGui.cpp`)
+- **Read "Open in RV" button** — mirrors the Write node: "RV Executable" knob
+  (pre-filled from `NATRON_RV_PATH`) + "Open in RV" button launching RV/OpenRV
+  detached on the source pattern for fast input review. (`Engine/ReadNode.cpp`)
+
 ### Completed (2026-05-30) — CyclesRenderSettings node + wiring
 
 - **`Engine/Dev/Cycles/CyclesRenderSettings.{h,cpp}` (new)** — sink node
