@@ -17,6 +17,108 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Lighting / scene-traversal fixes + CyclesRender holdout input + Material3D transmission map (2026-06-03)** —
+  - **Light rotation in viewport** — `SceneGraph::rebuild`'s Light3D branch was
+    calling `buildTRS(..., 0,0,0, ...)`, discarding the `rotateX/Y/Z` knobs, so
+    the viewport drew every light un-rotated (most visible on Spot/Area). Now
+    reads the rotation knobs like the geometry path. (The Cycles render already
+    rotated lights via `buildLightTransform`; this was a viewport-only gap.)
+  - **Lights use the SceneGraph world matrix** — the render light loop now sets
+    `obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix))` (like geometry)
+    instead of rebuilding from local knobs, so grouped/nested lights follow the
+    parent Group3D transform and the render matches the viewport. Byte-identical
+    for ungrouped lights (`buildTRS` ≡ `buildLightTransform`). `buildLightTransform`
+    + its 2 matrix helpers are now dead code (kept; harmless).
+  - **Recursive scene-node collection** — `prepareCyclesPasses` /
+    `enumerateScene{Lights,Geo}` walked containers only one level deep, so
+    `Lights → Group3D → Scene3D → render` never collected the grouped lights/geo.
+    New `collectSceneNodes()` descends through every nested Scene3D/Group3D.
+  - **Dot pass-through** — scene traversal now sees through `Dot` routing nodes
+    (`skipDots()` + Dot handling in `collectSceneNodes`), so geo/lights behind a
+    Dot on any input (scene, holdout, RenderPass) pass through.
+  - **CyclesRender "holdout" input (slot 4)** — geo wired here is added to the
+    scene AND flagged `set_use_holdout(true)`, punching a transparent matte of
+    its shape. Additive (independent of any RenderPass visMap). Threaded as
+    `CyclesPassPrepared::holdoutNames` → `renderToBufferWithCameraMultiPass` /
+    `syncSceneWithCamera` (new `holdoutObjects` param). Covers the primitive geo
+    loop (Sphere/Card/Cube/Quad); ReadGeo/particles/volumes not yet wired.
+  - **Material3D transmission map** — new input 5 "Transmission" + "Transmission
+    Map" file knob, baked like the other maps and wired to the Principled
+    "Transmission Weight" socket. Glass was already supported via the scalar
+    Transmission + IOR knobs (→ `set_transmission_weight` / `set_ior`); this adds
+    per-pixel masking. IOR remains scalar-only. (Transmission bounces default 8,
+    on CyclesRenderSettings + CyclesRender — bump for thick/stacked glass.)
+
+- **Cycles shadow catcher — working comp pass + the lamp-exclusion fix (2026-05-31)** —
+  Shadow catcher (invisible card catches a sphere's shadow into alpha, for comp)
+  now works, via the **RenderPass** node (interactive) and the
+  **CyclesRenderPassManager** batch path. Two fixes: (1) the matte output was
+  flattened onto a white backdrop with alpha=1 — now output directly as a
+  premultiplied comp pass (RGB = objects, ALPHA = shadow density + coverage,
+  transparent elsewhere); (2) **the lamp's wrapper object must be
+  `set_is_shadow_catcher(true)`** — otherwise Cycles stamps
+  `SHADER_EXCLUDE_SHADOW_CATCHER` on it (`scene/light.cpp:331`), the lamp is
+  skipped in the catcher's unshadowed reference pass, `color_catcher=0`, and the
+  shadow ratio collapses to a flat 1.0. Direct-light shadows DO work with a
+  black world; no environment needed. `[Cycles SC]` diagnostics are gated behind
+  env `NATRON_DEBUG_SC`. The RenderPass "everything-starts-excluded" model means
+  you must mark the caster (Camera/Trace) as well as the catcher.
+
+- **CyclesRenderPassManager — custom pass-table UI + live preview (2026-05-31→06-02)** —
+  The "Passes (JSON)" text box is replaced by a custom spreadsheet **table
+  widget** (`KnobPassTable` / `Gui/KnobGuiPassTable` / `Gui/PassTableWidget`,
+  registered in both knob factories; backing store stays the same JSON string so
+  save/load/undo are unchanged). Increments: table (Name/Type/On/Samples/AOVs/
+  File + Add/Remove) → readability styling → per-pass "Selected Pass" detail
+  panel → discovered-name **dropdown pickers** for object/light scoping + a
+  "Refresh Objects" button (new `discoverSceneObjects()`) → **AOV checkbox** grid
+  (custom/token AOVs preserved) → live **multi-plane preview**: "Preview Selected"
+  renders the chosen pass to a connected Viewer with each ticked AOV as a Viewer
+  layer (`render()` rewritten from a transparent-black sink; secret
+  `previewPassIndex`; node made `isMultiPlanar()` + `getComponentsNeededAndProduced`).
+
+- **CyclesRenderPassManager — material override + shadow catcher / holdout / phantom promotion (2026-05-30)** —
+  closes the gap with the RenderPass node's full visibility model. Four
+  new JSON fields per pass:
+  - `materialOverride` (script name) — Blender-style material override:
+    every mesh in the batch renders with this MaterialProvider's shader
+    instead of its own. Standard clay-render / shadow-pass pattern.
+    Particles + volumes keep their own shaders. Unresolvable name
+    aborts the batch with a stderr error (same pattern as
+    cameraOverride).
+  - `shadowCatcherObjects` / `holdoutObjects` / `traceObjects` —
+    semicolon-separated script names of scene geo that should be
+    promoted from default-visible to a specific visibility profile.
+    Shadow catcher catches shadows while being invisible to camera;
+    holdout punches the alpha (clean-plate); trace contributes to
+    reflections / refractions / shadows but is invisible to camera
+    (phantom). Promotion priority: excluded > shadow catcher >
+    holdout > trace > default. The standard shadow pass is
+    `shadowCatcherObjects = "Ground"; traceObjects = "Hero"; materialOverride = "WhiteDiffuse"`.
+
+  Implementation: `CyclesRenderer::renderToBufferWithCameraMultiPass`
+  + `syncSceneWithCamera` gain a `MaterialProvider* materialOverride`
+  parameter; the per-mesh `createMaterialShader` call site substitutes
+  the override when present. `CyclesPassRequest::materialOverride`
+  threads through `executeCyclesPasses`. The manager's per-batch
+  visMap construction expands: when ANY of object scoping / SC / HO /
+  TR is set, build a full map covering every scene object with the
+  computed profile per the priority table. Batch key extends with
+  `|mat=|sc=|ho=|tr=` segments so promotions / overrides force
+  separate Cycles sessions. New `enumerateProjectMaterials` diagnostic
+  prints every `Material3D` node so users can match what to put in
+  `materialOverride`.
+
+  Shadow-catcher output today: the shadow contribution is baked into
+  the `Combined` pass via Cycles' `use_approximate_shadow_catcher`
+  mode. Catcher-flagged objects appear in `Combined` darkened by the
+  shadow factor, multiplied by their (override or own) surface color.
+  Exposing the dedicated `PASS_SHADOW_CATCHER` trio
+  (raw accumulator + sample count + matte) as a separate AOV is
+  deferred — Cycles' pass accessor for that pass does an internal
+  divide-by-Combined that bottoms out at 1.0 when the catcher
+  accumulator isn't populated, so it needs all three passes wired up
+  together plus a documented comp formula. See TODO.
 - **CyclesPassRender — prepare/execute split, 5A.2 dedup landed (2026-05-30)** —
   collapses the scene-build / Material3D bake / Cycles invocation
   duplication between `CyclesRender::render()` and the shared helper.

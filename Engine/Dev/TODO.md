@@ -283,13 +283,70 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ### Pending — CyclesRenderPassManager nice-to-haves
 
-- **Per-pass material override** (deferred). JSON `materialOverride`
-  naming a Material3D node; the manager swaps every renderable's
-  material to it for the batch (separate Cycles session per override).
-- **Custom UI widget for the pass table** (deferred). The MVP edits
-  JSON directly in the multi-line knob; the long-term UI is a
-  spreadsheet-style widget mirroring the data.js / app.jsx demo. Lands
-  when the JSON model is fully settled.
+- **Shadow Catcher AOV (raw accumulator + sample count)** — we
+  expose `ShadowCatcherMatte` (`PASS_SHADOW_CATCHER_MATTE`), which in
+  approximate mode contains "non-catcher objects + catcher with
+  shadow baked in" — the practical beauty pass when shadow catchers
+  are in the scene. The other two passes in Cycles' canonical trio
+  (`PASS_SHADOW_CATCHER` raw accumulator + divide-by-Combined in
+  accessor + `PASS_SHADOW_CATCHER_SAMPLE_COUNT`) would let users
+  composite shadow against an external plate explicitly. Exposing
+  those requires registering all three passes and documenting the
+  comp formula `final = (Combined / SHADOW_CATCHER) * plate +
+  SHADOW_CATCHER_MATTE over plate`. First attempt returned uniform
+  1.0 because the accessor's internal divide bottoms out at the
+  default when only `PASS_SHADOW_CATCHER` is populated.
+- **Custom UI widget for the pass table** — DONE (2026-06-01,
+  uncommitted). New `KnobPassTable` (type `"CyclesPassTable"`) +
+  `Gui/PassTableWidget` + `Gui/KnobGuiPassTable`, mirroring the
+  DevShuffle custom-knob pattern (GUI matched by knob typeName). Backing
+  store stays the same pass-list JSON string, so the renderer / save /
+  load / undo are unchanged. Increments: (1) spreadsheet table
+  (Name/Type/On/Samples/AOVs/File + Add/Remove), (2) readability
+  styling, (3) per-pass "Selected Pass" detail panel for the non-column
+  fields, (4) discovered-name dropdown pickers for the object/light
+  scoping fields + a "Refresh Objects" button, backed by a new
+  `CyclesRenderPassManager::discoverSceneObjects()`, (5) AOV checkbox
+  grid (ticks ↔ the pass `aovs` array; custom/token AOVs preserved),
+  (6) live multi-plane **preview**: "Preview Selected" renders the chosen
+  pass to a connected Viewer with each ticked AOV as a Viewer layer —
+  `render()` rewritten from a transparent-black sink, secret
+  `previewPassIndex` knob, node made `isMultiPlanar()` +
+  `getComponentsNeededAndProduced`. Deferred polish: checkable
+  multi-select dropdowns, camera/material pickers, collapse the tall
+  detail panel into sub-groups, "clear preview" affordance. See
+  `PASS_TABLE_WIDGET_NOTES.md` (repo-root-adjacent, not committed).
+
+### Completed (2026-05-30) — Per-pass material override + visibility promotions
+
+- **JSON model.** Four new fields per pass: `materialOverride` (script
+  name of a Material3D-like node), `shadowCatcherObjects`,
+  `holdoutObjects`, `traceObjects` (semicolon-separated script names).
+- **`CyclesRenderer::renderToBufferWithCameraMultiPass` + `syncSceneWithCamera`**
+  gain a `MaterialProvider* materialOverride` param. The per-mesh
+  `createMaterialShader` call site substitutes the override when set
+  so every mesh in the batch uses the same shader. Particles + volumes
+  keep their own shader paths (no override).
+- **`CyclesPassRequest::materialOverride`** threads through
+  `executeCyclesPasses` to the renderer.
+- **`enumerateProjectMaterials`** mirrors `enumerateProjectCameras` and
+  prints every `MaterialProvider`-derived non-geo-wrapper node in the
+  project for the diagnostic dump. `hasMaterialInput()` filters out
+  geo nodes (Sphere3D, Card3D, …) so only genuine material sources
+  appear.
+- **`renderFrameForBatches` visMap construction** extended: builds a
+  full map covering every scene object when ANY of object scoping,
+  shadowCatcherObjects, holdoutObjects, traceObjects is set. Per
+  object: excluded → `isExcluded=true` (rayVis 0); shadow catcher
+  → rayVis 0x7FF + `isShadowCatcher=true`; holdout → rayVis 0x7FF +
+  `isHoldout=true`; trace → rayVis 0x7FE (ALL & ~CAMERA); else default
+  visible. Priority: excluded > SC > HO > TR.
+- **`batchKeyFor`** extends with `|mat=…|sc=…|ho=…|tr=…` segments so
+  different overrides / promotions force separate Cycles sessions.
+  Same override + same promotions still batch together.
+- **Per-batch stderr line** prints `mat=`, `sc=[…]`, `ho=[…]`, `tr=[…]`
+  alongside the existing scoping summaries. Material/SC/HO/TR
+  resolution that fails the lookup aborts that batch loudly.
 
 ### Completed (2026-05-30) — CyclesPassRender prepare/execute split (5A.2)
 
