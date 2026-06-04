@@ -28,6 +28,10 @@
 #include <vector>
 #include <functional>
 
+// Global-scope forward decl — MaterialProvider lives outside the
+// Natron namespace (same convention as CameraProvider).
+class MaterialProvider;
+
 NATRON_NAMESPACE_ENTER
 
 class SceneGraph;
@@ -93,7 +97,9 @@ public:
                              const std::set<std::string>* activeLights = nullptr,
                              const DOFParams* dof = nullptr,
                              const MotionBlurParams* motionBlur = nullptr,
-                             const IntegratorParams* integrator = nullptr);
+                             const IntegratorParams* integrator = nullptr,
+                             MaterialProvider* materialOverride = nullptr,
+                             const std::set<std::string>* holdoutObjects = nullptr);
 
     /**
      * @brief Start rendering (non-blocking). Cycles renders on its own thread.
@@ -163,7 +169,9 @@ public:
                                             const std::set<std::string>* activeLights = nullptr,
                                             const DOFParams* dof = nullptr,
                                             const MotionBlurParams* motionBlur = nullptr,
-                                            const IntegratorParams* integrator = nullptr);
+                                            const IntegratorParams* integrator = nullptr,
+                                            MaterialProvider* materialOverride = nullptr,
+                                            const std::set<std::string>* holdoutObjects = nullptr);
 
     /**
      * @brief Set the number of samples for the next render.

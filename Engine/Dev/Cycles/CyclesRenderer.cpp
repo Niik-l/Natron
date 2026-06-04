@@ -22,7 +22,9 @@
 
 #include "CyclesRenderer.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <map>
@@ -274,6 +276,16 @@ private:
 CCL_NAMESPACE_END
 
 NATRON_NAMESPACE_ENTER
+
+// Shadow-catcher diagnostics gate. Set env NATRON_DEBUG_SC=1 to enable the
+// verbose [Cycles SC] render logging + the extra raw-catcher pass reads. Off
+// by default so production renders stay quiet.
+static bool
+scDebugEnabled()
+{
+    static const bool on = (std::getenv("NATRON_DEBUG_SC") != NULL);
+    return on;
+}
 
 // ============================================================================
 // Helper: map Light3D::LightType to ccl::LightType
@@ -631,6 +643,18 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         graph->connect(emissionTex->output("Color"), principled->input("Emission Color"));
     }
 
+    // Transmission map (mask) — drives the Principled "Transmission Weight"
+    // input per-pixel: white = glass/transparent, black = opaque. Overrides the
+    // scalar Transmission slider where present.
+    std::string transFile = resolveTextureFrame(mat->getMaterialTransmissionMapFile(), frame);
+    if (!transFile.empty()) {
+        ccl::ImageTextureNode* transTex = graph->create_node<ccl::ImageTextureNode>();
+        transTex->set_filename(ccl::ustring(transFile));
+        transTex->set_colorspace(ccl::ustring("Non-Color"));
+        graph->connect(texCoord->output("UV"), transTex->input("Vector"));
+        graph->connect(transTex->output("Color"), principled->input("Transmission Weight"));
+    }
+
     graph->connect(principled->output("BSDF"), graph->output()->input("Surface"));
     shader->set_graph(std::move(graph));
     shader->tag_update(scene);
@@ -741,7 +765,9 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                                      const std::set<std::string>* activeLights,
                                      const DOFParams* dof,
                                      const MotionBlurParams* motionBlur,
-                                     const IntegratorParams* integrator)
+                                     const IntegratorParams* integrator,
+                                     MaterialProvider* materialOverride,
+                                     const std::set<std::string>* holdoutObjects)
 {
     if (!_impl->initialized) return;
 
@@ -985,17 +1011,6 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             shaders.push_back_slow(lShader);
             light->set_used_shaders(shaders);
 
-            // Read rotation knobs from the light node
-            float lrx = 0, lry = 0, lrz = 0;
-            {
-                EffectInstancePtr eff = node->getEffectInstance();
-                if (eff) {
-                    KnobIPtr k;
-                    k = eff->getKnobByName("rotateX"); if (k) lrx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-                    k = eff->getKnobByName("rotateY"); if (k) lry = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-                    k = eff->getKnobByName("rotateZ"); if (k) lrz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-                }
-            }
             // Apply active lights filter if provided
             if (activeLights && !activeLights->empty()) {
                 if (activeLights->find(sn.name) == activeLights->end()) {
@@ -1007,7 +1022,22 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             ccl::Object* obj = scene->create_node<ccl::Object>();
             obj->set_geometry(light);
             obj->set_visibility(ccl::PATH_RAY_ALL_VISIBILITY & ~ccl::PATH_RAY_CAMERA);
-            obj->set_tfm(buildLightTransform((float)ltx, (float)lty, (float)ltz, lrx, lry, lrz));
+            // Mark the light's wrapper object as a shadow catcher so Cycles does
+            // NOT stamp SHADER_EXCLUDE_SHADOW_CATCHER on the lamp (light.cpp:331).
+            // Without this the lamp is skipped during NEE in the shadow-catcher
+            // object pass (light.h:117), the catcher's unshadowed reference is
+            // unlit (color_catcher=0), and the shadow ratio collapses to a flat
+            // 1.0 (no shadow). This matches Blender, where lamps illuminate the
+            // catcher pass by default. Harmless when no catcher is present.
+            obj->set_is_shadow_catcher(true);
+            // Use the SceneGraph world matrix — position + rotation + any parent
+            // Group3D transform — exactly like geometry. This makes grouped /
+            // nested lights follow the group and match the viewport. (Was
+            // buildLightTransform() from the light's own knobs, which ignored
+            // the group transform, so grouped lights rendered at their local
+            // position.) For an ungrouped light this is byte-identical to the
+            // old path (buildTRS == buildLightTransform).
+            obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix));
 
             // Set light group on the object (Cycles uses Object::lightgroup)
             std::string lgName = light3d->getLightGroup();
@@ -1124,6 +1154,20 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             {"UV",        ccl::PASS_UV},
             {"Depth",     ccl::PASS_DEPTH},
             {"Mist",      ccl::PASS_MIST},
+            // PASS_SHADOW_CATCHER_MATTE: when read via the pass accessor
+            // with use_approximate_shadow_catcher=true, Cycles populates
+            // this pass with "non-catcher objects + catcher with shadow
+            // baked in" — the single-image equivalent of what Blender's
+            // viewer shows when you tick the catcher checkbox and render.
+            // We auto-request this internally when catchers exist and
+            // copy it over Combined so users get the catcher-with-shadow
+            // result in a single pass.
+            {"ShadowCatcherMatte", ccl::PASS_SHADOW_CATCHER_MATTE},
+            // Raw catcher accumulator (shadow ratio) + sample count — used for
+            // diagnostics: lets us read what the catcher actually measured,
+            // independent of the matte-with-shadow accessor math.
+            {"ShadowCatcher", ccl::PASS_SHADOW_CATCHER},
+            {"ShadowCatcherSampleCount", ccl::PASS_SHADOW_CATCHER_SAMPLE_COUNT},
         };
 
         // Build the set of passes to create. Always include "Combined".
@@ -1946,10 +1990,16 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         if (verts.empty()) continue;
         int numTris = (int)triVerts.size() / 3;
 
-        // Per-object material shader
-        ccl::Shader* objShader = nullptr;
+        // Per-object material shader. When a material override is in
+        // effect, use it instead of the per-object MaterialProvider so
+        // every renderable receives the same shader — the standard
+        // clay-render / shadow-pass pattern. srcNode is hoisted out
+        // because the motion-blur block below still consults it.
         NodePtr srcNode = sn.sourceNode.lock();
-        if (srcNode) {
+        ccl::Shader* objShader = nullptr;
+        if (materialOverride) {
+            objShader = createMaterialShader(scene, materialOverride, time);
+        } else if (srcNode) {
             MaterialProvider* matProv = dynamic_cast<MaterialProvider*>(srcNode->getEffectInstance().get());
             if (matProv) {
                 objShader = createMaterialShader(scene, matProv, time);
@@ -2071,6 +2121,11 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             auto it = visibilityMap->find(sn.name);
             if (it != visibilityMap->end()) {
                 const ObjectVisibility& vis = it->second;
+                if (scDebugEnabled())
+                fprintf(stderr, "[Cycles SC] object '%s' in visMap: excluded=%d holdout=%d "
+                       "shadowCatcher=%d rayVis=0x%X\n",
+                       sn.name.c_str(), (int)vis.isExcluded, (int)vis.isHoldout,
+                       (int)vis.isShadowCatcher, vis.rayVisibility);
                 if (vis.isExcluded) {
                     obj->set_visibility(0);
                 } else {
@@ -2078,13 +2133,36 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     obj->set_use_holdout(vis.isHoldout);
                     obj->set_is_shadow_catcher(vis.isShadowCatcher);
                     if (vis.isShadowCatcher) {
+                        // Approximate mode is required for the
+                        // PASS_SHADOW_CATCHER_MATTE accessor to return
+                        // the "matte + shadow approximated onto the
+                        // catcher" combination — that's how we get a
+                        // single-image catcher-with-shadow result.
+                        // Without this flag the matte pass returns only
+                        // non-catcher objects (the catcher is invisible)
+                        // and shadow data lives only in the raw catcher
+                        // accumulator which would need manual comp.
                         scene->film->set_use_approximate_shadow_catcher(true);
+                        if (scDebugEnabled())
+                        fprintf(stderr, "[Cycles SC] -> set_is_shadow_catcher(true) + approximate mode ON for '%s'\n",
+                               sn.name.c_str());
                     }
                 }
             } else {
                 // Object not in any category — excluded
+                if (scDebugEnabled())
+                fprintf(stderr, "[Cycles SC] WARNING object '%s' NOT in visMap -> EXCLUDED (invisible). "
+                       "Name mismatch? visMap has %d entries.\n",
+                       sn.name.c_str(), (int)visibilityMap->size());
                 obj->set_visibility(0);
             }
+        }
+
+        // Additive holdout: geo wired to the CyclesRender "holdout" input
+        // renders as a Cycles holdout (a transparent matte of its shape),
+        // independent of any RenderPass visMap above.
+        if (holdoutObjects && holdoutObjects->count(sn.name)) {
+            obj->set_use_holdout(true);
         }
 
         obj->tag_update(scene);
@@ -2125,12 +2203,54 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
                                                    const std::set<std::string>* activeLights,
                                                    const DOFParams* dof,
                                                    const MotionBlurParams* motionBlur,
-                                                   const IntegratorParams* integrator)
+                                                   const IntegratorParams* integrator,
+                                                   MaterialProvider* materialOverride,
+                                                   const std::set<std::string>* holdoutObjects)
 {
     initialize(width, height, samples);
+
+    // Detect shadow-catcher objects so we can auto-inject the
+    // PASS_SHADOW_CATCHER buffer for the post-render composite.
+    // Catcher contributions are routed OUT of PASS_COMBINED by Cycles
+    // whenever any object has the catcher flag set; without summing the
+    // catcher pass back into Combined ourselves, the catcher disappears
+    // from the output entirely.
+    bool hasShadowCatcher = false;
+    int shadowCatcherCount = 0;
+    if (visibilityMap) {
+        for (const auto& kv : *visibilityMap) {
+            if (kv.second.isShadowCatcher) {
+                hasShadowCatcher = true;
+                ++shadowCatcherCount;
+            }
+        }
+    }
+    if (scDebugEnabled())
+    fprintf(stderr, "[Cycles SC] renderMultiPass: visMap=%s entries=%d shadowCatchers=%d hasShadowCatcher=%d\n",
+           visibilityMap ? "present" : "NULL",
+           visibilityMap ? (int)visibilityMap->size() : 0,
+           shadowCatcherCount, (int)hasShadowCatcher);
+    // Track whether the caller explicitly asked for the matte pass as
+    // a standalone AOV — affects whether we keep it after the composite.
+    const bool userRequestedMatte = std::find(requestedPasses.begin(),
+                                                requestedPasses.end(),
+                                                std::string("ShadowCatcherMatte")) != requestedPasses.end();
+    std::vector<std::string> effectiveRequested = requestedPasses;
+    if (hasShadowCatcher && !userRequestedMatte) {
+        effectiveRequested.push_back("ShadowCatcherMatte");
+    }
+    // Diagnostic only (NATRON_DEBUG_SC): also pull the raw catcher accumulator
+    // + sample count so the composite block below can report them. Users can
+    // still request these as explicit AOVs — that path is unaffected.
+    if (hasShadowCatcher && scDebugEnabled()) {
+        effectiveRequested.push_back("ShadowCatcher");
+        effectiveRequested.push_back("ShadowCatcherSampleCount");
+    }
+
     syncSceneWithCamera(sg, camTX, camTY, camTZ, camRX, camRY, camRZ,
-                        focalLength, hAperture, vAperture, time, requestedPasses,
-                        visibilityMap, activeLights, dof, motionBlur, integrator);
+                        focalLength, hAperture, vAperture, time, effectiveRequested,
+                        visibilityMap, activeLights, dof, motionBlur, integrator,
+                        materialOverride, holdoutObjects);
 
     // Build the full list of pass names for the output driver.
     // This includes the requested standard passes plus any light group Combined passes.
@@ -2138,7 +2258,7 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
 
     // Always include Combined
     allPassNames.push_back("Combined");
-    for (const auto& pn : requestedPasses) {
+    for (const auto& pn : effectiveRequested) {
         if (pn != "Combined") {
             allPassNames.push_back(pn);
         }
@@ -2166,6 +2286,106 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
 
     startRender();
     waitForRender();
+
+    // Render-time shadow-catcher composite. With approximate mode on,
+    // Cycles' PASS_SHADOW_CATCHER_MATTE accessor encodes:
+    //   matte.rgb   = non-catcher objects only (the sphere in test).
+    //   matte.alpha = sphere alpha (=1 over sphere) blended with
+    //                 (1 - shadow_multiplier) over catcher pixels —
+    //                 so catcher unshadowed = 0, catcher shadowed =
+    //                 shadow_factor in [0,1].
+    // To make the catcher VISIBLE in a single-pass output the way
+    // Blender's viewer shows it, we alpha-over the matte onto a white
+    // backdrop. After the over:
+    //   sphere pixels  → sphere.rgb (alpha=1, backdrop contributes 0).
+    //   catcher shadow → matte.rgb + (1-shadow_factor)*white. Where
+    //                    matte.rgb is ~0 at catcher pixels, this comes
+    //                    out as (1-shadow_factor)*white → bright in
+    //                    unshadowed parts, dark in shadowed parts.
+    //   empty bg       → also becomes white (acceptable for the standard
+    //                    shadow-pass workflow — user can mask it out in
+    //                    comp using the original alpha if they want
+    //                    transparent background).
+    if (hasShadowCatcher) {
+        auto itC = outPassBuffers.find("Combined");
+        auto itM = outPassBuffers.find("ShadowCatcherMatte");
+        if (scDebugEnabled())
+        fprintf(stderr, "[Cycles SC] composite: Combined=%s ShadowCatcherMatte=%s\n",
+               itC != outPassBuffers.end() ? "found" : "MISSING",
+               itM != outPassBuffers.end() ? "found" : "MISSING");
+        if (itC != outPassBuffers.end() && itM != outPassBuffers.end()) {
+            std::vector<float>& combined = itC->second;
+            const std::vector<float>& matte = itM->second;
+            const size_t nPix = std::min(combined.size(), matte.size()) / 4;
+            if (scDebugEnabled()) {
+                float mnA = 1e30f, mxA = -1e30f; int nzA = 0;
+                for (size_t i = 0; i < nPix; ++i) {
+                    const float a = matte[i * 4 + 3];
+                    if (a != 0.0f) nzA++;
+                    if (a > 0.001f && a < 1e9f) { if (a < mnA) mnA = a; if (a > mxA) mxA = a; }
+                }
+                fprintf(stderr, "[Cycles SC] matte ALPHA range=[%.4f, %.4f] nonZeroAlpha=%d/%d (shadow lives here)\n",
+                       mnA, mxA, nzA, (int)nPix);
+            }
+            // Diagnostic: report the RAW catcher accumulator. If this is ~1.0
+            // everywhere the catcher measured no shadow (problem is upstream in
+            // the catcher path); if it dips below 1.0 under the sphere the
+            // shadow IS measured and the matte math/read is dropping it.
+            if (scDebugEnabled()) {
+                auto itR = outPassBuffers.find("ShadowCatcher");
+                if (itR != outPassBuffers.end()) {
+                    const std::vector<float>& raw = itR->second;
+                    const size_t rPix = raw.size() / 4;
+                    float mn = 1e30f, mx = -1e30f; int below = 0;
+                    for (size_t i = 0; i < rPix; ++i) {
+                        const float v = raw[i * 4];
+                        if (v < mn) mn = v; if (v > mx) mx = v;
+                        if (v > 0.0f && v < 0.99f) below++;
+                    }
+                    fprintf(stderr, "[Cycles SC] RAW ShadowCatcher ch0 range=[%.4f, %.4f] pixelsBelow1.0=%d/%d\n",
+                           mn, mx, below, (int)rPix);
+                } else {
+                    fprintf(stderr, "[Cycles SC] RAW ShadowCatcher pass NOT in buffers\n");
+                }
+                // Sample count: if this is 0 on the card, the catcher object
+                // pass never accumulated -> the split isn't happening, which is
+                // why the ratio is a flat 1.0.
+                auto itSC = outPassBuffers.find("ShadowCatcherSampleCount");
+                if (itSC != outPassBuffers.end()) {
+                    const std::vector<float>& sc = itSC->second;
+                    const size_t sPix = sc.size() / 4;
+                    int withSamples = 0; float mx = 0;
+                    for (size_t i = 0; i < sPix; ++i) {
+                        const float v = sc[i * 4];
+                        if (v > 0.0f) withSamples++;
+                        if (v > mx) mx = v;
+                    }
+                    fprintf(stderr, "[Cycles SC] SampleCount pixelsWithCatcherSamples=%d/%d maxCount=%.1f\n",
+                           withSamples, (int)sPix, mx);
+                } else {
+                    fprintf(stderr, "[Cycles SC] SampleCount pass NOT in buffers\n");
+                }
+            }
+            // Output the shadow-catcher matte directly as a PREMULTIPLIED comp
+            // pass: RGB = non-catcher objects (the sphere), ALPHA = shadow
+            // density on the (invisible) catcher + object coverage. Background
+            // and unshadowed catcher stay transparent (alpha 0). This comps
+            // over a backplate as plate*(1-A) + RGB — the shadow darkens the
+            // plate and the sphere overs on top. (Previously this flattened the
+            // matte onto a white backdrop with alpha=1, which destroyed the
+            // alpha and turned the background white.)
+            for (size_t i = 0; i < nPix; ++i) {
+                const size_t off = i * 4;
+                combined[off + 0] = matte[off + 0];
+                combined[off + 1] = matte[off + 1];
+                combined[off + 2] = matte[off + 2];
+                combined[off + 3] = matte[off + 3];
+            }
+            if (!userRequestedMatte) {
+                outPassBuffers.erase(itM);
+            }
+        }
+    }
 
     return !outPassBuffers.empty();
 }
@@ -2270,6 +2490,7 @@ CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
     add("Normal",   "Normal",          3, {"X","Y","Z"});
     add("Depth",    "depth",           1, {"Z"});
     add("UV",       "UV",              3, {"U","V","W"});
+    add("ShadowCatcherMatte", "ShadowCatcherMatte", 4, {"R","G","B","A"});
 
     // Light group passes
     for (auto& entry : passBuffers) {
