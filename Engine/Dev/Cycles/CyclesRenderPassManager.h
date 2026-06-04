@@ -25,6 +25,9 @@
 
 #include "../../../Global/Macros.h"
 
+#include <string>
+#include <vector>
+
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
@@ -89,12 +92,28 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
+    // Multi-plane: the live preview outputs the selected pass's AOVs as
+    // separate planes, so the Viewer's layer dropdown lists them.
+    virtual bool isMultiPlanar() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
+    virtual PassThroughEnum isPassThroughForNonRenderedPlanes() const OVERRIDE FINAL WARN_UNUSED_RETURN
+    { return ePassThroughPassThroughNonRenderedPlanes; }
+
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
+
+    // Discover scene geometry + light node script names from the connected
+    // scene input. Used by the pass-table GUI to populate the object/light
+    // dropdown pickers so users don't have to type exact names.
+    void discoverSceneObjects(std::vector<std::string>& outGeo,
+                              std::vector<std::string>& outLights) const;
 
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual void getComponentsNeededAndProduced(double time, ViewIdx view,
+                                                EffectInstance::ComponentsNeededMap* comps,
+                                                double* passThroughTime, int* passThroughView,
+                                                int* passThroughInput) OVERRIDE FINAL;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     std::unique_ptr<CyclesRenderPassManagerPrivate> _imp;

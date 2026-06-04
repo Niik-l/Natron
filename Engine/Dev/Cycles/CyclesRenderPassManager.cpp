@@ -41,6 +41,7 @@
 #include "../../AppManager.h"
 #include "../../Format.h"
 #include "../../Image.h"
+#include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
 #include "../../KnobFile.h"
 #include "../../Node.h"
@@ -50,6 +51,8 @@
 #include "CyclesPassRender.h"
 #include "CyclesRenderer.h"
 #include "CyclesRenderSettings.h"
+#include "KnobPassTable.h"
+#include "../Scene3D/Material3D.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -57,11 +60,17 @@ struct CyclesRenderPassManagerPrivate
 {
     // Pass list as a JSON string. Persisted in project files automatically
     // via Natron's knob serialization. Seed value covers the MVP 2-pass case
-    // (one beauty + one data). User edits this directly in the panel for
-    // MVP; custom widget lands in Phase 5+.
-    KnobStringWPtr passesJson;
+    // (one beauty + one data). Edited via the custom spreadsheet table widget
+    // (KnobPassTable → KnobGuiPassTable → PassTableWidget); the backing store
+    // is still the same JSON string the renderer reads.
+    KnobPassTableWPtr passesJson;
     KnobButtonWPtr resetToDefault;
     KnobButtonWPtr renderToDisk;
+
+    // Which pass to preview live in the viewer (-1 = none → transparent black).
+    // Driven by the pass-table widget's "Preview Selected" button; secret
+    // because the GUI owns it.
+    KnobIntWPtr    previewPassIndex;
 
     // Frame range
     KnobChoiceWPtr frameMode;
@@ -111,7 +120,11 @@ static const char* kDefaultPassesJson =
     "    \"candidateObjects\": \"*\",\n"
     "    \"excludeObjects\": \"\",\n"
     "    \"soloObject\": \"\",\n"
-    "    \"cameraOverride\": \"\"\n"
+    "    \"cameraOverride\": \"\",\n"
+    "    \"materialOverride\": \"\",\n"
+    "    \"shadowCatcherObjects\": \"\",\n"
+    "    \"holdoutObjects\": \"\",\n"
+    "    \"traceObjects\": \"\"\n"
     "  },\n"
     "  {\n"
     "    \"id\": \"p2\",\n"
@@ -131,7 +144,11 @@ static const char* kDefaultPassesJson =
     "    \"candidateObjects\": \"*\",\n"
     "    \"excludeObjects\": \"\",\n"
     "    \"soloObject\": \"\",\n"
-    "    \"cameraOverride\": \"\"\n"
+    "    \"cameraOverride\": \"\",\n"
+    "    \"materialOverride\": \"\",\n"
+    "    \"shadowCatcherObjects\": \"\",\n"
+    "    \"holdoutObjects\": \"\",\n"
+    "    \"traceObjects\": \"\"\n"
     "  }\n"
     "]\n";
 
@@ -202,21 +219,21 @@ CyclesRenderPassManager::initializeKnobs()
 {
     KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Pass Manager"));
 
-    // The pass list — JSON string, persisted in the project file. Multi-line
-    // edit so users can edit directly in the panel until the custom widget
-    // lands. Seed with a default 2-pass setup so a freshly-created node has
-    // something usable.
+    // The pass list — JSON string backing a custom spreadsheet table widget
+    // (KnobPassTable). Persisted in the project file like any string knob.
+    // Seed with a default 2-pass setup so a freshly-created node has something
+    // usable.
     {
-        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Passes (JSON)"));
+        KnobPassTablePtr k = AppManager::createKnob<KnobPassTable>(this, tr("Passes"));
         k->setName("passesJson");
-        k->setAsMultiLine();
         k->setDefaultValue(kDefaultPassesJson);
         k->setHintToolTip(tr(
             "JSON-serialized list of render passes. Each entry: id, name, "
             "type, group, enabled/solo/mute/output flags, aovs (array), "
             "filePath, format, bitDepth, compression, samples, candidateLights, "
             "excludeLights, soloLight, candidateObjects, excludeObjects, "
-            "soloObject, cameraOverride."
+            "soloObject, cameraOverride, materialOverride, shadowCatcherObjects, "
+            "holdoutObjects, traceObjects."
             "\n\nLight handling — two mechanisms:"
             "\n  1. Light-group AOVs (standard workflow): the beauty file "
             "carries every light group as separate layers so comp can do "
@@ -243,6 +260,27 @@ CyclesRenderPassManager::initializeKnobs()
             "slot 2 → renderer default. An unresolvable name fails that "
             "batch loudly rather than silently rendering the wrong angle. "
             "Different camera names force separate batches."
+            "\n\nMaterial override: materialOverride takes the fully-qualified "
+            "script name of a Material3D-like MaterialProvider node anywhere "
+            "in the project. When set, every mesh in the batch renders with "
+            "this shader instead of its own — the Blender-style clay-render / "
+            "shadow-pass pattern. Particles and volumes keep their own "
+            "shaders. Unresolvable name aborts the batch loudly."
+            "\n\nVisibility promotions (shadow / matte / element passes): "
+            "shadowCatcherObjects / holdoutObjects / traceObjects are "
+            "semicolon-separated script names of scene-geo objects that "
+            "should be promoted from default-visible to a specific "
+            "visibility profile."
+            "\n  shadowCatcherObjects → catches shadows from other objects "
+            "but is itself invisible in beauty. Pair with materialOverride "
+            "(a plain diffuse) for the canonical shadow pass."
+            "\n  holdoutObjects → punches the alpha (clean-plate workflows)."
+            "\n  traceObjects → phantom / trace-only; contributes to "
+            "reflections/refractions but is invisible to camera."
+            "\nPriority when an object appears in multiple lists: "
+            "shadow catcher > holdout > trace > default visible. Excluded "
+            "(from object scoping) wins over all promotions. Different "
+            "promotion sets force separate batches."
             "\n\nOutput format is selected by the extension on filePath:"
             "\n  .exr            → multi-layer EXR (default). bitDepth = "
             "\"16-bit Half\" or \"32-bit Full\"; compression = ZIP / ZIPS / "
@@ -254,9 +292,10 @@ CyclesRenderPassManager::initializeKnobs()
             "\nMulti-AOV passes in non-EXR formats produce one file per AOV "
             "with _<AOVName> injected before the extension (e.g. data.0001_Normal.png)."
             "\n\nRender to Disk prints the scene's Light3D + non-light script "
-            "names AND every CameraProvider node in the project so you can "
-            "match them. Edit directly here for now; custom UI widget lands "
-            "in a later phase. Use Reset to Default to restore the seed."));
+            "names AND every CameraProvider + MaterialProvider node in the "
+            "project so you can match them. Edit directly here for now; "
+            "custom UI widget lands in a later phase. Use Reset to Default "
+            "to restore the seed."));
         page->addKnob(k);
         _imp->passesJson = k;
     }
@@ -325,6 +364,18 @@ CyclesRenderPassManager::initializeKnobs()
             "MVP step 3: prints the active list to stderr without rendering."));
         page->addKnob(k);
         _imp->renderToDisk = k;
+    }
+
+    // Secret: which pass index the viewer previews. The pass-table widget's
+    // "Preview Selected" button sets this; render() reads it. Persisted so a
+    // reopened project shows the same preview.
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Preview Pass Index"));
+        k->setName("previewPassIndex");
+        k->setDefaultValue(-1);
+        k->setSecretByDefault(true);
+        page->addKnob(k);
+        _imp->previewPassIndex = k;
     }
 }
 
@@ -454,6 +505,22 @@ struct ActiveSpec {
     // Empty → fall back to the manager's input slot 2. Resolved at render
     // time; an unresolvable name aborts the batch with a clear error.
     std::string               cameraOverride;
+
+    // Per-pass material override. Script name of a MaterialProvider node
+    // (typically a Material3D) anywhere in the project. When set, every
+    // mesh in the batch renders with this shader instead of its own —
+    // the standard clay-render / shadow-pass pattern. Unresolvable name
+    // aborts the batch with a clear error.
+    std::string               materialOverride;
+
+    // Per-pass visibility promotions. Semicolon-separated script names of
+    // scene-geo objects that should be promoted from default-visible to
+    // a specific visibility profile. Priority when an object appears in
+    // multiple lists: shadow catcher > holdout > trace. Excluded (from
+    // object scoping) wins over all promotions.
+    std::string               shadowCatcherObjects;  // is_shadow_catcher=true
+    std::string               holdoutObjects;        // is_holdout=true
+    std::string               traceObjects;          // rayVisibility = ALL & ~CAMERA (phantom)
 };
 
 // Split a semicolon-separated name list into a set of trimmed names.
@@ -600,11 +667,46 @@ enumerateProjectCameras(EffectInstance* callerEffect,
     }
 }
 
+// Same shape as enumerateProjectCameras but for MaterialProvider-derived
+// nodes. Filters out per-geo nodes (Sphere3D, Card3D, etc. all implement
+// MaterialProvider) by requiring `hasMaterialInput()` == false — that's
+// true only for actual material-source nodes like Material3D, which is
+// what users should plug into a `materialOverride` field.
+struct ProjectMaterialInfo {
+    std::string fullName;
+};
+
+static void
+enumerateProjectMaterials(EffectInstance* callerEffect,
+                          std::vector<ProjectMaterialInfo>& out)
+{
+    out.clear();
+    if (!callerEffect) return;
+    AppInstancePtr app = callerEffect->getApp();
+    if (!app || !app->getProject()) return;
+    NodesList nodes;
+    app->getProject()->getNodes_recursive(nodes, /*onlyActive*/ false);
+    for (const NodePtr& n : nodes) {
+        if (!n) continue;
+        EffectInstancePtr fx = n->getEffectInstance();
+        if (!fx) continue;
+        // Filter to genuine material-source nodes. hasMaterialInput() is
+        // a runtime-state query ("is something wired") not a structural
+        // one, so a fresh geo node with no material connected would slip
+        // through. dynamic_cast<Material3D> only matches actual material
+        // sources.
+        if (!dynamic_cast<Material3D*>(fx.get())) continue;
+        ProjectMaterialInfo info;
+        info.fullName = n->getFullyQualifiedName();
+        out.push_back(std::move(info));
+    }
+}
+
 // Build a string key that two specs MUST match on to share a Cycles
 // session. Components: samples, sorted active-lights set, sorted visible-
-// objects set, camera override (empty = input-2 default). Specs with the
-// same key render with the same Cycles scene state, so we can batch them
-// into a single submission.
+// objects set, camera override, sorted shadow-catcher / holdout / phantom
+// sets, material override. Specs with the same key render with the same
+// Cycles scene state, so we can batch them into a single submission.
 static std::string
 batchKeyFor(const ActiveSpec&                spec,
             const std::vector<SceneGeoInfo>& allSceneGeo)
@@ -633,6 +735,15 @@ batchKeyFor(const ActiveSpec&                spec,
     key += "|cam=";
     const std::string camTrim = trimCopy(spec.cameraOverride);
     key += camTrim.empty() ? std::string("<input2>") : camTrim;
+    key += "|sc=";
+    key += joinSet(parseNameList(spec.shadowCatcherObjects));
+    key += "|ho=";
+    key += joinSet(parseNameList(spec.holdoutObjects));
+    key += "|tr=";
+    key += joinSet(parseNameList(spec.traceObjects));
+    key += "|mat=";
+    const std::string matTrim = trimCopy(spec.materialOverride);
+    key += matTrim.empty() ? std::string("<none>") : matTrim;
     return key;
 }
 
@@ -829,10 +940,14 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
             spec.candidateLights  = p.value(QStringLiteral("candidateLights")).toString().toStdString();
             spec.excludeLights    = p.value(QStringLiteral("excludeLights")).toString().toStdString();
             spec.soloLight        = p.value(QStringLiteral("soloLight")).toString().toStdString();
-            spec.candidateObjects = p.value(QStringLiteral("candidateObjects")).toString().toStdString();
-            spec.excludeObjects   = p.value(QStringLiteral("excludeObjects")).toString().toStdString();
-            spec.soloObject       = p.value(QStringLiteral("soloObject")).toString().toStdString();
-            spec.cameraOverride   = p.value(QStringLiteral("cameraOverride")).toString().toStdString();
+            spec.candidateObjects     = p.value(QStringLiteral("candidateObjects")).toString().toStdString();
+            spec.excludeObjects       = p.value(QStringLiteral("excludeObjects")).toString().toStdString();
+            spec.soloObject           = p.value(QStringLiteral("soloObject")).toString().toStdString();
+            spec.cameraOverride       = p.value(QStringLiteral("cameraOverride")).toString().toStdString();
+            spec.materialOverride     = p.value(QStringLiteral("materialOverride")).toString().toStdString();
+            spec.shadowCatcherObjects = p.value(QStringLiteral("shadowCatcherObjects")).toString().toStdString();
+            spec.holdoutObjects       = p.value(QStringLiteral("holdoutObjects")).toString().toStdString();
+            spec.traceObjects         = p.value(QStringLiteral("traceObjects")).toString().toStdString();
             spec.aovs.reserve(aovList.size());
             for (const QString& a : aovList) spec.aovs.push_back(a.toStdString());
             activeSpecs.push_back(std::move(spec));
@@ -886,6 +1001,22 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
             fprintf(stderr, "[PassManager] Project cameras (%d):\n", (int)projCams.size());
             for (const auto& c : projCams) {
                 fprintf(stderr, "[PassManager]   fullName='%s'\n", c.fullName.c_str());
+            }
+        }
+    }
+
+    // Project-material diagnostic — every MaterialProvider node in the
+    // project tree that isn't a geo wrapper (i.e. genuine Material3D-like
+    // sources). Use these names verbatim in a pass's materialOverride.
+    {
+        std::vector<ProjectMaterialInfo> projMats;
+        enumerateProjectMaterials(callerEffect, projMats);
+        if (projMats.empty()) {
+            fprintf(stderr, "[PassManager] Project materials: <none found>\n");
+        } else {
+            fprintf(stderr, "[PassManager] Project materials (%d):\n", (int)projMats.size());
+            for (const auto& m : projMats) {
+                fprintf(stderr, "[PassManager]   fullName='%s'\n", m.fullName.c_str());
             }
         }
     }
@@ -993,7 +1124,7 @@ renderFrameForBatches(EffectInstance*                  effect,
     for (size_t i = 0; i < activeSpecs.size(); ++i) {
         batches[batchKeyFor(activeSpecs[i], allSceneGeo)].push_back(i);
     }
-    fprintf(stderr, "[PassManager] Frame %d — batching: %d active pass(es) → %d batch(es) (key=samples+lights+objects+camera)\n",
+    fprintf(stderr, "[PassManager] Frame %d — batching: %d active pass(es) → %d batch(es) (key=samples+lights+objects+camera+material+sc+ho+tr)\n",
             frame, (int)activeSpecs.size(), (int)batches.size());
 
     int batchesRendered = 0;
@@ -1011,6 +1142,7 @@ renderFrameForBatches(EffectInstance*                  effect,
         std::set<std::string> batchVisibleObjects;
         const bool batchObjScoped = resolveActiveObjects(batchHead, allSceneGeo, batchVisibleObjects);
         const std::string batchCamName = trimCopy(batchHead.cameraOverride);
+        const std::string batchMatName = trimCopy(batchHead.materialOverride);
 
         // Resolve the per-batch camera override (if any). An empty string
         // means "use the manager's input slot 2"; the helper handles that
@@ -1072,10 +1204,27 @@ renderFrameForBatches(EffectInstance*                  effect,
             }
             if (objectSummary.empty()) objectSummary = "<none>";
         }
-        fprintf(stderr, "[PassManager]   Batch %d/%d: samples=%d, lights=[%s], objects=[%s], cam=%s, %d pass(es): [%s], union AOVs=[%s]\n",
+        // Promotion summaries — built from the head spec's lists since
+        // every member shares them by batch-key construction.
+        auto joinList = [](const std::string& s) {
+            std::string out;
+            const std::set<std::string> set = parseNameList(s);
+            for (const auto& n : set) {
+                if (!out.empty()) out += ",";
+                out += n;
+            }
+            return out.empty() ? std::string("<none>") : out;
+        };
+        const std::string scSummary  = joinList(batchHead.shadowCatcherObjects);
+        const std::string hoSummary  = joinList(batchHead.holdoutObjects);
+        const std::string trSummary  = joinList(batchHead.traceObjects);
+        const std::string matSummary = batchMatName.empty() ? std::string("<none>") : batchMatName;
+        fprintf(stderr, "[PassManager]   Batch %d/%d: samples=%d, lights=[%s], objects=[%s], cam=%s, mat=%s, sc=[%s], ho=[%s], tr=[%s], %d pass(es): [%s], union AOVs=[%s]\n",
                 batchIdx, (int)batches.size(),
                 batchSamples, lightSummary.c_str(), objectSummary.c_str(),
                 batchCamName.empty() ? "<input2>" : batchCamName.c_str(),
+                matSummary.c_str(),
+                scSummary.c_str(), hoSummary.c_str(), trSummary.c_str(),
                 (int)specIdxs.size(),
                 memberList.c_str(), unionList.c_str());
 
@@ -1086,32 +1235,74 @@ renderFrameForBatches(EffectInstance*                  effect,
             if (!parent.isEmpty()) QDir().mkpath(parent);
         }
 
-        // Object scoping: when scoped, build a full ObjectVisibility map
-        // that covers EVERY scene object. The renderer treats "object
-        // present in the map" as a visibility flag carrier; "object
-        // missing from a non-null map" is implicit visibility(0). So an
-        // unscoped batch MUST pass nullptr (skip the filter entirely),
-        // while a scoped batch MUST enumerate every object explicitly.
+        // Object scoping + visibility promotions: when ANY of object
+        // scoping / shadow-catchers / holdouts / phantom (trace-only)
+        // is configured, we must build a full ObjectVisibility map
+        // covering EVERY scene object. The renderer treats "object
+        // present in a non-null map" as a visibility flag carrier;
+        // "object missing from a non-null map" is implicit
+        // visibility(0). An unscoped batch passes nullptr.
         //
-        // 0x7FF mirrors RenderPass.cpp's PATH_RAY_ALL_VISIBILITY — the
-        // constant is private to that translation unit, so the value is
-        // hard-coded here with this comment as a pointer.
+        // Promotion priority (per object):
+        //   excluded (from object scoping) > shadow catcher > holdout >
+        //   trace > default visible.
+        //
+        // 0x7FF mirrors RenderPass.cpp's PATH_RAY_ALL_VISIBILITY; 0x7FE
+        // is the same with PATH_RAY_CAMERA (bit 0) cleared, matching
+        // the phantom / trace-only convention.
+        const std::set<std::string> scSet = parseNameList(batchHead.shadowCatcherObjects);
+        const std::set<std::string> hoSet = parseNameList(batchHead.holdoutObjects);
+        const std::set<std::string> trSet = parseNameList(batchHead.traceObjects);
+        const bool batchHasVisMap =
+            batchObjScoped || !scSet.empty() || !hoSet.empty() || !trSet.empty();
+
         std::map<std::string, ObjectVisibility> batchVisMap;
-        if (batchObjScoped) {
+        if (batchHasVisMap) {
             for (const auto& g : allSceneGeo) {
                 ObjectVisibility v;
-                if (batchVisibleObjects.count(g.scriptName)) {
-                    v.rayVisibility   = 0x7FF; // PATH_RAY_ALL_VISIBILITY
-                    v.isHoldout       = false;
-                    v.isShadowCatcher = false;
-                    v.isExcluded      = false;
-                } else {
+                const bool inScope =
+                    !batchObjScoped || batchVisibleObjects.count(g.scriptName) > 0;
+                if (!inScope) {
                     v.rayVisibility   = 0;
-                    v.isHoldout       = false;
-                    v.isShadowCatcher = false;
                     v.isExcluded      = true;
+                } else if (scSet.count(g.scriptName)) {
+                    v.rayVisibility   = 0x7FF;
+                    v.isShadowCatcher = true;
+                } else if (hoSet.count(g.scriptName)) {
+                    v.rayVisibility   = 0x7FF;
+                    v.isHoldout       = true;
+                } else if (trSet.count(g.scriptName)) {
+                    v.rayVisibility   = 0x7FE; // ALL & ~PATH_RAY_CAMERA
+                } else {
+                    v.rayVisibility   = 0x7FF;
                 }
                 batchVisMap[g.scriptName] = v;
+            }
+        }
+
+        // Resolve the per-batch material override (if any). Same hard-fail
+        // semantics as cameraOverride — an unresolvable name aborts the
+        // batch with a clear stderr line rather than silently rendering
+        // with original materials. (batchMatName was hoisted up so the
+        // per-batch diagnostic line could include it.)
+        MaterialProvider* batchMatOverride = nullptr;
+        if (!batchMatName.empty()) {
+            AppInstancePtr app = effect ? effect->getApp() : AppInstancePtr();
+            NodePtr matNode;
+            if (app) matNode = app->getNodeByFullySpecifiedName(batchMatName);
+            EffectInstancePtr matFx = matNode ? matNode->getEffectInstance() : EffectInstancePtr();
+            if (matFx) {
+                MaterialProvider* mp = dynamic_cast<MaterialProvider*>(matFx.get());
+                if (mp && !mp->hasMaterialInput()) {
+                    batchMatOverride = mp;
+                }
+            }
+            if (!batchMatOverride) {
+                fprintf(stderr,
+                        "[PassManager]   SKIP batch %d :: materialOverride='%s' did not resolve to a MaterialProvider node (e.g. Material3D)\n",
+                        batchIdx, batchMatName.c_str());
+                anyFailure = true;
+                continue;
             }
         }
 
@@ -1168,9 +1359,10 @@ renderFrameForBatches(EffectInstance*                  effect,
         // actually scoped. An empty pointer means "all lights" — which is
         // distinct from an empty set (= "no lights at all"). The renderer
         // skips the filter check entirely when activeLights is nullptr.
-        if (batchScoped)      reqBatch.activeLights   = &batchActiveLights;
-        if (batchObjScoped)   reqBatch.visMap         = &batchVisMap;
-        if (batchCamOverride) reqBatch.cameraOverride = batchCamOverride;
+        if (batchScoped)      reqBatch.activeLights     = &batchActiveLights;
+        if (batchHasVisMap)   reqBatch.visMap           = &batchVisMap;
+        if (batchCamOverride) reqBatch.cameraOverride   = batchCamOverride;
+        if (batchMatOverride) reqBatch.materialOverride = batchMatOverride;
         if (settings) {
             if (batchDof.enabled) reqBatch.dof = &batchDof;
             if (batchMb.enabled)  reqBatch.mb  = &batchMb;
@@ -1263,6 +1455,29 @@ renderFrameForBatches(EffectInstance*                  effect,
     return anyFailure ? -1 : batchesRendered;
 }
 
+void
+CyclesRenderPassManager::discoverSceneObjects(std::vector<std::string>& outGeo,
+                                              std::vector<std::string>& outLights) const
+{
+    outGeo.clear();
+    outLights.clear();
+
+    double t = 0.;
+    if (getApp() && getApp()->getTimeLine()) {
+        t = getApp()->getTimeLine()->currentFrame();
+    }
+
+    // Reuse the same dynamic_cast walk the renderer uses, so the picker names
+    // match exactly what the ObjectVisibility map keys on at render time.
+    std::vector<SceneGeoInfo>   geo;
+    std::vector<SceneLightInfo> lights;
+    enumerateSceneGeo(const_cast<CyclesRenderPassManager*>(this), t, geo);
+    enumerateSceneLights(const_cast<CyclesRenderPassManager*>(this), t, lights);
+
+    for (size_t i = 0; i < geo.size(); ++i)    outGeo.push_back(geo[i].scriptName);
+    for (size_t i = 0; i < lights.size(); ++i) outLights.push_back(lights[i].scriptName);
+}
+
 bool
 CyclesRenderPassManager::knobChanged(KnobI* k,
                                      ValueChangedReasonEnum /*reason*/,
@@ -1272,7 +1487,7 @@ CyclesRenderPassManager::knobChanged(KnobI* k,
 {
     KnobButtonPtr reset = _imp->resetToDefault.lock();
     if (reset && reset.get() == k) {
-        KnobStringPtr passes = _imp->passesJson.lock();
+        KnobPassTablePtr passes = _imp->passesJson.lock();
         if (passes) {
             passes->setValue(kDefaultPassesJson);
         }
@@ -1281,7 +1496,7 @@ CyclesRenderPassManager::knobChanged(KnobI* k,
 
     KnobButtonPtr submit = _imp->renderToDisk.lock();
     if (submit && submit.get() == k) {
-        KnobStringPtr passes = _imp->passesJson.lock();
+        KnobPassTablePtr passes = _imp->passesJson.lock();
         if (!passes) return true;
         // Resolve the render time. Prefer the current timeline frame so
         // a button press doesn't render whatever stale frame value Natron
@@ -1307,6 +1522,100 @@ CyclesRenderPassManager::knobChanged(KnobI* k,
     return false;
 }
 
+// Map a Cycles pass name to its viewer plane. Mirrors CyclesRender's
+// passNameToPlane so the preview's layer names match the beauty renderer.
+static ImagePlaneDesc
+ppmPassNameToPlane(const std::string& name)
+{
+    if (name == "Combined") return ImagePlaneDesc::getRGBAComponents();
+    static const char* rgb3[] = {"R", "G", "B"};
+    static const char* rgba4[] = {"R", "G", "B", "A"};
+    if (name == "DiffDir")  return ImagePlaneDesc("DiffuseDirect",   "Diffuse Direct",   "", rgb3, 3);
+    if (name == "DiffInd")  return ImagePlaneDesc("DiffuseIndirect", "Diffuse Indirect", "", rgb3, 3);
+    if (name == "DiffCol")  return ImagePlaneDesc("DiffuseColor",    "Diffuse Color",    "", rgb3, 3);
+    if (name == "GlossDir") return ImagePlaneDesc("GlossyDirect",    "Glossy Direct",    "", rgb3, 3);
+    if (name == "GlossInd") return ImagePlaneDesc("GlossyIndirect",  "Glossy Indirect",  "", rgb3, 3);
+    if (name == "GlossCol") return ImagePlaneDesc("GlossyColor",     "Glossy Color",     "", rgb3, 3);
+    if (name == "TransDir") return ImagePlaneDesc("TransmissionDirect",   "Transmission Direct",   "", rgb3, 3);
+    if (name == "TransInd") return ImagePlaneDesc("TransmissionIndirect", "Transmission Indirect", "", rgb3, 3);
+    if (name == "TransCol") return ImagePlaneDesc("TransmissionColor",    "Transmission Color",    "", rgb3, 3);
+    if (name == "Emit")     return ImagePlaneDesc("Emission",        "Emission",         "", rgb3, 3);
+    if (name == "Env")      return ImagePlaneDesc("Environment",     "Environment",      "", rgb3, 3);
+    if (name == "Normal")   return ImagePlaneDesc("Normal",          "Normal",           "", rgb3, 3);
+    if (name == "UV")       return ImagePlaneDesc("UV",              "UV",               "", rgb3, 3);
+    if (name == "AO")       return ImagePlaneDesc("AO",              "Ambient Occlusion","", rgb3, 3);
+    if (name == "Depth")    return ImagePlaneDesc("Depth",           "Depth",            "", rgb3, 3);
+    if (name == "Mist")     return ImagePlaneDesc("Mist",            "Mist",             "", rgb3, 3);
+    if (name == "ShadowCatcherMatte")
+        return ImagePlaneDesc("ShadowCatcherMatte", "Shadow Catcher Matte", "", rgba4, 4);
+    if (name == "ShadowCatcher")
+        return ImagePlaneDesc("ShadowCatcher", "Shadow Catcher", "", rgb3, 3);
+    if (name == "ShadowCatcherSampleCount")
+        return ImagePlaneDesc("ShadowCatcherSampleCount", "SC Sample Count", "", rgb3, 3);
+    if (name.substr(0, 9) == "Combined_") {
+        const std::string grp = name.substr(9);
+        return ImagePlaneDesc("LightGroup_" + grp, "LightGroup " + grp, "", rgb3, 3);
+    }
+    return ImagePlaneDesc::getRGBAComponents();
+}
+
+// Read the currently-previewed pass's AOV names (skips tokens; ensures
+// "Combined" is present). Returns false if no valid preview pass.
+static bool
+ppmPreviewAovNames(const KnobIntWPtr& previewIdxKnob,
+                   const KnobPassTableWPtr& passesKnob,
+                   std::vector<std::string>& outAovs)
+{
+    outAovs.clear();
+    int idx = -1;
+    if (KnobIntPtr pk = previewIdxKnob.lock()) idx = pk->getValue();
+    if (idx < 0) return false;
+    KnobPassTablePtr pj = passesKnob.lock();
+    if (!pj) return false;
+
+    const QJsonDocument doc =
+        QJsonDocument::fromJson(QString::fromStdString(pj->getValue()).toUtf8());
+    if (!doc.isArray()) return false;
+    const QJsonArray arr = doc.array();
+    if (idx >= arr.size() || !arr[idx].isObject()) return false;
+
+    bool haveCombined = false;
+    const QJsonArray aovs = arr[idx].toObject().value(QStringLiteral("aovs")).toArray();
+    for (const QJsonValue& v : aovs) {
+        const std::string nm = v.toString().toStdString();
+        if (nm.empty() || nm[0] == '@') continue;   // skip magic tokens
+        if (nm == "Combined") haveCombined = true;
+        outAovs.push_back(nm);
+    }
+    if (!haveCombined) outAovs.insert(outAovs.begin(), std::string("Combined"));
+    return true;
+}
+
+void
+CyclesRenderPassManager::getComponentsNeededAndProduced(double /*time*/,
+                                                        ViewIdx /*view*/,
+                                                        EffectInstance::ComponentsNeededMap* comps,
+                                                        double* passThroughTime,
+                                                        int* passThroughView,
+                                                        int* passThroughInput)
+{
+    std::list<ImagePlaneDesc> produced;
+    produced.push_back(ImagePlaneDesc::getRGBAComponents());   // Color/Combined always
+
+    std::vector<std::string> aovs;
+    if (ppmPreviewAovNames(_imp->previewPassIndex, _imp->passesJson, aovs)) {
+        for (size_t i = 0; i < aovs.size(); ++i) {
+            if (aovs[i] == "Combined") continue;               // already added as Color
+            produced.push_back(ppmPassNameToPlane(aovs[i]));
+        }
+    }
+
+    (*comps)[-1] = produced;
+    *passThroughTime  = 0;
+    *passThroughView  = 0;
+    *passThroughInput = 0;
+}
+
 StatusEnum
 CyclesRenderPassManager::getRegionOfDefinition(U64 /*hash*/,
                                                 double /*time*/,
@@ -1314,34 +1623,180 @@ CyclesRenderPassManager::getRegionOfDefinition(U64 /*hash*/,
                                                 ViewIdx /*view*/,
                                                 RectD* rod)
 {
-    // Sink node — render() never produces image data. Project default RoD
-    // so the engine doesn't cache a failure (per
-    // feedback-natron-input-optional-required, an early failure here
-    // poisons the cache for later knob changes).
+    // Match the project/render format so a previewed pass shows at the right
+    // resolution. Falls back to 1920x1080 if the project has no default format.
+    int w = 1920, h = 1080;
+    resolveOutputDimensions(this, w, h);
     rod->x1 = 0; rod->y1 = 0;
-    rod->x2 = 1920; rod->y2 = 1080;
+    rod->x2 = w; rod->y2 = h;
     return eStatusOK;
 }
 
 StatusEnum
 CyclesRenderPassManager::render(const RenderActionArgs& args)
 {
-    // MVP step 1: write transparent black so any downstream viewer wired by
-    // mistake gets a defined image instead of garbage. Real work lives in
-    // the "Render to Disk" button handler (MVP step 3+), not the live
-    // render path.
     if (args.outputPlanes.empty()) return eStatusOK;
-    ImagePtr outImg = args.outputPlanes.front().second;
-    if (!outImg) return eStatusOK;
 
-    RectI bounds = outImg->getBounds();
-    int nComp = outImg->getComponents().getNumComponents();
-    Image::WriteAccess wa(outImg.get());
-    for (int y = bounds.y1; y < bounds.y2; ++y) {
-        for (int x = bounds.x1; x < bounds.x2; ++x) {
-            float* dst = (float*)wa.pixelAt(x, y);
-            if (!dst) continue;
-            for (int c = 0; c < nComp; ++c) dst[c] = 0.0f;
+    // --- Live preview of the selected pass, MULTI-PLANE (Step B) ---
+    // Render the selected pass once with ALL its AOVs, then fill each output
+    // plane from its matching pass buffer so the Viewer's layer dropdown lists
+    // them. previewPassIndex < 0 → no preview → every plane transparent black.
+    std::vector<std::string> aovs;
+    const bool hasPreview = ppmPreviewAovNames(_imp->previewPassIndex, _imp->passesJson, aovs);
+
+    std::map<std::string, std::vector<float> > buffers;
+    int srcW = 0, srcH = 0;
+
+    if (hasPreview) {
+        int previewIdx = -1;
+        if (KnobIntPtr pk = _imp->previewPassIndex.lock()) previewIdx = pk->getValue();
+        KnobPassTablePtr pj = _imp->passesJson.lock();
+        QJsonObject pass;
+        bool gotPass = false;
+        if (previewIdx >= 0 && pj) {
+            const QJsonDocument doc =
+                QJsonDocument::fromJson(QString::fromStdString(pj->getValue()).toUtf8());
+            if (doc.isArray()) {
+                const QJsonArray arr = doc.array();
+                if (previewIdx < arr.size() && arr[previewIdx].isObject()) {
+                    pass = arr[previewIdx].toObject();
+                    gotPass = true;
+                }
+            }
+        }
+        if (gotPass) {
+            int w = 1920, h = 1080;
+            resolveOutputDimensions(this, w, h);
+            const int samples = pass.value(QStringLiteral("samples")).toInt(128);
+
+            // Per-pass scoping → ObjectVisibility map (mirror of the disk
+            // path's renderFrameForBatches construction).
+            auto strOf = [&](const char* key) {
+                return trimCopy(pass.value(QLatin1String(key)).toString().toStdString());
+            };
+            const std::set<std::string> scSet = parseNameList(strOf("shadowCatcherObjects"));
+            const std::set<std::string> hoSet = parseNameList(strOf("holdoutObjects"));
+            const std::set<std::string> trSet = parseNameList(strOf("traceObjects"));
+            const std::set<std::string> cand  = parseNameList(strOf("candidateObjects"));
+            const std::set<std::string> excl  = parseNameList(strOf("excludeObjects"));
+            const std::string soloObj = strOf("soloObject");
+
+            std::vector<SceneGeoInfo> geo;
+            enumerateSceneGeo(this, args.time, geo);
+
+            std::set<std::string> visibleSet;
+            bool objScoped = false;
+            if (!soloObj.empty()) {
+                objScoped = true; visibleSet.insert(soloObj);
+            } else if (!cand.empty()) {
+                objScoped = true;
+                for (const auto& c : cand) if (!excl.count(c)) visibleSet.insert(c);
+            } else if (!excl.empty()) {
+                objScoped = true;
+                for (const auto& g : geo) if (!excl.count(g.scriptName)) visibleSet.insert(g.scriptName);
+            }
+
+            std::map<std::string, ObjectVisibility> visMap;
+            const bool hasVisMap =
+                objScoped || !scSet.empty() || !hoSet.empty() || !trSet.empty();
+            if (hasVisMap) {
+                for (const auto& g : geo) {
+                    ObjectVisibility v;
+                    const bool inScope = !objScoped || visibleSet.count(g.scriptName) > 0;
+                    if (!inScope) {
+                        v.rayVisibility = 0; v.isExcluded = true;
+                    } else if (scSet.count(g.scriptName)) {
+                        v.rayVisibility = 0x7FF; v.isShadowCatcher = true;
+                    } else if (hoSet.count(g.scriptName)) {
+                        v.rayVisibility = 0x7FF; v.isHoldout = true;
+                    } else if (trSet.count(g.scriptName)) {
+                        v.rayVisibility = 0x7FE; // ALL & ~CAMERA (phantom)
+                    } else {
+                        v.rayVisibility = 0x7FF;
+                    }
+                    visMap[g.scriptName] = v;
+                }
+            }
+
+            CyclesPassRequest req;
+            req.time            = args.time;
+            req.view            = args.view;
+            req.width           = w;
+            req.height          = h;
+            req.samples         = samples;
+            req.requestedPasses = aovs;        // render every AOV the pass declares
+            req.transparentBg   = false;
+            if (!visMap.empty()) req.visMap = &visMap;
+
+            std::string err;
+            if (renderCyclesPassesForEffect(this, req, buffers, err)) {
+                srcW = w; srcH = h;
+            } else {
+                fprintf(stderr, "[PassManager] preview render failed: %s\n", err.c_str());
+            }
+        }
+    }
+
+    // Fill each output plane from its matching pass buffer (mirror CyclesRender:
+    // no Y-flip, nearest-sample scale; Depth/Mist/AO broadcast to grayscale).
+    for (const auto& planePair : args.outputPlanes) {
+        const ImagePlaneDesc& planeDesc = planePair.first;
+        ImagePtr planeImg = planePair.second;
+        if (!planeImg) continue;
+
+        std::string passName;
+        for (size_t a = 0; a < aovs.size(); ++a) {
+            if (ppmPassNameToPlane(aovs[a]).getPlaneID() == planeDesc.getPlaneID()) {
+                passName = aovs[a];
+                break;
+            }
+        }
+        if (passName.empty() && planeDesc.getNumComponents() == 4) passName = "Combined";
+
+        const RectI bounds = planeImg->getBounds();
+        const int nComp = planeDesc.getNumComponents();
+        Image::WriteAccess wa(planeImg.get());
+
+        std::map<std::string, std::vector<float> >::const_iterator it =
+            passName.empty() ? buffers.end() : buffers.find(passName);
+
+        if (srcW <= 0 || srcH <= 0 || it == buffers.end() || it->second.empty()) {
+            for (int y = bounds.y1; y < bounds.y2; ++y) {
+                for (int x = bounds.x1; x < bounds.x2; ++x) {
+                    float* dst = (float*)wa.pixelAt(x, y);
+                    if (!dst) continue;
+                    for (int c = 0; c < nComp; ++c) dst[c] = 0.0f;
+                }
+            }
+            continue;
+        }
+
+        const std::vector<float>& src = it->second;
+        const int dstW = bounds.width();
+        const int dstH = bounds.height();
+        const bool gray = (passName == "Mist" || passName == "AO");
+        for (int y = bounds.y1; y < bounds.y2; ++y) {
+            for (int x = bounds.x1; x < bounds.x2; ++x) {
+                float* dst = (float*)wa.pixelAt(x, y);
+                if (!dst) continue;
+                const int fbX = x - bounds.x1;
+                const int fbY = y - bounds.y1;
+                int sx = (srcW == dstW) ? fbX : (fbX * srcW / dstW);
+                int sy = (srcH == dstH) ? fbY : (fbY * srcH / dstH);
+                if (sx >= srcW) sx = srcW - 1;
+                if (sy >= srcH) sy = srcH - 1;
+                const int sidx = (sy * srcW + sx) * 4;
+                float r = src[sidx + 0];
+                float g = src[sidx + 1];
+                float b = src[sidx + 2];
+                float a = src[sidx + 3];
+                if (passName == "Depth")      { if (r >= 1e9f) r = 0.0f; g = b = r; a = 1.0f; }
+                else if (gray)                { g = b = r; a = 1.0f; }
+                dst[0] = r;
+                if (nComp > 1) dst[1] = g;
+                if (nComp > 2) dst[2] = b;
+                if (nComp > 3) dst[3] = a;
+            }
         }
     }
     return eStatusOK;
