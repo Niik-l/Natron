@@ -48,6 +48,7 @@ public:
     virtual std::string getMaterialRoughnessMapFile() const { return std::string(); }
     virtual std::string getMaterialMetallicMapFile() const { return std::string(); }
     virtual std::string getMaterialEmissionMapFile() const { return std::string(); }
+    virtual std::string getMaterialTransmissionMapFile() const { return std::string(); }
     virtual double getMaterialNormalStrength(double /*time*/) const { return 1.0; }
 
     // Texture colorspace (for color textures — diffuse, emission)

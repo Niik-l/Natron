@@ -60,7 +60,7 @@ public:
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 5; }
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 6; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
@@ -102,6 +102,7 @@ public:
     virtual std::string getMaterialRoughnessMapFile() const OVERRIDE;
     virtual std::string getMaterialMetallicMapFile() const OVERRIDE;
     virtual std::string getMaterialEmissionMapFile() const OVERRIDE;
+    virtual std::string getMaterialTransmissionMapFile() const OVERRIDE;
     virtual double getMaterialNormalStrength(double time) const OVERRIDE;
     virtual std::string getMaterialDiffuseColorspace() const OVERRIDE;
     virtual std::string getMaterialEmissionColorspace() const OVERRIDE;

@@ -50,6 +50,7 @@ struct Material3DPrivate
     KnobFileWPtr roughnessMapFile;
     KnobFileWPtr metallicMapFile;
     KnobFileWPtr emissionMapFile;
+    KnobFileWPtr transmissionMapFile;
 
     // Texture colorspace
     KnobChoiceWPtr diffuseColorspace;
@@ -61,6 +62,7 @@ struct Material3DPrivate
     std::string bakedRoughnessPath;
     std::string bakedEmissionPath;
     std::string bakedNormalPath;
+    std::string bakedTransmissionPath;
 };
 
 Material3D::Material3D(NodePtr node)
@@ -83,6 +85,7 @@ Material3D::getInputLabel(int inputNb) const
         case 2: return "Roughness";
         case 3: return "Emission";
         case 4: return "Normal";
+        case 5: return "Transmission";
         default: return std::string();
     }
 }
@@ -215,6 +218,14 @@ Material3D::initializeKnobs()
         texPage->addKnob(k); _imp->roughnessMapFile = k;
     }
     {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Transmission Map"));
+        k->setName("transmissionMapFile");
+        k->setHintToolTip(tr("Grayscale transmission mask. Overrides the Transmission slider "
+                             "(white = glass/transparent, black = opaque). Or connect a 2D node "
+                             "to the Transmission input."));
+        texPage->addKnob(k); _imp->transmissionMapFile = k;
+    }
+    {
         KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Emission Map"));
         k->setName("emissionMapFile");
         k->setHintToolTip(tr("RGB emission texture. Multiplied by Emission Strength."));
@@ -309,6 +320,12 @@ std::string Material3D::getMaterialMetallicMapFile() const
 {
     if (!_imp->bakedMetallicPath.empty()) return _imp->bakedMetallicPath;
     KnobFilePtr k = _imp->metallicMapFile.lock(); return k ? k->getValue() : std::string();
+}
+
+std::string Material3D::getMaterialTransmissionMapFile() const
+{
+    if (!_imp->bakedTransmissionPath.empty()) return _imp->bakedTransmissionPath;
+    KnobFilePtr k = _imp->transmissionMapFile.lock(); return k ? k->getValue() : std::string();
 }
 
 std::string Material3D::getMaterialEmissionMapFile() const
@@ -437,15 +454,16 @@ renderInputToFile(EffectInstance* input, double time, const std::string& outPath
 void
 Material3D::bakeInputTextures(double time)
 {
-    // Input mapping: 0=Diffuse, 1=Metallic, 2=Roughness, 3=Emission, 4=Normal
-    std::string* paths[5] = {
+    // Input mapping: 0=Diffuse, 1=Metallic, 2=Roughness, 3=Emission, 4=Normal,
+    // 5=Transmission
+    std::string* paths[6] = {
         &_imp->bakedDiffusePath, &_imp->bakedMetallicPath,
         &_imp->bakedRoughnessPath, &_imp->bakedEmissionPath,
-        &_imp->bakedNormalPath
+        &_imp->bakedNormalPath, &_imp->bakedTransmissionPath
     };
-    const char* names[5] = {"diffuse", "metallic", "roughness", "emission", "normal"};
+    const char* names[6] = {"diffuse", "metallic", "roughness", "emission", "normal", "transmission"};
 
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         paths[i]->clear();
         EffectInstancePtr input = getInput(i);
         if (!input) continue;
