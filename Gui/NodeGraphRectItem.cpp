@@ -35,6 +35,7 @@ NodeGraphRectItem::NodeGraphRectItem(QGraphicsItem *parent,
                                      int cornerRadiusPx)
 : QGraphicsRectItem(parent)
 , _cornerRadiusPx(cornerRadiusPx)
+, _flat(false)
 {
 }
 
@@ -43,12 +44,17 @@ NodeGraphRectItem::paint(QPainter *painter, const QStyleOptionGraphicsItem* /*op
 {
     painter->setPen(pen());
 
-    // Apply a subtle top-to-bottom gradient over the node's base color
-    QColor baseColor = brush().color();
-    QLinearGradient gradient(rect().topLeft(), rect().bottomLeft());
-    gradient.setColorAt(0.0, baseColor.lighter(130));  // lighter at top
-    gradient.setColorAt(1.0, baseColor.darker(120));   // darker at bottom
-    painter->setBrush(QBrush(gradient));
+    if (_flat) {
+        // Flat fill: show the picked color exactly, no gradient (Backdrop, Nuke-style).
+        painter->setBrush(brush());
+    } else {
+        // Apply a subtle top-to-bottom gradient over the node's base color
+        QColor baseColor = brush().color();
+        QLinearGradient gradient(rect().topLeft(), rect().bottomLeft());
+        gradient.setColorAt(0.0, baseColor.lighter(130));  // lighter at top
+        gradient.setColorAt(1.0, baseColor.darker(120));   // darker at bottom
+        painter->setBrush(QBrush(gradient));
+    }
 
     painter->drawRoundedRect(rect(), _cornerRadiusPx, _cornerRadiusPx);
 }

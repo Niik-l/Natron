@@ -620,6 +620,12 @@ NodeGui::createGui()
     const QString& iconFilePath = node->getPlugin()->getIconFilePath();
     BackdropGui* isBd = dynamic_cast<BackdropGui*>(this);
 
+    if (isBd) {
+        // Backdrops render as a flat color (no gradient) so the picked color shows
+        // exactly, Nuke-style.
+        _boundingBox->setFlat(true);
+    }
+
     if ( !isBd && !iconFilePath.isEmpty() && appPTR->getCurrentSettings()->isPluginIconActivatedOnNodeGraph() ) {
         _pluginIcon = new NodeGraphPixmapItem(getDagGui(), this);
         _pluginIcon->setZValue(depth + 1);

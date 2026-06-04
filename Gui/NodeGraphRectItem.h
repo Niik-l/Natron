@@ -44,6 +44,7 @@ class NodeGraphRectItem
 : public QGraphicsRectItem
 {
     int _cornerRadiusPx;
+    bool _flat;
 public:
 
     NodeGraphRectItem(QGraphicsItem *parent,
@@ -57,6 +58,13 @@ public:
     void setCornerRadiusPx(int cornerRadiusPx)
     {
         _cornerRadiusPx = cornerRadiusPx;
+    }
+
+    // When flat, the rect is filled with its plain brush color (no top-to-bottom
+    // gradient). Used by Backdrop nodes so the picked color shows exactly, Nuke-style.
+    void setFlat(bool flat)
+    {
+        _flat = flat;
     }
 
     virtual void paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWidget *widget) OVERRIDE FINAL;
