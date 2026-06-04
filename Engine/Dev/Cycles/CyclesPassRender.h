@@ -35,9 +35,10 @@
 #include "../../EngineFwd.h"
 
 #include "CyclesRenderer.h"
-#include "../Scene3D/RenderPass.h"     // ObjectVisibility, RenderPass*
-#include "../Scene3D/CameraProvider.h" // CameraProvider (global scope)
-#include "../Scene3D/SceneGraph.h"     // SceneGraph (held by CyclesPassPrepared)
+#include "../Scene3D/RenderPass.h"       // ObjectVisibility, RenderPass*
+#include "../Scene3D/CameraProvider.h"   // CameraProvider (global scope)
+#include "../Scene3D/MaterialProvider.h" // MaterialProvider (global scope)
+#include "../Scene3D/SceneGraph.h"       // SceneGraph (held by CyclesPassPrepared)
 
 NATRON_NAMESPACE_ENTER
 
@@ -83,6 +84,12 @@ struct CyclesPassRequest
     // The caller is responsible for validating the pointer (and producing a
     // clear error if the override was requested but no such node exists).
     const CameraProvider*                          cameraOverride = nullptr;
+
+    // Per-pass material override. When non-null, the renderer uses this
+    // MaterialProvider's shader for every mesh in the scene — the standard
+    // clay-render / shadow-pass pattern. Particles, volumes, and other
+    // renderables with their own shader paths are unaffected.
+    MaterialProvider*                              materialOverride = nullptr;
 };
 
 // Resolved inputs ready for Cycles execution. Filled by
@@ -111,6 +118,12 @@ struct CyclesPassPrepared
     // lifetime of the EffectInstance graph the prepared struct was built
     // against.
     RenderPass* renderPass = nullptr;
+
+    // Script names of geo connected to the CyclesRender "holdout" input
+    // (slot 4). These nodes are added to the scene AND flagged as Cycles
+    // holdouts (set_use_holdout) so they punch a transparent matte in the
+    // output instead of being shaded. Empty when no holdout input is wired.
+    std::set<std::string> holdoutNames;
 };
 
 // Step 1 of the two-step render. Walks the effect's obj input

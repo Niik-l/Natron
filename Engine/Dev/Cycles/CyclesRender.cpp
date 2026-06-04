@@ -143,6 +143,7 @@ CyclesRender::getInputLabel(int inputNb) const
         case 1: return "obj/scn";
         case 2: return "cam";
         case 3: return "settings";
+        case 4: return "holdout";
         default: return "";
     }
 }
@@ -150,7 +151,8 @@ CyclesRender::getInputLabel(int inputNb) const
 bool
 CyclesRender::isInputOptional(int inputNb) const
 {
-    return (inputNb == 0 || inputNb == 2 || inputNb == 3);
+    // Everything except the obj/scn input (1) is optional.
+    return (inputNb != 1);
 }
 
 void

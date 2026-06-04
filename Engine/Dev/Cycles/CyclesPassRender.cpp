@@ -23,6 +23,7 @@
 #include "CyclesPassRender.h"
 
 #include <memory>
+#include <set>
 
 #include "../../Node.h"
 
@@ -36,6 +37,48 @@
 #include "../Scene3D/SceneGraph.h"
 
 NATRON_NAMESPACE_ENTER
+
+// Recursively collect a scene container's nodes. Scene3D / Group3D nest
+// arbitrarily (e.g. Lights -> Group3D -> Scene3D -> render), so we must descend
+// through EVERY container input — not just one level — or nodes inside a nested
+// group never reach the SceneGraph and silently don't render. Non-container
+// nodes (lights, geo) are added but not descended into. `seen` dedups nodes
+// reachable via multiple paths and guards against cycles.
+// Follow input 0 through any chain of Dot routing nodes, returning the first
+// non-Dot effect (or null). Dots are pure pass-throughs in the node graph.
+static EffectInstancePtr
+skipDots(EffectInstancePtr eff)
+{
+    while (eff && eff->getPluginID() == PLUGINID_NATRON_DOT) {
+        eff = eff->getInput(0);
+    }
+    return eff;
+}
+
+static void
+collectSceneNodes(EffectInstance* eff, NodesList& out, std::set<EffectInstance*>& seen)
+{
+    if (!eff || seen.count(eff)) return;
+    seen.insert(eff);
+
+    // See through Dot routing nodes — they're transparent (input 0), so don't
+    // add the Dot itself, just continue from what it points at.
+    if (eff->getPluginID() == PLUGINID_NATRON_DOT) {
+        EffectInstancePtr inp = eff->getInput(0);
+        if (inp) collectSceneNodes(inp.get(), out, seen);
+        return;
+    }
+
+    if (NodePtr n = eff->getNode()) out.push_back(n);
+
+    Scene3D* s = dynamic_cast<Scene3D*>(eff);
+    Group3D* g = dynamic_cast<Group3D*>(eff);
+    const int maxIn = s ? SCENE3D_MAX_INPUTS : (g ? GROUP3D_MAX_INPUTS : 0);
+    for (int i = 0; i < maxIn; ++i) {
+        EffectInstancePtr inp = eff->getInput(i);
+        if (inp) collectSceneNodes(inp.get(), out, seen);
+    }
+}
 
 bool
 prepareCyclesPasses(EffectInstance*           effect,
@@ -51,37 +94,47 @@ prepareCyclesPasses(EffectInstance*           effect,
         return false;
     }
 
-    // --- Walk obj input (slot 1) + optional RenderPass wrapper.
-    EffectInstancePtr geoEffect = effect->getInput(1);
+    // --- Walk obj input (slot 1) + optional RenderPass wrapper, seeing through
+    // any Dot routing nodes at each hop.
+    EffectInstancePtr geoEffect = skipDots(effect->getInput(1));
     if (!geoEffect) {
         errOut = "no obj/scene connected on slot 1";
         return false;
     }
     out.renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
     if (out.renderPass) {
-        geoEffect = out.renderPass->getInput(0);
+        geoEffect = skipDots(out.renderPass->getInput(0));
         if (!geoEffect) {
             errOut = "RenderPass has nothing on its input 0 (scene)";
             return false;
         }
     }
 
-    // --- Collect all top-level scene nodes, accounting for Scene3D /
-    // Group3D containers that have many sub-inputs each.
+    // --- Collect all scene nodes, descending recursively through nested
+    // Scene3D / Group3D containers (Lights -> Group3D -> Scene3D -> render).
+    // A one-level walk missed nodes inside a nested group, so grouped lights /
+    // geo never rendered.
     NodesList allNodes;
-    allNodes.push_back(geoEffect->getNode());
-    Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
-    if (scene3d) {
-        for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
-            EffectInstancePtr inp = scene3d->getInput(i);
-            if (inp) allNodes.push_back(inp->getNode());
-        }
-    }
-    Group3D* group3d = dynamic_cast<Group3D*>(geoEffect.get());
-    if (group3d) {
-        for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
-            EffectInstancePtr inp = group3d->getInput(i);
-            if (inp) allNodes.push_back(inp->getNode());
+    std::set<EffectInstance*> seen;
+    collectSceneNodes(geoEffect.get(), allNodes, seen);
+
+    // --- Holdout input (CyclesRender slot 4): geo wired here is added to the
+    // scene AND flagged as a Cycles holdout, so it punches a transparent matte
+    // of its shape. Other render entry points (PassManager) have no slot 4 →
+    // getInput(4) is null → no holdouts. Names are always flagged; nodes are
+    // added to the scene via the shared `seen` set so a node present on both
+    // the scene and holdout inputs isn't duplicated.
+    if (EffectInstancePtr holdoutEff = effect->getInput(4)) {
+        NodesList holdoutNodes;
+        std::set<EffectInstance*> hseen;
+        collectSceneNodes(holdoutEff.get(), holdoutNodes, hseen);
+        for (NodesList::const_iterator it = holdoutNodes.begin(); it != holdoutNodes.end(); ++it) {
+            if (!*it) continue;
+            out.holdoutNames.insert((*it)->getScriptName());     // always flag
+            EffectInstancePtr fx = (*it)->getEffectInstance();
+            if (fx && seen.insert(fx.get()).second) {
+                allNodes.push_back(*it);                         // add once
+            }
         }
     }
 
@@ -167,7 +220,9 @@ executeCyclesPasses(CyclesRenderer&            renderer,
         req.activeLights,
         req.dof,
         req.mb,
-        req.integrator);
+        req.integrator,
+        req.materialOverride,
+        prepared.holdoutNames.empty() ? nullptr : &prepared.holdoutNames);
 
     if (!ok || outBuffers.empty()) {
         errOut = "renderToBufferWithCameraMultiPass returned no buffers";
@@ -203,29 +258,18 @@ enumerateSceneLights(EffectInstance*              effect,
     // Same traversal as the renderer: input 1 → through RenderPass →
     // Scene3D / Group3D containers. We collect every node we visit and
     // then filter to Light3D via dynamic_cast.
-    EffectInstancePtr geoEffect = effect->getInput(1);
+    EffectInstancePtr geoEffect = skipDots(effect->getInput(1));
     if (!geoEffect) return;
     RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
     if (renderPass) {
-        geoEffect = renderPass->getInput(0);
+        geoEffect = skipDots(renderPass->getInput(0));
         if (!geoEffect) return;
     }
 
     NodesList allNodes;
-    allNodes.push_back(geoEffect->getNode());
-    Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
-    if (scene3d) {
-        for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
-            EffectInstancePtr inp = scene3d->getInput(i);
-            if (inp) allNodes.push_back(inp->getNode());
-        }
-    }
-    Group3D* group3d = dynamic_cast<Group3D*>(geoEffect.get());
-    if (group3d) {
-        for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
-            EffectInstancePtr inp = group3d->getInput(i);
-            if (inp) allNodes.push_back(inp->getNode());
-        }
+    {
+        std::set<EffectInstance*> seen;
+        collectSceneNodes(geoEffect.get(), allNodes, seen);
     }
 
     for (const NodePtr& n : allNodes) {
@@ -249,29 +293,18 @@ enumerateSceneGeo(EffectInstance*            effect,
     out.clear();
     if (!effect) return;
 
-    EffectInstancePtr geoEffect = effect->getInput(1);
+    EffectInstancePtr geoEffect = skipDots(effect->getInput(1));
     if (!geoEffect) return;
     RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
     if (renderPass) {
-        geoEffect = renderPass->getInput(0);
+        geoEffect = skipDots(renderPass->getInput(0));
         if (!geoEffect) return;
     }
 
     NodesList allNodes;
-    allNodes.push_back(geoEffect->getNode());
-    Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
-    if (scene3d) {
-        for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
-            EffectInstancePtr inp = scene3d->getInput(i);
-            if (inp) allNodes.push_back(inp->getNode());
-        }
-    }
-    Group3D* group3d = dynamic_cast<Group3D*>(geoEffect.get());
-    if (group3d) {
-        for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
-            EffectInstancePtr inp = group3d->getInput(i);
-            if (inp) allNodes.push_back(inp->getNode());
-        }
+    {
+        std::set<EffectInstance*> seen;
+        collectSceneNodes(geoEffect.get(), allNodes, seen);
     }
 
     for (const NodePtr& n : allNodes) {
