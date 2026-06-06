@@ -200,6 +200,33 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
 
     mainLayout->addWidget(toolbar);
 
+    // ==================== Second toolbar row (viewport actions) ============
+    // A spare row for object/viewport actions; add future buttons here.
+    {
+        QWidget* toolbar2 = new QWidget(this);
+        toolbar2->setFixedHeight(26);
+        QHBoxLayout* toolbar2Layout = new QHBoxLayout(toolbar2);
+        toolbar2Layout->setContentsMargins(4, 2, 4, 2);
+        toolbar2Layout->setSpacing(4);
+
+        QToolButton* isolateBtn = new QToolButton(toolbar2);
+        isolateBtn->setText(QString::fromUtf8("Isolate Selected"));
+        isolateBtn->setToolTip(QString::fromUtf8("Show only the selected object (and its children) in the viewport. "
+                                                 "Toggle off to show everything again."));
+        isolateBtn->setCheckable(true);
+        isolateBtn->setFixedHeight(22);
+        // Lambda connect (no new slot → no moc change needed). _viewport is set
+        // just below and is valid by the time the user can click.
+        connect(isolateBtn, &QToolButton::toggled, this, [this](bool on) {
+            if (_viewport) {
+                _viewport->setIsolateSelected(on);
+            }
+        });
+        toolbar2Layout->addWidget(isolateBtn);
+        toolbar2Layout->addStretch();
+        mainLayout->addWidget(toolbar2);
+    }
+
     // ==================== 3D Viewport ====================
     _viewport = new DevViewport3D(gui);
     mainLayout->addWidget(_viewport, 1); // stretch factor 1 = takes all remaining space

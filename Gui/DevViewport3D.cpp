@@ -426,6 +426,10 @@ struct DevViewport3DPrivate
     std::string selectedNodeName;
     int selectedCardIndex;
 
+    // Isolate Selected: when true, only the selected node (and its descendants)
+    // is drawn in the viewport. Toggled from the Viewport3DTab toolbar.
+    bool isolateSelected;
+
     // Point selection
     int selectedPointIndex;          // -1 = none
     std::string selectedPointCloud;  // name of the point cloud node
@@ -508,6 +512,7 @@ struct DevViewport3DPrivate
         , imguizmoOp(ImGuizmo::TRANSLATE)
         , imguizmoMode(ImGuizmo::WORLD)
         , selectedCardIndex(-1)
+        , isolateSelected(false)
         , selectedPointIndex(-1)
         , boxSelecting(false)
         , boxStartX(0), boxStartY(0)
@@ -1128,6 +1133,17 @@ DevViewport3D::paintGL()
     for (size_t i = 0; i < sceneNodes.size(); ++i) {
         const SceneNode& sn = sceneNodes[i];
         if (!sn.visible) continue;
+        // Isolate Selected: when active AND something is selected, draw only the
+        // selected node and its descendants (archive sub-entries are named
+        // "<selected>/..."). Nothing selected => isolate is a no-op (draw all).
+        if (_imp->isolateSelected && !_imp->selectedNodeName.empty()) {
+            const std::string& sel = _imp->selectedNodeName;
+            const bool isSel = (sn.name == sel);
+            const bool isDescendant = (sn.name.size() > sel.size() &&
+                                       sn.name.compare(0, sel.size(), sel) == 0 &&
+                                       sn.name[sel.size()] == '/');
+            if (!isSel && !isDescendant) continue;
+        }
         NodePtr node = sn.sourceNode.lock();
         if (!node) continue;
 
@@ -1857,6 +1873,20 @@ DevViewport3D::setShadingMode(DevViewport3D::ShadingMode mode)
     if (_imp->shadingMode == mode) return;
     _imp->shadingMode = mode;
     update();
+}
+
+void
+DevViewport3D::setIsolateSelected(bool enabled)
+{
+    if (_imp->isolateSelected == enabled) return;
+    _imp->isolateSelected = enabled;
+    update();
+}
+
+bool
+DevViewport3D::isIsolateSelected() const
+{
+    return _imp->isolateSelected;
 }
 
 DevViewport3D::ShadingMode

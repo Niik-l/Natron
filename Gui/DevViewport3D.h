@@ -124,6 +124,11 @@ public:
     void setShadingMode(ShadingMode mode);
     ShadingMode getShadingMode() const;
 
+    // Isolate Selected — when enabled, only the selected node (and its
+    // descendants) is drawn. Toggled from the Viewport3DTab toolbar.
+    void setIsolateSelected(bool enabled);
+    bool isIsolateSelected() const;
+
 private:
 
     virtual void initializeGL() OVERRIDE FINAL;
