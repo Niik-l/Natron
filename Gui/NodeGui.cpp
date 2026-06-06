@@ -832,7 +832,10 @@ NodeGui::removeSettingsPanel()
 void
 NodeGui::refreshSize()
 {
-    QRectF bbox = boundingRect();
+    // Use the exact box rect, not boundingRect() — the latter adds the pen-width
+    // margin, which fed back through resize() and crept the node wider on every
+    // call (the Read-node-grows-on-scrub bug).
+    QRectF bbox = _boundingBox->rect();
 
     QString& label = _nodeLabel;
     resize( bbox.width(), bbox.height(), false, !label.isEmpty() );
@@ -878,6 +881,13 @@ NodeGui::adjustSizeToContent(int* /*w*/,
                              int *h,
                              bool adjustToTextSize)
 {
+    // Width is intentionally left untouched here: node widths stay uniform
+    // (NODE_WIDTH / preview width) rather than fitting the label text — a long
+    // label (e.g. a Read node's filename) overflows the box instead of widening
+    // it. Callers pass the node's exact box width (_boundingBox->rect()), not
+    // boundingRect() (which adds the pen margin and used to creep wider on every
+    // label change — visible as the Read node growing while scrubbing). Only the
+    // height is fit to content.
     QRectF labelBbox = _nameItem->boundingRect();
 
     if (adjustToTextSize) {
@@ -3145,7 +3155,10 @@ NodeGui::setNameItemHtml(const QString & name,
     _nameItem->adjustSize();
 
 
-    QRectF bbox = boundingRect();
+    // Exact box rect (not boundingRect(), which adds the pen margin and crept the
+    // width on every label change — the Read-node-grows-on-scrub bug). Width
+    // stays uniform; adjustSizeToContent only re-fits the height to the new text.
+    QRectF bbox = _boundingBox->rect();
     resize( bbox.width(), bbox.height(), false, !label.isEmpty() );
 } // setNameItemHtml
 
