@@ -110,6 +110,33 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
 
+### Completed (2026-06-06) — Material override + archive transform + viewport isolate + fixes
+
+- **GeoMaterialOverride ("Material Override") node** — per-sub-object materials on a
+  ReadAlembicArchive without duplicating geo. `archive → Material Override → Scene`;
+  Geo (input 0) passthrough + Mat (input 1). `surfaces` knob lists archive paths
+  (exact / ancestor / bare-leaf match). Decorator: `SceneGraph::rebuild` tags
+  `SceneNode.materialNode`; `collectSceneNodes` descends the Geo input; renderer
+  precedence = downstream override > per-part > archive base. Disabled node bypasses.
+- **Surface picker** — `Gui/MaterialOverridePickerWidget` (checkable tree from the
+  connected archive, writes the `surfaces` knob), injected via
+  `NodeSettingsPanel::initializeExtraGui`. No Q_OBJECT (lambda connects).
+- **Render-cache fix** — CyclesRender scene hash now includes the per-part override
+  (flag + override material params) so Surfaces/material edits re-render.
+- **CyclesRender "Refresh Passes" button** — clears cache + refreshes metadata +
+  re-renders viewers, for when a toggled AOV doesn't propagate without scrubbing.
+- **AlembicTreeWidget crash fix** — unticking a surface freed the clicked item mid
+  `itemChanged` (self-induced reload → `_tree->clear()`); guarded with
+  `_applyingExcluded`. Files: `Gui/MaterialOverridePickerWidget.{h,cpp}`,
+  `Engine/Dev/Scene3D/GeoMaterialOverride.{h,cpp}`, `GEO_MATERIAL_OVERRIDE_DESIGN.md`.
+- **ReadAlembicArchive Transform tab** — Translate/Rotate/Scale + Uniform Scale on
+  the archive root SceneNode → scales/moves the whole archive (worldMatrix
+  propagation). `ReadAlembicArchive.cpp` + `SceneGraph.cpp`.
+- **3D viewport "Isolate Selected"** — new second toolbar row + toggle; draws only
+  the selected node + descendants. `Gui/Viewport3DTab.cpp`, `Gui/DevViewport3D.{h,cpp}`.
+- **Read node grow-on-scrub fix** — `NodeGui::adjustSizeToContent` fits width to
+  content deterministically (no `boundingRect()` pen-margin creep). `Gui/NodeGui.cpp`.
+
 ### Completed (2026-06-04) — Geo auto-load on project open + viewport / review QoL
 
 - **Geometry & Alembic nodes load on project open** — `ReadGeo`,

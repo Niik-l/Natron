@@ -17,6 +17,59 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Per-geo material override + archive transform + viewport isolate + node/tree fixes (2026-06-06)** —
+  - **GeoMaterialOverride ("Material Override") node** — assigns a different
+    material to specific sub-objects of an upstream `ReadAlembicArchive` without
+    duplicating geometry. Sits in the geo chain (`archive → Material Override →
+    Scene`): input 0 = Geo (passed through), input 1 = Mat. The `surfaces` knob
+    lists archive paths (matched exact / ancestor / bare-leaf-name, so the names
+    shown in the tree work). A pure decorator — `SceneGraph::rebuild` pre-scans
+    override nodes and tags each matching `SceneNode.materialNode` (new field);
+    `collectSceneNodes` descends the override's Geo input so the archive behind it
+    is still collected. `CyclesRenderer`'s per-node shader pick uses
+    `sn.materialNode`; precedence is **downstream/per-pass override → per-part
+    override → archive base material**. Disabling the node (`isNodeDisabled()`)
+    bypasses the override (geo still flows). Chain several for several materials.
+  - **Surface picker UI** — `Gui/MaterialOverridePickerWidget` (added to the node
+    panel via `NodeSettingsPanel::initializeExtraGui`, mirroring the archive's
+    tree) shows a checkable hierarchy read from the connected archive; ticking
+    writes full paths into the `surfaces` knob — point-and-click instead of typing.
+    Built without `Q_OBJECT` (lambda connections) so there's no moc to generate.
+  - **Render-cache correctness** — `CyclesRender`'s scene hash now incorporates
+    the per-part override (a flag + the override material's params, mirroring the
+    renderer's precedence), so editing the Surfaces list or the override material
+    busts the cache and re-renders (it was serving stale before).
+  - **CyclesRender "Refresh Passes" button** (AOV tab) — clears the internal cache,
+    re-runs metadata to re-publish the output planes, and forces the viewers to
+    re-render, for when a toggled AOV doesn't propagate without scrubbing.
+  - **AlembicTreeWidget re-entrancy crash fix** — unticking a surface wrote the
+    `excludedPaths` knob, which synchronously reloaded the archive and emitted
+    `archiveReloaded` → `refresh()` → `_tree->clear()`, freeing the clicked item
+    *inside* its own `itemChanged` signal → use-after-free SIGSEGV in Qt's
+    item-view (the long-standing "crash on scrub/untick"). Fixed with an
+    `_applyingExcluded` guard so the self-induced reload skips the tree rebuild
+    (the entry set is unchanged — only the visibility filter).
+  - **ReadAlembicArchive user transform** — new "Transform" tab (Translate /
+    Rotate / Scale X/Y/Z + a **Uniform Scale**), applied to the archive's root
+    `SceneNode` in `SceneGraph::rebuild` so it propagates to every entry via the
+    worldMatrix chain (scale/move the whole archive when its geo comes in at the
+    wrong scale). Read by knob name → archives saved before this load at identity;
+    animatable; composes with a parent Group3D. Works in viewport + Cycles for
+    free (both read worldMatrix; the Cycles cache already hashes it).
+  - **3D viewport "Isolate Selected"** — new second toolbar row in
+    `Viewport3DTab` (room for future buttons) with an Isolate toggle. When on,
+    `DevViewport3D` draws only the selected node + its descendants (archive
+    sub-entries are `selected/...`); nothing selected = no-op. Viewport-only
+    (doesn't affect the Cycles render); grid stays visible.
+  - **Read node no longer grows on scrub** — `NodeGui::adjustSizeToContent` now
+    derives the width deterministically from content (icon + label, or preview)
+    instead of feeding `boundingRect()` back in. `QGraphicsRectItem::boundingRect()`
+    includes the pen-width margin, so the old feedback crept the node wider on
+    every label change — and a Read node updates its sublabel to the current
+    frame's filename every frame, so scrubbing ballooned it. Affects only
+    sublabel-bearing nodes (Read/Write/Merge); they now size-to-fit stably.
+  - Design + revert notes: `GEO_MATERIAL_OVERRIDE_DESIGN.md`.
+
 - **Geo auto-load on project open + viewport / review QoL (2026-06-04)** —
   - **Geometry & Alembic nodes load on project open** — `ReadGeo`,
     `ReadAlembicArchive`, `ReadAlembicCamera`, and `ReadAlembicTransform` only
