@@ -87,6 +87,12 @@ struct SceneNode {
     // motion-blur path to re-query upstream at sub-frame times.
     int archiveEntryIdx;
 
+    // Per-part material override (GeoMaterialOverride). When non-null, the
+    // renderer shades this node with this node's material instead of the source
+    // node's own material. Null = use the source node's material. Set during
+    // SceneGraph::rebuild when a GeoMaterialOverride lists this entry's path.
+    NodeWPtr materialNode;
+
     SceneNode()
         : type(eSceneNodeGroup)
         , parentIndex(-1)

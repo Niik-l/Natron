@@ -45,6 +45,9 @@
 #include "ReadAlembicTransform.h"
 #include "ReadAlembicArchive.h"
 #include "ReadGeo.h"
+#include "GeoMaterialOverride.h"
+
+#include <set>
 #include "../../KnobTypes.h"
 
 #ifndef M_PI
@@ -168,6 +171,49 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
 
     // Name → index map for Pass 2
     std::map<std::string, int> nameToIndex;
+
+    // ===== Per-part material overrides (GeoMaterialOverride nodes) =====
+    // Pre-scan all nodes for GeoMaterialOverride decorators. Each maps a set of
+    // archive sub-object paths → a material node, scoped to a target geo source
+    // (the archive reached by walking input 0 through Dots / chained overrides).
+    // During the archive's per-entry emission below, an entry whose full path is
+    // listed gets its SceneNode.materialNode set. Keyed by the target geo's
+    // EffectInstance* so we can match it against the archive being emitted.
+    struct MatOverrideRule {
+        std::set<std::string> paths;
+        NodeWPtr matNode;
+    };
+    std::map<EffectInstance*, std::vector<MatOverrideRule> > matOverrides;
+    for (NodesList::const_iterator it = allNodes.begin(); it != allNodes.end(); ++it) {
+        NodePtr onode = *it;
+        if (!onode || !onode->isActivated()) continue;
+        // A disabled (bypassed) Material Override applies no material — the geo
+        // still passes through (collectSceneNodes recurses its Geo input), it just
+        // reverts to the source's base material.
+        if (onode->isNodeDisabled()) continue;
+        EffectInstancePtr oeff = onode->getEffectInstance();
+        GeoMaterialOverride* ov = dynamic_cast<GeoMaterialOverride*>(oeff.get());
+        if (!ov) continue;
+
+        // Resolve the target geo: walk input 0 through Dots and chained overrides.
+        EffectInstancePtr geo = ov->getInput(0);
+        while (geo) {
+            if (geo->getPluginID() == PLUGINID_NATRON_DOT) { geo = geo->getInput(0); continue; }
+            if (dynamic_cast<GeoMaterialOverride*>(geo.get())) { geo = geo->getInput(0); continue; }
+            break;
+        }
+        if (!geo) continue;
+
+        EffectInstancePtr mat = ov->getInput(1);
+        NodePtr matNode = mat ? mat->getNode() : NodePtr();
+        if (!matNode) continue;
+
+        MatOverrideRule rule;
+        ov->getSurfacePaths(rule.paths);
+        if (rule.paths.empty()) continue;
+        rule.matNode = matNode;
+        matOverrides[geo.get()].push_back(rule);
+    }
 
     // ===== PASS 1: Discover nodes and extract local transforms =====
 
@@ -310,7 +356,33 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             root.type = eSceneNodeGroup;
             root.name = nodeName;
             root.sourceNode = node;
-            SceneNode::setIdentity(root.localMatrix);
+            // User transform on the archive root → propagates to every entry via
+            // the worldMatrix chain, so it scales/moves the whole archive (the
+            // T/R/S + Uniform Scale knobs on the node). Read by name so archives
+            // saved before this feature (knobs absent) fall back to identity.
+            {
+                KnobIPtr kTX = effect->getKnobByName("translateX");
+                KnobIPtr kTY = effect->getKnobByName("translateY");
+                KnobIPtr kTZ = effect->getKnobByName("translateZ");
+                KnobIPtr kRX = effect->getKnobByName("rotateX");
+                KnobIPtr kRY = effect->getKnobByName("rotateY");
+                KnobIPtr kRZ = effect->getKnobByName("rotateZ");
+                KnobIPtr kSX = effect->getKnobByName("scaleX");
+                KnobIPtr kSY = effect->getKnobByName("scaleY");
+                KnobIPtr kSZ = effect->getKnobByName("scaleZ");
+                KnobIPtr kUS = effect->getKnobByName("uniformScale");
+                float tx = kTX ? (float)dynamic_cast<KnobDouble*>(kTX.get())->getValueAtTime(time) : 0.f;
+                float ty = kTY ? (float)dynamic_cast<KnobDouble*>(kTY.get())->getValueAtTime(time) : 0.f;
+                float tz = kTZ ? (float)dynamic_cast<KnobDouble*>(kTZ.get())->getValueAtTime(time) : 0.f;
+                float rx = kRX ? (float)dynamic_cast<KnobDouble*>(kRX.get())->getValueAtTime(time) : 0.f;
+                float ry = kRY ? (float)dynamic_cast<KnobDouble*>(kRY.get())->getValueAtTime(time) : 0.f;
+                float rz = kRZ ? (float)dynamic_cast<KnobDouble*>(kRZ.get())->getValueAtTime(time) : 0.f;
+                float sx = kSX ? (float)dynamic_cast<KnobDouble*>(kSX.get())->getValueAtTime(time) : 1.f;
+                float sy = kSY ? (float)dynamic_cast<KnobDouble*>(kSY.get())->getValueAtTime(time) : 1.f;
+                float sz = kSZ ? (float)dynamic_cast<KnobDouble*>(kSZ.get())->getValueAtTime(time) : 1.f;
+                float us = kUS ? (float)dynamic_cast<KnobDouble*>(kUS.get())->getValueAtTime(time) : 1.f;
+                buildTRS(tx, ty, tz, rx, ry, rz, sx * us, sy * us, sz * us, root.localMatrix);
+            }
             const int rootSgIdx = (int)_nodes.size();
             nameToIndex[nodeName] = rootSgIdx;
             _nodes.push_back(root);
@@ -343,6 +415,50 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
                 sn.name = nodeName + entryName; // e.g. "ReadAlembicArchive1/Camera01Trackers/Tracker1"
                 sn.sourceNode = node;
                 sn.archiveEntryIdx = i;  // remember the entry index for sub-time re-queries (Cycles motion blur)
+
+                // Per-part material override: if any GeoMaterialOverride targets
+                // this archive and lists this entry, tag it (later rules win on
+                // overlap). A listed token matches entryName (the full path, e.g.
+                // "/lamp/polySurface2/polySurfaceShape2") three ways, most to least
+                // specific: exact full path; ancestor ("/lamp/polySurface2" covers
+                // its descendant shapes); or bare leaf name ("polySurfaceShape2")
+                // when the token has no slash — lenient so users can type just the
+                // name shown in the archive tree.
+                {
+                    std::map<EffectInstance*, std::vector<MatOverrideRule> >::iterator mit =
+                        matOverrides.find(effect.get());
+                    if (mit != matOverrides.end()) {
+                        // Leaf name of this entry (last path component).
+                        const size_t lastSlash = entryName.find_last_of('/');
+                        const std::string entryLeaf = (lastSlash == std::string::npos)
+                            ? entryName : entryName.substr(lastSlash + 1);
+                        for (size_t r = 0; r < mit->second.size(); ++r) {
+                            const std::set<std::string>& paths = mit->second[r].paths;
+                            bool match = (paths.count(entryName) > 0);
+                            for (std::set<std::string>::const_iterator pit = paths.begin();
+                                 !match && pit != paths.end(); ++pit) {
+                                const std::string& p = *pit;
+                                if (p.empty()) continue;
+                                // Ancestor: entryName starts with "<p>/".
+                                if (entryName.size() > p.size() &&
+                                    entryName.compare(0, p.size(), p) == 0 &&
+                                    entryName[p.size()] == '/') {
+                                    match = true;
+                                    break;
+                                }
+                                // Bare leaf name (no slash in the token).
+                                if (p.find('/') == std::string::npos && p == entryLeaf) {
+                                    match = true;
+                                    break;
+                                }
+                            }
+                            if (match) {
+                                sn.materialNode = mit->second[r].matNode;
+                            }
+                        }
+                    }
+                }
+
                 std::memcpy(sn.localMatrix, lm, sizeof(lm));
                 sn.parentIndex = (parentLocalIdx < 0) ? rootSgIdx : (baseSgIdx + parentLocalIdx);
                 _nodes[sn.parentIndex].childIndices.push_back((int)_nodes.size());

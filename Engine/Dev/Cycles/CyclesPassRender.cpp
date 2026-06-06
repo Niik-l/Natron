@@ -35,6 +35,7 @@
 #include "../Scene3D/RenderPass.h"
 #include "../Scene3D/Scene3D.h"
 #include "../Scene3D/SceneGraph.h"
+#include "../Scene3D/GeoMaterialOverride.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -70,6 +71,16 @@ collectSceneNodes(EffectInstance* eff, NodesList& out, std::set<EffectInstance*>
     }
 
     if (NodePtr n = eff->getNode()) out.push_back(n);
+
+    // GeoMaterialOverride is a decorator in the geo chain: descend its geo input
+    // (0) so the archive behind it is still collected. Its material assignment is
+    // applied in SceneGraph::rebuild (the node itself was pushed just above so the
+    // rebuild pre-scan sees it). Don't descend input 1 — that's the material.
+    if (dynamic_cast<GeoMaterialOverride*>(eff)) {
+        EffectInstancePtr inp = eff->getInput(0);
+        if (inp) collectSceneNodes(inp.get(), out, seen);
+        return;
+    }
 
     Scene3D* s = dynamic_cast<Scene3D*>(eff);
     Group3D* g = dynamic_cast<Group3D*>(eff);

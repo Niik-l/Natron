@@ -427,6 +427,46 @@ ReadAlembicArchive::initializeKnobs()
         page->addKnob(k);
         _imp->info = k;
     }
+
+    // --- Transform: user T/R/S applied to the WHOLE archive ----------------
+    // Read in SceneGraph::rebuild and placed on the archive's root SceneNode, so
+    // it propagates to every entry via the worldMatrix chain — handy when an
+    // archive's geo comes in at the wrong scale. Animatable; composes with any
+    // parent Group3D. Read by name (translateX/.../scaleZ + uniformScale).
+    KnobPagePtr xformPage = AppManager::createKnob<KnobPage>(this, tr("Transform"));
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate X")); k->setName("translateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate Y")); k->setName("translateY"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate Z")); k->setName("translateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate X")); k->setName("rotateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Y")); k->setName("rotateY"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Z")); k->setName("rotateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale X")); k->setName("scaleX"); k->setDefaultValue(1.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale Y")); k->setName("scaleY"); k->setDefaultValue(1.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale Z")); k->setName("scaleZ"); k->setDefaultValue(1.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Uniform Scale"));
+        k->setName("uniformScale"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Multiplies all three scale axes — quick way to scale the whole archive up or down."));
+        xformPage->addKnob(k);
+    }
 }
 
 bool

@@ -551,6 +551,31 @@ static std::string resolveTextureFrame(const std::string& path, int frame)
     return result;
 }
 
+// Map a Material3D colorspace choice ("sRGB" / "Linear" / "ACEScg" / "Raw") to a
+// Cycles colorspace string that resolves under ANY active OCIO config.
+//
+// Cycles converts textures via OIIO/OpenColorIO using the config pointed to by
+// the OCIO env var — which Natron sets to its selected config (Settings.cpp),
+// so the render space follows Natron's config (Linear Rec.709 under the default
+// 'blender' config, ACEScg under an ACES config). To stay config-agnostic:
+//   - "Raw"    -> Cycles' built-in raw (identity; no transform), works in any config.
+//   - "Linear" -> built-in raw too (the texture is already in the rendering
+//                 scene-linear space, so no transform).
+//   - color spaces ("sRGB", "ACEScg", or any custom name) pass through as OCIO
+//     names so OCIO converts them into the config's rendering space (correct
+//     primaries for both Rec.709 and ACES, unlike Cycles' built-in sRGB which
+//     assumes Rec.709). The chosen name must exist in the active config.
+// Data maps (normal/roughness/metallic/transmission) always use built-in raw
+// directly — they're never color-managed.
+static ccl::ustring
+materialColorspaceToCycles(const std::string& choice)
+{
+    if (choice == "Raw" || choice == "Linear") {
+        return ccl::ustring("__builtin_raw");
+    }
+    return ccl::ustring(choice);
+}
+
 static ccl::Shader*
 createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double time)
 {
@@ -589,10 +614,7 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     if (!texFile.empty()) {
         ccl::ImageTextureNode* imgTex = graph->create_node<ccl::ImageTextureNode>();
         imgTex->set_filename(ccl::ustring(texFile));
-        std::string diffCS = mat->getMaterialDiffuseColorspace();
-        if (diffCS == "Raw") diffCS = "Non-Color";
-        if (diffCS == "Linear") diffCS = "__builtin_raw";
-        imgTex->set_colorspace(ccl::ustring(diffCS));
+        imgTex->set_colorspace(materialColorspaceToCycles(mat->getMaterialDiffuseColorspace()));
         graph->connect(texCoord->output("UV"), imgTex->input("Vector"));
         graph->connect(imgTex->output("Color"), principled->input("Base Color"));
     }
@@ -602,7 +624,7 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     if (!normalFile.empty()) {
         ccl::ImageTextureNode* normalTex = graph->create_node<ccl::ImageTextureNode>();
         normalTex->set_filename(ccl::ustring(normalFile));
-        normalTex->set_colorspace(ccl::ustring("Non-Color"));
+        normalTex->set_colorspace(ccl::ustring("__builtin_raw"));
         ccl::NormalMapNode* normalMap = graph->create_node<ccl::NormalMapNode>();
         normalMap->set_strength((float)mat->getMaterialNormalStrength(time));
         graph->connect(texCoord->output("UV"), normalTex->input("Vector"));
@@ -615,7 +637,7 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     if (!roughFile.empty()) {
         ccl::ImageTextureNode* roughTex = graph->create_node<ccl::ImageTextureNode>();
         roughTex->set_filename(ccl::ustring(roughFile));
-        roughTex->set_colorspace(ccl::ustring("Non-Color"));
+        roughTex->set_colorspace(ccl::ustring("__builtin_raw"));
         graph->connect(texCoord->output("UV"), roughTex->input("Vector"));
         graph->connect(roughTex->output("Color"), principled->input("Roughness"));
     }
@@ -625,7 +647,7 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     if (!metalFile.empty()) {
         ccl::ImageTextureNode* metalTex = graph->create_node<ccl::ImageTextureNode>();
         metalTex->set_filename(ccl::ustring(metalFile));
-        metalTex->set_colorspace(ccl::ustring("Non-Color"));
+        metalTex->set_colorspace(ccl::ustring("__builtin_raw"));
         graph->connect(texCoord->output("UV"), metalTex->input("Vector"));
         graph->connect(metalTex->output("Color"), principled->input("Metallic"));
     }
@@ -635,10 +657,7 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     if (!emissionFile.empty()) {
         ccl::ImageTextureNode* emissionTex = graph->create_node<ccl::ImageTextureNode>();
         emissionTex->set_filename(ccl::ustring(emissionFile));
-        std::string emCS = mat->getMaterialEmissionColorspace();
-        if (emCS == "Raw") emCS = "Non-Color";
-        if (emCS == "Linear") emCS = "__builtin_raw";
-        emissionTex->set_colorspace(ccl::ustring(emCS));
+        emissionTex->set_colorspace(materialColorspaceToCycles(mat->getMaterialEmissionColorspace()));
         graph->connect(texCoord->output("UV"), emissionTex->input("Vector"));
         graph->connect(emissionTex->output("Color"), principled->input("Emission Color"));
     }
@@ -650,7 +669,7 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     if (!transFile.empty()) {
         ccl::ImageTextureNode* transTex = graph->create_node<ccl::ImageTextureNode>();
         transTex->set_filename(ccl::ustring(transFile));
-        transTex->set_colorspace(ccl::ustring("Non-Color"));
+        transTex->set_colorspace(ccl::ustring("__builtin_raw"));
         graph->connect(texCoord->output("UV"), transTex->input("Vector"));
         graph->connect(transTex->output("Color"), principled->input("Transmission Weight"));
     }
@@ -1996,9 +2015,17 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         // clay-render / shadow-pass pattern. srcNode is hoisted out
         // because the motion-blur block below still consults it.
         NodePtr srcNode = sn.sourceNode.lock();
+        NodePtr matOverrideNode = sn.materialNode.lock(); // per-part (GeoMaterialOverride)
         ccl::Shader* objShader = nullptr;
         if (materialOverride) {
+            // Downstream / per-pass override wins (clay / shadow-pass pattern).
             objShader = createMaterialShader(scene, materialOverride, time);
+        } else if (matOverrideNode) {
+            // Per-part material override for this archive sub-object.
+            MaterialProvider* mp = dynamic_cast<MaterialProvider*>(matOverrideNode->getEffectInstance().get());
+            if (mp) {
+                objShader = createMaterialShader(scene, mp, time);
+            }
         } else if (srcNode) {
             MaterialProvider* matProv = dynamic_cast<MaterialProvider*>(srcNode->getEffectInstance().get());
             if (matProv) {

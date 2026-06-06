@@ -44,8 +44,10 @@
 #include "Engine/RotoLayer.h"
 #include "Engine/Utils.h" // convertFromPlainText
 #include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
+#include "Engine/Dev/Scene3D/GeoMaterialOverride.h"
 
 #include "Gui/AlembicTreeWidget.h"
+#include "Gui/MaterialOverridePickerWidget.h"
 #include "Gui/Button.h"
 #include "Gui/Gui.h"
 #include "Gui/GuiApplicationManager.h" // appPTR
@@ -176,6 +178,13 @@ NodeSettingsPanel::initializeExtraGui(QVBoxLayout* layout)
             if (ReadAlembicArchive* archive = dynamic_cast<ReadAlembicArchive*>(effect.get())) {
                 AlembicTreeWidget* tree = new AlembicTreeWidget(archive, this);
                 layout->addWidget(tree);
+            }
+            // GeoMaterialOverride — show a checkable surface picker reading the
+            // upstream archive (drives the node's surfaces knob), so the user
+            // picks surfaces visually instead of typing paths.
+            if (GeoMaterialOverride* ov = dynamic_cast<GeoMaterialOverride*>(effect.get())) {
+                MaterialOverridePickerWidget* picker = new MaterialOverridePickerWidget(ov, this);
+                layout->addWidget(picker);
             }
         }
     }

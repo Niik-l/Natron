@@ -103,6 +103,10 @@ struct CyclesRenderPrivate
     KnobFileWPtr exrOutputPath;
     KnobButtonWPtr saveExrBtn;
 
+    // Forces a metadata + cache refresh so a changed AOV pass set re-publishes
+    // and re-renders without having to scrub the timeline.
+    KnobButtonWPtr refreshPassesBtn;
+
     // Render cache (multi-pass)
     std::map<std::string, std::vector<float>> cachedPassBuffers;
     U64 cachedHash = 0;
@@ -259,6 +263,14 @@ CyclesRender::initializeKnobs()
 
     // AOV Passes page
     KnobPagePtr aovPage = AppManager::createKnob<KnobPage>(this, tr("AOV Passes"));
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Refresh Passes"));
+        k->setName("refreshPasses");
+        k->setHintToolTip(tr("Re-publish the output planes and force a re-render. Use this if "
+                             "the viewer / downstream doesn't pick up newly toggled AOV passes "
+                             "without scrubbing the timeline."));
+        aovPage->addKnob(k); _imp->refreshPassesBtn = k;
+    }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Direct")); k->setName("aovDiffDir"); k->setDefaultValue(false);
         aovPage->addKnob(k); _imp->aovDiffDir = k;
@@ -813,9 +825,18 @@ CyclesRender::render(const RenderActionArgs& args)
                     }
                 }
             }
-            // Hash material params if geometry has MaterialProvider
+            // Hash material params. Mirror the renderer's per-node precedence:
+            // a per-part override (sn.materialNode, from a GeoMaterialOverride)
+            // wins over the source node's own material — so editing the override's
+            // surface list OR its material busts the render cache and re-renders.
             {
-                NodePtr node = sn.sourceNode.lock();
+                NodePtr matOverrideNode = sn.materialNode.lock(); // per-part override
+                NodePtr srcNode = sn.sourceNode.lock();
+                // Whether an override applies to this node — toggling a surface in
+                // or out of the override flips this even if the two materials would
+                // otherwise hash identically.
+                sceneHash = hashCombine(sceneHash, matOverrideNode ? 1ULL : 0ULL);
+                NodePtr node = matOverrideNode ? matOverrideNode : srcNode;
                 if (node) {
                     MaterialProvider* matProv = dynamic_cast<MaterialProvider*>(node->getEffectInstance().get());
                     if (matProv) {
@@ -922,7 +943,6 @@ CyclesRender::render(const RenderActionArgs& args)
     }
 
     // --- Cache check: skip render if nothing changed ---
-
     if (sceneHash == _imp->cachedHash &&
         !_imp->cachedPassBuffers.empty() &&
         _imp->cachedWidth == renderW &&
@@ -1275,6 +1295,24 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
         }
         return true;
     }
+
+    // --- Refresh Passes — re-publish output planes + force a re-render ---
+    if (_imp->refreshPassesBtn.lock().get() == k) {
+        // Drop the internal render cache so the next render isn't served stale...
+        _imp->cachedHash = 0;
+        _imp->cachedPassBuffers.clear();
+        // ...and re-run metadata so the (possibly changed) AOV plane set is
+        // re-published to downstream / the viewer without scrubbing the timeline.
+        refreshMetadata_public(true);
+        clearPersistentMessage(false);
+        // Force the viewers to re-pull at the current frame (what scrubbing did).
+        AppInstancePtr app = getApp();
+        if (app) {
+            app->renderAllViewers(true);
+        }
+        return true;
+    }
+
     return false;
 }
 
