@@ -71,6 +71,7 @@ AlembicTreeWidget::AlembicTreeWidget(ReadAlembicArchive* archive, QWidget* paren
     , _search(nullptr)
     , _tree(nullptr)
     , _suppressItemChanged(false)
+    , _applyingExcluded(false)
 {
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(2, 4, 2, 2);
@@ -188,6 +189,14 @@ AlembicTreeWidget::~AlembicTreeWidget()
 void
 AlembicTreeWidget::refresh()
 {
+    // Skip the rebuild when WE triggered the reload by writing excludedPaths: the
+    // archive's entry set is unchanged (only its visibility filter), the tree
+    // already shows the right check states, and rebuilding here would run
+    // _tree->clear() synchronously inside the itemChanged signal that started the
+    // write — deleting the clicked item out from under Qt (use-after-free crash).
+    // Legitimate reloads (file change, Reload button) still rebuild, and the
+    // Refresh button calls rebuildFromArchive() directly.
+    if (_applyingExcluded) return;
     rebuildFromArchive();
 }
 
@@ -419,7 +428,13 @@ AlembicTreeWidget::writeExcludedPathsToKnob()
     KnobIPtr ep = _archive->getKnobByName("excludedPaths");
     KnobString* es = dynamic_cast<KnobString*>(ep.get());
     if (es) {
+        // setValue → knobChanged → loadAlembicFile → archiveReloaded → refresh().
+        // That cascade is synchronous and we're inside an itemChanged signal, so
+        // guard refresh() against rebuilding the tree (and freeing the live item)
+        // until this returns.
+        _applyingExcluded = true;
         es->setValue(ss.str()); // triggers knobChanged → archive re-filters
+        _applyingExcluded = false;
     }
 }
 

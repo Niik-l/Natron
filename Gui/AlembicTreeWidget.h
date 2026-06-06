@@ -83,6 +83,9 @@ private:
     QLineEdit* _search;
     QTreeWidget* _tree;
     bool _suppressItemChanged;        // prevent recursion while we build the tree
+    bool _applyingExcluded;           // writing excludedPaths → skip the self-induced
+                                      // archiveReloaded rebuild (would delete the item
+                                      // mid-itemChanged signal → use-after-free crash)
 };
 
 NATRON_NAMESPACE_EXIT
