@@ -28,12 +28,62 @@
 #include "../../KnobTypes.h"
 #include "../../KnobFile.h"
 #include "../../Node.h"
+#include "../../OCIOColorSpaceUtils.h"
 #include "../../ViewIdx.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 
 NATRON_NAMESPACE_ENTER
+
+// Build the entries for a texture-colorspace dropdown from the active OCIO config,
+// so the names actually resolve under whatever config the user runs (e.g. ACES v4,
+// where plain "sRGB" does not exist — it's "sRGB - Texture" etc.). The list is
+// "Raw" + "Linear" (both = no transform / already in render space) followed by every
+// colorspace name in the config. If OCIO is unavailable, falls back to the legacy
+// fixed set. *defaultIndex receives a sensible default (an sRGB-ish entry if present).
+// The chosen entry's id string is what gets handed to Cycles' set_colorspace().
+static std::vector<ChoiceOption>
+buildTextureColorspaceChoices(int* defaultIndex)
+{
+    std::vector<ChoiceOption> entries;
+    entries.push_back( ChoiceOption("Raw", "", "Raw data, no color conversion") );
+    entries.push_back( ChoiceOption("Linear", "", "Already in scene-linear / render space, no conversion") );
+
+    const std::vector<std::string> configSpaces = getOcioColorSpaceNames();
+    int srgbIdx = -1;
+    if ( !configSpaces.empty() ) {
+        for (std::size_t i = 0; i < configSpaces.size(); ++i) {
+            const std::string& name = configSpaces[i];
+            // Skip names that would duplicate the synthetic Raw/Linear entries.
+            if (name == "Raw" || name == "Linear") {
+                continue;
+            }
+            // Remember the first sRGB-ish space to use as the default (typical albedo).
+            if (srgbIdx < 0) {
+                std::string lower = name;
+                for (std::size_t c = 0; c < lower.size(); ++c) {
+                    lower[c] = (char)std::tolower( (unsigned char)lower[c] );
+                }
+                if (lower.find("srgb") != std::string::npos) {
+                    srgbIdx = (int)entries.size();
+                }
+            }
+            entries.push_back( ChoiceOption(name, "", "") );
+        }
+    } else {
+        // No OCIO config available — keep the original fixed choices.
+        entries.push_back( ChoiceOption("sRGB", "", "sRGB gamma-encoded (PNG, JPEG)") );
+        entries.push_back( ChoiceOption("ACEScg", "", "ACEScg (AP1 linear, ACES pipeline)") );
+        srgbIdx = 2;
+    }
+
+    if (defaultIndex) {
+        *defaultIndex = (srgbIdx >= 0) ? srgbIdx : 1; // sRGB-ish, else "Linear"
+    }
+    return entries;
+}
 
 struct Material3DPrivate
 {
@@ -195,14 +245,12 @@ Material3D::initializeKnobs()
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Diffuse Colorspace"));
         k->setName("diffuseColorspace");
-        std::vector<ChoiceOption> entries;
-        entries.push_back(ChoiceOption("sRGB", "", "sRGB gamma-encoded (PNG, JPEG)"));
-        entries.push_back(ChoiceOption("Linear", "", "Linear / scene-referred (EXR, HDR)"));
-        entries.push_back(ChoiceOption("ACEScg", "", "ACEScg (AP1 linear, ACES pipeline)"));
-        entries.push_back(ChoiceOption("Raw", "", "Raw data, no conversion"));
+        int defIdx = 0;
+        std::vector<ChoiceOption> entries = buildTextureColorspaceChoices(&defIdx);
         k->populateChoices(entries);
-        k->setDefaultValue(0);
-        k->setHintToolTip(tr("Color space of the diffuse texture file. Cycles converts to scene linear at load time."));
+        k->setDefaultValue(defIdx);
+        k->setHintToolTip(tr("Color space of the diffuse texture file (from the active OCIO config). "
+                             "Cycles converts to scene linear at load time."));
         texPage->addKnob(k); _imp->diffuseColorspace = k;
     }
     {
@@ -234,14 +282,11 @@ Material3D::initializeKnobs()
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Emission Colorspace"));
         k->setName("emissionColorspace");
-        std::vector<ChoiceOption> entries;
-        entries.push_back(ChoiceOption("sRGB", "", "sRGB gamma-encoded (PNG, JPEG)"));
-        entries.push_back(ChoiceOption("Linear", "", "Linear / scene-referred (EXR, HDR)"));
-        entries.push_back(ChoiceOption("ACEScg", "", "ACEScg (AP1 linear, ACES pipeline)"));
-        entries.push_back(ChoiceOption("Raw", "", "Raw data, no conversion"));
+        int defIdx = 0;
+        std::vector<ChoiceOption> entries = buildTextureColorspaceChoices(&defIdx);
         k->populateChoices(entries);
-        k->setDefaultValue(0);
-        k->setHintToolTip(tr("Color space of the emission texture file."));
+        k->setDefaultValue(defIdx);
+        k->setHintToolTip(tr("Color space of the emission texture file (from the active OCIO config)."));
         texPage->addKnob(k); _imp->emissionColorspace = k;
     }
     {
@@ -334,27 +379,28 @@ std::string Material3D::getMaterialEmissionMapFile() const
     KnobFilePtr k = _imp->emissionMapFile.lock(); return k ? k->getValue() : std::string();
 }
 
-static const char* colorspaceIndexToString(int idx)
-{
-    switch (idx) {
-        case 0: return "sRGB";
-        case 1: return "Linear";
-        case 2: return "ACEScg";
-        case 3: return "Raw";
-        default: return "sRGB";
-    }
-}
-
+// Return the selected entry's id string directly. Entries are populated from the
+// active OCIO config (see buildTextureColorspaceChoices), so the returned name is a
+// valid OCIO colorspace (or the synthetic "Raw"/"Linear") that resolves under the
+// running config. This is fed to Cycles via materialColorspaceToCycles().
 std::string Material3D::getMaterialDiffuseColorspace() const
 {
     KnobChoicePtr k = _imp->diffuseColorspace.lock();
-    return colorspaceIndexToString(k ? k->getValue() : 0);
+    if (!k) {
+        return "sRGB";
+    }
+    const std::string id = k->getActiveEntry().id;
+    return id.empty() ? std::string("Linear") : id;
 }
 
 std::string Material3D::getMaterialEmissionColorspace() const
 {
     KnobChoicePtr k = _imp->emissionColorspace.lock();
-    return colorspaceIndexToString(k ? k->getValue() : 0);
+    if (!k) {
+        return "sRGB";
+    }
+    const std::string id = k->getActiveEntry().id;
+    return id.empty() ? std::string("Linear") : id;
 }
 
 // ==================== Input Texture Baking ====================
