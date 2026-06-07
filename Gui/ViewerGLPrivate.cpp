@@ -36,6 +36,9 @@
 
 #include <QOpenGLShaderProgram>
 
+#include <OpenColorIO/OpenColorIO.h>   // GPU OCIO display transform (Stage 2)
+namespace OCIO_VIEWER = OCIO_NAMESPACE;
+
 #include "Engine/Lut.h" // Color
 #include "Engine/Settings.h"
 #include "Engine/Texture.h"
@@ -43,6 +46,7 @@
 #include "Gui/Gui.h"
 #include "Gui/GuiApplicationManager.h" // appFont
 #include "Gui/Menu.h"
+#include "Gui/Shaders.h"  // vertRGB for the OCIO shader
 #include "Gui/ViewerTab.h"
 
 #include <QOpenGLContext>
@@ -75,6 +79,12 @@ ViewerGL::Implementation::Implementation(ViewerGL* this_,
     , shaderRGB()
     , shaderBlack()
     , shaderLoaded(false)
+    , ocioDisplay()
+    , ocioView()
+    , ocioShaderDirty(false)
+    , ocioShaderValid(false)
+    , shaderOCIO()
+    , ocioLutTextures()
     , infoViewer()
     , viewerTab(parent)
     , zoomOrPannedSinceLastFit(false)
@@ -157,6 +167,7 @@ ViewerGL::Implementation::~Implementation()
         shaderBlack->removeAllShaders();
         shaderBlack.reset();
     }
+    freeOcioGpuResources();
     for (int i = 0; i < 2; ++i) {
         displayTextures[i].texture.reset();
     }
@@ -692,7 +703,17 @@ void
 ViewerGL::Implementation::unbindTextureAndReleaseShader(bool useShader)
 {
     if (useShader) {
-        shaderRGB->release();
+        if ( !ocioDisplay.empty() && !ocioView.empty() && ocioShaderValid && shaderOCIO ) {
+            // Unbind OCIO LUT textures from units 1.. and release the OCIO shader.
+            for (std::size_t k = 0; k < ocioLutTextures.size(); ++k) {
+                glActiveTexture( GL_TEXTURE0 + 1 + (GLenum)k );
+                glBindTexture(ocioLutTextures[k].target, 0);
+            }
+            glActiveTexture(GL_TEXTURE0);
+            shaderOCIO->release();
+        } else {
+            shaderRGB->release();
+        }
     }
     glCheckError();
     glBindTexture(GL_TEXTURE_2D, prevBoundTexture);
@@ -846,16 +867,232 @@ ViewerGL::Implementation::activateShaderRGB(int texIndex)
     // - 8-bits textures are stored non-linear and must be displayer as is
     // - floating-point textures are linear and must be decompressed according to the given lut
 
+    const float gain   = (float)displayTextures[texIndex].gain;
+    const float offset = (float)displayTextures[texIndex].offset;
+    const float gamma  = (float)displayTextures[texIndex].gamma;
+
+    // Stage 2: native GPU OCIO. When an OCIO display/view is selected, apply the
+    // OCIO display transform on the GPU (float path). Falls back to the built-in
+    // LUT shader if the OCIO shader can't be built (the engine then renders the
+    // 8-bit CPU OCIO path instead — see ViewerInstance force-byte fallback).
+    bool useOcio = !ocioDisplay.empty() && !ocioView.empty();
+    if (useOcio) {
+        buildOcioShaderIfNeeded();
+        useOcio = ocioShaderValid && shaderOCIO && shaderOCIO->isLinked();
+    }
+    if (useOcio) {
+        if ( !shaderOCIO->bind() ) {
+            qDebug() << "Error when binding OCIO shader" << qPrintable( shaderOCIO->log() );
+        }
+        shaderOCIO->setUniformValue("Tex", 0);
+        shaderOCIO->setUniformValue("gain", gain);
+        shaderOCIO->setUniformValue("offset", offset);
+        shaderOCIO->setUniformValue("gamma", gamma);
+        // Bind OCIO's LUT textures on units 1.. and point each sampler at its unit.
+        for (std::size_t k = 0; k < ocioLutTextures.size(); ++k) {
+            const GLenum unit = GL_TEXTURE0 + 1 + (GLenum)k;
+            glActiveTexture(unit);
+            glBindTexture(ocioLutTextures[k].target, ocioLutTextures[k].texId);
+            shaderOCIO->setUniformValue(ocioLutTextures[k].samplerName.c_str(), (GLint)(1 + k));
+        }
+        glActiveTexture(GL_TEXTURE0);  // leave unit 0 (image) active
+        return;
+    }
+
     if ( !shaderRGB->bind() ) {
         qDebug() << "Error when binding shader" << qPrintable( shaderRGB->log() );
     }
 
     shaderRGB->setUniformValue("Tex", 0);
-    shaderRGB->setUniformValue("gain", (float)displayTextures[texIndex].gain);
-    shaderRGB->setUniformValue("offset", (float)displayTextures[texIndex].offset);
+    shaderRGB->setUniformValue("gain", gain);
+    shaderRGB->setUniformValue("offset", offset);
     shaderRGB->setUniformValue("lut", (GLint)displayingImageLut);
-    float gamma = displayTextures[texIndex].gamma;
     shaderRGB->setUniformValue("gamma", gamma);
+}
+
+void
+ViewerGL::Implementation::freeOcioGpuResources()
+{
+    for (std::size_t i = 0; i < ocioLutTextures.size(); ++i) {
+        GLuint id = ocioLutTextures[i].texId;
+        if (id) {
+            glDeleteTextures(1, &id);
+        }
+    }
+    ocioLutTextures.clear();
+    if (shaderOCIO) {
+        shaderOCIO->removeAllShaders();
+        shaderOCIO.reset();
+    }
+    ocioShaderValid = false;
+}
+
+bool
+ViewerGL::Implementation::buildOcioShaderIfNeeded()
+{
+    if (!ocioShaderDirty) {
+        return ocioShaderValid;
+    }
+    // Must have a current GL context to create the program / upload textures.
+    // If not (called outside a real paint), leave it dirty and retry next draw.
+    if ( !QOpenGLContext::currentContext() ) {
+        return false;
+    }
+    ocioShaderDirty = false;
+    freeOcioGpuResources();  // also clears ocioShaderValid
+
+    if ( ocioDisplay.empty() || ocioView.empty() ) {
+        return false;
+    }
+
+    std::string shaderText;
+    std::vector<OcioLutTexture> newLuts;
+    try {
+        OCIO_VIEWER::ConstConfigRcPtr config = OCIO_VIEWER::GetCurrentConfig();
+        if (!config) {
+            return false;
+        }
+        OCIO_VIEWER::DisplayViewTransformRcPtr dvt = OCIO_VIEWER::DisplayViewTransform::Create();
+        dvt->setSrc(OCIO_VIEWER::ROLE_SCENE_LINEAR);   // viewer image is scene-linear (ACEScg etc.)
+        dvt->setDisplay( ocioDisplay.c_str() );
+        dvt->setView( ocioView.c_str() );
+        OCIO_VIEWER::ConstProcessorRcPtr proc = config->getProcessor(dvt);
+        OCIO_VIEWER::ConstGPUProcessorRcPtr gpu = proc->getDefaultGPUProcessor();
+
+        OCIO_VIEWER::GpuShaderDescRcPtr desc = OCIO_VIEWER::GpuShaderDesc::CreateShaderDesc();
+        desc->setLanguage(OCIO_VIEWER::GPU_LANGUAGE_GLSL_1_2);  // match Natron's legacy viewer GLSL
+        desc->setFunctionName("OCIODisplay");
+        desc->setResourcePrefix("ocio_");
+        gpu->extractGpuShaderInfo(desc);
+
+        // 1D / 2D LUT textures.
+        const unsigned num2d = desc->getNumTextures();
+        for (unsigned i = 0; i < num2d; ++i) {
+            const char* texName = 0; const char* sampName = 0;
+            unsigned w = 0, h = 0;
+            OCIO_VIEWER::GpuShaderDesc::TextureType chan = OCIO_VIEWER::GpuShaderDesc::TEXTURE_RGB_CHANNEL;
+            OCIO_VIEWER::GpuShaderDesc::TextureDimensions dims = OCIO_VIEWER::GpuShaderDesc::TEXTURE_2D;
+            OCIO_VIEWER::Interpolation interp = OCIO_VIEWER::INTERP_LINEAR;
+            desc->getTexture(i, texName, sampName, w, h, chan, dims, interp);
+            const float* values = 0;
+            desc->getTextureValues(i, values);
+            if (!sampName || !values || w == 0) {
+                continue;
+            }
+            const GLint glInterp = (interp == OCIO_VIEWER::INTERP_NEAREST) ? GL_NEAREST : GL_LINEAR;
+            const bool isRed = (chan == OCIO_VIEWER::GpuShaderDesc::TEXTURE_RED_CHANNEL);
+            const GLenum fmt = isRed ? GL_RED : GL_RGB;
+            const GLint internalFmt = isRed ? GL_R32F : GL_RGB32F;
+
+            GLuint id = 0;
+            glGenTextures(1, &id);
+            OcioLutTexture lt; lt.texId = id; lt.samplerName = sampName;
+            if (dims == OCIO_VIEWER::GpuShaderDesc::TEXTURE_1D) {
+                lt.target = GL_TEXTURE_1D;
+                glBindTexture(GL_TEXTURE_1D, id);
+                glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, glInterp);
+                glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, glInterp);
+                glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexImage1D(GL_TEXTURE_1D, 0, internalFmt, w, 0, fmt, GL_FLOAT, values);
+                glBindTexture(GL_TEXTURE_1D, 0);
+            } else {
+                lt.target = GL_TEXTURE_2D;
+                glBindTexture(GL_TEXTURE_2D, id);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, glInterp);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, glInterp);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, internalFmt, w, (h == 0 ? 1 : h), 0, fmt, GL_FLOAT, values);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            newLuts.push_back(lt);
+        }
+
+        // 3D LUT textures.
+        const unsigned num3d = desc->getNum3DTextures();
+        for (unsigned i = 0; i < num3d; ++i) {
+            const char* texName = 0; const char* sampName = 0;
+            unsigned edge = 0;
+            OCIO_VIEWER::Interpolation interp = OCIO_VIEWER::INTERP_LINEAR;
+            desc->get3DTexture(i, texName, sampName, edge, interp);
+            const float* values = 0;
+            desc->get3DTextureValues(i, values);
+            if (!sampName || !values || edge == 0) {
+                continue;
+            }
+            const GLint glInterp = (interp == OCIO_VIEWER::INTERP_NEAREST) ? GL_NEAREST : GL_LINEAR;
+            GLuint id = 0;
+            glGenTextures(1, &id);
+            OcioLutTexture lt; lt.texId = id; lt.samplerName = sampName; lt.target = GL_TEXTURE_3D;
+            glBindTexture(GL_TEXTURE_3D, id);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, glInterp);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, glInterp);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+            glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB32F, edge, edge, edge, 0, GL_RGB, GL_FLOAT, values);
+            glBindTexture(GL_TEXTURE_3D, 0);
+            newLuts.push_back(lt);
+        }
+
+        shaderText = desc->getShaderText();
+    } catch (const std::exception& e) {
+        qDebug() << "ViewerGL: OCIO GPU shader build failed:" << e.what();
+        for (std::size_t i = 0; i < newLuts.size(); ++i) {
+            GLuint id = newLuts[i].texId; if (id) glDeleteTextures(1, &id);
+        }
+        return false;
+    }
+
+    // Assemble the fragment shader: our uniforms + OCIO's generated code + a main()
+    // that does gain/offset (in linear) -> OCIO display transform -> viewer gamma.
+    std::string frag;
+    frag += "uniform sampler2D Tex;\n";
+    frag += "uniform float gain;\n";
+    frag += "uniform float offset;\n";
+    frag += "uniform float gamma;\n";
+    frag += shaderText;
+    frag += "\nvoid main() {\n";
+    frag += "    vec4 c = texture2D(Tex, gl_TexCoord[0].st);\n";
+    frag += "    c.rgb = c.rgb * gain + offset;\n";
+    frag += "    c = OCIODisplay(c);\n";
+    frag += "    if (gamma <= 0.0) {\n";
+    frag += "        c.rgb = vec3(greaterThanEqual(c.rgb, vec3(1.0)));\n";
+    frag += "    } else {\n";
+    frag += "        c.rgb = pow(max(c.rgb, vec3(0.0)), vec3(1.0 / gamma));\n";
+    frag += "    }\n";
+    frag += "    gl_FragColor = c;\n";
+    frag += "}\n";
+
+    // Create the program parented to the GL context, exactly like shaderRGB.
+    shaderOCIO.reset( new QOpenGLShaderProgram( _this->context() ) );
+    bool ok = shaderOCIO->addShaderFromSourceCode(QOpenGLShader::Vertex, vertRGB);
+    if (!ok) {
+        qDebug() << "ViewerGL: OCIO vertex shader failed:" << qPrintable( shaderOCIO->log() );
+    }
+    if (ok) {
+        ok = shaderOCIO->addShaderFromSourceCode(QOpenGLShader::Fragment, frag.c_str());
+        if (!ok) {
+            qDebug() << "ViewerGL: OCIO fragment shader compile failed:" << qPrintable( shaderOCIO->log() );
+        }
+    }
+    if (ok) {
+        ok = shaderOCIO->link();
+        if (!ok) {
+            qDebug() << "ViewerGL: OCIO shader link failed:" << qPrintable( shaderOCIO->log() );
+        }
+    }
+    if (!ok || !shaderOCIO->isLinked()) {
+        shaderOCIO.reset();
+        for (std::size_t i = 0; i < newLuts.size(); ++i) {
+            GLuint id = newLuts[i].texId; if (id) glDeleteTextures(1, &id);
+        }
+        return false;
+    }
+
+    ocioLutTextures = newLuts;
+    ocioShaderValid = true;
+    return true;
 }
 
 bool

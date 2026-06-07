@@ -396,6 +396,10 @@ public:
 
     void setLut(int lut);
 
+    // Stage 2: select an OCIO display/view for the float (GPU) viewer path.
+    // Empty strings clear it (revert to the built-in colorspace LUT).
+    void setOcioDisplayView(const std::string& display, const std::string& view);
+
     bool isWipeHandleVisible() const;
 
     void setZoomOrPannedSinceLastFit(bool enabled);

@@ -962,15 +962,12 @@ ViewerInstance::setupMinimalUpdateViewerParams(const SequenceTime time,
         outArgs->isDoingPartialUpdates = _imp->isDoingPartialUpdates;
     }
 
-    // OCIO display/view is a CPU step applied only in the 8-bit texture converter
-    // (scaleToTexture8bits_generic). The 32-bit float path stores raw linear values
-    // and lets the GPU apply gain/gamma/LUT at draw time, which would skip OCIO. So
-    // when an OCIO view is active, force a byte texture: the OCIO-baked result is then
-    // displayed directly, independent of the viewer's 8/32-bit toggle. (GPU-accelerated
-    // OCIO via OCIO-generated GLSL remains a future optimization.)
-    if ( outArgs->ocioProc && !outArgs->ocioDisplay.empty() ) {
-        outArgs->params->depth = eImageBitDepthByte;
-    }
+    // OCIO display/view is applied two ways depending on the viewer bit depth:
+    //   - 8-bit (default): baked on the CPU in scaleToTexture8bits_generic.
+    //   - 32-bit float: applied on the GPU (ViewerGL builds an OCIO display shader).
+    // Both consume outArgs->ocioProc / ocioDisplay / ocioView set above, so no bit
+    // depth override is needed here. (Stage 2 GPU OCIO; if the GPU shader fails to
+    // build the viewer can fall back to 8-bit for the CPU path.)
 
     // Fill the gamma LUT if it has never been filled yet
     bool gammaLookupEmpty;

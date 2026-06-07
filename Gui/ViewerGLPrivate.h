@@ -161,6 +161,22 @@ struct ViewerGL::Implementation
     std::unique_ptr<QOpenGLShaderProgram> shaderRGB; /*!< The shader program used to render RGB data*/
     std::unique_ptr<QOpenGLShaderProgram> shaderBlack; /*!< The shader program used when the viewer is disconnected.*/
     bool shaderLoaded; /*!< Flag to check whether the shaders have already been loaded.*/
+
+    // Stage 2: native GPU OCIO display transform for the float viewer path.
+    // When ocioDisplay/ocioView are set, a dedicated shader (shaderOCIO) applies
+    // the OCIO display transform on the GPU instead of the built-in LUT branch in
+    // shaderRGB. Built lazily in the draw (GL context current). Empty = built-in.
+    std::string ocioDisplay, ocioView;
+    bool ocioShaderDirty;   /*!< rebuild shaderOCIO + LUTs on next draw */
+    bool ocioShaderValid;   /*!< last build succeeded → safe to use on the float path */
+    std::unique_ptr<QOpenGLShaderProgram> shaderOCIO;
+    struct OcioLutTexture { unsigned int texId; std::string samplerName; unsigned int target; };
+    std::vector<OcioLutTexture> ocioLutTextures;
+    /** Build shaderOCIO + LUT textures for the current ocioDisplay/View. Returns
+     *  ocioShaderValid. No-op fast path when not dirty. */
+    bool buildOcioShaderIfNeeded();
+    /** Free shaderOCIO + its GL LUT textures. */
+    void freeOcioGpuResources();
     InfoViewerWidget* infoViewer[2]; /*!< Pointer to the info bar below the viewer holding pixel/mouse/format related info*/
     ViewerTab* const viewerTab; /*!< Pointer to the viewer tab GUI*/
     bool zoomOrPannedSinceLastFit; //< true if the user zoomed or panned the image since the last call to fitToRoD

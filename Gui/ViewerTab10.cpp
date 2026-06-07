@@ -75,6 +75,9 @@ ViewerTab::onColorSpaceComboBoxChanged(int v)
         const int ocioIndex = v - VIEWER_BUILTIN_COLORSPACE_COUNT;
         if ( ocioIndex >= 0 && ocioIndex < (int)_imp->ocioDisplayViews.size() ) {
             const std::pair<std::string, std::string>& dv = _imp->ocioDisplayViews[ocioIndex];
+            // Tell the GL viewer first (it builds the GPU OCIO shader for the float
+            // path), then the node (which triggers the re-render).
+            _imp->viewer->setOcioDisplayView(dv.first, dv.second);
             _imp->viewerNode->setOcioDisplayView(dv.first, dv.second);
         }
         return;
@@ -95,6 +98,7 @@ ViewerTab::onColorSpaceComboBoxChanged(int v)
         throw std::logic_error("ViewerTab::onColorSpaceComboBoxChanged(): unknown colorspace");
     }
     // Leaving an OCIO view: clear it so the built-in LUT path takes over again.
+    _imp->viewer->setOcioDisplayView(std::string(), std::string());
     _imp->viewerNode->setOcioDisplayView(std::string(), std::string());
     _imp->viewer->setLut( (int)colorspace );
     _imp->viewerNode->onColorSpaceChanged(colorspace);

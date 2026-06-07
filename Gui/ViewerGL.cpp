@@ -1730,6 +1730,20 @@ ViewerGL::setLut(int lut)
     _imp->displayingImageLut = (ViewerColorSpaceEnum)lut;
 }
 
+void
+ViewerGL::setOcioDisplayView(const std::string& display,
+                             const std::string& view)
+{
+    // always running in the main thread
+    assert( qApp && qApp->thread() == QThread::currentThread() );
+    if (_imp->ocioDisplay == display && _imp->ocioView == view) {
+        return;
+    }
+    _imp->ocioDisplay = display;
+    _imp->ocioView = view;
+    _imp->ocioShaderDirty = true;   // rebuilt lazily on the next draw (GL context current)
+}
+
 #define QMouseEventLocalPos(e) ( e->localPos() )
 
 void
