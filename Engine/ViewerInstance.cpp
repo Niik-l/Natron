@@ -66,6 +66,10 @@ CLANG_DIAG_ON(deprecated)
 #include "Engine/Utils.h"
 #include "Engine/ViewIdx.h"
 
+#ifdef NATRON_HAVE_OPENIMAGEIO
+#include <OpenImageIO/color.h>   // OIIO::ColorConfig / ColorProcessor (wraps OCIO)
+#endif
+
 #ifndef M_LN2
 #define M_LN2       0.693147180559945309417232121458176568  /* loge(2)        */
 #endif
@@ -78,6 +82,21 @@ using std::make_pair;
 using std::shared_ptr;
 
 NATRON_NAMESPACE_ANONYMOUS_ENTER
+
+// Fold the OCIO display/view selection into the viewer (tree) hash that keys the
+// texture cache, so switching display/view serves a fresh texture instead of a
+// stale cached one. Empty display/view leaves the hash unchanged (legacy LUT path).
+static U64
+foldOcioIntoViewerHash(U64 base,
+                       const std::string& display,
+                       const std::string& view)
+{
+    if ( display.empty() && view.empty() ) {
+        return base;
+    }
+    std::size_t h = std::hash<std::string>()(display + "|" + view);
+    return base ^ ( (U64)h + 0x9e3779b97f4a7c15ULL + (base << 6) + (base >> 2) );
+}
 
 struct MinMaxVal {
     MinMaxVal(double min_, double max_)
@@ -934,10 +953,23 @@ ViewerInstance::setupMinimalUpdateViewerParams(const SequenceTime time,
         outArgs->params->gain = _imp->viewerParamsGain;
         outArgs->params->gamma = _imp->viewerParamsGamma;
         outArgs->params->lut = _imp->viewerParamsLut;
+        outArgs->ocioProc = _imp->viewerOcioProcessor;
+        outArgs->ocioDisplay = _imp->viewerParamsOcioDisplay;
+        outArgs->ocioView = _imp->viewerParamsOcioView;
         outArgs->params->layer = _imp->viewerParamsLayer;
         outArgs->params->alphaLayer = _imp->viewerParamsAlphaLayer;
         outArgs->params->alphaChannelName = _imp->viewerParamsAlphaChannelName;
         outArgs->isDoingPartialUpdates = _imp->isDoingPartialUpdates;
+    }
+
+    // OCIO display/view is a CPU step applied only in the 8-bit texture converter
+    // (scaleToTexture8bits_generic). The 32-bit float path stores raw linear values
+    // and lets the GPU apply gain/gamma/LUT at draw time, which would skip OCIO. So
+    // when an OCIO view is active, force a byte texture: the OCIO-baked result is then
+    // displayed directly, independent of the viewer's 8/32-bit toggle. (GPU-accelerated
+    // OCIO via OCIO-generated GLSL remains a future optimization.)
+    if ( outArgs->ocioProc && !outArgs->ocioDisplay.empty() ) {
+        outArgs->params->depth = eImageBitDepthByte;
     }
 
     // Fill the gamma LUT if it has never been filled yet
@@ -1071,11 +1103,12 @@ ViewerInstance::getViewerRoIAndTexture(const RectD& rod,
     // Texture rect contains the pixel coordinates in the image to be rendered
 
     if (useCache) {
+        const U64 cacheViewerHash = foldOcioIntoViewerHash(viewerHash, outArgs->ocioDisplay, outArgs->ocioView);
         FrameEntryLocker entryLocker(_imp.get());
         for (std::list<UpdateViewerParams::CachedTile>::iterator it = outArgs->params->tiles.begin(); it != outArgs->params->tiles.end(); ++it) {
             FrameKey key(getNode().get(),
                          outArgs->params->time,
-                         viewerHash,
+                         cacheViewerHash,
                          outArgs->params->gain,
                          outArgs->params->gamma,
                          outArgs->params->lut,
@@ -1730,6 +1763,7 @@ ViewerInstance::renderViewer_internal(ViewIdx view,
                 return eViewerRenderRetCodeRedraw;
             }
             std::string inputToRenderName = inArgs.activeInputToRender->getNode()->getScriptName_mt_safe();
+            const U64 cacheViewerHash = foldOcioIntoViewerHash(viewerHash, inArgs.ocioDisplay, inArgs.ocioView);
             for (std::list<UpdateViewerParams::CachedTile>::iterator it = updateParams->tiles.begin(); it != updateParams->tiles.end(); ++it) {
                 if (it->isCached) {
                     assert(it->ramBuffer);
@@ -1739,7 +1773,7 @@ ViewerInstance::renderViewer_internal(ViewIdx view,
 
                     FrameKey key(getNode().get(),
                                  inArgs.params->time,
-                                 viewerHash,
+                                 cacheViewerHash,
                                  inArgs.params->gain,
                                  inArgs.params->gamma,
                                  inArgs.params->lut,
@@ -1845,7 +1879,8 @@ ViewerInstance::renderViewer_internal(ViewIdx view,
                                         lutFromColorspace(updateParams->lut),
                                         alphaChannelIndex,
                                         viewerRenderRoiOnly,
-                                        tileRowElements);
+                                        tileRowElements,
+                                        inArgs.ocioProc);
             QReadLocker k(&_imp->gammaLookupMutex);
             for (std::list<UpdateViewerParams::CachedTile>::iterator it = unCachedTiles.begin(); it != unCachedTiles.end(); ++it) {
                 renderFunctor(viewerRenderRoI,
@@ -1912,7 +1947,8 @@ ViewerInstance::renderViewer_internal(ViewIdx view,
                                         lutFromColorspace(updateParams->lut),
                                         alphaChannelIndex,
                                         viewerRenderRoiOnly,
-                                        tileRowElements);
+                                        tileRowElements,
+                                        inArgs.ocioProc);
 
             if (runInCurrentThread) {
                 QReadLocker k(&_imp->gammaLookupMutex);
@@ -2273,6 +2309,25 @@ scaleToTexture8bits_generic(const RectI& roi,
 
 
                 U8 uR, uG, uB;
+#ifdef NATRON_HAVE_OPENIMAGEIO
+                if (args.ocioProc) {
+                    // OCIO display/view path (Stage 1, CPU): apply the display
+                    // transform to the post-gain/gamma scene-linear pixel, then
+                    // quantize. No error-diffusion dither on this path (Stage 2 GPU
+                    // is the optimized route; per-pixel apply here is the slow path).
+                    const OIIO::ColorProcessor* proc =
+                        static_cast<const OIIO::ColorProcessor*>( args.ocioProc.get() );
+                    float pix[3] = { (float)r, (float)g, (float)b };
+                    // 7-arg apply is the const overload (strides are all required).
+                    proc->apply(pix, 1, 1, 3,
+                                (OIIO::stride_t)sizeof(float),
+                                (OIIO::stride_t)(3 * sizeof(float)),
+                                (OIIO::stride_t)(3 * sizeof(float)));
+                    uR = Color::floatToInt<256>(pix[0]);
+                    uG = Color::floatToInt<256>(pix[1]);
+                    uB = Color::floatToInt<256>(pix[2]);
+                } else
+#endif
                 if (!args.colorSpace) {
                     uR = Color::floatToInt<256>(r);
                     uG = Color::floatToInt<256>(g);
@@ -3079,6 +3134,90 @@ ViewerInstance::onColorSpaceChanged(ViewerColorSpaceEnum colorspace)
         renderCurrentFrame(true);
     } else {
         _imp->uiContext->redraw();
+    }
+}
+
+#ifdef NATRON_HAVE_OPENIMAGEIO
+// Shared OIIO color config — wraps the active OCIO config (reads the OCIO env var
+// that Natron's Settings set). Built once; a config change needs a restart (same
+// as the IO/OCIO plugins).
+static OIIO::ColorConfig&
+getViewerOIIOColorConfig()
+{
+    static OIIO::ColorConfig config;
+    return config;
+}
+#endif
+
+std::vector<std::string>
+ViewerInstance::getOcioDisplayViewChoices()
+{
+    std::vector<std::string> out;
+#ifdef NATRON_HAVE_OPENIMAGEIO
+    OIIO::ColorConfig& cfg = getViewerOIIOColorConfig();
+    if ( cfg.supportsOpenColorIO() ) {
+        const int nd = cfg.getNumDisplays();
+        for (int d = 0; d < nd; ++d) {
+            const std::string disp( cfg.getDisplayNameByIndex(d) );
+            const int nv = cfg.getNumViews(disp);
+            for (int v = 0; v < nv; ++v) {
+                const std::string view( cfg.getViewNameByIndex(disp, v) );
+                out.push_back(disp + " / " + view);
+            }
+        }
+    }
+#endif
+    return out;
+}
+
+void
+ViewerInstance::setOcioDisplayView(const std::string& display,
+                                   const std::string& view)
+{
+    // always running in the main thread
+    assert( qApp && qApp->thread() == QThread::currentThread() );
+    {
+        QMutexLocker l(&_imp->viewerParamsMutex);
+        if (_imp->viewerParamsOcioDisplay == display && _imp->viewerParamsOcioView == view) {
+            return;
+        }
+        _imp->viewerParamsOcioDisplay = display;
+        _imp->viewerParamsOcioView = view;
+        _imp->viewerOcioProcessor.reset();
+        _imp->viewerOcioProcessorKey.clear();
+#ifdef NATRON_HAVE_OPENIMAGEIO
+        if ( !display.empty() && !view.empty() ) {
+            OIIO::ColorConfig& cfg = getViewerOIIOColorConfig();
+            if ( cfg.supportsOpenColorIO() ) {
+                // scene_linear (the config's rendering role) -> selected display/view.
+                OIIO::ColorProcessorHandle proc = cfg.createDisplayTransform(display, view, "scene_linear");
+                if (proc) {
+                    _imp->viewerOcioProcessor = proc;  // upcast to shared_ptr<const void>
+                    _imp->viewerOcioProcessorKey = display + "|" + view;
+                }
+            }
+        }
+#endif
+    }
+    if ( _imp->uiContext &&
+         (_imp->uiContext->getBitDepth() == eImageBitDepthByte) &&
+         !getApp()->getProject()->isLoadingProject() ) {
+        renderCurrentFrame(true);
+    } else if (_imp->uiContext) {
+        _imp->uiContext->redraw();
+    }
+}
+
+void
+ViewerInstance::getOcioDisplayView(std::string* display,
+                                   std::string* view) const
+{
+    QMutexLocker l(&_imp->viewerParamsMutex);
+    if (display) {
+        *display = _imp->viewerParamsOcioDisplay;
+    }
+    if (view) {
+        *view = _imp->viewerParamsOcioView;
     }
 }
 

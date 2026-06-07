@@ -505,6 +505,29 @@ ViewerTab::ViewerTab(const std::list<NodeGuiPtr> & existingNodesContext,
     _imp->viewerColorSpace->addItem( QString::fromUtf8("sRGB") );
     _imp->viewerColorSpace->addItem( QString::fromUtf8("Rec.709") );
     _imp->viewerColorSpace->addItem( QString::fromUtf8("BT1886") );
+
+    // Append the OCIO config's display/view transforms (e.g. ACES Output
+    // Transforms) after the built-in colorspaces. Each "Display / View" entry
+    // drives the native OCIO viewer path (Stage 1, 8-bit CPU). Empty if no OCIO
+    // config is available.
+    {
+        const std::vector<std::string> ocioChoices = ViewerInstance::getOcioDisplayViewChoices();
+        for (std::size_t i = 0; i < ocioChoices.size(); ++i) {
+            const std::string& choice = ocioChoices[i];
+            const std::string sep = " / ";
+            const std::size_t pos = choice.find(sep);
+            std::string display, view;
+            if (pos != std::string::npos) {
+                display = choice.substr(0, pos);
+                view = choice.substr(pos + sep.size());
+            } else {
+                display = choice;
+            }
+            _imp->ocioDisplayViews.push_back( std::make_pair(display, view) );
+            _imp->viewerColorSpace->addItem( QString::fromUtf8( choice.c_str() ) );
+        }
+    }
+
     _imp->viewerColorSpace->setCurrentIndex(1);
 
     QPixmap pixCheckerboardEnabled, pixCheckerboardDisabld;

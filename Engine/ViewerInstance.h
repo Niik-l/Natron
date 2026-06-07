@@ -56,6 +56,12 @@ public:
     bool userRoIEnabled;
     bool mustComputeRoDAndLookupCache;
     bool isDoingPartialUpdates;
+    // OCIO display/view for the viewer (Stage 1 CPU path). ocioProc is the
+    // type-erased OIIO::ColorProcessor (null = use the built-in params->lut).
+    // ocioDisplay/ocioView feed the texture-cache key so switching invalidates.
+    std::shared_ptr<const void> ocioProc;
+    std::string ocioDisplay;
+    std::string ocioView;
 };
 
 class ViewerInstance
@@ -271,6 +277,15 @@ public:
     double getGamma() const WARN_UNUSED_RETURN;
 
     void onColorSpaceChanged(ViewerColorSpaceEnum colorspace);
+
+    // OCIO display/view (Stage 1 CPU path). When a display+view is set, the viewer
+    // applies the OCIO display transform instead of the built-in colorspace LUT.
+    // getOcioDisplayViewChoices() returns "Display / View" strings from the active
+    // OCIO config (empty if OIIO/OCIO unavailable). Pass empty strings to
+    // setOcioDisplayView() to fall back to the built-in colorspace LUT.
+    static std::vector<std::string> getOcioDisplayViewChoices();
+    void setOcioDisplayView(const std::string& display, const std::string& view);
+    void getOcioDisplayView(std::string* display, std::string* view) const;
 
     virtual void onInputChanged(int inputNb) OVERRIDE FINAL;
 

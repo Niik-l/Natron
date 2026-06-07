@@ -68,6 +68,18 @@ NATRON_NAMESPACE_ENTER
 void
 ViewerTab::onColorSpaceComboBoxChanged(int v)
 {
+    // Entries >= VIEWER_BUILTIN_COLORSPACE_COUNT are OCIO display/view transforms
+    // appended after the built-in colorspaces. Route those to the native OCIO
+    // viewer path; built-in entries keep using the legacy colorspace LUT.
+    if (v >= VIEWER_BUILTIN_COLORSPACE_COUNT) {
+        const int ocioIndex = v - VIEWER_BUILTIN_COLORSPACE_COUNT;
+        if ( ocioIndex >= 0 && ocioIndex < (int)_imp->ocioDisplayViews.size() ) {
+            const std::pair<std::string, std::string>& dv = _imp->ocioDisplayViews[ocioIndex];
+            _imp->viewerNode->setOcioDisplayView(dv.first, dv.second);
+        }
+        return;
+    }
+
     ViewerColorSpaceEnum colorspace = eViewerColorSpaceSRGB;
 
     if (v == 0) {
@@ -82,6 +94,8 @@ ViewerTab::onColorSpaceComboBoxChanged(int v)
         assert(false);
         throw std::logic_error("ViewerTab::onColorSpaceComboBoxChanged(): unknown colorspace");
     }
+    // Leaving an OCIO view: clear it so the built-in LUT path takes over again.
+    _imp->viewerNode->setOcioDisplayView(std::string(), std::string());
     _imp->viewer->setLut( (int)colorspace );
     _imp->viewerNode->onColorSpaceChanged(colorspace);
 }

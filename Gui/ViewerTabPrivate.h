@@ -50,6 +50,10 @@ CLANG_DIAG_ON(uninitialized)
 
 #define NATRON_TRANSFORM_AFFECTS_OVERLAYS
 
+// Number of built-in entries in the viewer colorspace combo (Linear, sRGB,
+// Rec.709, BT1886) before the appended OCIO display/view entries.
+#define VIEWER_BUILTIN_COLORSPACE_COUNT 4
+
 NATRON_NAMESPACE_ENTER
 
 struct ViewerTabPrivate
@@ -114,6 +118,9 @@ struct ViewerTabPrivate
     Button* toggleGammaButton;
     ScaleSliderQWidget* gammaSlider;
     ComboBox* viewerColorSpace;
+    // OCIO display/view entries appended to viewerColorSpace after the 4 built-in
+    // colorspaces. Index here = combo index - VIEWER_BUILTIN_COLORSPACE_COUNT.
+    std::vector<std::pair<std::string, std::string> > ocioDisplayViews;
     Button* checkerboardButton;
     Button* pickerButton;
     ComboBox* viewsComboBox;

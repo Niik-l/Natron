@@ -83,7 +83,8 @@ struct RenderViewerArgs
                      const Color::Lut* colorSpace_,
                      int alphaChannelIndex_,
                      bool renderOnlyRoI_,
-                     std::size_t tileRowElements_)
+                     std::size_t tileRowElements_,
+                     const std::shared_ptr<const void>& ocioProc_ = std::shared_ptr<const void>())
         : inputImage(inputImage_)
         , matteImage(matteImage_)
         , channels(channels_)
@@ -97,6 +98,7 @@ struct RenderViewerArgs
         , alphaChannelIndex(alphaChannelIndex_)
         , renderOnlyRoI(renderOnlyRoI_)
         , tileRowElements(tileRowElements_)
+        , ocioProc(ocioProc_)
     {
     }
 
@@ -113,6 +115,10 @@ struct RenderViewerArgs
     int alphaChannelIndex;
     bool renderOnlyRoI;
     std::size_t tileRowElements;
+    // OCIO display transform (OIIO::ColorProcessor), type-erased to keep this
+    // header free of OIIO. When set, the color converter applies it instead of
+    // the built-in `colorSpace` LUT. Built in ViewerInstance.cpp.
+    std::shared_ptr<const void> ocioProc;
 };
 
 struct ViewerInstance::ViewerInstancePrivate
@@ -135,6 +141,8 @@ public:
         , viewerParamsGain(1.)
         , viewerParamsGamma(1.)
         , viewerParamsLut(eViewerColorSpaceSRGB)
+        , viewerParamsOcioDisplay()
+        , viewerParamsOcioView()
         , viewerParamsAutoContrast(false)
         , viewerParamsChannels()
         , viewerParamsLayer( ImagePlaneDesc::getRGBAComponents() )
@@ -382,6 +390,15 @@ public:
     double viewerParamsGamma;          /*!< Current gamma setting in the GUI. Not affected by autoContrast. */
     ViewerColorSpaceEnum viewerParamsLut; /*!< a value coding the current color-space used to render.
                                                  0 = sRGB ,  1 = linear , 2 = Rec 709*/
+    // OCIO display/view for the viewer (Stage 1 CPU path). When both are non-empty,
+    // the viewer applies the OCIO display transform (via OIIO::ColorConfig) instead
+    // of the built-in viewerParamsLut. Empty = use the legacy built-in LUT.
+    std::string viewerParamsOcioDisplay;
+    std::string viewerParamsOcioView;
+    // Cached OIIO ColorProcessor (type-erased) for the current display/view, plus
+    // the "display|view" string it was built for so we only rebuild on change.
+    std::shared_ptr<const void> viewerOcioProcessor;
+    std::string viewerOcioProcessorKey;
     bool viewerParamsAutoContrast;
     DisplayChannelsEnum viewerParamsChannels[2];
     ImagePlaneDesc viewerParamsLayer;
