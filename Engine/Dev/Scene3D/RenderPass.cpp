@@ -23,16 +23,38 @@
 
 #include "RenderPass.h"
 
+#include "../../AppInstance.h"
 #include "../../AppManager.h"
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
+#include "../../NodeMetadata.h"
+#include "../../Format.h"
 #include "../../ViewIdx.h"
+
+#include <algorithm>
+#include <cmath>
+#include <list>
+#include <memory>
 
 #include "Scene3D.h"
 #include "Group3D.h"
 #include "Light3D.h"
+
+// Live Cycles preview path. RenderPass is always compiled (Scene3D), but the
+// Cycles renderer only exists when NATRON_CYCLES is on — so the preview render
+// is gated and falls back to a no-op stub otherwise.
+#ifdef NATRON_CYCLES
+#include "CameraProvider.h"
+#include "../Cycles/CyclesPassRender.h"
+#include "../Cycles/CyclesRenderer.h"
+#include "../Cycles/CyclesRenderSettings.h"
+#endif
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 NATRON_NAMESPACE_ENTER
 
@@ -74,11 +96,82 @@ struct RenderPassPrivate
     KnobGroupWPtr lightsGroup;
     KnobBoolWPtr  activeLightsKnobs[RENDERPASS_MAX_OBJECTS];
 
+    // Live preview render knobs
+    KnobIntWPtr  outputWidth, outputHeight;
+    KnobIntWPtr  samples;
+    KnobBoolWPtr previewMode;   // render at half res, upscale
+
+    // AOV enable knobs (mirror CyclesRender's AOV Passes tab)
+    KnobButtonWPtr refreshPassesBtn;
+    KnobBoolWPtr aovDiffDir, aovDiffInd, aovDiffCol;
+    KnobBoolWPtr aovGlossDir, aovGlossInd, aovGlossCol;
+    KnobBoolWPtr aovEmission, aovEnv, aovAO;
+    KnobBoolWPtr aovNormal, aovDepth, aovUV, aovMist;
+
     // Cached discovered names (index matches knob index)
     std::vector<std::string> geoNames;
     std::vector<std::string> lightNames;
+
+#ifdef NATRON_CYCLES
+    // Persistent renderer so a new preview can cancel an in-flight one when the
+    // user drags a slider / moves the camera.
+    std::unique_ptr<CyclesRenderer> activeRenderer;
+#endif
 };
 
+
+#ifdef NATRON_CYCLES
+// Collect enabled AOV pass names (mirrors CyclesRender::getEnabledPasses — the
+// strings must match what executeCyclesPasses produces). "Combined" is always on.
+static std::vector<std::string>
+getEnabledPassesRP(const RenderPassPrivate* imp)
+{
+    std::vector<std::string> passes;
+    passes.push_back("Combined");
+    auto check = [&](const KnobBoolWPtr& knob, const char* name) {
+        KnobBoolPtr k = knob.lock();
+        if (k && k->getValue()) passes.push_back(name);
+    };
+    check(imp->aovDiffDir,  "DiffDir");
+    check(imp->aovDiffInd,  "DiffInd");
+    check(imp->aovDiffCol,  "DiffCol");
+    check(imp->aovGlossDir, "GlossDir");
+    check(imp->aovGlossInd, "GlossInd");
+    check(imp->aovGlossCol, "GlossCol");
+    check(imp->aovEmission, "Emit");
+    check(imp->aovEnv,      "Env");
+    check(imp->aovAO,       "AO");
+    check(imp->aovNormal,   "Normal");
+    check(imp->aovDepth,    "Depth");
+    check(imp->aovUV,       "UV");
+    check(imp->aovMist,     "Mist");
+    return passes;
+}
+
+// Map a pass name → ImagePlaneDesc (mirrors CyclesRender::passNameToPlane so the
+// plane IDs match — a RenderPass preview and a CyclesRender produce identical AOV
+// plane names).
+static ImagePlaneDesc
+passNameToPlaneRP(const std::string& name)
+{
+    if (name == "Combined") return ImagePlaneDesc::getRGBAComponents();
+    static const char* rgb3[] = {"R", "G", "B"};
+    if (name == "DiffDir")  return ImagePlaneDesc("DiffuseDirect",  "Diffuse Direct",  "", rgb3, 3);
+    if (name == "DiffInd")  return ImagePlaneDesc("DiffuseIndirect","Diffuse Indirect", "", rgb3, 3);
+    if (name == "DiffCol")  return ImagePlaneDesc("DiffuseColor",   "Diffuse Color",   "", rgb3, 3);
+    if (name == "GlossDir") return ImagePlaneDesc("GlossyDirect",   "Glossy Direct",   "", rgb3, 3);
+    if (name == "GlossInd") return ImagePlaneDesc("GlossyIndirect", "Glossy Indirect",  "", rgb3, 3);
+    if (name == "GlossCol") return ImagePlaneDesc("GlossyColor",    "Glossy Color",    "", rgb3, 3);
+    if (name == "Emit")     return ImagePlaneDesc("Emission",       "Emission",        "", rgb3, 3);
+    if (name == "Env")      return ImagePlaneDesc("Environment",    "Environment",     "", rgb3, 3);
+    if (name == "Normal")   return ImagePlaneDesc("Normal",         "Normal",          "", rgb3, 3);
+    if (name == "UV")       return ImagePlaneDesc("UV",             "UV",              "", rgb3, 3);
+    if (name == "AO")       return ImagePlaneDesc("AO",    "Ambient Occlusion", "", rgb3, 3);
+    if (name == "Depth")    return ImagePlaneDesc("Depth", "Depth",             "", rgb3, 3);
+    if (name == "Mist")     return ImagePlaneDesc("Mist",  "Mist",              "", rgb3, 3);
+    return ImagePlaneDesc::getRGBAComponents();
+}
+#endif // NATRON_CYCLES
 
 RenderPass::RenderPass(NodePtr node)
     : EffectInstance(node)
@@ -104,6 +197,8 @@ std::string
 RenderPass::getInputLabel(int inputNb) const
 {
     if (inputNb == 0) return "scene";
+    if (inputNb == 1) return "camera";
+    if (inputNb == 2) return "settings";
     return std::string();
 }
 
@@ -219,6 +314,64 @@ RenderPass::initializeKnobs()
     createObjectBoolGroup(this, lightsPage, tr("Active Lights"), "activeLight",
                           tr("Which lights contribute to this pass. If none checked, all lights are used."),
                           _imp->lightsGroup, _imp->activeLightsKnobs, RENDERPASS_MAX_OBJECTS);
+
+    // --- Preview page (live Cycles render of this pass) ---
+    // Connect a camera (input 1) and optionally a CyclesRenderSettings (input 2),
+    // then wire this node to a Viewer to see the pass render live. The preview
+    // reflects this pass's own object visibility / holdout / shadow-catcher /
+    // light selection.
+    KnobPagePtr previewPage = AppManager::createKnob<KnobPage>(this, tr("Preview"));
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Output Width"));
+        k->setName("outputWidth"); k->setDefaultValue(1920);
+        k->setMinimum(1); k->setDisplayMinimum(1); k->setDisplayMaximum(8192);
+        k->setHintToolTip(tr("Preview render width in pixels."));
+        previewPage->addKnob(k); _imp->outputWidth = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Output Height"));
+        k->setName("outputHeight"); k->setDefaultValue(1080);
+        k->setMinimum(1); k->setDisplayMinimum(1); k->setDisplayMaximum(8192);
+        k->setHintToolTip(tr("Preview render height in pixels."));
+        previewPage->addKnob(k); _imp->outputHeight = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Samples"));
+        k->setName("previewSamples"); k->setDefaultValue(16);
+        k->setMinimum(1); k->setMaximum(8192);
+        k->setHintToolTip(tr("Path-trace samples for the live preview. Ignored when a "
+                             "CyclesRenderSettings node is connected (input 2)."));
+        previewPage->addKnob(k); _imp->samples = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Preview (Half Res)"));
+        k->setName("previewMode"); k->setDefaultValue(true);
+        k->setHintToolTip(tr("Render at half resolution and upscale. Faster for interactive work."));
+        previewPage->addKnob(k); _imp->previewMode = k;
+    }
+
+    // --- AOV Passes page (mirror CyclesRender) ---
+    KnobPagePtr aovPage = AppManager::createKnob<KnobPage>(this, tr("AOV Passes"));
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Refresh Passes"));
+        k->setName("refreshPasses");
+        k->setHintToolTip(tr("Re-publish the output planes after toggling AOVs, so the "
+                             "viewer / downstream picks up the new pass set without scrubbing."));
+        aovPage->addKnob(k); _imp->refreshPassesBtn = k;
+    }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Direct"));   k->setName("aovDiffDir");  k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovDiffDir  = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Indirect")); k->setName("aovDiffInd");  k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovDiffInd  = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Color"));    k->setName("aovDiffCol");  k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovDiffCol  = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Direct"));    k->setName("aovGlossDir"); k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovGlossDir = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Indirect"));  k->setName("aovGlossInd"); k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovGlossInd = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Color"));     k->setName("aovGlossCol"); k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovGlossCol = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Emission"));         k->setName("aovEmission"); k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovEmission = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Environment"));      k->setName("aovEnv");      k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovEnv      = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Ambient Occlusion"));k->setName("aovAO");       k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovAO       = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Normal"));           k->setName("aovNormal");   k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovNormal   = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Depth"));            k->setName("aovDepth");    k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovDepth    = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("UV"));               k->setName("aovUV");       k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovUV       = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Mist"));             k->setName("aovMist");     k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovMist     = k; }
 }
 
 bool
@@ -228,6 +381,18 @@ RenderPass::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     KnobButtonPtr refreshBtn = _imp->refreshBtn.lock();
     if (refreshBtn && k == refreshBtn.get()) {
         refreshObjectLists();
+        return true;
+    }
+
+    // Refresh Passes — re-publish output planes after an AOV toggle + re-render.
+    KnobButtonPtr refreshPasses = _imp->refreshPassesBtn.lock();
+    if (refreshPasses && k == refreshPasses.get()) {
+        refreshMetadata_public(true);
+        clearPersistentMessage(false);
+        AppInstancePtr app = getApp();
+        if (app) {
+            app->renderAllViewers(true);
+        }
         return true;
     }
     return false;
@@ -321,15 +486,31 @@ RenderPass::discoverSceneObjects(std::vector<std::string>& outGeo,
     outGeo.clear();
     outLights.clear();
 
-    // Get the connected Scene input and traverse its inputs to find all nodes
+#ifdef NATRON_CYCLES
+    // Use the SAME recursive traversal the renderer uses (collectSceneNodes via
+    // the enumerate* helpers): descends Scene3D / Group3D containers, sees through
+    // Dot routing nodes, and classifies Light3D vs geo. This is why a Dot no
+    // longer shows up as "geo" and lights nested inside a Group3D are found.
+    // scene is on THIS node's input 0, so pass sceneInputSlot = 0.
+    EffectInstance* self = const_cast<EffectInstance*>( static_cast<const EffectInstance*>(this) );
+
+    std::vector<SceneGeoInfo> geoInfo;
+    enumerateSceneGeo(self, 0.0, geoInfo, /*sceneInputSlot=*/0);
+    for (size_t i = 0; i < geoInfo.size(); ++i) {
+        outGeo.push_back(geoInfo[i].scriptName);
+    }
+
+    std::vector<SceneLightInfo> lightInfo;
+    enumerateSceneLights(self, 0.0, lightInfo, /*sceneInputSlot=*/0);
+    for (size_t i = 0; i < lightInfo.size(); ++i) {
+        outLights.push_back(lightInfo[i].scriptName);
+    }
+#else
+    // No Cycles: fall back to a shallow one-level walk of the scene input.
     EffectInstancePtr sceneEffect = getInput(0);
     if (!sceneEffect) return;
-
-    // Check if it's a Scene3D or Group3D
     Scene3D* scene3d = dynamic_cast<Scene3D*>(sceneEffect.get());
     Group3D* group3d = dynamic_cast<Group3D*>(sceneEffect.get());
-
-    // Collect all connected nodes from the Scene
     std::vector<EffectInstancePtr> sceneInputs;
     if (scene3d) {
         for (int i = 0; i < scene3d->getNInputs(); ++i) {
@@ -342,20 +523,14 @@ RenderPass::discoverSceneObjects(std::vector<std::string>& outGeo,
             if (inp) sceneInputs.push_back(inp);
         }
     }
-
     for (const auto& eff : sceneInputs) {
         NodePtr node = eff->getNode();
         if (!node) continue;
         std::string name = node->getScriptName_mt_safe();
-
-        // Check if it's a light
-        Light3D* light = dynamic_cast<Light3D*>(eff.get());
-        if (light) {
-            outLights.push_back(name);
-        } else {
-            outGeo.push_back(name);
-        }
+        if (dynamic_cast<Light3D*>(eff.get())) outLights.push_back(name);
+        else outGeo.push_back(name);
     }
+#endif
 }
 
 std::map<std::string, ObjectVisibility>
@@ -455,19 +630,236 @@ RenderPass::getActiveLights() const
 // Render (pass-through)
 // ---------------------------------------------------------------------------
 
-StatusEnum
-RenderPass::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
-                                   ViewIdx /*view*/, RectD* rod)
+void
+RenderPass::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
+                                           EffectInstance::ComponentsNeededMap* comps,
+                                           double* passThroughTime, int* passThroughView,
+                                           int* passThroughInput)
 {
-    rod->x1 = 0; rod->y1 = 0;
-    rod->x2 = 1; rod->y2 = 1;
+    std::list<ImagePlaneDesc> produced;
+#ifdef NATRON_CYCLES
+    std::vector<std::string> passes = getEnabledPassesRP(_imp.get());
+    for (const std::string& p : passes) {
+        produced.push_back( passNameToPlaneRP(p) );
+    }
+#else
+    produced.push_back( ImagePlaneDesc::getRGBAComponents() );
+#endif
+    (*comps)[-1] = produced;
+    *passThroughTime  = 0;
+    *passThroughView  = 0;
+    *passThroughInput = 0;
+}
+
+StatusEnum
+RenderPass::getPreferredMetadata(NodeMetadata& metadata)
+{
+    // The preview depends on the current frame (animated geo / lights / camera).
+    metadata.setIsFrameVarying(true);
+
+    int w = _imp->outputWidth.lock()  ? _imp->outputWidth.lock()->getValue()  : 1920;
+    int h = _imp->outputHeight.lock() ? _imp->outputHeight.lock()->getValue() : 1080;
+    RectI fmt;
+    fmt.x1 = 0; fmt.y1 = 0;
+    fmt.x2 = std::max(1, w);
+    fmt.y2 = std::max(1, h);
+    metadata.setOutputFormat(fmt);
     return eStatusOK;
 }
 
 StatusEnum
-RenderPass::render(const RenderActionArgs& /*args*/)
+RenderPass::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
+                                   ViewIdx /*view*/, RectD* rod)
 {
+    int w = _imp->outputWidth.lock()  ? _imp->outputWidth.lock()->getValue()  : 1920;
+    int h = _imp->outputHeight.lock() ? _imp->outputHeight.lock()->getValue() : 1080;
+    rod->x1 = 0; rod->y1 = 0;
+    rod->x2 = std::max(1, w);
+    rod->y2 = std::max(1, h);
     return eStatusOK;
+}
+
+StatusEnum
+RenderPass::render(const RenderActionArgs& args)
+{
+    if ( args.outputPlanes.empty() ) {
+        return eStatusFailed;
+    }
+    if ( !args.outputPlanes.front().second ) {
+        return eStatusFailed;
+    }
+
+#ifdef NATRON_CYCLES
+    // --- Resolution (half-res preview like CyclesRender) ---
+    int outW = _imp->outputWidth.lock()  ? _imp->outputWidth.lock()->getValue()  : 1920;
+    int outH = _imp->outputHeight.lock() ? _imp->outputHeight.lock()->getValue() : 1080;
+    if (outW <= 0) outW = 1920;
+    if (outH <= 0) outH = 1080;
+    const bool isPreview = _imp->previewMode.lock() && _imp->previewMode.lock()->getValue();
+    const int renderW = isPreview ? std::max(64, outW / 2) : outW;
+    const int renderH = isPreview ? std::max(64, outH / 2) : outH;
+
+    // --- Optional CyclesRenderSettings (input 2) ---
+    const CyclesRenderSettings* settings = nullptr;
+    if ( EffectInstancePtr se = getInput(2) ) {
+        settings = dynamic_cast<const CyclesRenderSettings*>( se.get() );
+    }
+    const int renderSamples = settings
+        ? settings->getSamples(args.time)
+        : (_imp->samples.lock() ? _imp->samples.lock()->getValue() : 16);
+
+    // --- Camera (input 1) → passed to the helper as cameraOverride ---
+    const CameraProvider* cam = nullptr;
+    if ( EffectInstancePtr ce = getInput(1) ) {
+        cam = dynamic_cast<const CameraProvider*>( ce.get() );
+    }
+
+    // --- Integrator / DOF / Motion Blur: only from a connected Settings node
+    //     (the preview keeps a lean knob set; full control lives on the Settings
+    //     node, shared with the final render). ---
+    CyclesRenderer::IntegratorParams integParams;
+    CyclesRenderer::DOFParams        dofParams;
+    CyclesRenderer::MotionBlurParams mbParams;
+    if (settings) {
+        integParams.maxBounces          = settings->getMaxBounces(args.time);
+        integParams.diffuseBounces      = settings->getDiffuseBounces(args.time);
+        integParams.glossyBounces       = settings->getGlossyBounces(args.time);
+        integParams.transmissionBounces = settings->getTransmissionBounces(args.time);
+        if ( settings->getDOFEnabled(args.time) && cam ) {
+            dofParams.enabled = true;
+            double camFL = cam->getCameraFocalLength(args.time);
+            double fstop = cam->getCameraFStop(args.time);
+            if (fstop < 0.1) fstop = 0.1;
+            dofParams.apertureSize  = (float)(camFL / (2.0 * fstop) / 1000.0);
+            dofParams.focusDistance = (float)settings->getFocusDistance(args.time);
+            dofParams.blades        = settings->getBokehBlades(args.time);
+            dofParams.bladeRotation = (float)(settings->getBladeRotation(args.time) * M_PI / 180.0);
+        }
+        if ( settings->getMotionBlurEnabled(args.time) ) {
+            mbParams.enabled         = true;
+            mbParams.shutterTime     = (float)settings->getShutterTime(args.time);
+            mbParams.shutterPosition = settings->getShutterPosition(args.time);
+        }
+    }
+
+    // --- Build the request and prepare the scene from THIS node's input 0 ---
+    CyclesPassRequest req;
+    req.time            = args.time;
+    req.view            = ViewIdx(0);
+    req.width           = renderW;
+    req.height          = renderH;
+    req.samples         = renderSamples;
+    req.requestedPasses = getEnabledPassesRP(_imp.get());
+    req.transparentBg   = false;
+    req.integrator      = &integParams;
+    if (dofParams.enabled) req.dof = &dofParams;
+    if (mbParams.enabled)  req.mb  = &mbParams;
+    req.cameraOverride  = cam;
+
+    CyclesPassPrepared prepared;
+    {
+        std::string prepErr;
+        if ( !prepareCyclesPasses(this, req, prepared, prepErr, /*sceneInputSlot=*/0) ) {
+            return eStatusFailed;
+        }
+    }
+
+    // --- Apply THIS pass's own visibility / light setup (the whole point) ---
+    refreshObjectLists();
+    std::map<std::string, ObjectVisibility> visMap = getObjectVisibilityMap();
+    std::set<std::string>                   activeLightSet = getActiveLights();
+    if ( !visMap.empty() )         req.visMap       = &visMap;
+    if ( !activeLightSet.empty() ) req.activeLights = &activeLightSet;
+
+    // --- Render (cancel any in-flight preview first) ---
+    if (_imp->activeRenderer) {
+        _imp->activeRenderer->cancelRender();
+        _imp->activeRenderer.reset();
+    }
+    _imp->activeRenderer = std::unique_ptr<CyclesRenderer>(new CyclesRenderer());
+    std::map<std::string, std::vector<float>> passBuffers;
+    {
+        std::string execErr;
+        if ( !executeCyclesPasses(*_imp->activeRenderer, prepared, req, passBuffers, execErr) ) {
+            _imp->activeRenderer.reset();
+            return eStatusFailed;
+        }
+    }
+
+    const int srcW = renderW;
+    const int srcH = renderH;
+
+    // --- Fill each requested output plane from its matching pass buffer
+    //     (mirror CyclesRender: bottom-up, nearest upscale from the preview
+    //     buffer; per-AOV display tweaks for Depth / Mist / AO). ---
+    for (auto& pp : args.outputPlanes) {
+        const ImagePlaneDesc& pd = pp.first;
+        ImagePtr planeImg = pp.second;
+        if (!planeImg) continue;
+
+        // Match this plane to one of the rendered passes.
+        std::string passName;
+        for (size_t pi = 0; pi < req.requestedPasses.size(); ++pi) {
+            if ( passNameToPlaneRP(req.requestedPasses[pi]).getPlaneID() == pd.getPlaneID() ) {
+                passName = req.requestedPasses[pi];
+                break;
+            }
+        }
+        if ( passName.empty() && pd.getNumComponents() == 4 ) passName = "Combined";
+        if ( passName.empty() ) continue;
+
+        std::map<std::string, std::vector<float>>::const_iterator bit = passBuffers.find(passName);
+        if ( bit == passBuffers.end() || bit->second.empty() ) continue;
+        const std::vector<float>& src = bit->second;
+
+        const int numOutComps = pd.getNumComponents();
+        const RectI outBounds = planeImg->getBounds();
+        Image::WriteAccess wa( planeImg.get() );
+        for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+            for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+                float* dst = (float*)wa.pixelAt(x, y);
+                if (!dst) continue;
+                const int fbX = x - outBounds.x1;
+                const int fbY = y - outBounds.y1;
+                const int dstW = outBounds.width();
+                const int dstH = outBounds.height();
+                int sx = (srcW == dstW) ? fbX : (fbX * srcW / dstW);
+                int sy = (srcH == dstH) ? fbY : (fbY * srcH / dstH);
+                sx = std::min(sx, srcW - 1);
+                sy = std::min(sy, srcH - 1);
+                const int idx = (sy * srcW + sx) * 4;
+                float r = src[idx + 0], g = src[idx + 1], b = src[idx + 2], a = src[idx + 3];
+                if (passName == "Depth") {
+                    if (r >= 1e9f) r = 0.0f;   // infinity → black
+                    g = b = r; a = 1.0f;
+                } else if (passName == "Mist" || passName == "AO") {
+                    g = b = r; a = 1.0f;       // single-value → grayscale
+                }
+                dst[0] = r;
+                if (numOutComps > 1) dst[1] = g;
+                if (numOutComps > 2) dst[2] = b;
+                if (numOutComps > 3) dst[3] = a;
+            }
+        }
+    }
+    return eStatusOK;
+#else
+    // No Cycles in this build — clear to black so the viewer shows nothing
+    // rather than uninitialized memory.
+    const ImagePlaneDesc& planeDesc = args.outputPlanes.front().first;
+    ImagePtr outImg = args.outputPlanes.front().second;
+    const int numOutComps = planeDesc.getNumComponents();
+    const RectI outBounds = outImg->getBounds();
+    Image::WriteAccess wa( outImg.get() );
+    for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+        for (int x = outBounds.x1; x < outBounds.x2; ++x) {
+            float* dst = (float*)wa.pixelAt(x, y);
+            if (!dst) continue;
+            for (int c = 0; c < numOutComps; ++c) dst[c] = 0.f;
+        }
+    }
+    return eStatusOK;
+#endif // NATRON_CYCLES
 }
 
 NATRON_NAMESPACE_EXIT

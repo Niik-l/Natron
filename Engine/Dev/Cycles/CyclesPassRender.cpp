@@ -95,7 +95,8 @@ bool
 prepareCyclesPasses(EffectInstance*           effect,
                      const CyclesPassRequest&  req,
                      CyclesPassPrepared&       out,
-                     std::string&              errOut)
+                     std::string&              errOut,
+                     int                       sceneInputSlot)
 {
     errOut.clear();
     out = CyclesPassPrepared(); // reset to defaults
@@ -105,11 +106,12 @@ prepareCyclesPasses(EffectInstance*           effect,
         return false;
     }
 
-    // --- Walk obj input (slot 1) + optional RenderPass wrapper, seeing through
-    // any Dot routing nodes at each hop.
-    EffectInstancePtr geoEffect = skipDots(effect->getInput(1));
+    // --- Walk obj input (default slot 1; RenderPass self-preview uses slot 0)
+    // + optional RenderPass wrapper, seeing through any Dot routing nodes at
+    // each hop.
+    EffectInstancePtr geoEffect = skipDots(effect->getInput(sceneInputSlot));
     if (!geoEffect) {
-        errOut = "no obj/scene connected on slot 1";
+        errOut = "no obj/scene connected on the scene input slot";
         return false;
     }
     out.renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
@@ -261,15 +263,16 @@ renderCyclesPassesForEffect(EffectInstance*            effect,
 void
 enumerateSceneLights(EffectInstance*              effect,
                       double                       /*time*/,
-                      std::vector<SceneLightInfo>& out)
+                      std::vector<SceneLightInfo>& out,
+                      int                          sceneInputSlot)
 {
     out.clear();
     if (!effect) return;
 
-    // Same traversal as the renderer: input 1 → through RenderPass →
+    // Same traversal as the renderer: scene input slot → through RenderPass →
     // Scene3D / Group3D containers. We collect every node we visit and
     // then filter to Light3D via dynamic_cast.
-    EffectInstancePtr geoEffect = skipDots(effect->getInput(1));
+    EffectInstancePtr geoEffect = skipDots(effect->getInput(sceneInputSlot));
     if (!geoEffect) return;
     RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
     if (renderPass) {
@@ -299,12 +302,13 @@ enumerateSceneLights(EffectInstance*              effect,
 void
 enumerateSceneGeo(EffectInstance*            effect,
                    double                     /*time*/,
-                   std::vector<SceneGeoInfo>& out)
+                   std::vector<SceneGeoInfo>& out,
+                   int                        sceneInputSlot)
 {
     out.clear();
     if (!effect) return;
 
-    EffectInstancePtr geoEffect = skipDots(effect->getInput(1));
+    EffectInstancePtr geoEffect = skipDots(effect->getInput(sceneInputSlot));
     if (!geoEffect) return;
     RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
     if (renderPass) {
@@ -324,6 +328,12 @@ enumerateSceneGeo(EffectInstance*            effect,
         if (!fx) continue;
         // Skip lights — they're collected by enumerateSceneLights.
         if (dynamic_cast<Light3D*>(fx.get())) continue;
+        // Skip container / decorator nodes — they're not renderable geo (they
+        // just group or annotate it). collectSceneNodes pushes them while
+        // descending, so filter them out of the object list here.
+        if (dynamic_cast<Scene3D*>(fx.get())) continue;
+        if (dynamic_cast<Group3D*>(fx.get())) continue;
+        if (dynamic_cast<GeoMaterialOverride*>(fx.get())) continue;
         SceneGeoInfo info;
         info.scriptName = n->getScriptName_mt_safe();
         out.push_back(std::move(info));

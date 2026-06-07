@@ -136,10 +136,15 @@ struct CyclesPassPrepared
 // PassManager calls this via `renderCyclesPassesForEffect()`. CyclesRender
 // calls it directly so it can hash the resolved values + cache check
 // before deciding whether to run step 2.
+// sceneInputSlot: which input slot of `effect` holds the scene/obj graph.
+// CyclesRender/PassManager use slot 1 (the default); RenderPass renders its own
+// preview with the scene on slot 0. The camera still comes from req.cameraOverride
+// (or the legacy slot 2) and holdouts from slot 4, independent of this.
 bool prepareCyclesPasses(EffectInstance*           effect,
                           const CyclesPassRequest&  req,
                           CyclesPassPrepared&       out,
-                          std::string&              errOut);
+                          std::string&              errOut,
+                          int                       sceneInputSlot = 1);
 
 // Step 2 of the two-step render. Invokes Cycles using a prepared scene
 // and the request's per-pass parameters. The renderer is supplied by the
@@ -172,9 +177,12 @@ struct SceneLightInfo {
 // Walk the effect's obj input (input slot 1, traversing through optional
 // RenderPass / Scene3D / Group3D containers) and collect every Light3D
 // node found. Cheap — no SceneGraph rebuild, just dynamic_cast walks.
+// sceneInputSlot: input slot holding the scene (default 1 for CyclesRender/
+// PassManager; RenderPass discovers its own scene on slot 0).
 void enumerateSceneLights(EffectInstance*              effect,
                            double                       time,
-                           std::vector<SceneLightInfo>& out);
+                           std::vector<SceneLightInfo>& out,
+                           int                          sceneInputSlot = 1);
 
 // One scene-graph non-light entry (geo / particles / volumes / cameras).
 // Used by per-pass object scoping in CyclesRenderPassManager — the
@@ -188,7 +196,8 @@ struct SceneGeoInfo {
 // isn't a Light3D. Used to build the per-pass ObjectVisibility map.
 void enumerateSceneGeo(EffectInstance*            effect,
                         double                     time,
-                        std::vector<SceneGeoInfo>& out);
+                        std::vector<SceneGeoInfo>& out,
+                        int                        sceneInputSlot = 1);
 
 NATRON_NAMESPACE_EXIT
 
