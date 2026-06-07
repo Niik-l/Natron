@@ -113,6 +113,10 @@ public:
     bool   getMotionBlurEnabled(double time) const;
     double getShutterTime(double time) const;
     int    getShutterPosition(double time) const;
+    // Default output colorspace for files written to disk by consumers
+    // (CyclesRenderPassManager). Returns the selected OCIO colorspace id, or
+    // empty if unset/unavailable. Per-pass JSON "colorspace" overrides this.
+    std::string getOutputColorspace(double time) const;
 
 private:
 

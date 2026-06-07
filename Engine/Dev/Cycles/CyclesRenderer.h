@@ -206,6 +206,11 @@ public:
         // EXR compression: ZIP (default), ZIPS, PIZ, DWAA, DWAB, RLE,
         // PXR24, B44, B44A, None.
         std::string compression;
+        // Output colorspace for LDR (PNG/JPG/TIFF) writes: the rendered
+        // scene-linear pixels are converted to this OCIO colorspace before
+        // quantizing. Empty / "Raw" / the scene_linear name = no conversion.
+        // EXR ignores this (always written scene-linear + tagged).
+        std::string colorspace;
     };
 
     // Existing 3-arg form kept for backward compatibility with the

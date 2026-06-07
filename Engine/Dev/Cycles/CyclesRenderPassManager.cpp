@@ -53,8 +53,49 @@
 #include "CyclesRenderSettings.h"
 #include "KnobPassTable.h"
 #include "../Scene3D/Material3D.h"
+#include "../../OCIOColorSpaceUtils.h"
 
 NATRON_NAMESPACE_ENTER
+
+// True for AOVs that carry non-colour data (geometry / IDs) and must never be
+// colour-converted on write: depth, normals, position, motion vectors, UVs,
+// object/material indices, and cryptomatte (hashed float IDs — converting them
+// corrupts the mattes).
+static bool
+isDataAov_(const std::string& aov)
+{
+    std::string a = aov;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        a[i] = (char)std::tolower((unsigned char)a[i]);
+    }
+    return a.find("depth")    != std::string::npos ||
+           a.find("normal")   != std::string::npos ||
+           a.find("position") != std::string::npos ||
+           a.find("vector")   != std::string::npos ||
+           a.find("motion")   != std::string::npos ||
+           a.find("crypto")   != std::string::npos ||
+           a.find("index")    != std::string::npos ||
+           a == "uv" || a == "z";
+}
+
+// True if a colorspace name is a scene-linear / working space (so it's a poor
+// target for an 8-bit review file and should be auto-promoted to a display space).
+static bool
+looksSceneLinear_(const std::string& name)
+{
+    if ( name.empty() ) {
+        return true;
+    }
+    if ( name == getOcioSceneLinearName() ) {
+        return true;
+    }
+    std::string n = name;
+    for (std::size_t i = 0; i < n.size(); ++i) {
+        n[i] = (char)std::tolower((unsigned char)n[i]);
+    }
+    return n.find("linear") != std::string::npos ||
+           n == "acescg" || n == "aces2065-1" || n == "acescc" || n == "acescct";
+}
 
 struct CyclesRenderPassManagerPrivate
 {
@@ -230,10 +271,17 @@ CyclesRenderPassManager::initializeKnobs()
         k->setHintToolTip(tr(
             "JSON-serialized list of render passes. Each entry: id, name, "
             "type, group, enabled/solo/mute/output flags, aovs (array), "
-            "filePath, format, bitDepth, compression, samples, candidateLights, "
+            "filePath, format, bitDepth, compression, colorspace, samples, "
+            "candidateLights, "
             "excludeLights, soloLight, candidateObjects, excludeObjects, "
             "soloObject, cameraOverride, materialOverride, shadowCatcherObjects, "
             "holdoutObjects, traceObjects."
+            "\n\nColorspace (output): per-pass override of the CyclesRenderSettings "
+            "'Output Colorspace' default. EXR is always written scene-linear "
+            "(ACEScg) and tagged — this only affects PNG/JPG/TIFF, which are "
+            "converted from scene-linear to the named OCIO colorspace for review. "
+            "Data AOVs (depth/normal/position/vector/id/cryptomatte) are never "
+            "converted. Empty = inherit the Settings node."
             "\n\nLight handling — two mechanisms:"
             "\n  1. Light-group AOVs (standard workflow): the beauty file "
             "carries every light group as separate layers so comp can do "
@@ -486,6 +534,7 @@ struct ActiveSpec {
     std::string               format;       // "EXR (Multilayer)", "PNG (16-bit)", etc. MVP: EXR only.
     std::string               bitDepth;     // "32-bit Full" (default), "16-bit Half"
     std::string               compression;  // ZIP / ZIPS / PIZ / DWAA / DWAB / RLE / PXR24 / B44 / B44A / None
+    std::string               colorspace;   // per-pass output colorspace override (OCIO name). Empty = inherit the Settings node default.
     // Light scoping (per-pass). Semicolon-separated light names — glob
     // pattern resolution deferred. Resolved at render time into the
     // CyclesPassRequest::activeLights filter set.
@@ -937,6 +986,7 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
             spec.format       = p.value(QStringLiteral("format")).toString().toStdString();
             spec.bitDepth     = p.value(QStringLiteral("bitDepth")).toString().toStdString();
             spec.compression  = p.value(QStringLiteral("compression")).toString().toStdString();
+            spec.colorspace   = p.value(QStringLiteral("colorspace")).toString().toStdString();
             spec.candidateLights  = p.value(QStringLiteral("candidateLights")).toString().toStdString();
             spec.excludeLights    = p.value(QStringLiteral("excludeLights")).toString().toStdString();
             spec.soloLight        = p.value(QStringLiteral("soloLight")).toString().toStdString();
@@ -1395,6 +1445,14 @@ renderFrameForBatches(EffectInstance*                  effect,
             opts.bitDepth    = spec.bitDepth;
             opts.compression = spec.compression;
 
+            // Resolve the output colorspace: per-pass JSON override, else the
+            // Settings node default, else empty (writers fall back). EXR ignores
+            // this (always written scene-linear + tagged); it drives LDR only.
+            std::string baseColorspace = spec.colorspace;
+            if (baseColorspace.empty() && settings) {
+                baseColorspace = settings->getOutputColorspace(frame);
+            }
+
             const std::string& outPath = resolvedPaths[idx];
             const std::string ext = [&]() {
                 size_t dot = outPath.rfind('.');
@@ -1436,6 +1494,16 @@ renderFrameForBatches(EffectInstance*                  effect,
                     const std::string suffix = std::string("_") + aov;
                     if (dot == std::string::npos) perAovPath += suffix;
                     else perAovPath.insert(dot, suffix);
+                }
+                // Per-AOV colorspace: data passes never convert; colour passes
+                // convert to the resolved space, auto-promoting a scene-linear
+                // target to the config display space so the 8-bit file isn't dark.
+                if ( isDataAov_(aov) ) {
+                    opts.colorspace = "Raw";
+                } else if ( looksSceneLinear_(baseColorspace) ) {
+                    opts.colorspace = getOcioDefaultDisplayColorSpace();
+                } else {
+                    opts.colorspace = baseColorspace;
                 }
                 const bool isCombined = (aov == "Combined");
                 const bool saved = CyclesRenderer::saveSingleImage(

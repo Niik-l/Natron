@@ -62,8 +62,10 @@
 
 #include <OpenImageIO/imagebuf.h>
 #include <OpenImageIO/imagebufalgo.h>
+#include <OpenImageIO/color.h>
 
 // Natron headers
+#include "Engine/OCIOColorSpaceUtils.h"
 #include "Engine/Dev/Scene3D/CameraMath.h"
 #include "Engine/Dev/Scene3D/RotationConventions.h"
 #include "Engine/Dev/Scene3D/SceneGraph.h"
@@ -2480,6 +2482,43 @@ static void resolveExrOptions_(const CyclesRenderer::ExrOutputOptions& opts,
     else if (c.find("none")  != std::string::npos) outCompression = "none";
 }
 
+// Convert the first 3 (RGB) channels of an interleaved buffer in place from the
+// config's scene_linear space to `target`, via OCIO (OIIO::ColorConfig). No-op
+// (returns false) when target is empty, "Raw", the scene_linear space itself, or
+// when OCIO is unavailable / the transform can't be built. nch is the buffer's
+// channel count (>=3); alpha and extra channels are left untouched.
+static bool
+convertSceneLinearRGB_(float* interleaved, int width, int height, int nch,
+                       const std::string& target)
+{
+    if (!interleaved || nch < 3 || target.empty()) {
+        return false;
+    }
+    if (target == "Raw" || target == "raw") {
+        return false;
+    }
+    const std::string sceneLinear = getOcioSceneLinearName();
+    if (target == sceneLinear) {
+        return false;  // identity
+    }
+    static OIIO::ColorConfig config;
+    if ( !OIIO::ColorConfig::supportsOpenColorIO() ) {
+        return false;
+    }
+    const std::string from = sceneLinear.empty() ? std::string("scene_linear") : sceneLinear;
+    OIIO::ColorProcessorHandle proc = config.createColorProcessor(from, target);
+    if (!proc) {
+        return false;
+    }
+    // RGB over an nch-interleaved buffer: process 3 channels with a per-pixel
+    // stride of nch floats so alpha/extra channels are skipped.
+    proc->apply(interleaved, width, height, 3,
+                (OIIO::stride_t)sizeof(float),
+                (OIIO::stride_t)(nch * sizeof(float)),
+                (OIIO::stride_t)(nch * (size_t)width * sizeof(float)));
+    return true;
+}
+
 bool
 CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
                                     const std::map<std::string, std::vector<float>>& passBuffers,
@@ -2550,6 +2589,15 @@ CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
     OIIO::ImageSpec spec(width, height, totalCh, pixelType);
     spec.channelnames = chanNames;
     spec.attribute("compression", compression);
+    // Multi-layer EXR bundles colour AND data AOVs and must stay comp-ready, so
+    // it is always written scene-linear and only TAGGED (never converted). For
+    // EXR delivery in another space, use a Write node.
+    {
+        const std::string sceneLinear = getOcioSceneLinearName();
+        if (!sceneLinear.empty()) {
+            spec.attribute("oiio:ColorSpace", sceneLinear);
+        }
+    }
 
     auto out = OIIO::ImageOutput::create(filepath);
     if (!out) return false;
@@ -2642,6 +2690,22 @@ CyclesRenderer::saveSingleImage(const std::string& filepath,
     } else {
         spec.channelnames = { "R", "G", "B" };
     }
+    // Colorspace tag: when opts.colorspace requests a real (non scene-linear, non
+    // Raw) space we convert below and tag with it; otherwise tag the source space.
+    {
+        const std::string sceneLinear = getOcioSceneLinearName();
+        std::string csTag;
+        if (opts.colorspace.empty() || opts.colorspace == sceneLinear) {
+            csTag = sceneLinear;
+        } else if (opts.colorspace == "Raw" || opts.colorspace == "raw") {
+            csTag = "Raw";
+        } else {
+            csTag = opts.colorspace;
+        }
+        if (!csTag.empty()) {
+            spec.attribute("oiio:ColorSpace", csTag);
+        }
+    }
 
     // Compression handling per format.
     const std::string c = toLowerCopy_(opts.compression);
@@ -2682,6 +2746,10 @@ CyclesRenderer::saveSingleImage(const std::string& filepath,
             if (nCh == 4) pixels[di + 3] = rgbaBuffer[si + 3];
         }
     }
+    // Convert scene-linear → output colorspace before quantizing to 8/16-bit, so
+    // PNG/JPG/TIFF review images display correctly (no-op for Raw / scene-linear /
+    // data passes — see convertSceneLinearRGB_).
+    convertSceneLinearRGB_(pixels.data(), width, height, nCh, opts.colorspace);
     out->write_image(OIIO::TypeDesc::FLOAT, pixels.data());
     out->close();
 

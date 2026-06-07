@@ -25,6 +25,7 @@
 #include "../../AppManager.h"
 #include "../../Image.h"
 #include "../../KnobTypes.h"
+#include "../../OCIOColorSpaceUtils.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -49,6 +50,8 @@ struct CyclesRenderSettingsPrivate
     KnobBoolWPtr   motionBlur;
     KnobDoubleWPtr shutterTime;
     KnobChoiceWPtr shutterPosition;
+
+    KnobChoiceWPtr outputColorspace;
 };
 
 CyclesRenderSettings::CyclesRenderSettings(NodePtr node)
@@ -196,6 +199,45 @@ CyclesRenderSettings::initializeKnobs()
         k->setDefaultValue(1);
         mbPage->addKnob(k); _imp->shutterPosition = k;
     }
+
+    // --- Output tab ---
+    KnobPagePtr outPage = AppManager::createKnob<KnobPage>(this, tr("Output"));
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Output Colorspace"));
+        k->setName("outputColorspace");
+        // Populate from the active OCIO config so the names resolve downstream.
+        std::vector<ChoiceOption> entries;
+        const std::vector<std::string> spaces = getOcioColorSpaceNames();
+        int defIdx = 0;
+        const std::string sceneLinear = getOcioSceneLinearName();
+        if ( !spaces.empty() ) {
+            for (std::size_t i = 0; i < spaces.size(); ++i) {
+                if (!sceneLinear.empty() && spaces[i] == sceneLinear) {
+                    defIdx = (int)i;  // default to scene-linear (ACEScg)
+                }
+                entries.push_back( ChoiceOption(spaces[i], "", "") );
+            }
+        } else {
+            entries.push_back( ChoiceOption("ACEScg", "", "") );
+            entries.push_back( ChoiceOption("sRGB - Display", "", "") );
+        }
+        k->populateChoices(entries);
+        k->setDefaultValue(defIdx);
+        k->setHintToolTip(tr(
+            "Default colorspace for files written to disk by a connected "
+            "CyclesRenderPassManager.\n\n"
+            "• EXR is always written scene-linear (ACEScg) and tagged with the "
+            "config's scene_linear space — it stays comp-ready; this setting does "
+            "not bake a transform into EXRs (use a Write node for EXR delivery in "
+            "another space).\n"
+            "• PNG / JPG / TIFF (review) are converted from scene-linear to this "
+            "space so they display correctly. If this is left on a scene-linear "
+            "space, review images auto-promote to the config's display space.\n"
+            "• Data passes (depth / normal / position / vector / id / cryptomatte) "
+            "are never converted.\n\n"
+            "A per-pass JSON \"colorspace\" field overrides this for that pass."));
+        outPage->addKnob(k); _imp->outputColorspace = k;
+    }
 }
 
 // --- CyclesSettingsProvider impl ---
@@ -281,6 +323,12 @@ int    CyclesRenderSettings::getShutterPosition(double /*time*/) const
 {
     KnobChoicePtr k = _imp->shutterPosition.lock();
     return k ? k->getValue() : 1;  // Center
+}
+
+std::string CyclesRenderSettings::getOutputColorspace(double /*time*/) const
+{
+    KnobChoicePtr k = _imp->outputColorspace.lock();
+    return k ? k->getActiveEntry().id : std::string();
 }
 
 StatusEnum
