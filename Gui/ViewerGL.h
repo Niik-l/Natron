@@ -102,6 +102,8 @@ public:
     virtual bool isClippingImageToFormat() const OVERRIDE FINAL;
     virtual ImageBitDepthEnum getBitDepth() const OVERRIDE FINAL;
 
+    virtual bool isGPUOcioApplicable() const OVERRIDE FINAL;
+
     /**
      *@brief Hack to allow the resizeEvent to be publicly used elsewhere.
      * It calls QOpenGLWidget::resizeEvent(QResizeEvent*).

@@ -1045,7 +1045,11 @@ ViewerGL::Implementation::buildOcioShaderIfNeeded()
     }
 
     // Assemble the fragment shader: our uniforms + OCIO's generated code + a main()
-    // that does gain/offset (in linear) -> OCIO display transform -> viewer gamma.
+    // that does gain/offset -> viewer gamma -> OCIO display transform, all in linear.
+    // Gamma is applied BEFORE the display transform to match the 8-bit CPU path
+    // (ViewerInstance::scaleToTexture8bits_generic: gain -> gamma LUT -> OCIO), so the
+    // viewer gamma slider behaves identically in 8-bit and 32-bit float. The CPU gamma
+    // LUT clamps to [0,1] and is skipped at gamma==1 (HDR preserved); mirror both here.
     std::string frag;
     frag += "uniform sampler2D Tex;\n";
     frag += "uniform float gain;\n";
@@ -1055,12 +1059,12 @@ ViewerGL::Implementation::buildOcioShaderIfNeeded()
     frag += "\nvoid main() {\n";
     frag += "    vec4 c = texture2D(Tex, gl_TexCoord[0].st);\n";
     frag += "    c.rgb = c.rgb * gain + offset;\n";
-    frag += "    c = OCIODisplay(c);\n";
     frag += "    if (gamma <= 0.0) {\n";
     frag += "        c.rgb = vec3(greaterThanEqual(c.rgb, vec3(1.0)));\n";
-    frag += "    } else {\n";
-    frag += "        c.rgb = pow(max(c.rgb, vec3(0.0)), vec3(1.0 / gamma));\n";
+    frag += "    } else if (gamma != 1.0) {\n";
+    frag += "        c.rgb = pow(clamp(c.rgb, vec3(0.0), vec3(1.0)), vec3(1.0 / gamma));\n";
     frag += "    }\n";
+    frag += "    c = OCIODisplay(c);\n";
     frag += "    gl_FragColor = c;\n";
     frag += "}\n";
 

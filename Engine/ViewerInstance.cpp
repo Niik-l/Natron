@@ -962,12 +962,19 @@ ViewerInstance::setupMinimalUpdateViewerParams(const SequenceTime time,
         outArgs->isDoingPartialUpdates = _imp->isDoingPartialUpdates;
     }
 
-    // OCIO display/view is applied two ways depending on the viewer bit depth:
-    //   - 8-bit (default): baked on the CPU in scaleToTexture8bits_generic.
-    //   - 32-bit float: applied on the GPU (ViewerGL builds an OCIO display shader).
-    // Both consume outArgs->ocioProc / ocioDisplay / ocioView set above, so no bit
-    // depth override is needed here. (Stage 2 GPU OCIO; if the GPU shader fails to
-    // build the viewer can fall back to 8-bit for the CPU path.)
+    // OCIO display/view is applied two ways:
+    //   - GPU (float path): ViewerGL applies an OCIO display shader at draw time.
+    //   - CPU (8-bit path): baked in scaleToTexture8bits_generic.
+    // Prefer the GPU path when the viewer reports it will apply OCIO on the GPU
+    // (32-bit float + a successfully-built shader). Otherwise — 8-bit mode, or the
+    // GPU shader failed to build — force a byte texture so OCIO is baked on the CPU
+    // instead of the float path silently skipping it.
+    if ( outArgs->ocioProc && !outArgs->ocioDisplay.empty() ) {
+        const bool gpuWillApply = _imp->uiContext && _imp->uiContext->isGPUOcioApplicable();
+        if (!gpuWillApply) {
+            outArgs->params->depth = eImageBitDepthByte;
+        }
+    }
 
     // Fill the gamma LUT if it has never been filled yet
     bool gammaLookupEmpty;

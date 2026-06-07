@@ -86,6 +86,14 @@ public:
     virtual ImageBitDepthEnum getBitDepth() const = 0;
 
     /**
+     * @brief Returns true if the viewer will apply the selected OCIO display/view
+     * on the GPU (float path) for the next render. When false (8-bit mode, no OCIO
+     * view, or the GPU shader failed to build), the engine bakes OCIO on the CPU
+     * (8-bit path) instead. Default false for non-GL viewers.
+     **/
+    virtual bool isGPUOcioApplicable() const { return false; }
+
+    /**
      * @brief Returns true if the user has enabled the region of interest
      **/
     virtual bool isUserRegionOfInterestEnabled() const = 0;

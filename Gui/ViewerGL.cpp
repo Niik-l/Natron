@@ -1741,7 +1741,25 @@ ViewerGL::setOcioDisplayView(const std::string& display,
     }
     _imp->ocioDisplay = display;
     _imp->ocioView = view;
-    _imp->ocioShaderDirty = true;   // rebuilt lazily on the next draw (GL context current)
+    _imp->ocioShaderDirty = true;
+    // Build the GPU OCIO shader now (if GL is up) so isGPUOcioApplicable() is
+    // accurate before the next render — that lets the engine choose the 8-bit CPU
+    // OCIO path when the GPU shader can't be built. If GL isn't ready yet, the
+    // draw builds it lazily and a later render switches to the GPU path.
+    if ( isValid() ) {
+        makeCurrent();
+        _imp->buildOcioShaderIfNeeded();
+        doneCurrent();
+    }
+}
+
+bool
+ViewerGL::isGPUOcioApplicable() const
+{
+    // GPU OCIO only runs in the float path, and only when the shader built OK.
+    return !_imp->ocioDisplay.empty() && !_imp->ocioView.empty()
+           && (getBitDepth() == eImageBitDepthFloat)
+           && _imp->ocioShaderValid;
 }
 
 #define QMouseEventLocalPos(e) ( e->localPos() )
