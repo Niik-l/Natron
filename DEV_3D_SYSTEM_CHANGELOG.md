@@ -17,6 +17,49 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Colour management pass: native OCIO viewer + config-aware materials + pass output colourspace + RenderPass live preview (2026-06-07)** —
+  - **Native OCIO-aware viewer** — the viewer colourspace dropdown now lists the
+    active OCIO config's `Display / View` transforms (e.g. ACES Output Transforms)
+    alongside the built-in Linear/sRGB/Rec.709/BT1886.
+    - *Stage 1 (CPU, 8-bit path)* — `scaleToTexture8bits_generic` applies the OCIO
+      display transform via `OIIO::ColorConfig` when a view is selected; the
+      display/view is folded into the texture-cache key so switching is never stale.
+    - *Stage 2 (GPU, 32-bit float path)* — `ViewerGL` builds a dedicated shader from
+      OCIO's `GpuShaderDesc` (GLSL 1.2 + LUT textures) and applies the transform on
+      the GPU, so ACES views are **real-time** (exposure/gamma/scrub with no
+      re-render, full float precision). Falls back to the CPU/built-in path if the
+      GPU shader can't be built. In 32-bit float mode the whole dropdown (built-in
+      + OCIO) runs on the GPU; in 8-bit it all runs on the CPU.
+  - **Config-aware Material3D colourspaces** — the diffuse/emission texture
+    colourspace menus are populated from the active OCIO config (new header-only
+    `Engine/OCIOColorSpaceUtils.h`) and return the entry id string, so names resolve
+    under any config (fixes ACES, where plain "sRGB" is "sRGB - Texture" and was
+    silently mis-decoding). Falls back to the legacy fixed list without OCIO.
+  - **Per-pass output colourspace (disk renders)** — `CyclesRenderSettings` gains a
+    default "Output Colorspace"; `CyclesRenderPassManager` adds a per-pass JSON
+    `colorspace` override (per-pass → Settings → fallback). EXR is written
+    scene-linear and tagged; PNG/JPG/TIFF are converted scene-linear → target so
+    reviews display correctly (a scene-linear target auto-promotes to the config
+    display space); data AOVs (depth/normal/position/vector/id/cryptomatte) are
+    never converted. Fixes LDR pass output that was raw-linear-in-8-bit. The
+    in-graph `CyclesRender` output deliberately stays scene-linear (use a Write node
+    for EXR delivery in another space).
+  - **RenderPass live Cycles preview + AOV tab** — `RenderPass` renders its own live
+    Cycles preview reflecting that pass's visibility/holdout/shadow-catcher/light
+    setup (new camera + settings inputs, Preview tab) via the shared
+    `CyclesPassRender` helper (`prepareCyclesPasses` gained a `sceneInputSlot` param),
+    plus an AOV Passes tab (multi-plane output mirroring `CyclesRender`). Wire
+    scene+camera and connect to a Viewer — no separate `CyclesRender` needed.
+  - **RenderPass scene-discovery fixes** — discovery now uses the renderer's
+    recursive `collectSceneNodes` walk (via `enumerateSceneGeo`/`enumerateSceneLights`),
+    so Dot routing nodes are seen through, lights nested in a Group3D are found, and
+    container/decorator nodes (Scene3D/Group3D/GeoMaterialOverride) are no longer
+    listed as renderable geo.
+  - **ACES v4.0.0 chain consistency** — verified end-to-end: Read →
+    scene_linear (ACEScg) → Cycles/comp → Viewer/Write, all reading the same `$OCIO`.
+    `ColorChartMatch` already correct (config-independent colorimetric matrices,
+    ACEScg default, AP0/AP1 primaries unchanged in ACES 2.0).
+
 - **Per-geo material override + archive transform + viewport isolate + node/tree fixes (2026-06-06)** —
   - **GeoMaterialOverride ("Material Override") node** — assigns a different
     material to specific sub-objects of an upstream `ReadAlembicArchive` without
