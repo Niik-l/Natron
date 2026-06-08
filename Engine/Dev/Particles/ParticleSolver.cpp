@@ -640,22 +640,6 @@ ParticleSolver::getParticleData(double time)
         _imp->cachedData = std::make_shared<ParticleData>();
     }
 
-    // Loading indicator: a cold/partial cache means we must simulate a range of
-    // frames here, which can take a noticeable moment (sequential sim). Post a
-    // status banner on the node so the user knows Natron is working, not hung or
-    // crashing. Only for a non-trivial range, so 1-frame-ahead scrubbing doesn't
-    // flicker. Cleared after the loop. (getParticleData is serialized by computeMutex.)
-    // NB: eMessageTypeInfo routes to a MODAL popup (Node::setPersistentMessage), which
-    // would block this render thread while it holds computeMutex -> stalls playback.
-    // Use the non-blocking persistent banner path (eMessageTypeWarning) instead — it
-    // only sets a flag + queued signal. Shows as a banner on the node/viewer.
-    const int framesToSim = endFrame - startFrame + 1;
-    const bool showSimBanner = framesToSim > 5;
-    if (showSimBanner) {
-        setPersistentMessage( eMessageTypeWarning,
-                              "Simulating particles… (" + std::to_string(framesToSim) + " frames)" );
-    }
-
     for (int frame = startFrame; frame <= endFrame; ++frame) {
         // 1. Get emitter output to discover new particles
         ParticleDataPtr emitterData = emitter->getParticleData((double)frame);
@@ -785,10 +769,6 @@ ParticleSolver::getParticleData(double time)
                                + sizeof(uint32_t) * _imp->knownIDs.size() + 128;
             _imp->frameCacheBytes += entry.memoryBytes;
         }
-    }
-
-    if (showSimBanner) {
-        clearPersistentMessage(false);
     }
 
     }  // end if (!servedFromExactCache)
