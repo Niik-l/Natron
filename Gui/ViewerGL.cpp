@@ -139,6 +139,20 @@ ViewerGL::~ViewerGL()
 {
     // always running in the main thread
     assert( qApp && qApp->thread() == QThread::currentThread() );
+
+    // The GL resources owned by _imp (shaderRGB / shaderBlack / shaderOCIO, the
+    // display textures, VBOs, checkerboard + OCIO LUT textures) are tied to this
+    // widget's QOpenGLContext. Their destructors call glDeleteProgram / glDeleteTextures
+    // / glDeleteBuffers, which require that context to be CURRENT — QOpenGLWidget does
+    // NOT make it current for us in the destructor, so otherwise these run with no
+    // current context and crash inside the GL driver / Qt6OpenGL (release builds
+    // compile out Qt's context-group safety check, so it segfaults instead of warning).
+    // The context still exists here (the QOpenGLWidget base destructor that destroys it
+    // runs after this body), so make it current and tear the Implementation down now.
+    if ( context() ) {
+        makeCurrent();
+    }
+    _imp.reset();
 }
 
 QSize

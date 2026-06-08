@@ -446,6 +446,31 @@ ViewerGL::Implementation::initializeGL()
     // always running in the main thread
     assert( qApp && qApp->thread() == QThread::currentThread() );
     _this->makeCurrent();
+
+    // initializeGL() runs on EVERY (re)creation of the QOpenGLWidget's GL context
+    // (viewer pane reparented / docked / split, moved to another window or GPU, or
+    // a driver reset). The textures / VBOs below are rebuilt each time, but the
+    // shader programs were gated behind shaderLoaded (set once, never reset), so
+    // after a context recreation shaderRGB / shaderBlack / shaderOCIO no longer
+    // matched the live context — the next paint ran glUseProgram on them and
+    // crashed (in release builds Qt's context-group safety check is compiled out).
+    //
+    // Crucially these programs are parented to the QOpenGLContext
+    // (new QOpenGLShaderProgram(context())), so when the OLD context was destroyed
+    // Qt's QObject parent/child cleanup ALREADY deleted them — these unique_ptrs
+    // are now DANGLING. We must therefore release() (abandon the dangling pointer
+    // WITHOUT deleting) rather than reset() (which double-frees and crashes in
+    // ~QOpenGLShaderProgram). On the first init the pointers are null, so release()
+    // is a harmless no-op. shaderLoaded=false makes initShaderGLSL() rebuild them
+    // on the live context.
+    shaderLoaded = false;
+    (void)shaderRGB.release();    // already freed by the old context's QObject cleanup
+    (void)shaderBlack.release();
+    (void)shaderOCIO.release();
+    ocioShaderValid = false;
+    ocioShaderDirty = true;       // force an OCIO shader rebuild on the next draw
+    ocioLutTextures.clear();      // GL textures died with the old context; just drop ids
+
     initAndCheckGlExtensions();
 
     int format, internalFormat, glType;
@@ -883,6 +908,7 @@ ViewerGL::Implementation::activateShaderRGB(int texIndex)
     if (useOcio) {
         if ( !shaderOCIO->bind() ) {
             qDebug() << "Error when binding OCIO shader" << qPrintable( shaderOCIO->log() );
+            return;  // never set uniforms on an unbound program
         }
         shaderOCIO->setUniformValue("Tex", 0);
         shaderOCIO->setUniformValue("gain", gain);
@@ -899,8 +925,9 @@ ViewerGL::Implementation::activateShaderRGB(int texIndex)
         return;
     }
 
-    if ( !shaderRGB->bind() ) {
-        qDebug() << "Error when binding shader" << qPrintable( shaderRGB->log() );
+    if ( !shaderRGB || !shaderRGB->bind() ) {
+        qDebug() << "Error when binding shader" << ( shaderRGB ? qPrintable( shaderRGB->log() ) : "(shaderRGB is null)" );
+        return;  // never set uniforms on a null / unbound program
     }
 
     shaderRGB->setUniformValue("Tex", 0);
