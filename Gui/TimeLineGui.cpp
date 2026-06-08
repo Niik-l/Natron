@@ -48,6 +48,7 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include "Engine/Settings.h"
 #include "Engine/TimeLine.h"
 #include "Engine/ViewerInstance.h"
+#include "Engine/OutputSchedulerThread.h"  // RenderEngine (playback auto-restart)
 
 #include "Gui/CurveEditor.h"
 #include "Gui/CurveWidget.h"
@@ -888,7 +889,19 @@ void
 TimeLineGui::seek(SequenceTime time)
 {
     if ( time != _imp->timeline->currentFrame() ) {
-        if (_imp->viewer) { _imp->gui->getApp()->setLastViewerUsingTimeline( _imp->viewer->getNode() ); }
+        if (_imp->viewer) {
+            _imp->gui->getApp()->setLastViewerUsingTimeline( _imp->viewer->getNode() );
+            // A user seek (timeline click / prev-next) must NOT resume playback.
+            // Playback auto-restart can be left enabled after an aborted play, which
+            // makes RenderEngine::renderCurrentFrameInternal restart playback from the
+            // seeked frame; the playback scheduler then advances the playhead, so a
+            // click on frame N lands on N+1/N+2/N+3 (drift). Clear the flag so this
+            // seek does a single-frame render. Clicking WHILE actively playing is
+            // unaffected — that path keys off the live 'working' flag, not this.
+            if ( _imp->viewer->getRenderEngine() ) {
+                _imp->viewer->getRenderEngine()->setPlaybackAutoRestartEnabled(false);
+            }
+        }
         _imp->seekingTimeline = true;
         _imp->timeline->onFrameChanged(time);
         _imp->seekingTimeline = false;
