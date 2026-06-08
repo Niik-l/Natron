@@ -17,6 +17,28 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Stability + playback fixes: viewer GL crashes, particle 3D-viewport playback, timeline drift, lighting (2026-06-08)** —
+  - **Viewer GL crash fixes** — the viewer's shader programs are parented to the
+    `QOpenGLContext`, so context recreation (splitting/docking/reparenting a viewer)
+    left the owning `unique_ptr`s dangling, and viewer teardown freed GL resources
+    with no current context → SIGSEGV in `Qt6OpenGL` (release builds compile out Qt's
+    safety check, so it crashed instead of warning). Fixed: `initializeGL()` releases
+    (not resets) the dangling programs and rebuilds on the live context; `~ViewerGL`
+    makes the context current before destroying the Implementation.
+  - **Particle 3D-viewport playback** — `getParticleData()` returned a deep copy on
+    every call (concurrency-safety), but the 3D viewport calls it per repaint on the
+    GUI thread, so playback copied all particles per frame on the main thread and
+    stalled the player. It now returns the immutable cached snapshot directly on a
+    cache hit (no copy). Also serialised `getParticleData()` against the paint/render
+    data race, and added a non-blocking "Simulating particles…" banner on cold sims.
+  - **Timeline click-drift + playback** — clicking a frame during slow renders could
+    land 1-3 frames ahead because a user seek went through the playback-restart path;
+    a user seek now clears playback-auto-restart so it renders a single frame, and the
+    timeline-change handler no longer re-renders an actively-playing viewer.
+  - **RenderPass lighting** — an empty Active-Lights selection now renders **no**
+    lights (was: all); toggling any object/light checkbox invalidates the frame cache
+    (`incrementKnobsAge`) so the change shows on every frame, not just after a scrub.
+
 - **Colour management pass: native OCIO viewer + config-aware materials + pass output colourspace + RenderPass live preview (2026-06-07)** —
   - **Native OCIO-aware viewer** — the viewer colourspace dropdown now lists the
     active OCIO config's `Display / View` transforms (e.g. ACES Output Transforms)
