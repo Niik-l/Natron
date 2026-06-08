@@ -329,6 +329,13 @@ struct ParticleSolverPrivate
         std::size_t                  memoryBytes  = 0;
     };
     mutable std::mutex         frameCacheMutex;
+    // Serialises the WHOLE of getParticleData(). The 3D viewport (paintGL, GUI
+    // thread) and the renderers (Cycles / ScanlineRender, worker threads) all call
+    // getParticleData() on the same solver; the simulation body mutates shared state
+    // (cachedData->particles, knownIDs) with no lock, so concurrent calls corrupted
+    // the heap. Lock order is ALWAYS computeMutex -> frameCacheMutex (never the
+    // reverse), so nesting the existing frameCacheMutex sections inside is deadlock-free.
+    mutable std::mutex         computeMutex;
     std::map<int, CachedFrame> frameCache;
     U64                        frameCacheHash  = 0;
     std::size_t                frameCacheBytes = 0;
@@ -520,9 +527,16 @@ ParticleSolver::knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec /*
 ParticleDataPtr
 ParticleSolver::getParticleData(double time)
 {
-    // Single-slot fast path — same frame as the previous call.
+    // Serialise the entire simulation/return against concurrent callers (3D
+    // viewport paint vs Cycles / ScanlineRender worker threads) — see computeMutex.
+    std::lock_guard<std::mutex> computeLk(_imp->computeMutex);
+
+    // Single-slot fast path — same frame as the previous call. Return a COPY: the
+    // caller must never alias _imp->cachedData, which a later call re-simulates in
+    // place (the live slot is mutated across frames). Copying hands back an
+    // immutable snapshot so paint + render threads can't trample each other's data.
     if (_imp->cachedData && time == _imp->cachedFrame) {
-        return _imp->cachedData;
+        return std::make_shared<ParticleData>(*_imp->cachedData);
     }
 
     const bool cacheEnabled = _imp->cacheEnabled.lock()
@@ -755,7 +769,8 @@ ParticleSolver::getParticleData(double time)
     }
 
     _imp->cachedFrame = time;
-    return _imp->cachedData;
+    // Return an immutable snapshot, not the live slot — see the fast-path note above.
+    return std::make_shared<ParticleData>(*_imp->cachedData);
 }
 
 // applyForce is required by the ParticleModifier interface but collision
