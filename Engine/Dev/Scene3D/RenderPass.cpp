@@ -395,6 +395,32 @@ RenderPass::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         }
         return true;
     }
+
+    // Object / light selection checkboxes are created setEvaluateOnChange(false)
+    // (so the discovery refresh doesn't storm renders), which means Natron does NOT
+    // fold them into the node hash. Without that, toggling a light/object left
+    // previously-rendered frames served from the frame cache with the OLD selection
+    // (only the scrubbed-to frame ever refreshed). Detect a selection toggle, bump
+    // the knobs age (incrementKnobsAge() also recomputes the hash → busts the frame
+    // cache for ALL frames), and re-render so the change shows everywhere.
+    for (int i = 0; i < RENDERPASS_MAX_OBJECTS; ++i) {
+        if ( _imp->cameraObjects[i].lock().get()     == k ||
+             _imp->traceObjects[i].lock().get()      == k ||
+             _imp->matteObjects[i].lock().get()      == k ||
+             _imp->shadowCatchers[i].lock().get()    == k ||
+             _imp->excludedObjects[i].lock().get()   == k ||
+             _imp->activeLightsKnobs[i].lock().get() == k ) {
+            NodePtr node = getNode();
+            if (node) {
+                node->incrementKnobsAge();
+            }
+            AppInstancePtr app = getApp();
+            if (app) {
+                app->renderAllViewers(true);
+            }
+            return true;
+        }
+    }
     return false;
 }
 
@@ -622,7 +648,16 @@ RenderPass::getActiveLights() const
         }
     }
 
-    // Empty set = all lights active (convention from the plan)
+    // Convention: nothing ticked = render with NO lights (not all). The shared
+    // Cycles renderer treats a NULL activeLights as "all lights" and a non-empty
+    // set as "only these"; so when no light is selected we return a sentinel that
+    // matches no real light, which makes the renderer exclude every light. The
+    // sentinel uses a control char so it can never collide with a node script name.
+    // Centralised here so it applies both to RenderPass's own preview and to a
+    // downstream CyclesRender that reads this selection (CyclesRender.cpp:906/966).
+    if (lights.empty()) {
+        lights.insert(std::string("\x01__renderpass_no_lights__"));
+    }
     return lights;
 }
 
