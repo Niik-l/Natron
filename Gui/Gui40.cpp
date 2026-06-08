@@ -53,6 +53,7 @@
 #include "Engine/ProcessHandler.h"
 #include "Engine/ViewIdx.h"
 #include "Engine/ViewerInstance.h"
+#include "Engine/OutputSchedulerThread.h"  // RenderEngine::isDoingSequentialRender
 
 #include "Gui/AboutWindow.h"
 #include "Gui/ActionShortcuts.h"
@@ -1002,14 +1003,23 @@ Gui::renderViewersAndRefreshKnobsAfterTimelineTimeChange(SequenceTime time,
     const std::list<ViewerTab*>& viewers = getViewersList();
     ///Syncrhronize viewers
     for (std::list<ViewerTab*>::const_iterator it = viewers.begin(); it != viewers.end(); ++it) {
-        if ( ( (*it)->getInternalNode() == leadViewer ) && isPlayback ) {
+        ViewerInstance* vi = (*it)->getInternalNode();
+        // During a playback seek, never re-render a viewer that is itself driving the
+        // playback: renderCurrentFrame() would abort + restart its scheduler, which
+        // thrashes playback (start -> abort -> start ...) and can leave it stopped.
+        // The designated lead viewer is skipped, but getLastViewerUsingTimeline() can
+        // be reset to null by the Curve/DopeSheet editors and Roto, so ALSO skip any
+        // viewer whose engine is currently doing a sequential (playback) render.
+        if ( isPlayback &&
+             ( vi == leadViewer ||
+               ( vi->getRenderEngine() && vi->getRenderEngine()->isDoingSequentialRender() ) ) ) {
             continue;
         }
-        if ( (*it)->getInternalNode()->isDoingPartialUpdates() ) {
+        if ( vi->isDoingPartialUpdates() ) {
             //When tracking, we handle rendering separately
             continue;
         }
-        (*it)->getInternalNode()->renderCurrentFrame(!isPlayback);
+        vi->renderCurrentFrame(!isPlayback);
     }
 } // Gui::renderViewersAndRefreshKnobsAfterTimelineTimeChange
 
