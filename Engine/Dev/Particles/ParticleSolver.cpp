@@ -562,16 +562,36 @@ ParticleSolver::getParticleData(double time)
         }
     }
 
-    // 2. Exact-frame cache hit — deep-copy state out, skip the integration loop.
+    // 2. Exact-frame cache hit — return the cached snapshot DIRECTLY, no copy.
+    //    Cached states are never mutated after storage, so sharing the shared_ptr is
+    //    safe for concurrent readers. Copying here per call was the killer: the 3D
+    //    viewport calls getParticleData() every repaint on the GUI thread, so during
+    //    playback the per-frame deep copy on the main thread starved the playback
+    //    event loop and stalled the player. Only the debug-collision tint needs a
+    //    private mutable copy.
     bool servedFromExactCache = false;
     if (cacheEnabled) {
-        std::lock_guard<std::mutex> lk(_imp->frameCacheMutex);
-        auto it = _imp->frameCache.find(endFrame);
-        if (it != _imp->frameCache.end()) {
-            _imp->cachedData       = std::make_shared<ParticleData>(*it->second.state);
-            _imp->knownIDs         = it->second.knownIDs;
-            it->second.lastAccessUs = nowUs();
-            servedFromExactCache   = true;
+        ParticleDataPtr cached;
+        {
+            std::lock_guard<std::mutex> lk(_imp->frameCacheMutex);
+            auto it = _imp->frameCache.find(endFrame);
+            if (it != _imp->frameCache.end()) {
+                it->second.lastAccessUs = nowUs();
+                cached = it->second.state;   // immutable snapshot
+            }
+        }
+        if (cached) {
+            const bool showCol = _imp->showCollisions.lock()
+                                 ? _imp->showCollisions.lock()->getValue() : false;
+            if (!showCol) {
+                return cached;               // hot path: no copy
+            }
+            ParticleDataPtr tinted = std::make_shared<ParticleData>(*cached);
+            for (size_t i = 0; i < tinted->particles.size(); ++i) {
+                Particle& p = tinted->particles[i];
+                if (p.collided) { p.r = 1.0f; p.g = 0.15f; p.b = 0.1f; }
+            }
+            return tinted;
         }
     }
 
@@ -618,6 +638,22 @@ ParticleSolver::getParticleData(double time)
 
     if (!_imp->cachedData) {
         _imp->cachedData = std::make_shared<ParticleData>();
+    }
+
+    // Loading indicator: a cold/partial cache means we must simulate a range of
+    // frames here, which can take a noticeable moment (sequential sim). Post a
+    // status banner on the node so the user knows Natron is working, not hung or
+    // crashing. Only for a non-trivial range, so 1-frame-ahead scrubbing doesn't
+    // flicker. Cleared after the loop. (getParticleData is serialized by computeMutex.)
+    // NB: eMessageTypeInfo routes to a MODAL popup (Node::setPersistentMessage), which
+    // would block this render thread while it holds computeMutex -> stalls playback.
+    // Use the non-blocking persistent banner path (eMessageTypeWarning) instead — it
+    // only sets a flag + queued signal. Shows as a banner on the node/viewer.
+    const int framesToSim = endFrame - startFrame + 1;
+    const bool showSimBanner = framesToSim > 5;
+    if (showSimBanner) {
+        setPersistentMessage( eMessageTypeWarning,
+                              "Simulating particles… (" + std::to_string(framesToSim) + " frames)" );
     }
 
     for (int frame = startFrame; frame <= endFrame; ++frame) {
@@ -749,6 +785,10 @@ ParticleSolver::getParticleData(double time)
                                + sizeof(uint32_t) * _imp->knownIDs.size() + 128;
             _imp->frameCacheBytes += entry.memoryBytes;
         }
+    }
+
+    if (showSimBanner) {
+        clearPersistentMessage(false);
     }
 
     }  // end if (!servedFromExactCache)
