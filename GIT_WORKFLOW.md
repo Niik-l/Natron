@@ -90,6 +90,18 @@ Keep the first line under ~70 characters.
 
 If `git status` shows hundreds of files, something is wrong with `.gitignore`. Stop and check.
 
+### Local-only — NEVER stage or commit
+
+Some changes live in the working tree indefinitely and must stay out of **every** commit:
+
+- **DevShadowCatcher** — untracked `Engine/Dev/Cycles/DevShadowCatcher.{cpp,h}` plus the one-line hooks in `Engine/EffectInstance.h` and `Engine/AppManager.cpp` (RnD node).
+- **Gated debug instrumentation** — `Engine/OutputSchedulerThread.cpp` (`NATRON_DEBUG_PLAYBACK` playback-stop logging) and the `NATRON_DEBUG_CYCLES_SESSIONS` session counters in `Engine/Dev/Cycles/CyclesRenderer.cpp`. Off by default; debugging aids, not shipping code.
+
+Rules:
+1. **Always stage explicitly by filename** — `git add path/to/File.cpp` — never `git add .`, `git add -A`, or `git add -u`.
+2. **If a feature lands in a file that also holds local-only code** (e.g. `CyclesRenderer.cpp` carries both the session counters and shipping features), **remove the local-only code from that file before committing the feature.** Hunk/interactive staging (`git add -p`) is not available in this environment, so a whole-file `git add` would otherwise drag the local-only code into the commit.
+3. After committing, `git status --short` should show **only** the local-only set above (nothing else outstanding).
+
 ## Clean Up Before Committing
 
 ```bash
