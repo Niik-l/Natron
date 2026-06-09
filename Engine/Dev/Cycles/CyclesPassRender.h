@@ -78,6 +78,8 @@ struct CyclesPassRequest
     // Optional scoping (sourced upstream from a RenderPass node when present).
     const std::map<std::string, ObjectVisibility>* visMap       = nullptr;
     const std::set<std::string>*                   activeLights = nullptr;
+    // Per-light ray-visibility overrides (light name -> flags). Null = none.
+    const std::map<std::string, LightRayVis>*      lightRayVis  = nullptr;
 
     // Per-pass camera override. When non-null, the helper reads camera
     // params from this CameraProvider INSTEAD of the effect's input slot 2.

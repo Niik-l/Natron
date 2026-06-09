@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <atomic>
 #include <cstring>
 #include <iomanip>
 #include <map>
@@ -321,6 +322,15 @@ struct CyclesRenderer::Impl
     // Pixel buffer for readback
     std::vector<float> pixelBuffer;  // RGBA float, width*height*4
 
+    // Per-light ray-visibility overrides for the current render (light name -> flags).
+    std::map<std::string, LightRayVis> lightRayVis;
+
+    // When true, objects flagged reflectionMatte are rendered as pure white
+    // emitters instead of their normal material. Used by the second (reflection
+    // matte) render pass — emission carries through glossy bounces, so the matte
+    // appears directly AND in reflections (shader AOVs can't, they're camera-only).
+    bool emissiveMatteMode = false;
+
     Impl() {}
     ~Impl()
     {
@@ -578,6 +588,23 @@ materialColorspaceToCycles(const std::string& choice)
     return ccl::ustring(choice);
 }
 
+// Pure white emitter, used for reflection-matte objects in the second render
+// pass. A flat constant emission reads as a clean matte both directly and in
+// reflections, with no dependence on scene lighting.
+static ccl::Shader*
+createEmissiveMatteShader(ccl::Scene* scene)
+{
+    ccl::Shader* shader = scene->create_node<ccl::Shader>();
+    auto graph = ccl::make_unique<ccl::ShaderGraph>();
+    ccl::EmissionNode* em = graph->create_node<ccl::EmissionNode>();
+    em->set_color(ccl::make_float3(1.0f, 1.0f, 1.0f));
+    em->set_strength(1.0f);
+    graph->connect(em->output("Emission"), graph->output()->input("Surface"));
+    shader->set_graph(std::move(graph));
+    shader->tag_update(scene);
+    return shader;
+}
+
 static ccl::Shader*
 createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double time)
 {
@@ -693,6 +720,14 @@ CyclesRenderer::CyclesRenderer()
 
 CyclesRenderer::~CyclesRenderer()
 {
+    // _impl (and the ccl::Session it owns) is freed after this body via ~Impl.
+}
+
+void
+CyclesRenderer::setLightRayVisibility(const std::map<std::string, LightRayVis>* overrides)
+{
+    if (overrides) _impl->lightRayVis = *overrides;
+    else           _impl->lightRayVis.clear();
 }
 
 bool
@@ -835,6 +870,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     // Then process other light types.
     bool hasDome = false;
     bool hasDomeCameraVisible = false;
+    unsigned int domeBgVisibility = ccl::PATH_RAY_ALL_VISIBILITY;  // dome ray-visibility (overridable)
     {
         // === First pass: find dome lights and set background ===
         const std::vector<SceneNode>& lightScan = sg.nodes();
@@ -845,9 +881,28 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             if (!node) continue;
             Light3D* light3d = dynamic_cast<Light3D*>(node->getEffectInstance().get());
             if (!light3d || light3d->getLightType() != Light3D::eLightDome) continue;
-            // Dome light ALWAYS contributes to lighting.
+            // Respect the Active Lights selection — a dome that isn't active must NOT
+            // light the scene (matches non-dome lights; "no lights selected" = dark).
+            // Without this the dome lit the scene regardless of its Active checkbox.
+            if (activeLights && !activeLights->empty() &&
+                activeLights->find(sn.name) == activeLights->end()) {
+                continue;
+            }
             // "Renderable" controls camera visibility only (like Arnold's skydome Camera flag).
             bool domeVisibleInCamera = light3d->isRenderable();
+
+            // Per-light ray-visibility override (from the RenderPass Active Lights rows):
+            // untick Refl/Diff/Trans to drop the dome ENVIRONMENT from that ray type
+            // (it still lights the scene); Cam combines with Renderable.
+            {
+                auto it = _impl->lightRayVis.find(node->getScriptName_mt_safe());
+                if (it != _impl->lightRayVis.end()) {
+                    if (!it->second.camera)   domeVisibleInCamera = false;
+                    if (!it->second.glossy)   domeBgVisibility &= ~ccl::PATH_RAY_GLOSSY;
+                    if (!it->second.diffuse)  domeBgVisibility &= ~ccl::PATH_RAY_DIFFUSE;
+                    if (!it->second.transmit) domeBgVisibility &= ~ccl::PATH_RAY_TRANSMIT;
+                }
+            }
 
             double ltx, lty, ltz, lr, lg, lb, lint, lexp;
             light3d->getLightParams(time, ltx, lty, ltz, lr, lg, lb, lint, lexp);
@@ -1042,7 +1097,22 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
             ccl::Object* obj = scene->create_node<ccl::Object>();
             obj->set_geometry(light);
-            obj->set_visibility(ccl::PATH_RAY_ALL_VISIBILITY & ~ccl::PATH_RAY_CAMERA);
+            // Natural default: visible to all rays except camera (you don't see the
+            // lamp directly). Per-light override (RenderPass Active Lights rows) is
+            // subtractive: unticking Refl/Diff/Trans removes the lamp's visible SHAPE
+            // from that ray type (e.g. an area light not appearing in reflections —
+            // its illumination/highlight still lands; that's handled by light sampling).
+            unsigned int lightVis = ccl::PATH_RAY_ALL_VISIBILITY & ~ccl::PATH_RAY_CAMERA;
+            {
+                auto it = _impl->lightRayVis.find(sn.name);
+                if (it != _impl->lightRayVis.end()) {
+                    if (!it->second.camera)   lightVis &= ~ccl::PATH_RAY_CAMERA;
+                    if (!it->second.glossy)   lightVis &= ~ccl::PATH_RAY_GLOSSY;
+                    if (!it->second.diffuse)  lightVis &= ~ccl::PATH_RAY_DIFFUSE;
+                    if (!it->second.transmit) lightVis &= ~ccl::PATH_RAY_TRANSMIT;
+                }
+            }
+            obj->set_visibility(lightVis);
             // Mark the light's wrapper object as a shadow catcher so Cycles does
             // NOT stamp SHADER_EXCLUDE_SHADOW_CATCHER on the lamp (light.cpp:331).
             // Without this the lamp is skipped during NEE in the shadow-catcher
@@ -1249,6 +1319,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     // Dome light ALWAYS contributes lighting (scatter, reflections, etc).
     // "Renderable" on dome = camera visibility only (like Arnold's skydome Camera flag).
     scene->background->set_transparent(!hasDomeCameraVisible);
+    scene->background->set_visibility(domeBgVisibility);  // dome out of reflections/diffuse/etc. if overridden
 
     // --- Integrator ---
     IntegratorParams integ;
@@ -2018,8 +2089,19 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         // because the motion-blur block below still consults it.
         NodePtr srcNode = sn.sourceNode.lock();
         NodePtr matOverrideNode = sn.materialNode.lock(); // per-part (GeoMaterialOverride)
+        // Reflection matte: in the second (matte) render pass, flagged objects
+        // become pure white emitters so they read as a matte directly AND in
+        // reflections (emission carries through glossy bounces).
+        bool isMatteObj = false;
+        if (visibilityMap) {
+            auto vit = visibilityMap->find(sn.name);
+            if (vit != visibilityMap->end() && vit->second.reflectionMatte) isMatteObj = true;
+        }
         ccl::Shader* objShader = nullptr;
-        if (materialOverride) {
+        if (_impl->emissiveMatteMode && isMatteObj) {
+            // Matte render: override this object's material with white emission.
+            objShader = createEmissiveMatteShader(scene);
+        } else if (materialOverride) {
             // Downstream / per-pass override wins (clay / shadow-pass pattern).
             objShader = createMaterialShader(scene, materialOverride, time);
         } else if (matOverrideNode) {
@@ -2268,6 +2350,58 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
     if (hasShadowCatcher && !userRequestedMatte) {
         effectiveRequested.push_back("ShadowCatcherMatte");
     }
+
+    // Reflection matte: "ReflectionMatte" is NOT a Cycles pass — it's produced by
+    // a second render (below) where flagged objects become white emitters. Pull it
+    // out of the main render's pass list and remember it was requested.
+    bool hasMatteObjects = false;
+    if (visibilityMap) {
+        for (const auto& kv : *visibilityMap) {
+            if (kv.second.reflectionMatte) { hasMatteObjects = true; break; }
+        }
+    }
+    const bool wantReflectionMatte =
+        std::find(requestedPasses.begin(), requestedPasses.end(),
+                  std::string("ReflectionMatte")) != requestedPasses.end();
+    effectiveRequested.erase(
+        std::remove(effectiveRequested.begin(), effectiveRequested.end(),
+                    std::string("ReflectionMatte")),
+        effectiveRequested.end());
+
+    // Combined Diffuse/Glossy/Transmission planes: Cycles' kernel only writes the
+    // direct/indirect/color sub-passes, never the category pass. We synthesize the
+    // beauty-matching contribution = (Dir + Ind) * Col after the render, so for each
+    // requested combined plane we make sure its three sub-passes are rendered. Track
+    // the ones we add purely for the synthesis so we can drop them if the user didn't
+    // ask for them. (combinedPlanes stays in scope for the synthesis pass below.)
+    struct CombinedPlane {
+        const char* name; const char* dir; const char* ind; const char* col;
+        bool wanted = false; bool addedDir = false, addedInd = false, addedCol = false;
+    };
+    CombinedPlane combinedPlanes[] = {
+        {"Diffuse",      "DiffDir",  "DiffInd",  "DiffCol"},
+        {"Glossy",       "GlossDir", "GlossInd", "GlossCol"},
+        {"Transmission", "TransDir", "TransInd", "TransCol"},
+    };
+    for (CombinedPlane& cp : combinedPlanes) {
+        cp.wanted = std::find(requestedPasses.begin(), requestedPasses.end(),
+                              std::string(cp.name)) != requestedPasses.end();
+        effectiveRequested.erase(
+            std::remove(effectiveRequested.begin(), effectiveRequested.end(),
+                        std::string(cp.name)),
+            effectiveRequested.end());
+        if (!cp.wanted) continue;
+        auto ensurePass = [&](const char* nm, bool& added) {
+            if (std::find(effectiveRequested.begin(), effectiveRequested.end(),
+                          std::string(nm)) == effectiveRequested.end()) {
+                effectiveRequested.push_back(nm);
+                added = true;
+            }
+        };
+        ensurePass(cp.dir, cp.addedDir);
+        ensurePass(cp.ind, cp.addedInd);
+        ensurePass(cp.col, cp.addedCol);
+    }
     // Diagnostic only (NATRON_DEBUG_SC): also pull the raw catcher accumulator
     // + sample count so the composite block below can report them. Users can
     // still request these as explicit AOVs — that path is unaffected.
@@ -2416,6 +2550,67 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
         }
     }
 
+    // --- Combined Diffuse/Glossy/Transmission planes: (Dir + Ind) * Col, per pixel. ---
+    // The light sub-passes are HDR (incoming radiance), the color pass is albedo; their
+    // product is the contribution as it lands in the beauty. Empty sub-passes are
+    // zero-filled, so a missing direct/indirect lobe is harmless.
+    for (CombinedPlane& cp : combinedPlanes) {
+        if (!cp.wanted) continue;
+        auto pd = outPassBuffers.find(cp.dir);
+        auto pi = outPassBuffers.find(cp.ind);
+        auto pc = outPassBuffers.find(cp.col);
+        if (pd != outPassBuffers.end() && pi != outPassBuffers.end() && pc != outPassBuffers.end()) {
+            const std::vector<float>& d = pd->second;
+            const std::vector<float>& in = pi->second;
+            const std::vector<float>& c = pc->second;
+            const size_t n = std::min(d.size(), std::min(in.size(), c.size()));
+            std::vector<float> combined(n, 0.0f);
+            const size_t nPix = n / 4;
+            for (size_t i = 0; i < nPix; ++i) {
+                const size_t o = i * 4;
+                for (int ch = 0; ch < 3; ++ch) {
+                    combined[o + ch] = (d[o + ch] + in[o + ch]) * c[o + ch];
+                }
+                combined[o + 3] = 1.0f;
+            }
+            outPassBuffers[cp.name] = std::move(combined);
+        }
+        // Drop the sub-passes we pulled in only to build the combined plane.
+        if (cp.addedDir) outPassBuffers.erase(cp.dir);
+        if (cp.addedInd) outPassBuffers.erase(cp.ind);
+        if (cp.addedCol) outPassBuffers.erase(cp.col);
+    }
+
+    // --- Reflection matte: second render with flagged objects as white emitters. ---
+    // Cycles shader AOVs only write on the primary camera ray, so they can't carry a
+    // matte through reflections. Instead we re-render the same scene with the flagged
+    // objects turned into pure emitters (emission DOES show in reflections) and route
+    // that render's Combined into the "ReflectionMatte" plane. This roughly doubles
+    // render time, but only when the matte is actually requested + objects are flagged.
+    if (wantReflectionMatte && hasMatteObjects) {
+        _impl->emissiveMatteMode = true;
+        std::vector<std::string> mattePasses;
+        mattePasses.push_back("Combined");
+        syncSceneWithCamera(sg, camTX, camTY, camTZ, camRX, camRY, camRZ,
+                            focalLength, hAperture, vAperture, time, mattePasses,
+                            visibilityMap, activeLights, dof, motionBlur, integrator,
+                            materialOverride, holdoutObjects);
+
+        std::map<std::string, std::vector<float>> matteBuffers;
+        std::vector<std::string> matteAll;
+        matteAll.push_back("Combined");
+        _impl->session->set_output_driver(
+            ccl::make_unique<ccl::NatronMultiPassOutputDriver>(&matteBuffers, matteAll, width, height));
+        startRender();
+        waitForRender();
+        _impl->emissiveMatteMode = false;
+
+        auto itMC = matteBuffers.find("Combined");
+        if (itMC != matteBuffers.end()) {
+            outPassBuffers["ReflectionMatte"] = std::move(itMC->second);
+        }
+    }
+
     return !outPassBuffers.empty();
 }
 
@@ -2547,9 +2742,12 @@ CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
     add("DiffDir",  "DiffuseDirect",   3, {"R","G","B"});
     add("DiffInd",  "DiffuseIndirect", 3, {"R","G","B"});
     add("DiffCol",  "DiffuseColor",    3, {"R","G","B"});
+    add("Diffuse",  "Diffuse",         3, {"R","G","B"});
     add("GlossDir", "GlossyDirect",    3, {"R","G","B"});
     add("GlossInd", "GlossyIndirect",  3, {"R","G","B"});
     add("GlossCol", "GlossyColor",     3, {"R","G","B"});
+    add("Glossy",   "Glossy",          3, {"R","G","B"});
+    add("Transmission", "Transmission", 3, {"R","G","B"});
     add("Emit",     "Emission",        3, {"R","G","B"});
     add("Env",      "Environment",     3, {"R","G","B"});
     add("AO",       "AO",             1, {"A"});
@@ -2557,6 +2755,7 @@ CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
     add("Depth",    "depth",           1, {"Z"});
     add("UV",       "UV",              3, {"U","V","W"});
     add("ShadowCatcherMatte", "ShadowCatcherMatte", 4, {"R","G","B","A"});
+    add("ReflectionMatte",    "ReflectionMatte",    4, {"R","G","B","A"});
 
     // Light group passes
     for (auto& entry : passBuffers) {

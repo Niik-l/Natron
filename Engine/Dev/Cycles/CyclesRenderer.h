@@ -36,6 +36,7 @@ NATRON_NAMESPACE_ENTER
 
 class SceneGraph;
 struct ObjectVisibility;
+struct LightRayVis;
 
 /**
  * @brief Bridge between Natron's SceneGraph and Blender's Cycles renderer.
@@ -52,6 +53,13 @@ class CyclesRenderer
 public:
     CyclesRenderer();
     ~CyclesRenderer();
+
+    /**
+     * @brief Set per-light ray-visibility overrides for the next render (light name
+     * -> flags). Pass null to clear. Applied to the dome (background visibility) and
+     * to point/area/spot light wrapper-object visibility during scene sync.
+     */
+    void setLightRayVisibility(const std::map<std::string, LightRayVis>* overrides);
 
     /**
      * @brief Initialize the render session with given resolution.

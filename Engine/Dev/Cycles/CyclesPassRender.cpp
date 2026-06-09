@@ -220,6 +220,10 @@ executeCyclesPasses(CyclesRenderer&            renderer,
         return false;
     }
 
+    // Per-light ray-visibility overrides (e.g. keep a dome/area light out of
+    // reflections). Null clears any previous override on the renderer.
+    renderer.setLightRayVisibility(req.lightRayVis);
+
     const bool ok = renderer.renderToBufferWithCameraMultiPass(
         prepared.sceneGraph,
         prepared.camTX, prepared.camTY, prepared.camTZ,

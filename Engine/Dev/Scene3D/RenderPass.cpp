@@ -92,9 +92,17 @@ struct RenderPassPrivate
     KnobGroupWPtr excludedGroup;
     KnobBoolWPtr  excludedObjects[RENDERPASS_MAX_OBJECTS];
 
+    KnobGroupWPtr reflectionMatteGroup;
+    KnobBoolWPtr  reflectionMatteObjects[RENDERPASS_MAX_OBJECTS];
+
     // Lights
     KnobGroupWPtr lightsGroup;
     KnobBoolWPtr  activeLightsKnobs[RENDERPASS_MAX_OBJECTS];
+    // Per-light ray-visibility toggles (same row as the active checkbox).
+    KnobBoolWPtr  lightVisCamera[RENDERPASS_MAX_OBJECTS];
+    KnobBoolWPtr  lightVisGlossy[RENDERPASS_MAX_OBJECTS];
+    KnobBoolWPtr  lightVisDiffuse[RENDERPASS_MAX_OBJECTS];
+    KnobBoolWPtr  lightVisTransmit[RENDERPASS_MAX_OBJECTS];
 
     // Live preview render knobs
     KnobIntWPtr  outputWidth, outputHeight;
@@ -103,10 +111,11 @@ struct RenderPassPrivate
 
     // AOV enable knobs (mirror CyclesRender's AOV Passes tab)
     KnobButtonWPtr refreshPassesBtn;
-    KnobBoolWPtr aovDiffDir, aovDiffInd, aovDiffCol;
-    KnobBoolWPtr aovGlossDir, aovGlossInd, aovGlossCol;
+    KnobBoolWPtr aovDiffDir, aovDiffInd, aovDiffCol, aovDiffuse, aovTrans;
+    KnobBoolWPtr aovGlossDir, aovGlossInd, aovGlossCol, aovGlossy;
     KnobBoolWPtr aovEmission, aovEnv, aovAO;
     KnobBoolWPtr aovNormal, aovDepth, aovUV, aovMist;
+    KnobBoolWPtr aovReflMatte;
 
     // Cached discovered names (index matches knob index)
     std::vector<std::string> geoNames;
@@ -135,9 +144,12 @@ getEnabledPassesRP(const RenderPassPrivate* imp)
     check(imp->aovDiffDir,  "DiffDir");
     check(imp->aovDiffInd,  "DiffInd");
     check(imp->aovDiffCol,  "DiffCol");
+    check(imp->aovDiffuse,  "Diffuse");
     check(imp->aovGlossDir, "GlossDir");
     check(imp->aovGlossInd, "GlossInd");
     check(imp->aovGlossCol, "GlossCol");
+    check(imp->aovGlossy,   "Glossy");
+    check(imp->aovTrans,    "Transmission");
     check(imp->aovEmission, "Emit");
     check(imp->aovEnv,      "Env");
     check(imp->aovAO,       "AO");
@@ -145,6 +157,7 @@ getEnabledPassesRP(const RenderPassPrivate* imp)
     check(imp->aovDepth,    "Depth");
     check(imp->aovUV,       "UV");
     check(imp->aovMist,     "Mist");
+    check(imp->aovReflMatte, "ReflectionMatte");
     return passes;
 }
 
@@ -159,9 +172,12 @@ passNameToPlaneRP(const std::string& name)
     if (name == "DiffDir")  return ImagePlaneDesc("DiffuseDirect",  "Diffuse Direct",  "", rgb3, 3);
     if (name == "DiffInd")  return ImagePlaneDesc("DiffuseIndirect","Diffuse Indirect", "", rgb3, 3);
     if (name == "DiffCol")  return ImagePlaneDesc("DiffuseColor",   "Diffuse Color",   "", rgb3, 3);
+    if (name == "Diffuse")  return ImagePlaneDesc("Diffuse",        "Diffuse",         "", rgb3, 3);
     if (name == "GlossDir") return ImagePlaneDesc("GlossyDirect",   "Glossy Direct",   "", rgb3, 3);
     if (name == "GlossInd") return ImagePlaneDesc("GlossyIndirect", "Glossy Indirect",  "", rgb3, 3);
     if (name == "GlossCol") return ImagePlaneDesc("GlossyColor",    "Glossy Color",    "", rgb3, 3);
+    if (name == "Glossy")   return ImagePlaneDesc("Glossy",         "Glossy",          "", rgb3, 3);
+    if (name == "Transmission") return ImagePlaneDesc("Transmission", "Transmission",  "", rgb3, 3);
     if (name == "Emit")     return ImagePlaneDesc("Emission",       "Emission",        "", rgb3, 3);
     if (name == "Env")      return ImagePlaneDesc("Environment",    "Environment",     "", rgb3, 3);
     if (name == "Normal")   return ImagePlaneDesc("Normal",         "Normal",          "", rgb3, 3);
@@ -169,6 +185,10 @@ passNameToPlaneRP(const std::string& name)
     if (name == "AO")       return ImagePlaneDesc("AO",    "Ambient Occlusion", "", rgb3, 3);
     if (name == "Depth")    return ImagePlaneDesc("Depth", "Depth",             "", rgb3, 3);
     if (name == "Mist")     return ImagePlaneDesc("Mist",  "Mist",              "", rgb3, 3);
+    if (name == "ReflectionMatte") {
+        static const char* rgba4[] = {"R", "G", "B", "A"};
+        return ImagePlaneDesc("ReflectionMatte", "Reflection Matte", "", rgba4, 4);
+    }
     return ImagePlaneDesc::getRGBAComponents();
 }
 #endif // NATRON_CYCLES
@@ -300,20 +320,95 @@ RenderPass::initializeKnobs()
                           tr("Holdout objects \xe2\x80\x94 cut alpha holes where they appear."),
                           _imp->matteGroup, _imp->matteObjects, RENDERPASS_MAX_OBJECTS);
 
-    createObjectBoolGroup(this, page, tr("Shadow Catchers"), "shadowCatch",
-                          tr("Objects that receive shadows but render transparent."),
-                          _imp->shadowCatcherGroup, _imp->shadowCatchers, RENDERPASS_MAX_OBJECTS);
-
     createObjectBoolGroup(this, page, tr("Excluded Objects"), "exclObj",
                           tr("Objects completely removed from the render."),
                           _imp->excludedGroup, _imp->excludedObjects, RENDERPASS_MAX_OBJECTS);
 
-    // --- Lights page ---
-    KnobPagePtr lightsPage = AppManager::createKnob<KnobPage>(this, tr("Lights"));
+    // --- Separate passes — Shadow Catcher and Reflection Matte each emit their
+    // own output plane (the catcher composites its own pass; the matte runs a
+    // second emissive render). Behind a separator to set them apart from the
+    // beauty-visibility categories above. ---
+    {
+        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Separate Passes"));
+        sep->setName("passesSeparator");
+        page->addKnob(sep);
+    }
 
-    createObjectBoolGroup(this, lightsPage, tr("Active Lights"), "activeLight",
-                          tr("Which lights contribute to this pass. If none checked, all lights are used."),
-                          _imp->lightsGroup, _imp->activeLightsKnobs, RENDERPASS_MAX_OBJECTS);
+    createObjectBoolGroup(this, page, tr("Shadow Catchers"), "shadowCatch",
+                          tr("Objects that receive shadows but render transparent. "
+                             "Composites into its own Shadow Catcher pass."),
+                          _imp->shadowCatcherGroup, _imp->shadowCatchers, RENDERPASS_MAX_OBJECTS);
+
+    createObjectBoolGroup(this, page, tr("Reflection Matte"), "reflMatte",
+                          tr("Objects to include in the Reflection Matte plane (enable it in the AOV "
+                             "Passes tab). Flagged objects are re-rendered as pure white emitters, so "
+                             "they read as a matte both directly and wherever they're reflected (e.g. a "
+                             "sphere mirrored in a glossy floor). Adds a second render pass."),
+                          _imp->reflectionMatteGroup, _imp->reflectionMatteObjects, RENDERPASS_MAX_OBJECTS);
+
+    // --- Lights — on the Objects page, after Excluded Objects, behind a separator ---
+    {
+        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Lights"));
+        sep->setName("lightsSeparator");
+        page->addKnob(sep);
+    }
+    // Active Lights — one row per light: [Active] [Cam] [Refl] [Diff] [Trans].
+    // Active = light contributes to this pass (NONE ticked = no lights). The Cam/Refl/
+    // Diff/Trans toggles are per-light ray VISIBILITY (default on = inherit natural):
+    // untick to remove that light / the dome environment from that ray type — e.g.
+    // untick Refl so a dome/area light doesn't appear in reflections (still lights the
+    // scene). Cam is meaningful for the dome (matches Renderable); for area/point
+    // lights it's a no-op (they're camera-invisible by default).
+    {
+        KnobGroupPtr grp = AppManager::createKnob<KnobGroup>(this, tr("Active Lights"));
+        grp->setName("activeLight");
+        grp->setHintToolTip(tr("Per light: Active = contributes to this pass. "
+                               "Cam/Refl/Diff/Trans = visible to that ray type (untick Refl to keep "
+                               "the light/dome out of reflections; it still lights the scene)."));
+        grp->setDefaultValue(false);
+        page->addKnob(grp);
+        _imp->lightsGroup = grp;
+
+        auto makeRay = [&](KnobBoolWPtr& out, int i, const char* suffix, const QString& label) {
+            KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, label);
+            k->setName(std::string("light") + suffix + std::to_string(i));
+            k->setDefaultValue(true);            // visible by default
+            k->setSecret(true);
+            k->setAnimationEnabled(false);
+            k->setEvaluateOnChange(false);
+            k->setAddNewLine(false);             // sit on the same row
+            grp->addKnob(k);
+            out = k;
+        };
+
+        for (int i = 0; i < RENDERPASS_MAX_OBJECTS; ++i) {
+            KnobBoolPtr a = AppManager::createKnob<KnobBool>(this, QString::fromUtf8("---"));
+            a->setName("activeLight" + std::to_string(i));
+            a->setDefaultValue(false);
+            a->setSecret(true);
+            a->setAnimationEnabled(false);
+            a->setEvaluateOnChange(false);
+            a->setAddNewLine(false);             // ray toggles follow on this line
+            a->setSpacingBetweenItems(60);       // padding before the ray toggles
+            grp->addKnob(a);
+            _imp->activeLightsKnobs[i] = a;
+
+            makeRay(_imp->lightVisCamera[i],   i, "Cam",  tr("Cam"));
+            makeRay(_imp->lightVisGlossy[i],   i, "Refl", tr("Refl"));
+            makeRay(_imp->lightVisDiffuse[i],  i, "Diff", tr("Diff"));
+            // Last toggle ends the row (default addNewLine = true).
+            {
+                KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Trans"));
+                k->setName(std::string("lightTrans") + std::to_string(i));
+                k->setDefaultValue(true);
+                k->setSecret(true);
+                k->setAnimationEnabled(false);
+                k->setEvaluateOnChange(false);
+                grp->addKnob(k);
+                _imp->lightVisTransmit[i] = k;
+            }
+        }
+    }
 
     // --- Preview page (live Cycles render of this pass) ---
     // Connect a camera (input 1) and optionally a CyclesRenderSettings (input 2),
@@ -362,9 +457,23 @@ RenderPass::initializeKnobs()
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Direct"));   k->setName("aovDiffDir");  k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovDiffDir  = k; }
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Indirect")); k->setName("aovDiffInd");  k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovDiffInd  = k; }
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Color"));    k->setName("aovDiffCol");  k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovDiffCol  = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse"));          k->setName("aovDiffuse");  k->setDefaultValue(false);
+      k->setHintToolTip(tr("Combined diffuse contribution as it appears in the beauty: (Diffuse Direct + "
+                           "Diffuse Indirect) \xc3\x97 Diffuse Color. Synthesized from the sub-passes."));
+      aovPage->addKnob(k); _imp->aovDiffuse = k; }
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Direct"));    k->setName("aovGlossDir"); k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovGlossDir = k; }
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Indirect"));  k->setName("aovGlossInd"); k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovGlossInd = k; }
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Color"));     k->setName("aovGlossCol"); k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovGlossCol = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy"));           k->setName("aovGlossy");   k->setDefaultValue(false);
+      k->setHintToolTip(tr("Combined glossy contribution as it appears in the beauty: (Glossy Direct + "
+                           "Glossy Indirect) \xc3\x97 Glossy Color. Synthesized from the sub-passes, so it's "
+                           "directly viewable without rebuilding it in comp."));
+      aovPage->addKnob(k); _imp->aovGlossy = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Transmission"));     k->setName("aovTrans");    k->setDefaultValue(false);
+      k->setHintToolTip(tr("Combined transmission contribution as it appears in the beauty: (Transmission "
+                           "Direct + Transmission Indirect) \xc3\x97 Transmission Color. Synthesized from the "
+                           "sub-passes (glass / refraction)."));
+      aovPage->addKnob(k); _imp->aovTrans = k; }
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Emission"));         k->setName("aovEmission"); k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovEmission = k; }
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Environment"));      k->setName("aovEnv");      k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovEnv      = k; }
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Ambient Occlusion"));k->setName("aovAO");       k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovAO       = k; }
@@ -372,6 +481,11 @@ RenderPass::initializeKnobs()
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Depth"));            k->setName("aovDepth");    k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovDepth    = k; }
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("UV"));               k->setName("aovUV");       k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovUV       = k; }
     { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Mist"));             k->setName("aovMist");     k->setDefaultValue(false); aovPage->addKnob(k); _imp->aovMist     = k; }
+    { KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Reflection Matte")); k->setName("aovReflMatte"); k->setDefaultValue(false);
+      k->setHintToolTip(tr("Output a Reflection Matte plane: objects flagged 'Reflection Matte' (Objects tab) "
+                           "are re-rendered as pure white emitters, so they read as a matte both directly and "
+                           "in reflections. This adds a second render pass (roughly doubles render time)."));
+      aovPage->addKnob(k); _imp->aovReflMatte = k; }
 }
 
 bool
@@ -404,12 +518,17 @@ RenderPass::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     // the knobs age (incrementKnobsAge() also recomputes the hash → busts the frame
     // cache for ALL frames), and re-render so the change shows everywhere.
     for (int i = 0; i < RENDERPASS_MAX_OBJECTS; ++i) {
-        if ( _imp->cameraObjects[i].lock().get()     == k ||
-             _imp->traceObjects[i].lock().get()      == k ||
-             _imp->matteObjects[i].lock().get()      == k ||
-             _imp->shadowCatchers[i].lock().get()    == k ||
-             _imp->excludedObjects[i].lock().get()   == k ||
-             _imp->activeLightsKnobs[i].lock().get() == k ) {
+        if ( _imp->cameraObjects[i].lock().get()      == k ||
+             _imp->traceObjects[i].lock().get()       == k ||
+             _imp->matteObjects[i].lock().get()       == k ||
+             _imp->shadowCatchers[i].lock().get()     == k ||
+             _imp->excludedObjects[i].lock().get()    == k ||
+             _imp->reflectionMatteObjects[i].lock().get() == k ||
+             _imp->activeLightsKnobs[i].lock().get()  == k ||
+             _imp->lightVisCamera[i].lock().get()     == k ||
+             _imp->lightVisGlossy[i].lock().get()     == k ||
+             _imp->lightVisDiffuse[i].lock().get()    == k ||
+             _imp->lightVisTransmit[i].lock().get()   == k ) {
             NodePtr node = getNode();
             if (node) {
                 node->incrementKnobsAge();
@@ -489,9 +608,24 @@ RenderPass::refreshObjectLists()
     updateBoolKnobs(_imp->matteObjects,   RENDERPASS_MAX_OBJECTS, geo, false);
     updateBoolKnobs(_imp->shadowCatchers, RENDERPASS_MAX_OBJECTS, geo, false);
     updateBoolKnobs(_imp->excludedObjects,RENDERPASS_MAX_OBJECTS, geo, false);
+    updateBoolKnobs(_imp->reflectionMatteObjects, RENDERPASS_MAX_OBJECTS, geo, false);
 
-    // Update lights
+    // Update lights — active checkbox label/visibility...
     updateBoolKnobs(_imp->activeLightsKnobs, RENDERPASS_MAX_OBJECTS, lights, false);
+    // ...and show/hide the per-light ray-visibility toggles in sync with the rows.
+    {
+        const int lcount = std::min((int)lights.size(), RENDERPASS_MAX_OBJECTS);
+        auto setSecret = [](const KnobBoolWPtr& w, bool secret) {
+            KnobBoolPtr k = w.lock(); if (k) k->setSecret(secret);
+        };
+        for (int i = 0; i < RENDERPASS_MAX_OBJECTS; ++i) {
+            const bool hidden = (i >= lcount);
+            setSecret(_imp->lightVisCamera[i],   hidden);
+            setSecret(_imp->lightVisGlossy[i],   hidden);
+            setSecret(_imp->lightVisDiffuse[i],  hidden);
+            setSecret(_imp->lightVisTransmit[i], hidden);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +765,15 @@ RenderPass::getObjectVisibilityMap() const
         }
     }
 
+    // Reflection Matte: orthogonal flag (the object must also be visible to reflection
+    // rays — e.g. Camera or Trace Objects — for the matte to appear in a reflection).
+    for (int i = 0; i < count; ++i) {
+        KnobBoolPtr k = _imp->reflectionMatteObjects[i].lock();
+        if (k && k->getValue()) {
+            visMap[geo[i]].reflectionMatte = true;
+        }
+    }
+
     return visMap;
 }
 
@@ -659,6 +802,27 @@ RenderPass::getActiveLights() const
         lights.insert(std::string("\x01__renderpass_no_lights__"));
     }
     return lights;
+}
+
+std::map<std::string, LightRayVis>
+RenderPass::getLightRayVisibility() const
+{
+    std::map<std::string, LightRayVis> out;
+    const std::vector<std::string>& names = _imp->lightNames;
+    int count = std::min((int)names.size(), RENDERPASS_MAX_OBJECTS);
+    for (int i = 0; i < count; ++i) {
+        LightRayVis v;
+        KnobBoolPtr kc = _imp->lightVisCamera[i].lock();
+        KnobBoolPtr kg = _imp->lightVisGlossy[i].lock();
+        KnobBoolPtr kd = _imp->lightVisDiffuse[i].lock();
+        KnobBoolPtr kt = _imp->lightVisTransmit[i].lock();
+        v.camera   = kc ? kc->getValue() : true;
+        v.glossy   = kg ? kg->getValue() : true;
+        v.diffuse  = kd ? kd->getValue() : true;
+        v.transmit = kt ? kt->getValue() : true;
+        out[names[i]] = v;
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -803,8 +967,10 @@ RenderPass::render(const RenderActionArgs& args)
     refreshObjectLists();
     std::map<std::string, ObjectVisibility> visMap = getObjectVisibilityMap();
     std::set<std::string>                   activeLightSet = getActiveLights();
+    std::map<std::string, LightRayVis>      lightRayVis = getLightRayVisibility();
     if ( !visMap.empty() )         req.visMap       = &visMap;
     if ( !activeLightSet.empty() ) req.activeLights = &activeLightSet;
+    if ( !lightRayVis.empty() )    req.lightRayVis  = &lightRayVis;
 
     // --- Render (cancel any in-flight preview first) ---
     if (_imp->activeRenderer) {

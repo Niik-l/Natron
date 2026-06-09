@@ -51,6 +51,23 @@ struct ObjectVisibility
     bool isHoldout = false;
     bool isShadowCatcher = false;
     bool isExcluded = false;
+    bool reflectionMatte = false; // emit a flat colour into the ReflectionMatte AOV
+};
+
+/**
+ * @brief Per-light ray-visibility override (per pass). Each flag = "this light /
+ * dome environment is VISIBLE to that ray type." Default all-true = inherit the
+ * light's natural visibility; turning one off REMOVES the light from that ray type
+ * (e.g. uncheck glossy so a dome doesn't appear in reflections — it still lights).
+ * Camera is meaningful for the dome (matches its Renderable flag); for area/point
+ * lights it's a no-op since they're camera-invisible by default.
+ */
+struct LightRayVis
+{
+    bool camera   = true;
+    bool glossy   = true;   // reflections
+    bool diffuse  = true;
+    bool transmit = true;
 };
 
 /**
@@ -133,6 +150,12 @@ public:
      * @brief Get the set of active light names. Empty = all lights.
      */
     std::set<std::string> getActiveLights() const;
+
+    /**
+     * @brief Per-light ray-visibility overrides (light name -> flags). Read from the
+     * per-light Cam/Refl/Diff/Trans toggles in the Active Lights rows.
+     */
+    std::map<std::string, LightRayVis> getLightRayVisibility() const;
 
     /**
      * @brief Discover objects and lights from the connected Scene input.

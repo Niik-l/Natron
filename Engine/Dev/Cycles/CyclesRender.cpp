@@ -89,8 +89,8 @@ struct CyclesRenderPrivate
     KnobChoiceWPtr shutterPosition;
 
     // AOV enable knobs
-    KnobBoolWPtr aovDiffDir, aovDiffInd, aovDiffCol;
-    KnobBoolWPtr aovGlossDir, aovGlossInd, aovGlossCol;
+    KnobBoolWPtr aovDiffDir, aovDiffInd, aovDiffCol, aovDiffuse, aovTrans;
+    KnobBoolWPtr aovGlossDir, aovGlossInd, aovGlossCol, aovGlossy;
     KnobBoolWPtr aovEmission, aovEnv, aovAO;
     KnobBoolWPtr aovNormal, aovDepth, aovUV, aovMist;
 
@@ -284,6 +284,12 @@ CyclesRender::initializeKnobs()
         aovPage->addKnob(k); _imp->aovDiffCol = k;
     }
     {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse")); k->setName("aovDiffuse"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Combined diffuse contribution as it appears in the beauty: (Diffuse Direct + "
+                             "Diffuse Indirect) \xc3\x97 Diffuse Color. Synthesized from the sub-passes."));
+        aovPage->addKnob(k); _imp->aovDiffuse = k;
+    }
+    {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Direct")); k->setName("aovGlossDir"); k->setDefaultValue(false);
         aovPage->addKnob(k); _imp->aovGlossDir = k;
     }
@@ -294,6 +300,20 @@ CyclesRender::initializeKnobs()
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy Color")); k->setName("aovGlossCol"); k->setDefaultValue(false);
         aovPage->addKnob(k); _imp->aovGlossCol = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Glossy")); k->setName("aovGlossy"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Combined glossy contribution as it appears in the beauty: (Glossy Direct + "
+                             "Glossy Indirect) \xc3\x97 Glossy Color. Synthesized from the sub-passes, so it's "
+                             "directly viewable without rebuilding it in comp."));
+        aovPage->addKnob(k); _imp->aovGlossy = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Transmission")); k->setName("aovTrans"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Combined transmission contribution as it appears in the beauty: (Transmission "
+                             "Direct + Transmission Indirect) \xc3\x97 Transmission Color. Synthesized from the "
+                             "sub-passes (glass / refraction)."));
+        aovPage->addKnob(k); _imp->aovTrans = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Emission")); k->setName("aovEmission"); k->setDefaultValue(false);
@@ -480,9 +500,12 @@ getEnabledPasses(const CyclesRenderPrivate* imp)
     check(imp->aovDiffDir,  "DiffDir");
     check(imp->aovDiffInd,  "DiffInd");
     check(imp->aovDiffCol,  "DiffCol");
+    check(imp->aovDiffuse,  "Diffuse");
     check(imp->aovGlossDir, "GlossDir");
     check(imp->aovGlossInd, "GlossInd");
     check(imp->aovGlossCol, "GlossCol");
+    check(imp->aovGlossy,   "Glossy");
+    check(imp->aovTrans,    "Transmission");
     check(imp->aovEmission, "Emit");
     check(imp->aovEnv,      "Env");
     check(imp->aovAO,       "AO");
@@ -504,9 +527,12 @@ passNameToPlane(const std::string& name)
     if (name == "DiffDir")  return ImagePlaneDesc("DiffuseDirect",  "Diffuse Direct",  "", rgb3, 3);
     if (name == "DiffInd")  return ImagePlaneDesc("DiffuseIndirect","Diffuse Indirect", "", rgb3, 3);
     if (name == "DiffCol")  return ImagePlaneDesc("DiffuseColor",   "Diffuse Color",   "", rgb3, 3);
+    if (name == "Diffuse")  return ImagePlaneDesc("Diffuse",        "Diffuse",         "", rgb3, 3);
     if (name == "GlossDir") return ImagePlaneDesc("GlossyDirect",   "Glossy Direct",   "", rgb3, 3);
     if (name == "GlossInd") return ImagePlaneDesc("GlossyIndirect", "Glossy Indirect",  "", rgb3, 3);
     if (name == "GlossCol") return ImagePlaneDesc("GlossyColor",    "Glossy Color",    "", rgb3, 3);
+    if (name == "Glossy")   return ImagePlaneDesc("Glossy",         "Glossy",          "", rgb3, 3);
+    if (name == "Transmission") return ImagePlaneDesc("Transmission", "Transmission",  "", rgb3, 3);
     if (name == "Emit")     return ImagePlaneDesc("Emission",       "Emission",        "", rgb3, 3);
     if (name == "Env")      return ImagePlaneDesc("Environment",    "Environment",     "", rgb3, 3);
     if (name == "Normal")   return ImagePlaneDesc("Normal",         "Normal",          "", rgb3, 3);
@@ -960,12 +986,15 @@ CyclesRender::render(const RenderActionArgs& args)
         // duration of executeCyclesPasses below.
         std::map<std::string, ObjectVisibility> visMap;
         std::set<std::string> activeLightSet;
+        std::map<std::string, LightRayVis> lightRayVis;
         if (renderPass) {
             renderPass->refreshObjectLists();
             visMap = renderPass->getObjectVisibilityMap();
             activeLightSet = renderPass->getActiveLights();
+            lightRayVis = renderPass->getLightRayVisibility();
             if (!visMap.empty())        req.visMap       = &visMap;
             if (!activeLightSet.empty()) req.activeLights = &activeLightSet;
+            if (!lightRayVis.empty())   req.lightRayVis  = &lightRayVis;
         }
 
         // --- Render with Cycles via the shared helper ---
