@@ -40,6 +40,7 @@
 #include "../../AppManager.h"
 #include "CameraMath.h"
 #include "CameraProvider.h"
+#include "../DotUtils.h"
 #include "Card3D.h"
 #include "../../GLShader.h"
 #include "Light3D.h"
@@ -1928,8 +1929,8 @@ ScanlineRender::render(const RenderActionArgs& args)
     int outW = _imp->outputWidth.lock()->getValue();
     int outH = _imp->outputHeight.lock()->getValue();
 
-    // --- Get camera from input 2 ---
-    EffectInstancePtr camEffect = getInput(2);
+    // --- Get camera from input 2 (through any Dots) ---
+    EffectInstancePtr camEffect = skipDots(getInput(2));
     CameraProvider* cam = camEffect ? dynamic_cast<CameraProvider*>(camEffect.get()) : NULL;
 
     double camTX = 0, camTY = 0, camTZ = 5, camRX = 0, camRY = 0, camRZ = 0;

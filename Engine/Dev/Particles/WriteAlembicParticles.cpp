@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "WriteAlembicParticles.h"
+#include "../DotUtils.h"
 
 #include <cmath>
 #include <iostream>
@@ -118,7 +119,7 @@ WriteAlembicParticles::bake()
         std::cerr << "[WriteAlembicParticles] No output file set.\n";
         return;
     }
-    EffectInstancePtr input0 = getInput(0);
+    EffectInstancePtr input0 = skipDots(getInput(0));
     if (!input0) {
         std::cerr << "[WriteAlembicParticles] No particle input connected.\n";
         return;

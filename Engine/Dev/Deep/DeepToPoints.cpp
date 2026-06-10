@@ -37,6 +37,7 @@
 #include "../../Node.h"
 #include "../../ViewIdx.h"
 #include "../Scene3D/Camera3DNode.h"
+#include "../DotUtils.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -192,7 +193,7 @@ DeepToPoints::render(const RenderActionArgs& args)
     float imageScale = 1.0f / std::max(dw.width(), dw.height());
 
     // Check for camera input (input 1) for world-space unprojection
-    EffectInstancePtr camInput = getInput(1);
+    EffectInstancePtr camInput = skipDots(getInput(1));
     Camera3DNode* camera = camInput ? dynamic_cast<Camera3DNode*>(camInput.get()) : nullptr;
     bool hasCamera = (camera != nullptr);
 

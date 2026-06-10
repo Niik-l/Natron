@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "Card3D.h"
+#include "../DotUtils.h"
 
 #include <cmath>
 #include <vector>
@@ -462,13 +463,13 @@ std::string Card3D::getMaterialDiffuseColorspace() const
 
 bool Card3D::hasMaterialInput() const
 {
-    EffectInstancePtr inp = getInput(1);
+    EffectInstancePtr inp = skipDots(getInput(1));
     return inp && dynamic_cast<MaterialProvider*>(inp.get()) != nullptr;
 }
 
 MaterialProvider* Card3D::getConnectedMaterial() const
 {
-    EffectInstancePtr inp = getInput(1);
+    EffectInstancePtr inp = skipDots(getInput(1));
     return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
 }
 

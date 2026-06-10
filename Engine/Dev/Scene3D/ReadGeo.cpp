@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "ReadGeo.h"
+#include "../DotUtils.h"
 
 #include "../../NodeMetadata.h"
 
@@ -1230,13 +1231,13 @@ std::string ReadGeo::getMaterialTextureFile() const
 
 bool ReadGeo::hasMaterialInput() const
 {
-    EffectInstancePtr inp = getInput(0);
+    EffectInstancePtr inp = skipDots(getInput(0));
     return inp && dynamic_cast<MaterialProvider*>(inp.get()) != nullptr;
 }
 
 MaterialProvider* ReadGeo::getConnectedMaterial() const
 {
-    EffectInstancePtr inp = getInput(0);
+    EffectInstancePtr inp = skipDots(getInput(0));
     return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
 }
 

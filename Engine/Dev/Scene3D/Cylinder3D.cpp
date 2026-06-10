@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "Cylinder3D.h"
+#include "../DotUtils.h"
 
 #include <cmath>
 #include <vector>
@@ -582,13 +583,13 @@ std::string Cylinder3D::getMaterialDiffuseColorspace() const
 
 bool Cylinder3D::hasMaterialInput() const
 {
-    EffectInstancePtr inp = getInput(1);
+    EffectInstancePtr inp = skipDots(getInput(1));
     return inp && dynamic_cast<MaterialProvider*>(inp.get()) != nullptr;
 }
 
 MaterialProvider* Cylinder3D::getConnectedMaterial() const
 {
-    EffectInstancePtr inp = getInput(1);
+    EffectInstancePtr inp = skipDots(getInput(1));
     return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
 }
 

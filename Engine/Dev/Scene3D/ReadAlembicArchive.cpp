@@ -14,6 +14,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "ReadAlembicArchive.h"
+#include "../DotUtils.h"
 
 #include "../../NodeMetadata.h"
 
@@ -1043,14 +1044,14 @@ ReadAlembicArchive::getMaterialDiffuseColorspace() const
 bool
 ReadAlembicArchive::hasMaterialInput() const
 {
-    EffectInstancePtr inp = getInput(0);
+    EffectInstancePtr inp = skipDots(getInput(0));
     return inp && dynamic_cast<MaterialProvider*>(inp.get()) != nullptr;
 }
 
 MaterialProvider*
 ReadAlembicArchive::getConnectedMaterial() const
 {
-    EffectInstancePtr inp = getInput(0);
+    EffectInstancePtr inp = skipDots(getInput(0));
     return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
 }
 

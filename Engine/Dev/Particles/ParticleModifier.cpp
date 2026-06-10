@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "ParticleModifier.h"
+#include "../DotUtils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -76,7 +77,7 @@ ParticleModifier::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) con
 ParticleDataPtr
 ParticleModifier::getParticleData(double time)
 {
-    EffectInstancePtr input = getInput(0);
+    EffectInstancePtr input = skipDots(getInput(0));
     if (!input) return ParticleDataPtr();
     ParticleProvider* provider = dynamic_cast<ParticleProvider*>(input.get());
     if (!provider) return ParticleDataPtr();
@@ -105,6 +106,11 @@ ParticleModifier::collectUpstreamForces(EffectInstance* startNode,
 
     EffectInstance* current = startNode;
     while (current) {
+        // See through Dot routing nodes anywhere in the particle force chain.
+        while (current && current->getPluginID() == PLUGINID_NATRON_DOT) {
+            current = current->getInput(0).get();
+        }
+        if (!current) break;
         ParticleModifier* mod = dynamic_cast<ParticleModifier*>(current);
         if (mod) {
             // Only collect if it's a force (applyForce does something),

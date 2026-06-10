@@ -46,6 +46,7 @@
 #include "ReadAlembicArchive.h"
 #include "ReadGeo.h"
 #include "GeoMaterialOverride.h"
+#include "../DotUtils.h"
 
 #include <set>
 #include "../../KnobTypes.h"
@@ -204,7 +205,7 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         }
         if (!geo) continue;
 
-        EffectInstancePtr mat = ov->getInput(1);
+        EffectInstancePtr mat = skipDots(ov->getInput(1));
         NodePtr matNode = mat ? mat->getNode() : NodePtr();
         if (!matNode) continue;
 

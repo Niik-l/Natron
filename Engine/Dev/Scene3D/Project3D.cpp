@@ -36,6 +36,7 @@
 #include "../../AppInstance.h"
 #include "../../AppManager.h"
 #include "CameraProvider.h"
+#include "../DotUtils.h"
 #include "../../GPUContextPool.h"
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
@@ -247,8 +248,8 @@ Project3D::render(const RenderActionArgs& args)
     int outW = _imp->outputWidth.lock()->getValue();
     int outH = _imp->outputHeight.lock()->getValue();
 
-    // --- Get projection camera from input 1 ---
-    EffectInstancePtr projCamEffect = getInput(1);
+    // --- Get projection camera from input 1 (through any Dots) ---
+    EffectInstancePtr projCamEffect = skipDots(getInput(1));
     CameraProvider* projCam = projCamEffect ? dynamic_cast<CameraProvider*>(projCamEffect.get()) : NULL;
     if (!projCam) return eStatusFailed; // Projection camera is required
 
@@ -258,8 +259,8 @@ Project3D::render(const RenderActionArgs& args)
     double projHA = projCam->getCameraHAperture(args.time);
     double projVA = projCam->getCameraVAperture(args.time);
 
-    // --- Get render camera from input 3 (optional — falls back to projection camera) ---
-    EffectInstancePtr renCamEffect = getInput(3);
+    // --- Get render camera from input 3 (optional — falls back to projection camera; through any Dots) ---
+    EffectInstancePtr renCamEffect = skipDots(getInput(3));
     CameraProvider* renCam = renCamEffect ? dynamic_cast<CameraProvider*>(renCamEffect.get()) : NULL;
     if (!renCam) renCam = projCam; // Use projection camera if no render camera
 
@@ -290,7 +291,7 @@ Project3D::render(const RenderActionArgs& args)
     float geoTransform[16];
     for (int i = 0; i < 16; ++i) geoTransform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
 
-    EffectInstancePtr geoInput = getInput(2);
+    EffectInstancePtr geoInput = skipDots(getInput(2));
     ReadGeo* readGeo = geoInput ? dynamic_cast<ReadGeo*>(geoInput.get()) : NULL;
     MeshDataPtr mesh;
 

@@ -52,6 +52,7 @@
 #include "CyclesRenderer.h"
 #include "CyclesRenderSettings.h"
 #include "KnobPassTable.h"
+#include "../DotUtils.h"
 #include "../Scene3D/Material3D.h"
 #include "../../OCIOColorSpaceUtils.h"
 
@@ -1097,7 +1098,7 @@ parseAndDumpActivePasses(EffectInstance*    callerEffect,
     // integrator) comes from the provider when connected.
     const CyclesRenderSettings* settings = nullptr;
     {
-        EffectInstancePtr settingsEffect = callerEffect ? callerEffect->getInput(3) : EffectInstancePtr();
+        EffectInstancePtr settingsEffect = callerEffect ? skipDots(callerEffect->getInput(3)) : EffectInstancePtr();
         if (settingsEffect) {
             settings = dynamic_cast<const CyclesRenderSettings*>(settingsEffect.get());
         }
@@ -1373,7 +1374,7 @@ renderFrameForBatches(EffectInstance*                  effect,
                 batchDof.bladeRotation = (float)(settings->getBladeRotation((double)frame) * 3.14159265358979323846 / 180.0);
                 const CameraProvider* dofCam = batchCamOverride;
                 if (!dofCam) {
-                    EffectInstancePtr camEffect = effect ? effect->getInput(2) : EffectInstancePtr();
+                    EffectInstancePtr camEffect = effect ? skipDots(effect->getInput(2)) : EffectInstancePtr();
                     if (camEffect) dofCam = dynamic_cast<const CameraProvider*>(camEffect.get());
                 }
                 if (dofCam) {

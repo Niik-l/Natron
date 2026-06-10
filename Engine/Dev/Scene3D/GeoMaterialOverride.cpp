@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "GeoMaterialOverride.h"
+#include "../DotUtils.h"
 
 #include "../../AppManager.h"
 #include "../../Image.h"
@@ -131,7 +132,7 @@ GeoMaterialOverride::getPreferredMetadata(NodeMetadata& metadata)
 {
     // Pass through the geo input's frame-varying flag so scrubbing invalidates
     // the downstream render cache (mirrors Scene3D).
-    EffectInstancePtr geo = getInput(0);
+    EffectInstancePtr geo = skipDots(getInput(0));
     if (geo && geo->getHasAnimation()) {
         metadata.setIsFrameVarying(true);
     }

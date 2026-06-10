@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "ParticleSpawn.h"
+#include "../DotUtils.h"
 
 #include <random>
 #include <cmath>
@@ -197,7 +198,7 @@ ParticleSpawn::getParticleData(double time)
     }
 
     // Get parent particle provider from input
-    EffectInstancePtr input = getInput(0);
+    EffectInstancePtr input = skipDots(getInput(0));
     if (!input) return ParticleDataPtr();
     ParticleProvider* parentProvider = dynamic_cast<ParticleProvider*>(input.get());
     if (!parentProvider) return ParticleDataPtr();

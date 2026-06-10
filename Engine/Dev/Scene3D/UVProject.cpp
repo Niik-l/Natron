@@ -29,6 +29,7 @@
 
 #include "CameraMath.h"
 #include "CameraProvider.h"
+#include "../DotUtils.h"
 #include "RotationConventions.h"
 
 #include "../../AppManager.h"
@@ -298,7 +299,7 @@ UVProject::rewriteUVs(const std::vector<float>& verts,
 
     // ---------- Perspective mode ----------
     if (mode == eModePerspective) {
-        EffectInstancePtr camEffect = const_cast<UVProject*>(this)->getInput(1);
+        EffectInstancePtr camEffect = skipDots(const_cast<UVProject*>(this)->getInput(1));
         CameraProvider* cam = camEffect ? dynamic_cast<CameraProvider*>(camEffect.get()) : NULL;
         if (!cam) return; // no camera → leave outComponents == 0 (caller keeps upstream UVs)
 

@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "ParticleAttribute.h"
+#include "../DotUtils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -411,7 +412,7 @@ void
 fitSectionRange(ParticleAttribute* self, SectionKnobs& sec, double time)
 {
     // Resolve upstream particle stream.
-    EffectInstancePtr input = self->getInput(0);
+    EffectInstancePtr input = skipDots(self->getInput(0));
     if (!input) return;
     ParticleProvider* provider = dynamic_cast<ParticleProvider*>(input.get());
     if (!provider) return;

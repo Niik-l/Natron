@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "Sphere3D.h"
+#include "../DotUtils.h"
 
 #include <cmath>
 #include <vector>
@@ -511,13 +512,13 @@ std::string Sphere3D::getMaterialDiffuseColorspace() const
 
 bool Sphere3D::hasMaterialInput() const
 {
-    EffectInstancePtr inp = getInput(1);
+    EffectInstancePtr inp = skipDots(getInput(1));
     return inp && dynamic_cast<MaterialProvider*>(inp.get()) != nullptr;
 }
 
 MaterialProvider* Sphere3D::getConnectedMaterial() const
 {
-    EffectInstancePtr inp = getInput(1);
+    EffectInstancePtr inp = skipDots(getInput(1));
     return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
 }
 

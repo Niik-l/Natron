@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "ParticleInstance.h"
+#include "../DotUtils.h"
 
 #include <cmath>
 
@@ -140,7 +141,7 @@ ParticleDataPtr
 ParticleInstance::getParticleData(double time)
 {
     // Pass through particle data for downstream nodes
-    EffectInstancePtr input = getInput(0);
+    EffectInstancePtr input = skipDots(getInput(0));
     if (!input) return ParticleDataPtr();
     ParticleProvider* provider = dynamic_cast<ParticleProvider*>(input.get());
     if (!provider) return ParticleDataPtr();
@@ -153,7 +154,7 @@ ParticleInstance::getInstances(double time, std::vector<GeoInstance>& outInstanc
     outInstances.clear();
 
     // Get particle data
-    EffectInstancePtr input0 = getInput(0);
+    EffectInstancePtr input0 = skipDots(getInput(0));
     if (!input0) return;
     ParticleProvider* provider = dynamic_cast<ParticleProvider*>(input0.get());
     if (!provider) return;

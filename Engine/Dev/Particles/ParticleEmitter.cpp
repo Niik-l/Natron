@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "ParticleEmitter.h"
+#include "../DotUtils.h"
 
 #include <cmath>
 #include <random>
@@ -548,8 +549,8 @@ ParticleEmitter::getParticleData(double time)
         maskOrientVal = _imp->maskPlaneOrientation.lock() ? _imp->maskPlaneOrientation.lock()->getValue() : 1;
         maskColorFromImg = _imp->maskColorFromImage.lock() ? _imp->maskColorFromImage.lock()->getValue() : true;
 
-        // Detect Card3D upstream
-        EffectInstancePtr maskInput = getInput(0);
+        // Detect Card3D upstream (through any Dots)
+        EffectInstancePtr maskInput = skipDots(getInput(0));
         if (maskInput) {
             card3dMask = dynamic_cast<Card3D*>(maskInput.get());
         }

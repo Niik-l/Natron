@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "ParticleSolver.h"
+#include "../DotUtils.h"
 
 #include <algorithm>
 #include <array>
@@ -600,7 +601,7 @@ ParticleSolver::getParticleData(double time)
     // Walk upstream: collect force nodes and find the emitter
     std::vector<ParticleModifier*> forces;
     ParticleProvider* emitter = nullptr;
-    EffectInstancePtr input0 = getInput(0);
+    EffectInstancePtr input0 = skipDots(getInput(0));
     if (!input0) return ParticleDataPtr();
 
     ParticleModifier* inputMod = dynamic_cast<ParticleModifier*>(input0.get());

@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "Scene3D.h"
+#include "../DotUtils.h"
 
 #include <sstream>
 
@@ -119,7 +120,7 @@ Scene3D::getPreferredMetadata(NodeMetadata& metadata)
     // This ensures Natron's cache includes time in the ImageKey, so downstream
     // renderers (CyclesRender, ScanlineRender) re-render when the frame changes.
     for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) {
-        EffectInstancePtr inp = getInput(i);
+        EffectInstancePtr inp = skipDots(getInput(i));
         if (inp && inp->getHasAnimation()) {
             metadata.setIsFrameVarying(true);
             return eStatusOK;

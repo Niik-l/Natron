@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "ParticleMerge.h"
+#include "../DotUtils.h"
 
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
@@ -89,7 +90,7 @@ ParticleMerge::getParticleData(double time)
     ParticleDataPtr result = std::make_shared<ParticleData>();
 
     for (int i = 0; i < 4; ++i) {
-        EffectInstancePtr input = getInput(i);
+        EffectInstancePtr input = skipDots(getInput(i));
         if (!input) continue;
         ParticleProvider* provider = dynamic_cast<ParticleProvider*>(input.get());
         if (!provider) continue;

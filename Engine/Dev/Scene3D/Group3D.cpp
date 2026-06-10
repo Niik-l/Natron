@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "Group3D.h"
+#include "../DotUtils.h"
 
 #include <cassert>
 #include <sstream>
@@ -201,7 +202,7 @@ Group3D::getPreferredMetadata(NodeMetadata& metadata)
 {
     // If any connected input has animated knobs, this group is frame-varying.
     for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
-        EffectInstancePtr inp = getInput(i);
+        EffectInstancePtr inp = skipDots(getInput(i));
         if (inp && inp->getHasAnimation()) {
             metadata.setIsFrameVarying(true);
             return eStatusOK;
