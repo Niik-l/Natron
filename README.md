@@ -11,6 +11,7 @@ This fork extends Natron with a full 3D system, Cycles renderer, deep compositin
 - Alembic mesh + camera import
 - HDRI environment lighting with importance sampling
 - Motion blur, depth of field, AOV render passes
+- Native OCIO colour management — GPU-accelerated ACES views in the viewer (real-time, full float), config-aware material/output colourspaces; tested end-to-end on the ACES reference config **v4.0.0** (ACES 2.0)
 - Deep compositing (16 nodes)
 - Particle system (12 nodes: emitter, gravity, drag, turbulence, wind, attract, vortex, spawn, collide, killbox, merge)
 - SphericalTransform (8 projection types)

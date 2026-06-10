@@ -17,6 +17,32 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **RenderPass: per-light ray visibility + reflection matte + combined light×color AOVs (2026-06-09)** —
+  - **Per-light ray visibility** — the Lights controls moved onto the Objects page
+    (behind a "Separate Passes" separator alongside Shadow Catchers / Reflection
+    Matte). Each active light is a row `[Active] [Cam] [Refl] [Diff] [Trans]`; the
+    four ray toggles drop that light — or the dome environment — from
+    Camera/Reflection/Diffuse/Transmission rays per pass while it still lights the
+    scene. Dome → `scene->background->set_visibility(mask)` (+ camera bit drives
+    `set_transparent`); other lights → light-wrapper `ccl::Object->set_visibility`.
+    Threaded RenderPass → `CyclesPassRequest::lightRayVis` → `CyclesRenderer`.
+    Caveat: for non-dome lights the mask hides the light's visible SHAPE in that ray
+    type, not its illumination (Cycles has no per-ray use_glossy/use_diffuse socket).
+  - **Reflection Matte** — new object category. Flagged objects are re-rendered as
+    pure white emitters in a SECOND `renderToBufferWithCameraMultiPass` pass
+    (`_impl->emissiveMatteMode`, `createEmissiveMatteShader`) whose Combined is routed
+    into a `ReflectionMatte` plane, so the matte reads both directly and in
+    reflections. The original one-render shader-AOV plan was a DEAD END: Cycles'
+    `svm_node_aov_check` (`kernel/svm/aov.h`) gates every `OutputAOVNode` write on the
+    primary camera ray, so a shader AOV can never appear in a reflection — emission
+    can. ~2× render time when enabled (only then).
+  - **Combined Diffuse / Glossy / Transmission AOVs** — new toggles on RenderPass and
+    CyclesRender. Synthesized post-render as `(Direct + Indirect) × Color` (the kernel
+    only writes the direct/indirect/color sub-passes, never a category `PASS_GLOSSY`),
+    so each lobe is viewable at beauty-matching levels instead of the blown-out raw
+    HDR light pass. Sub-passes are auto-rendered and dropped if not requested on their
+    own; one unified `combinedPlanes` loop drives all three.
+
 - **Stability + playback fixes: viewer GL crashes, particle 3D-viewport playback, timeline drift, lighting (2026-06-08)** —
   - **Viewer GL crash fixes** — the viewer's shader programs are parented to the
     `QOpenGLContext`, so context recreation (splitting/docking/reparenting a viewer)
