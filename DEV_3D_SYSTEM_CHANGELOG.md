@@ -17,7 +17,38 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
-- **RenderPass: per-light ray visibility + reflection matte + combined light×color AOVs (2026-06-09)** —
+- **Dot-input fixes + RenderPass → CyclesRenderPass rename + denoise tick (2026-06-10)** —
+  - **Denoise tick (OpenImageDenoise, CPU).** New **Denoise** checkbox on the
+    CyclesRenderPass Preview tab (and the previously-dead CyclesRender / CyclesRenderSettings
+    Denoise knobs are now wired). `CyclesPassRequest::denoise` → `renderer.setDenoise()`
+    → `scene->integrator->set_use_denoise()` with `DENOISER_OPENIMAGEDENOISE` /
+    `denoise_use_gpu=false`. Cycles auto-adds the denoising albedo/normal aux passes;
+    scene passes default to `PassMode::DENOISED`, so the output driver's "Combined"
+    read returns the denoised result (auto-falling-back to noisy when off).
+    Deployment gotcha (MSYS2): OIDN's core looks for `OpenImageDenoise_device_cpu.dll`
+    but the package ships it `lib`-prefixed, so the CPU device fails to load
+    ("unsupported device type: CPU") until an un-prefixed copy is placed next to the
+    core / exe — see PACKAGING_NOTES.
+  - **Typed inputs now see through Dot routing nodes.** Camera / render-settings /
+    material / particle-stream / projection-geo inputs were resolved as
+    `dynamic_cast<T*>(getInput(slot).get())`, which returns null when a Dot sits
+    between source and consumer (a Dot is none of those types), so the input
+    silently did nothing. Added a shared `Engine/Dev/DotUtils.h` → `skipDots()` and
+    routed every typed-input resolution through it: CyclesRender / CyclesRenderPass /
+    ScanlineRender / Project3D / UVProject / CyclesRenderPassManager / DeepToPoints
+    (cameras), the CyclesRenderSettings inputs, the geo-node material inputs
+    (Card3D / Cube3D / Cylinder3D / Sphere3D / ReadAlembicArchive / ReadGeo +
+    GeoMaterialOverride), and the particle chain (Attribute / Emitter / Instance /
+    Merge / Modifier incl. the force-chain walk / Solver / Spawn / WriteAlembic).
+    Scene3D / Group3D / GeoMaterialOverride also skip Dots in their frame-varying
+    (`getHasAnimation`) check so animated content behind a Dot still re-renders.
+    Scene/holdout discovery (`collectSceneNodes`) already saw through Dots.
+  - **RenderPass node renamed to CyclesRenderPass** (label, plugin ID, C++ class,
+    files `CyclesRenderPass.{h,cpp}`) for consistency with the Cycles* family. Old
+    plugin ID `fr.inria.built-in.RenderPass` is aliased in
+    `AppManager::getPluginBinaryFromOldID`, so existing projects still load the node.
+
+- **CyclesRenderPass: per-light ray visibility + reflection matte + combined light×color AOVs (2026-06-09)** —
   - **Per-light ray visibility** — the Lights controls moved onto the Objects page
     (behind a "Separate Passes" separator alongside Shadow Catchers / Reflection
     Matte). Each active light is a row `[Active] [Cam] [Refl] [Diff] [Trans]`; the
@@ -25,7 +56,7 @@ Recent milestones:
     Camera/Reflection/Diffuse/Transmission rays per pass while it still lights the
     scene. Dome → `scene->background->set_visibility(mask)` (+ camera bit drives
     `set_transparent`); other lights → light-wrapper `ccl::Object->set_visibility`.
-    Threaded RenderPass → `CyclesPassRequest::lightRayVis` → `CyclesRenderer`.
+    Threaded CyclesRenderPass → `CyclesPassRequest::lightRayVis` → `CyclesRenderer`.
     Caveat: for non-dome lights the mask hides the light's visible SHAPE in that ray
     type, not its illumination (Cycles has no per-ray use_glossy/use_diffuse socket).
   - **Reflection Matte** — new object category. Flagged objects are re-rendered as
@@ -36,7 +67,7 @@ Recent milestones:
     `svm_node_aov_check` (`kernel/svm/aov.h`) gates every `OutputAOVNode` write on the
     primary camera ray, so a shader AOV can never appear in a reflection — emission
     can. ~2× render time when enabled (only then).
-  - **Combined Diffuse / Glossy / Transmission AOVs** — new toggles on RenderPass and
+  - **Combined Diffuse / Glossy / Transmission AOVs** — new toggles on CyclesRenderPass and
     CyclesRender. Synthesized post-render as `(Direct + Indirect) × Color` (the kernel
     only writes the direct/indirect/color sub-passes, never a category `PASS_GLOSSY`),
     so each lobe is viewable at beauty-matching levels instead of the blown-out raw
@@ -61,11 +92,11 @@ Recent milestones:
     land 1-3 frames ahead because a user seek went through the playback-restart path;
     a user seek now clears playback-auto-restart so it renders a single frame, and the
     timeline-change handler no longer re-renders an actively-playing viewer.
-  - **RenderPass lighting** — an empty Active-Lights selection now renders **no**
+  - **CyclesRenderPass lighting** — an empty Active-Lights selection now renders **no**
     lights (was: all); toggling any object/light checkbox invalidates the frame cache
     (`incrementKnobsAge`) so the change shows on every frame, not just after a scrub.
 
-- **Colour management pass: native OCIO viewer + config-aware materials + pass output colourspace + RenderPass live preview (2026-06-07)** —
+- **Colour management pass: native OCIO viewer + config-aware materials + pass output colourspace + CyclesRenderPass live preview (2026-06-07)** —
   - **Native OCIO-aware viewer** — the viewer colourspace dropdown now lists the
     active OCIO config's `Display / View` transforms (e.g. ACES Output Transforms)
     alongside the built-in Linear/sRGB/Rec.709/BT1886.
@@ -92,13 +123,13 @@ Recent milestones:
     never converted. Fixes LDR pass output that was raw-linear-in-8-bit. The
     in-graph `CyclesRender` output deliberately stays scene-linear (use a Write node
     for EXR delivery in another space).
-  - **RenderPass live Cycles preview + AOV tab** — `RenderPass` renders its own live
+  - **CyclesRenderPass live Cycles preview + AOV tab** — `CyclesRenderPass` renders its own live
     Cycles preview reflecting that pass's visibility/holdout/shadow-catcher/light
     setup (new camera + settings inputs, Preview tab) via the shared
     `CyclesPassRender` helper (`prepareCyclesPasses` gained a `sceneInputSlot` param),
     plus an AOV Passes tab (multi-plane output mirroring `CyclesRender`). Wire
     scene+camera and connect to a Viewer — no separate `CyclesRender` needed.
-  - **RenderPass scene-discovery fixes** — discovery now uses the renderer's
+  - **CyclesRenderPass scene-discovery fixes** — discovery now uses the renderer's
     recursive `collectSceneNodes` walk (via `enumerateSceneGeo`/`enumerateSceneLights`),
     so Dot routing nodes are seen through, lights nested in a Group3D are found, and
     container/decorator nodes (Scene3D/Group3D/GeoMaterialOverride) are no longer
@@ -205,10 +236,10 @@ Recent milestones:
     New `collectSceneNodes()` descends through every nested Scene3D/Group3D.
   - **Dot pass-through** — scene traversal now sees through `Dot` routing nodes
     (`skipDots()` + Dot handling in `collectSceneNodes`), so geo/lights behind a
-    Dot on any input (scene, holdout, RenderPass) pass through.
+    Dot on any input (scene, holdout, CyclesRenderPass) pass through.
   - **CyclesRender "holdout" input (slot 4)** — geo wired here is added to the
     scene AND flagged `set_use_holdout(true)`, punching a transparent matte of
-    its shape. Additive (independent of any RenderPass visMap). Threaded as
+    its shape. Additive (independent of any CyclesRenderPass visMap). Threaded as
     `CyclesPassPrepared::holdoutNames` → `renderToBufferWithCameraMultiPass` /
     `syncSceneWithCamera` (new `holdoutObjects` param). Covers the primitive geo
     loop (Sphere/Card/Cube/Quad); ReadGeo/particles/volumes not yet wired.
@@ -221,7 +252,7 @@ Recent milestones:
 
 - **Cycles shadow catcher — working comp pass + the lamp-exclusion fix (2026-05-31)** —
   Shadow catcher (invisible card catches a sphere's shadow into alpha, for comp)
-  now works, via the **RenderPass** node (interactive) and the
+  now works, via the **CyclesRenderPass** node (interactive) and the
   **CyclesRenderPassManager** batch path. Two fixes: (1) the matte output was
   flattened onto a white backdrop with alpha=1 — now output directly as a
   premultiplied comp pass (RGB = objects, ALPHA = shadow density + coverage,
@@ -231,7 +262,7 @@ Recent milestones:
   skipped in the catcher's unshadowed reference pass, `color_catcher=0`, and the
   shadow ratio collapses to a flat 1.0. Direct-light shadows DO work with a
   black world; no environment needed. `[Cycles SC]` diagnostics are gated behind
-  env `NATRON_DEBUG_SC`. The RenderPass "everything-starts-excluded" model means
+  env `NATRON_DEBUG_SC`. The CyclesRenderPass "everything-starts-excluded" model means
   you must mark the caster (Camera/Trace) as well as the catcher.
 
 - **CyclesRenderPassManager — custom pass-table UI + live preview (2026-05-31→06-02)** —
@@ -248,7 +279,7 @@ Recent milestones:
   `previewPassIndex`; node made `isMultiPlanar()` + `getComponentsNeededAndProduced`).
 
 - **CyclesRenderPassManager — material override + shadow catcher / holdout / phantom promotion (2026-05-30)** —
-  closes the gap with the RenderPass node's full visibility model. Four
+  closes the gap with the CyclesRenderPass node's full visibility model. Four
   new JSON fields per pass:
   - `materialOverride` (script name) — Blender-style material override:
     every mesh in the batch renders with this MaterialProvider's shader
@@ -294,10 +325,10 @@ Recent milestones:
   duplication between `CyclesRender::render()` and the shared helper.
   `renderCyclesPassesForEffect()` is now a thin wrapper around two new
   primitives: `prepareCyclesPasses()` (walks obj input → optional
-  RenderPass → Scene3D/Group3D, builds the scene graph, bakes materials,
+  CyclesRenderPass → Scene3D/Group3D, builds the scene graph, bakes materials,
   resolves the camera) and `executeCyclesPasses()` (invokes Cycles with
   a caller-owned `CyclesRenderer&`). The new `CyclesPassPrepared` struct
-  exposes the resolved sceneGraph, camera params, and RenderPass pointer
+  exposes the resolved sceneGraph, camera params, and CyclesRenderPass pointer
   so callers can inspect/hash before deciding to execute.
   `CyclesRender::render()` now does `prepare → hash → cache check →
   execute`, swapping out ~70 lines of duplicated scene-build + Cycles
@@ -355,7 +386,7 @@ Recent milestones:
   2. **Per-pass object scoping** — new `candidateObjects` /
      `excludeObjects` / `soloObject` fields parallel to the light
      scoping. `enumerateSceneGeo` walks the same input-1 → optional
-     RenderPass → Scene3D/Group3D traversal as `enumerateSceneLights`
+     CyclesRenderPass → Scene3D/Group3D traversal as `enumerateSceneLights`
      and collects every non-Light3D node. `resolveActiveObjects` honors
      solo > candidates > "all minus excludes". When scoped, a full
      `ObjectVisibility` map covering every scene object is built
@@ -398,7 +429,7 @@ Recent milestones:
   renderer. New `Engine/Dev/Cycles/CyclesPassRender.{h,cpp}` exposes
   `renderCyclesPassesForEffect(effect, request, outBuffers, errOut)`
   which builds the scene graph from input 1 (walking through optional
-  `RenderPass`, then `Scene3D`/`Group3D` containers), bakes Material3D
+  `CyclesRenderPass`, then `Scene3D`/`Group3D` containers), bakes Material3D
   textures, pulls camera params from input 2, and calls
   `CyclesRenderer::renderToBufferWithCameraMultiPass`. Logic duplicates
   the corresponding block in `CyclesRender::render()` for now; the
@@ -500,7 +531,7 @@ Recent milestones:
 | Node | Plugin ID | Description |
 |------|-----------|-------------|
 | **Scene3D** | `fr.inria.built-in.Scene3D` | Aggregates 3D objects for rendering |
-| **RenderPass** | `fr.inria.built-in.RenderPass` | Multi-pass filter: visibility, holdout, shadow catcher, light selection |
+| **CyclesRenderPass** | `fr.inria.built-in.RenderPass` | Multi-pass filter: visibility, holdout, shadow catcher, light selection |
 | **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | GLSL 3.3 + MRT rasterizer; 6 AOVs; Shading modes; particle render |
 | **CyclesRender** | `fr.inria.built-in.CyclesRender` | Cycles path tracer (NATRON_CYCLES); 12 AOVs |
 | ~~**Project3D**~~ | ~~`fr.inria.built-in.Project3D`~~ | **Disabled 2026-05-24** — ~~Camera projection onto geometry~~. Superseded by UVProject. |

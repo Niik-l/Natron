@@ -207,7 +207,7 @@ Tracking known bugs, incomplete features, and planned improvements.
 - **Per-pass object scoping** — `candidateObjects` / `excludeObjects` /
   `soloObject` mirror the light-scoping JSON fields.
   `CyclesPassRender.{h,cpp}` gains `SceneGeoInfo` + `enumerateSceneGeo`
-  (same input-1 → optional RenderPass → Scene3D/Group3D walk as
+  (same input-1 → optional CyclesRenderPass → Scene3D/Group3D walk as
   `enumerateSceneLights`, just collects everything that isn't a
   Light3D). `resolveActiveObjects` honors solo > candidates >
   "all-minus-excludes". When scoped, a full `ObjectVisibility` map
@@ -251,7 +251,7 @@ Tracking known bugs, incomplete features, and planned improvements.
 - **`Engine/Dev/Cycles/CyclesPassRender.{h,cpp}` (new)** — exposes
   `renderCyclesPassesForEffect(effect, CyclesPassRequest, outBuffers,
   errOut)`. Builds the scene graph from the effect's input 1 (walking
-  through optional `RenderPass`, then `Scene3D`/`Group3D` containers),
+  through optional `CyclesRenderPass`, then `Scene3D`/`Group3D` containers),
   bakes Material3D textures, pulls camera params from input 2, and
   calls `CyclesRenderer::renderToBufferWithCameraMultiPass`. Logic
   intentionally duplicates the corresponding block of
@@ -320,7 +320,7 @@ Tracking known bugs, incomplete features, and planned improvements.
   (local-only). The audit documents the current pass plumbing in
   `CyclesRender.cpp` (12 enabled passes via 12 knobs, single-Cycles-call
   multi-pass via `NatronMultiPassOutputDriver`, what controls already
-  exist via the upstream `RenderPass` node, what's missing for the
+  exist via the upstream `CyclesRenderPass` node, what's missing for the
   spec). The catalog enumerates all 49 `PassType` enums from
   `D:\_vfx_claude_2025\cycles\src\kernel\types.h:497-581` bucketed
   across the 6 categories the UI uses (Beauty / Shadows / Additive /
@@ -400,11 +400,11 @@ Tracking known bugs, incomplete features, and planned improvements.
 - **`Engine/Dev/Cycles/CyclesPassRender.{h,cpp}`** — refactored from a
   single `renderCyclesPassesForEffect()` into a two-step API:
   - `prepareCyclesPasses(effect, req, out, err)` walks input 1 (through
-    optional RenderPass into Scene3D/Group3D), builds the scene graph,
+    optional CyclesRenderPass into Scene3D/Group3D), builds the scene graph,
     bakes Material3D input textures, and resolves the camera
     (override > input 2 > defaults). Fills a new `CyclesPassPrepared`
     struct with the resolved `sceneGraph`, `camTX..camVA`, and the
-    discovered `RenderPass*`.
+    discovered `CyclesRenderPass*`.
   - `executeCyclesPasses(renderer, prepared, req, outBuffers, err)`
     invokes `renderToBufferWithCameraMultiPass` on a caller-owned
     `CyclesRenderer&`. CyclesRender uses `_imp->activeRenderer` for
@@ -417,7 +417,7 @@ Tracking known bugs, incomplete features, and planned improvements.
   calls. The cache hash block reads `sceneGraph` / `renderPass` via
   local aliases bound to `prepared`, so hash inputs are bit-for-bit
   identical pre/post-refactor and existing cache behavior is preserved.
-  RenderPass visibility resolution stays in the cache-miss branch but
+  CyclesRenderPass visibility resolution stays in the cache-miss branch but
   writes into `req.visMap` / `req.activeLights` rather than separate
   pointer locals. CyclesRender::render() drops ~70 lines net.
 
