@@ -27,12 +27,13 @@
 
 #include "../../Node.h"
 
+#include "../DotUtils.h"
 #include "../Scene3D/CameraProvider.h"
 #include "../Scene3D/Group3D.h"
 #include "../Scene3D/Light3D.h"
 #include "../Scene3D/Material3D.h"
 #include "../Scene3D/MaterialProvider.h"
-#include "../Scene3D/RenderPass.h"
+#include "../Scene3D/CyclesRenderPass.h"
 #include "../Scene3D/Scene3D.h"
 #include "../Scene3D/SceneGraph.h"
 #include "../Scene3D/GeoMaterialOverride.h"
@@ -45,17 +46,8 @@ NATRON_NAMESPACE_ENTER
 // group never reach the SceneGraph and silently don't render. Non-container
 // nodes (lights, geo) are added but not descended into. `seen` dedups nodes
 // reachable via multiple paths and guards against cycles.
-// Follow input 0 through any chain of Dot routing nodes, returning the first
-// non-Dot effect (or null). Dots are pure pass-throughs in the node graph.
-static EffectInstancePtr
-skipDots(EffectInstancePtr eff)
-{
-    while (eff && eff->getPluginID() == PLUGINID_NATRON_DOT) {
-        eff = eff->getInput(0);
-    }
-    return eff;
-}
-
+// (skipDots lives in ../DotUtils.h now — shared with the camera/settings/material
+// input resolution across the 3D nodes.)
 static void
 collectSceneNodes(EffectInstance* eff, NodesList& out, std::set<EffectInstance*>& seen)
 {
@@ -106,19 +98,19 @@ prepareCyclesPasses(EffectInstance*           effect,
         return false;
     }
 
-    // --- Walk obj input (default slot 1; RenderPass self-preview uses slot 0)
-    // + optional RenderPass wrapper, seeing through any Dot routing nodes at
+    // --- Walk obj input (default slot 1; CyclesRenderPass self-preview uses slot 0)
+    // + optional CyclesRenderPass wrapper, seeing through any Dot routing nodes at
     // each hop.
     EffectInstancePtr geoEffect = skipDots(effect->getInput(sceneInputSlot));
     if (!geoEffect) {
         errOut = "no obj/scene connected on the scene input slot";
         return false;
     }
-    out.renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
+    out.renderPass = dynamic_cast<CyclesRenderPass*>(geoEffect.get());
     if (out.renderPass) {
         geoEffect = skipDots(out.renderPass->getInput(0));
         if (!geoEffect) {
-            errOut = "RenderPass has nothing on its input 0 (scene)";
+            errOut = "CyclesRenderPass has nothing on its input 0 (scene)";
             return false;
         }
     }
@@ -186,7 +178,7 @@ prepareCyclesPasses(EffectInstance*           effect,
     const CameraProvider* cam = req.cameraOverride;
     EffectInstancePtr camEffect;
     if (!cam) {
-        camEffect = effect->getInput(2);
+        camEffect = skipDots(effect->getInput(2));
         if (camEffect) cam = dynamic_cast<const CameraProvider*>(camEffect.get());
     }
     if (cam) {
@@ -223,6 +215,9 @@ executeCyclesPasses(CyclesRenderer&            renderer,
     // Per-light ray-visibility overrides (e.g. keep a dome/area light out of
     // reflections). Null clears any previous override on the renderer.
     renderer.setLightRayVisibility(req.lightRayVis);
+
+    // OpenImageDenoise toggle — applied to the integrator in syncSceneWithCamera.
+    renderer.setDenoise(req.denoise);
 
     const bool ok = renderer.renderToBufferWithCameraMultiPass(
         prepared.sceneGraph,
@@ -273,12 +268,12 @@ enumerateSceneLights(EffectInstance*              effect,
     out.clear();
     if (!effect) return;
 
-    // Same traversal as the renderer: scene input slot → through RenderPass →
+    // Same traversal as the renderer: scene input slot → through CyclesRenderPass →
     // Scene3D / Group3D containers. We collect every node we visit and
     // then filter to Light3D via dynamic_cast.
     EffectInstancePtr geoEffect = skipDots(effect->getInput(sceneInputSlot));
     if (!geoEffect) return;
-    RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
+    CyclesRenderPass* renderPass = dynamic_cast<CyclesRenderPass*>(geoEffect.get());
     if (renderPass) {
         geoEffect = skipDots(renderPass->getInput(0));
         if (!geoEffect) return;
@@ -314,7 +309,7 @@ enumerateSceneGeo(EffectInstance*            effect,
 
     EffectInstancePtr geoEffect = skipDots(effect->getInput(sceneInputSlot));
     if (!geoEffect) return;
-    RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
+    CyclesRenderPass* renderPass = dynamic_cast<CyclesRenderPass*>(geoEffect.get());
     if (renderPass) {
         geoEffect = skipDots(renderPass->getInput(0));
         if (!geoEffect) return;

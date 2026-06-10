@@ -21,7 +21,7 @@
 #include <Python.h>
 // ***** END PYTHON BLOCK *****
 
-#include "RenderPass.h"
+#include "CyclesRenderPass.h"
 
 #include "../../AppInstance.h"
 #include "../../AppManager.h"
@@ -42,11 +42,12 @@
 #include "Group3D.h"
 #include "Light3D.h"
 
-// Live Cycles preview path. RenderPass is always compiled (Scene3D), but the
+// Live Cycles preview path. CyclesRenderPass is always compiled (Scene3D), but the
 // Cycles renderer only exists when NATRON_CYCLES is on — so the preview render
 // is gated and falls back to a no-op stub otherwise.
 #ifdef NATRON_CYCLES
 #include "CameraProvider.h"
+#include "../DotUtils.h"
 #include "../Cycles/CyclesPassRender.h"
 #include "../Cycles/CyclesRenderer.h"
 #include "../Cycles/CyclesRenderSettings.h"
@@ -108,6 +109,7 @@ struct RenderPassPrivate
     KnobIntWPtr  outputWidth, outputHeight;
     KnobIntWPtr  samples;
     KnobBoolWPtr previewMode;   // render at half res, upscale
+    KnobBoolWPtr denoise;       // OpenImageDenoise toggle
 
     // AOV enable knobs (mirror CyclesRender's AOV Passes tab)
     KnobButtonWPtr refreshPassesBtn;
@@ -162,7 +164,7 @@ getEnabledPassesRP(const RenderPassPrivate* imp)
 }
 
 // Map a pass name → ImagePlaneDesc (mirrors CyclesRender::passNameToPlane so the
-// plane IDs match — a RenderPass preview and a CyclesRender produce identical AOV
+// plane IDs match — a CyclesRenderPass preview and a CyclesRender produce identical AOV
 // plane names).
 static ImagePlaneDesc
 passNameToPlaneRP(const std::string& name)
@@ -193,28 +195,28 @@ passNameToPlaneRP(const std::string& name)
 }
 #endif // NATRON_CYCLES
 
-RenderPass::RenderPass(NodePtr node)
+CyclesRenderPass::CyclesRenderPass(NodePtr node)
     : EffectInstance(node)
     , _imp(new RenderPassPrivate())
 {
     setSupportsRenderScaleMaybe(eSupportsNo);
 }
 
-RenderPass::~RenderPass()
+CyclesRenderPass::~CyclesRenderPass()
 {
 }
 
 std::string
-RenderPass::getPluginDescription() const
+CyclesRenderPass::getPluginDescription() const
 {
     return tr("Render pass filter for multi-pass rendering.\n\n"
               "Sits between Scene3D and CyclesRender. Defines which objects are visible "
               "to camera, which are trace-only (phantom), holdouts, and shadow catchers.\n\n"
-              "Each CyclesRender with a RenderPass produces a separate element for compositing.").toStdString();
+              "Each CyclesRender with a CyclesRenderPass produces a separate element for compositing.").toStdString();
 }
 
 std::string
-RenderPass::getInputLabel(int inputNb) const
+CyclesRenderPass::getInputLabel(int inputNb) const
 {
     if (inputNb == 0) return "scene";
     if (inputNb == 1) return "camera";
@@ -223,19 +225,19 @@ RenderPass::getInputLabel(int inputNb) const
 }
 
 void
-RenderPass::addAcceptedComponents(int /*inputNb*/, std::list<ImagePlaneDesc>* comps)
+CyclesRenderPass::addAcceptedComponents(int /*inputNb*/, std::list<ImagePlaneDesc>* comps)
 {
     comps->push_back(ImagePlaneDesc::getRGBAComponents());
 }
 
 void
-RenderPass::addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const
+CyclesRenderPass::addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const
 {
     depths->push_back(eImageBitDepthFloat);
 }
 
 bool
-RenderPass::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
+CyclesRenderPass::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
 {
     return false;
 }
@@ -245,7 +247,7 @@ RenderPass::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
 // ---------------------------------------------------------------------------
 
 // Helper to create a group of RENDERPASS_MAX_OBJECTS hidden bool knobs
-static void createObjectBoolGroup(RenderPass* self,
+static void createObjectBoolGroup(CyclesRenderPass* self,
                                   const KnobPagePtr& page,
                                   const QString& groupLabel,
                                   const std::string& groupName,
@@ -274,7 +276,7 @@ static void createObjectBoolGroup(RenderPass* self,
 }
 
 void
-RenderPass::initializeKnobs()
+CyclesRenderPass::initializeKnobs()
 {
     // --- Objects page ---
     KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Objects"));
@@ -444,6 +446,13 @@ RenderPass::initializeKnobs()
         k->setHintToolTip(tr("Render at half resolution and upscale. Faster for interactive work."));
         previewPage->addKnob(k); _imp->previewMode = k;
     }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Denoise"));
+        k->setName("denoise"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Run OpenImageDenoise (CPU) on the result. Cleans up noise at low "
+                             "sample counts; adds a denoise pass after rendering."));
+        previewPage->addKnob(k); _imp->denoise = k;
+    }
 
     // --- AOV Passes page (mirror CyclesRender) ---
     KnobPagePtr aovPage = AppManager::createKnob<KnobPage>(this, tr("AOV Passes"));
@@ -489,7 +498,7 @@ RenderPass::initializeKnobs()
 }
 
 bool
-RenderPass::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
+CyclesRenderPass::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
                          ViewSpec /*view*/, double /*time*/, bool /*originatedFromMainThread*/)
 {
     KnobButtonPtr refreshBtn = _imp->refreshBtn.lock();
@@ -571,7 +580,7 @@ static void updateBoolKnobs(KnobBoolWPtr knobs[], int maxSlots,
 }
 
 void
-RenderPass::refreshObjectLists()
+CyclesRenderPass::refreshObjectLists()
 {
     std::vector<std::string> geo, lights;
     discoverSceneObjects(geo, lights);
@@ -633,14 +642,14 @@ RenderPass::refreshObjectLists()
 // ---------------------------------------------------------------------------
 
 std::string
-RenderPass::getPassName() const
+CyclesRenderPass::getPassName() const
 {
     KnobStringPtr k = _imp->passName.lock();
     return k ? k->getValue() : "beauty";
 }
 
 void
-RenderPass::discoverSceneObjects(std::vector<std::string>& outGeo,
+CyclesRenderPass::discoverSceneObjects(std::vector<std::string>& outGeo,
                                   std::vector<std::string>& outLights) const
 {
     outGeo.clear();
@@ -694,7 +703,7 @@ RenderPass::discoverSceneObjects(std::vector<std::string>& outGeo,
 }
 
 std::map<std::string, ObjectVisibility>
-RenderPass::getObjectVisibilityMap() const
+CyclesRenderPass::getObjectVisibilityMap() const
 {
     std::map<std::string, ObjectVisibility> visMap;
 
@@ -778,7 +787,7 @@ RenderPass::getObjectVisibilityMap() const
 }
 
 std::set<std::string>
-RenderPass::getActiveLights() const
+CyclesRenderPass::getActiveLights() const
 {
     std::set<std::string> lights;
     const std::vector<std::string>& lightNames = _imp->lightNames;
@@ -796,7 +805,7 @@ RenderPass::getActiveLights() const
     // set as "only these"; so when no light is selected we return a sentinel that
     // matches no real light, which makes the renderer exclude every light. The
     // sentinel uses a control char so it can never collide with a node script name.
-    // Centralised here so it applies both to RenderPass's own preview and to a
+    // Centralised here so it applies both to CyclesRenderPass's own preview and to a
     // downstream CyclesRender that reads this selection (CyclesRender.cpp:906/966).
     if (lights.empty()) {
         lights.insert(std::string("\x01__renderpass_no_lights__"));
@@ -805,7 +814,7 @@ RenderPass::getActiveLights() const
 }
 
 std::map<std::string, LightRayVis>
-RenderPass::getLightRayVisibility() const
+CyclesRenderPass::getLightRayVisibility() const
 {
     std::map<std::string, LightRayVis> out;
     const std::vector<std::string>& names = _imp->lightNames;
@@ -830,7 +839,7 @@ RenderPass::getLightRayVisibility() const
 // ---------------------------------------------------------------------------
 
 void
-RenderPass::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
+CyclesRenderPass::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
                                            EffectInstance::ComponentsNeededMap* comps,
                                            double* passThroughTime, int* passThroughView,
                                            int* passThroughInput)
@@ -851,7 +860,7 @@ RenderPass::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
 }
 
 StatusEnum
-RenderPass::getPreferredMetadata(NodeMetadata& metadata)
+CyclesRenderPass::getPreferredMetadata(NodeMetadata& metadata)
 {
     // The preview depends on the current frame (animated geo / lights / camera).
     metadata.setIsFrameVarying(true);
@@ -867,7 +876,7 @@ RenderPass::getPreferredMetadata(NodeMetadata& metadata)
 }
 
 StatusEnum
-RenderPass::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
+CyclesRenderPass::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
                                    ViewIdx /*view*/, RectD* rod)
 {
     int w = _imp->outputWidth.lock()  ? _imp->outputWidth.lock()->getValue()  : 1920;
@@ -879,7 +888,7 @@ RenderPass::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderSca
 }
 
 StatusEnum
-RenderPass::render(const RenderActionArgs& args)
+CyclesRenderPass::render(const RenderActionArgs& args)
 {
     if ( args.outputPlanes.empty() ) {
         return eStatusFailed;
@@ -900,7 +909,7 @@ RenderPass::render(const RenderActionArgs& args)
 
     // --- Optional CyclesRenderSettings (input 2) ---
     const CyclesRenderSettings* settings = nullptr;
-    if ( EffectInstancePtr se = getInput(2) ) {
+    if ( EffectInstancePtr se = skipDots( getInput(2) ) ) {
         settings = dynamic_cast<const CyclesRenderSettings*>( se.get() );
     }
     const int renderSamples = settings
@@ -909,7 +918,7 @@ RenderPass::render(const RenderActionArgs& args)
 
     // --- Camera (input 1) → passed to the helper as cameraOverride ---
     const CameraProvider* cam = nullptr;
-    if ( EffectInstancePtr ce = getInput(1) ) {
+    if ( EffectInstancePtr ce = skipDots( getInput(1) ) ) {
         cam = dynamic_cast<const CameraProvider*>( ce.get() );
     }
 
@@ -950,6 +959,7 @@ RenderPass::render(const RenderActionArgs& args)
     req.samples         = renderSamples;
     req.requestedPasses = getEnabledPassesRP(_imp.get());
     req.transparentBg   = false;
+    req.denoise         = _imp->denoise.lock() && _imp->denoise.lock()->getValue();
     req.integrator      = &integParams;
     if (dofParams.enabled) req.dof = &dofParams;
     if (mbParams.enabled)  req.mb  = &mbParams;
@@ -1066,4 +1076,4 @@ RenderPass::render(const RenderActionArgs& args)
 NATRON_NAMESPACE_EXIT
 NATRON_NAMESPACE_USING
 
-#include "moc_RenderPass.cpp"
+#include "moc_CyclesRenderPass.cpp"

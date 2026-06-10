@@ -35,7 +35,7 @@
 #include "../../EngineFwd.h"
 
 #include "CyclesRenderer.h"
-#include "../Scene3D/RenderPass.h"       // ObjectVisibility, RenderPass*
+#include "../Scene3D/CyclesRenderPass.h" // ObjectVisibility, CyclesRenderPass*
 #include "../Scene3D/CameraProvider.h"   // CameraProvider (global scope)
 #include "../Scene3D/MaterialProvider.h" // MaterialProvider (global scope)
 #include "../Scene3D/SceneGraph.h"       // SceneGraph (held by CyclesPassPrepared)
@@ -69,13 +69,14 @@ struct CyclesPassRequest
 
     // Common render settings.
     bool transparentBg = false;
+    bool denoise       = false;  // run Cycles' OpenImageDenoise on the result
 
     // Optional features. Pass nullptr to leave each disabled / default.
     const CyclesRenderer::DOFParams*        dof        = nullptr;
     const CyclesRenderer::MotionBlurParams* mb         = nullptr;
     const CyclesRenderer::IntegratorParams* integrator = nullptr;
 
-    // Optional scoping (sourced upstream from a RenderPass node when present).
+    // Optional scoping (sourced upstream from a CyclesRenderPass node when present).
     const std::map<std::string, ObjectVisibility>* visMap       = nullptr;
     const std::set<std::string>*                   activeLights = nullptr;
     // Per-light ray-visibility overrides (light name -> flags). Null = none.
@@ -114,12 +115,12 @@ struct CyclesPassPrepared
     double camFL = 50.0, camHA = 24.576, camVA = 18.672;
     bool   cameraResolved = false;
 
-    // RenderPass node found while walking input 1 (if any). Callers that
-    // pull visibility / lights from the RenderPass node can read it from
+    // CyclesRenderPass node found while walking input 1 (if any). Callers that
+    // pull visibility / lights from the CyclesRenderPass node can read it from
     // here rather than re-walking input 1. Raw pointer; valid for the
     // lifetime of the EffectInstance graph the prepared struct was built
     // against.
-    RenderPass* renderPass = nullptr;
+    CyclesRenderPass* renderPass = nullptr;
 
     // Script names of geo connected to the CyclesRender "holdout" input
     // (slot 4). These nodes are added to the scene AND flagged as Cycles
@@ -129,7 +130,7 @@ struct CyclesPassPrepared
 };
 
 // Step 1 of the two-step render. Walks the effect's obj input
-// (slot 1) through any optional RenderPass node into Scene3D / Group3D
+// (slot 1) through any optional CyclesRenderPass node into Scene3D / Group3D
 // containers, builds the scene graph, bakes Material3D input textures,
 // then resolves the camera (override > input 2 > defaults). Returns
 // false with a reason in `errOut` if the obj input is missing or the
@@ -139,7 +140,7 @@ struct CyclesPassPrepared
 // calls it directly so it can hash the resolved values + cache check
 // before deciding whether to run step 2.
 // sceneInputSlot: which input slot of `effect` holds the scene/obj graph.
-// CyclesRender/PassManager use slot 1 (the default); RenderPass renders its own
+// CyclesRender/PassManager use slot 1 (the default); CyclesRenderPass renders its own
 // preview with the scene on slot 0. The camera still comes from req.cameraOverride
 // (or the legacy slot 2) and holdouts from slot 4, independent of this.
 bool prepareCyclesPasses(EffectInstance*           effect,
@@ -177,10 +178,10 @@ struct SceneLightInfo {
 };
 
 // Walk the effect's obj input (input slot 1, traversing through optional
-// RenderPass / Scene3D / Group3D containers) and collect every Light3D
+// CyclesRenderPass / Scene3D / Group3D containers) and collect every Light3D
 // node found. Cheap — no SceneGraph rebuild, just dynamic_cast walks.
 // sceneInputSlot: input slot holding the scene (default 1 for CyclesRender/
-// PassManager; RenderPass discovers its own scene on slot 0).
+// PassManager; CyclesRenderPass discovers its own scene on slot 0).
 void enumerateSceneLights(EffectInstance*              effect,
                            double                       time,
                            std::vector<SceneLightInfo>& out,

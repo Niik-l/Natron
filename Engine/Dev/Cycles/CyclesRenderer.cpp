@@ -74,7 +74,7 @@
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
 #include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
-#include "Engine/Dev/Scene3D/RenderPass.h"
+#include "Engine/Dev/Scene3D/CyclesRenderPass.h"
 #include "Engine/Dev/Scene3D/ReadVDB.h"
 #include "Engine/Dev/Scene3D/Volume3D.h"
 #include "Engine/Dev/Particles/ParticleProvider.h"
@@ -316,7 +316,7 @@ struct CyclesRenderer::Impl
     int width = 0;
     int height = 0;
     int samples = 64;
-    bool denoise = true;
+    bool denoise = false;  // set per-render via setDenoise(); default off
     bool initialized = false;
 
     // Pixel buffer for readback
@@ -891,7 +891,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             // "Renderable" controls camera visibility only (like Arnold's skydome Camera flag).
             bool domeVisibleInCamera = light3d->isRenderable();
 
-            // Per-light ray-visibility override (from the RenderPass Active Lights rows):
+            // Per-light ray-visibility override (from the CyclesRenderPass Active Lights rows):
             // untick Refl/Diff/Trans to drop the dome ENVIRONMENT from that ray type
             // (it still lights the scene); Cam combines with Renderable.
             {
@@ -1098,7 +1098,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             ccl::Object* obj = scene->create_node<ccl::Object>();
             obj->set_geometry(light);
             // Natural default: visible to all rays except camera (you don't see the
-            // lamp directly). Per-light override (RenderPass Active Lights rows) is
+            // lamp directly). Per-light override (CyclesRenderPass Active Lights rows) is
             // subtractive: unticking Refl/Diff/Trans removes the lamp's visible SHAPE
             // from that ray type (e.g. an area light not appearing in reflections —
             // its illumination/highlight still lands; that's handled by light sampling).
@@ -1342,6 +1342,17 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     // Motion blur
     if (motionBlur && motionBlur->enabled) {
         scene->integrator->set_motion_blur(true);
+    }
+
+    // Denoising (OpenImageDenoise, CPU). When on, Cycles auto-adds the denoising
+    // albedo/normal aux passes and writes a DENOISED variant of each denoisable
+    // pass; the output driver reads "Combined" which resolves to the denoised
+    // result (scene passes default to PassMode::DENOISED, with automatic
+    // fall-back to noisy when denoising is off).
+    scene->integrator->set_use_denoise(_impl->denoise);
+    if (_impl->denoise) {
+        scene->integrator->set_denoiser_type(ccl::DENOISER_OPENIMAGEDENOISE);
+        scene->integrator->set_denoise_use_gpu(false);  // CPU device
     }
 
     scene->integrator->tag_update(scene, ccl::Integrator::UPDATE_ALL);
@@ -1646,7 +1657,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             obj->set_geometry(pc);
             obj->set_tfm(ccl::transform_identity());
 
-            // Apply RenderPass visibility if provided
+            // Apply CyclesRenderPass visibility if provided
             if (visibilityMap) {
                 auto it = visibilityMap->find(sn.name);
                 if (it != visibilityMap->end()) {
@@ -2227,7 +2238,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         obj->set_geometry(mesh);
         obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix));
 
-        // Apply RenderPass visibility if provided
+        // Apply CyclesRenderPass visibility if provided
         if (visibilityMap) {
             auto it = visibilityMap->find(sn.name);
             if (it != visibilityMap->end()) {
@@ -2271,7 +2282,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
         // Additive holdout: geo wired to the CyclesRender "holdout" input
         // renders as a Cycles holdout (a transparent matte of its shape),
-        // independent of any RenderPass visMap above.
+        // independent of any CyclesRenderPass visMap above.
         if (holdoutObjects && holdoutObjects->count(sn.name)) {
             obj->set_use_holdout(true);
         }

@@ -32,6 +32,7 @@
 #include "CyclesRenderSettings.h"
 #include "CyclesPassRender.h"
 
+#include "../DotUtils.h"
 #include "../Scene3D/CameraProvider.h"
 #include "../Scene3D/MaterialProvider.h"
 #include "../Scene3D/SceneGraph.h"
@@ -48,7 +49,7 @@
 #include "../../Project.h"
 #include "../Scene3D/Light3D.h"
 #include "../Scene3D/Material3D.h"
-#include "../Scene3D/RenderPass.h"
+#include "../Scene3D/CyclesRenderPass.h"
 #include "../Scene3D/Volume3D.h"
 #include "../Scene3D/ReadVDB.h"
 #include "../../KnobFile.h"
@@ -650,7 +651,7 @@ CyclesRender::render(const RenderActionArgs& args)
     // the Settings input falls cleanly back to standalone behavior.
     const CyclesRenderSettings* settings = nullptr;
     {
-        EffectInstancePtr settingsEffect = getInput(3);
+        EffectInstancePtr settingsEffect = skipDots(getInput(3));
         if (settingsEffect) {
             settings = dynamic_cast<const CyclesRenderSettings*>(settingsEffect.get());
         }
@@ -662,8 +663,8 @@ CyclesRender::render(const RenderActionArgs& args)
         ? settings->getSamples(args.time)
         : _imp->samples.lock()->getValue();
 
-    // --- Get camera from input 2 ---
-    EffectInstancePtr camEffect = getInput(2);
+    // --- Get camera from input 2 (through any Dots) ---
+    EffectInstancePtr camEffect = skipDots(getInput(2));
     CameraProvider* cam = camEffect ? dynamic_cast<CameraProvider*>(camEffect.get()) : NULL;
 
     double camTX = 0, camTY = 2, camTZ = -8;
@@ -756,6 +757,10 @@ CyclesRender::render(const RenderActionArgs& args)
     req.samples         = renderSamples;
     req.requestedPasses = requestedPasses;
     req.transparentBg   = false;
+    // Denoise: CyclesRenderSettings (when connected) wins over the local knob,
+    // mirroring how samples are resolved above.
+    req.denoise         = settings ? settings->getDenoise(args.time)
+                                    : (_imp->denoise.lock() && _imp->denoise.lock()->getValue());
     if (dofParams.enabled) req.dof = &dofParams;
     if (mbParams.enabled)  req.mb  = &mbParams;
     req.integrator = &integParams;
@@ -774,7 +779,7 @@ CyclesRender::render(const RenderActionArgs& args)
     // Aliases so the hash block below reads naturally (the local sceneGraph
     // / renderPass names predate the helper split).
     const SceneGraph& sceneGraph = prepared.sceneGraph;
-    RenderPass* renderPass = prepared.renderPass;
+    CyclesRenderPass* renderPass = prepared.renderPass;
 
     // --- Build scene hash for cache check ---
     // Hash EVERYTHING that affects the render: camera, settings, AND all scene node transforms/params
@@ -916,7 +921,7 @@ CyclesRender::render(const RenderActionArgs& args)
             }
         }
 
-        // Hash RenderPass visibility state
+        // Hash CyclesRenderPass visibility state
         if (renderPass) {
             renderPass->refreshObjectLists();
             std::map<std::string, ObjectVisibility> visMap = renderPass->getObjectVisibilityMap();
@@ -981,7 +986,7 @@ CyclesRender::render(const RenderActionArgs& args)
             _imp->activeRenderer.reset();
         }
 
-        // --- Build RenderPass visibility map (if connected) ---
+        // --- Build CyclesRenderPass visibility map (if connected) ---
         // Stored locally so the pointers in `req` remain valid for the
         // duration of executeCyclesPasses below.
         std::map<std::string, ObjectVisibility> visMap;
@@ -1193,8 +1198,8 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
 
     // --- Focus Helper: Set Focus button ---
     if (_imp->setFocusBtn.lock().get() == k) {
-        // Get camera
-        EffectInstancePtr camEffect = getInput(2);
+        // Get camera (through any Dots)
+        EffectInstancePtr camEffect = skipDots(getInput(2));
         CameraProvider* cam = camEffect ? dynamic_cast<CameraProvider*>(camEffect.get()) : NULL;
         if (!cam) {
             setPersistentMessage(eMessageTypeError, "No camera connected to input 2.");
@@ -1217,11 +1222,11 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
             return true;
         }
 
-        // Follow through RenderPass if present
-        RenderPass* renderPass = dynamic_cast<RenderPass*>(geoEffect.get());
+        // Follow through CyclesRenderPass if present
+        CyclesRenderPass* renderPass = dynamic_cast<CyclesRenderPass*>(geoEffect.get());
         if (renderPass) {
             geoEffect = renderPass->getInput(0);
-            if (!geoEffect) { setPersistentMessage(eMessageTypeError, "RenderPass has no scene."); return true; }
+            if (!geoEffect) { setPersistentMessage(eMessageTypeError, "CyclesRenderPass has no scene."); return true; }
         }
 
         // Find the object in scene inputs
@@ -1281,10 +1286,10 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
         std::vector<ChoiceOption> entries;
         entries.push_back(ChoiceOption("(none)", "", "No object selected"));
 
-        EffectInstancePtr geoEffect = getInput(1);
+        EffectInstancePtr geoEffect = skipDots(getInput(1));
         if (geoEffect) {
-            RenderPass* rp = dynamic_cast<RenderPass*>(geoEffect.get());
-            if (rp) geoEffect = rp->getInput(0);
+            CyclesRenderPass* rp = dynamic_cast<CyclesRenderPass*>(geoEffect.get());
+            if (rp) geoEffect = skipDots(rp->getInput(0));
         }
         if (geoEffect) {
             Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
@@ -1383,7 +1388,7 @@ void
 CyclesRender::onInputChanged(int inputNo)
 {
     if (inputNo != 3) return;
-    EffectInstancePtr settingsEffect = getInput(3);
+    EffectInstancePtr settingsEffect = skipDots(getInput(3));
     const bool connected =
         settingsEffect &&
         dynamic_cast<const CyclesRenderSettings*>(settingsEffect.get()) != nullptr;

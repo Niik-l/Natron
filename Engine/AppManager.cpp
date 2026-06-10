@@ -216,7 +216,7 @@
 #include "Dev/Scene3D/ReadAlembicArchive.h"
 #include "Dev/Scene3D/ReadGeo.h"
 #include "Dev/Scene3D/GeoMaterialOverride.h"
-#include "Dev/Scene3D/RenderPass.h"
+#include "Dev/Scene3D/CyclesRenderPass.h"
 
 #include "sbkversion.h" // shiboken/pyside version
 
@@ -1685,7 +1685,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<ReadAlembicArchive>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadGeo>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<GeoMaterialOverride>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
-    registerBuiltInPlugin<RenderPass>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<CyclesRenderPass>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
     // Dev nodes — Channel
     registerBuiltInPlugin<DevShuffle>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/channel_grouping_2.png"), false, false);
@@ -2302,6 +2302,9 @@ AppManager::getPluginBinaryFromOldID(const QString & pluginId,
         return _imp->findPluginById(QString::fromUtf8(PLUGINID_NATRON_BACKDROP), majorVersion, minorVersion);
     } else if ( pluginId == QString::fromUtf8("RotoOFX  [Draw]") ) {
         return _imp->findPluginById(QString::fromUtf8(PLUGINID_NATRON_ROTO), majorVersion, minorVersion);
+    } else if ( pluginId == QString::fromUtf8(PLUGINID_NATRON_RENDERPASS_OLD) ) {
+        // RenderPass was renamed to CyclesRenderPass; remap so old projects load it.
+        return _imp->findPluginById(QString::fromUtf8(PLUGINID_NATRON_CYCLESRENDERPASS), majorVersion, minorVersion);
     }
 
     ///Try remapping these ids to old ids we had in Natron < 1.0 for backward-compat

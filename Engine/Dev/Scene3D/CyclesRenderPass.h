@@ -17,8 +17,8 @@
  * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef NATRON_ENGINE_RENDERPASS_H
-#define NATRON_ENGINE_RENDERPASS_H
+#ifndef NATRON_ENGINE_CYCLESRENDERPASS_H
+#define NATRON_ENGINE_CYCLESRENDERPASS_H
 
 // ***** BEGIN PYTHON BLOCK *****
 #include <Python.h>
@@ -82,7 +82,7 @@ struct LightRayVis
  * CyclesRender reads the visibility map from this node and applies
  * per-object ray visibility flags before rendering.
  */
-class RenderPass
+class CyclesRenderPass
     : public EffectInstance
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
@@ -91,10 +91,10 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
 
-    static EffectInstance* BuildEffect(NodePtr n) { return new RenderPass(n); }
+    static EffectInstance* BuildEffect(NodePtr n) { return new CyclesRenderPass(n); }
 
-    RenderPass(NodePtr node);
-    virtual ~RenderPass();
+    CyclesRenderPass(NodePtr node);
+    virtual ~CyclesRenderPass();
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
@@ -104,10 +104,10 @@ public:
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return PLUGINID_NATRON_RENDERPASS; }
+    { return PLUGINID_NATRON_CYCLESRENDERPASS; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "RenderPass"; }
+    { return "CyclesRenderPass"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
@@ -185,4 +185,4 @@ private:
 
 NATRON_NAMESPACE_EXIT
 
-#endif // NATRON_ENGINE_RENDERPASS_H
+#endif // NATRON_ENGINE_CYCLESRENDERPASS_H
