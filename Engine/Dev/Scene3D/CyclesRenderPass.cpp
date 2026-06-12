@@ -25,9 +25,11 @@
 
 #include "../../AppInstance.h"
 #include "../../AppManager.h"
+#include "../../Project.h"
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
+#include "../../KnobFile.h"
 #include "../../Node.h"
 #include "../../NodeMetadata.h"
 #include "../../Format.h"
@@ -46,11 +48,19 @@
 // Cycles renderer only exists when NATRON_CYCLES is on — so the preview render
 // is gated and falls back to a no-op stub otherwise.
 #ifdef NATRON_CYCLES
+#include <QtCore/QDir>
+#include <QtCore/QFileInfo>
+#include <QtCore/QString>
+#include <QtCore/QStringList>
+#include <QtCore/QProcess>
+#include <cstdlib>   // std::getenv (NATRON_RV_PATH)
 #include "CameraProvider.h"
 #include "../DotUtils.h"
 #include "../Cycles/CyclesPassRender.h"
 #include "../Cycles/CyclesRenderer.h"
 #include "../Cycles/CyclesRenderSettings.h"
+#include "../../CreateNodeArgs.h"
+#include "../../NodeGroup.h"
 #endif
 
 #ifndef M_PI
@@ -118,6 +128,17 @@ struct RenderPassPrivate
     KnobBoolWPtr aovEmission, aovEnv, aovAO;
     KnobBoolWPtr aovNormal, aovDepth, aovUV, aovMist;
     KnobBoolWPtr aovReflMatte;
+
+    // Output / render-to-disk (Output page)
+    KnobIntWPtr    frameStart, frameEnd, frameInc;
+    KnobButtonWPtr renderToDiskBtn;
+    KnobFileWPtr   rvPathKnob;
+    KnobButtonWPtr openInRvBtn;
+    KnobButtonWPtr importRenderBtn;
+    KnobButtonWPtr updateRenderBtn;
+    KnobStringWPtr linkStatus;        // read-only: linked-Read status / outdated flag
+    KnobStringWPtr linkedReadName;    // hidden + persistent: linked Read's script name
+    NodeWPtr       linkedReadNode;    // in-session cache of the linked Read
 
     // Cached discovered names (index matches knob index)
     std::vector<std::string> geoNames;
@@ -495,6 +516,109 @@ CyclesRenderPass::initializeKnobs()
                            "are re-rendered as pure white emitters, so they read as a matte both directly and "
                            "in reflections. This adds a second render pass (roughly doubles render time)."));
       aovPage->addKnob(k); _imp->aovReflMatte = k; }
+
+    // --- Output page: write this pass to disk over a frame range ---
+    // Path = <Output Path>/<Pass Name>/v###/<Pass Name>.####.exr, where Output Path
+    // comes from a connected CyclesRenderSettings (else the project folder) and the
+    // version auto-increments per render. One multi-layer EXR per frame (Combined +
+    // every enabled AOV as layers).
+    {
+        KnobPagePtr outPage = AppManager::createKnob<KnobPage>(this, tr("Output"));
+
+        // Auto-fill the frame range from the project on creation.
+        double pf = 1.0, pl = 1.0;
+        if (getApp() && getApp()->getProject()) {
+            getApp()->getProject()->getFrameRange(&pf, &pl);
+        }
+        {
+            KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Frame Range"));
+            k->setName("frameStart"); k->setDefaultValue((int)pf);
+            k->setHintToolTip(tr("First frame to render to disk (auto-filled from the project frame range)."));
+            k->setAddNewLine(false);
+            outPage->addKnob(k); _imp->frameStart = k;
+        }
+        {
+            KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("End"));
+            k->setName("frameEnd"); k->setDefaultValue((int)pl);
+            k->setHintToolTip(tr("Last frame to render to disk."));
+            k->setAddNewLine(false);
+            outPage->addKnob(k); _imp->frameEnd = k;
+        }
+        {
+            KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Increment"));
+            k->setName("frameInc"); k->setDefaultValue(1); k->setMinimum(1);
+            k->setHintToolTip(tr("Frame step."));
+            outPage->addKnob(k); _imp->frameInc = k;
+        }
+        {
+            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Render to Disk"));
+            k->setName("renderToDisk");
+            k->setHintToolTip(tr(
+                "Render this pass over the frame range to multi-layer EXRs:\n"
+                "    <Output Path>/<Pass Name>/v###/<Pass Name>.####.exr\n\n"
+                "Output Path is read from a connected CyclesRenderSettings node (input 2); "
+                "if none is connected it falls back to the project folder. Each render "
+                "auto-increments the version (v001, v002, ...). The beauty (Combined) plus "
+                "every AOV you enabled on the AOV Passes tab are written as named layers in "
+                "one EXR per frame.\n\n"
+                "Note: this blocks the UI while the range renders — progress prints to the "
+                "terminal."));
+            outPage->addKnob(k); _imp->renderToDiskBtn = k;
+        }
+
+        // --- Review / import the written sequence ---
+        {
+            KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("RV Executable"));
+            k->setName("rvPath");
+            k->setAnimationEnabled(false);
+            k->setEvaluateOnChange(false);
+            k->setHintToolTip(tr("Path to the RV / OpenRV executable (rv.exe on Windows). Used by "
+                                 "'Open in RV'. Defaults to the NATRON_RV_PATH environment variable if set."));
+            if (const char* envRv = std::getenv("NATRON_RV_PATH")) {
+                if (envRv[0] != '\0') k->setDefaultValue(envRv);
+            }
+            outPage->addKnob(k); _imp->rvPathKnob = k;
+        }
+        {
+            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Open in RV"));
+            k->setName("openInRv"); k->setAddNewLine(false);
+            k->setHintToolTip(tr("Launch RV / OpenRV on the latest rendered version's sequence. "
+                                 "Requires the RV Executable path (or NATRON_RV_PATH)."));
+            outPage->addKnob(k); _imp->openInRvBtn = k;
+        }
+        {
+            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Import Render"));
+            k->setName("importRender"); k->setAddNewLine(false);
+            k->setHintToolTip(tr("Create a Read node reading the latest rendered version of this pass, "
+                                 "linked to this node. If a linked Read already exists it is re-pointed "
+                                 "to the latest version. The link survives save/reload."));
+            outPage->addKnob(k); _imp->importRenderBtn = k;
+        }
+        {
+            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Update Render"));
+            k->setName("updateRender");
+            k->setHintToolTip(tr("Re-point the linked Read to the latest version on disk and clear its "
+                                 "outdated flag. Use this after a re-render when you're happy with the new "
+                                 "version (nothing changes automatically, so a broken re-render can't sneak in)."));
+            outPage->addKnob(k); _imp->updateRenderBtn = k;
+        }
+        {
+            KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Linked Read"));
+            k->setName("linkStatus");
+            k->setAsLabel();   // read-only status line
+            k->setHintToolTip(tr("Status of the imported Read: up to date, outdated, or none."));
+            k->setDefaultValue("No linked Read (use Import Render).");
+            outPage->addKnob(k); _imp->linkStatus = k;
+        }
+        {
+            // Hidden + persistent: remembers the linked Read across save/reload.
+            KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Linked Read Name"));
+            k->setName("linkedReadName");
+            k->setSecretByDefault(true);
+            k->setEvaluateOnChange(false);
+            outPage->addKnob(k); _imp->linkedReadName = k;
+        }
+    }
 }
 
 bool
@@ -518,6 +642,16 @@ CyclesRenderPass::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         }
         return true;
     }
+
+    // Render to Disk — write this pass over the frame range to multi-layer EXRs.
+    KnobButtonPtr rtd = _imp->renderToDiskBtn.lock();
+    if (rtd && k == rtd.get()) {
+        renderToDisk();
+        return true;
+    }
+    if (KnobButtonPtr b = _imp->openInRvBtn.lock())     { if (k == b.get()) { openInRV();     return true; } }
+    if (KnobButtonPtr b = _imp->importRenderBtn.lock()) { if (k == b.get()) { importRender(); return true; } }
+    if (KnobButtonPtr b = _imp->updateRenderBtn.lock()) { if (k == b.get()) { updateRender(); return true; } }
 
     // Object / light selection checkboxes are created setEvaluateOnChange(false)
     // (so the discovery refresh doesn't storm renders), which means Natron does NOT
@@ -1072,6 +1206,406 @@ CyclesRenderPass::render(const RenderActionArgs& args)
     return eStatusOK;
 #endif // NATRON_CYCLES
 }
+
+#ifdef NATRON_CYCLES
+// Resolve <Output Path>/<Pass Name> as an absolute dir (creates nothing). Output Path
+// comes from a connected CyclesRenderSettings (input 2), else the project folder.
+// Returns empty if no base path is resolvable; fills passNameOut ("beauty" if unset).
+static QString
+resolvePassDir(CyclesRenderPass* self, std::string& passNameOut)
+{
+    std::string baseDir;
+    if (EffectInstancePtr se = skipDots(self->getInput(2))) {
+        if (const CyclesRenderSettings* s = dynamic_cast<const CyclesRenderSettings*>(se.get()))
+            baseDir = s->getOutputPath(0.0);
+    }
+    if (baseDir.empty() && self->getApp() && self->getApp()->getProject())
+        baseDir = self->getApp()->getProject()->getProjectPath().toStdString();
+    if (baseDir.empty()) return QString();
+    passNameOut = self->getPassName().empty() ? std::string("beauty") : self->getPassName();
+    return QDir(QString::fromStdString(baseDir)).absoluteFilePath(QString::fromStdString(passNameOut));
+}
+
+// Highest existing v### in passDir, or 0 if none.
+static int
+maxVersionInDir(const QDir& passDir)
+{
+    int maxV = 0;
+    const QStringList vs = passDir.entryList(QStringList() << QString::fromUtf8("v[0-9][0-9][0-9]*"),
+                                             QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString& v : vs) {
+        bool ok = false;
+        const int n = v.mid(1).toInt(&ok);
+        if (ok && n > maxV) maxV = n;
+    }
+    return maxV;
+}
+
+// <passDir>/v###/<passName>.####.exr for a given version.
+static QString
+seqPatternForVersion(const QString& passDir, const std::string& passName, int version)
+{
+    const QString vname = QString::fromUtf8("v%1").arg(version, 3, 10, QLatin1Char('0'));
+    const QString fname = QString::fromUtf8("%1.####.exr").arg(QString::fromStdString(passName));
+    return QDir(passDir).absoluteFilePath(vname + QLatin1Char('/') + fname);
+}
+
+// Parse the v### number from a sequence path's version folder; -1 if not found.
+static int
+versionFromPath(const QString& filePath)
+{
+    const QString vdir = QFileInfo(filePath).dir().dirName();
+    if (vdir.startsWith(QLatin1Char('v'))) {
+        bool ok = false;
+        const int n = vdir.mid(1).toInt(&ok);
+        if (ok) return n;
+    }
+    return -1;
+}
+
+// Render one frame of this pass to pass buffers (Combined + every enabled AOV),
+// mirroring render()'s request build but at full resolution. Used by renderToDisk().
+static bool
+renderPassFrameToBuffers(CyclesRenderPass* self,
+                         CyclesRenderer& renderer,
+                         double time, int w, int h, int fallbackSamples,
+                         const std::vector<std::string>& requestedPasses, bool denoise,
+                         std::map<std::string, std::vector<float>>& outBuffers,
+                         std::string& errOut)
+{
+    const CyclesRenderSettings* settings = nullptr;
+    if (EffectInstancePtr se = skipDots(self->getInput(2)))
+        settings = dynamic_cast<const CyclesRenderSettings*>(se.get());
+    const CameraProvider* cam = nullptr;
+    if (EffectInstancePtr ce = skipDots(self->getInput(1)))
+        cam = dynamic_cast<const CameraProvider*>(ce.get());
+
+    const int samples = settings ? settings->getSamples(time) : fallbackSamples;
+
+    CyclesRenderer::IntegratorParams integ;
+    CyclesRenderer::DOFParams        dof;
+    CyclesRenderer::MotionBlurParams mb;
+    if (settings) {
+        integ.maxBounces          = settings->getMaxBounces(time);
+        integ.diffuseBounces      = settings->getDiffuseBounces(time);
+        integ.glossyBounces       = settings->getGlossyBounces(time);
+        integ.transmissionBounces = settings->getTransmissionBounces(time);
+        if (settings->getDOFEnabled(time) && cam) {
+            dof.enabled = true;
+            double camFL = cam->getCameraFocalLength(time);
+            double fstop = cam->getCameraFStop(time);
+            if (fstop < 0.1) fstop = 0.1;
+            dof.apertureSize  = (float)(camFL / (2.0 * fstop) / 1000.0);
+            dof.focusDistance = (float)settings->getFocusDistance(time);
+            dof.blades        = settings->getBokehBlades(time);
+            dof.bladeRotation = (float)(settings->getBladeRotation(time) * M_PI / 180.0);
+        }
+        if (settings->getMotionBlurEnabled(time)) {
+            mb.enabled         = true;
+            mb.shutterTime     = (float)settings->getShutterTime(time);
+            mb.shutterPosition = settings->getShutterPosition(time);
+        }
+    }
+
+    CyclesPassRequest req;
+    req.time            = time;
+    req.view            = ViewIdx(0);
+    req.width           = w;
+    req.height          = h;
+    req.samples         = samples;
+    req.requestedPasses = requestedPasses;
+    req.transparentBg   = false;
+    req.denoise         = denoise;
+    req.integrator      = &integ;
+    if (dof.enabled) req.dof = &dof;
+    if (mb.enabled)  req.mb  = &mb;
+    req.cameraOverride  = cam;
+
+    CyclesPassPrepared prepared;
+    if (!prepareCyclesPasses(self, req, prepared, errOut, /*sceneInputSlot=*/0))
+        return false;
+
+    std::map<std::string, ObjectVisibility> visMap       = self->getObjectVisibilityMap();
+    std::set<std::string>                   activeLights = self->getActiveLights();
+    std::map<std::string, LightRayVis>      lightRayVis  = self->getLightRayVisibility();
+    if (!visMap.empty())       req.visMap       = &visMap;
+    if (!activeLights.empty()) req.activeLights = &activeLights;
+    if (!lightRayVis.empty())  req.lightRayVis  = &lightRayVis;
+
+    return executeCyclesPasses(renderer, prepared, req, outBuffers, errOut);
+}
+#endif // NATRON_CYCLES
+
+void
+CyclesRenderPass::renderToDisk()
+{
+#ifdef NATRON_CYCLES
+    clearPersistentMessage(false);
+
+    // --- <base>/<passName> (Output Path from Settings, else project folder) ---
+    std::string passName;
+    const QString passDirPath = resolvePassDir(this, passName);
+    if (passDirPath.isEmpty()) {
+        setPersistentMessage(eMessageTypeError,
+            "Render to Disk: no output path — connect a CyclesRenderSettings node (set its "
+            "Output Path) or save the project first.");
+        return;
+    }
+    QDir passDir(passDirPath);
+    if (!passDir.exists() && !passDir.mkpath(QString::fromUtf8("."))) {
+        setPersistentMessage(eMessageTypeError,
+            std::string("Render to Disk: could not create ") + passDir.absolutePath().toStdString());
+        return;
+    }
+
+    // --- Next free version folder (v001, v002, ...) ---
+    const QString vname = QString::fromUtf8("v%1").arg(maxVersionInDir(passDir) + 1, 3, 10, QLatin1Char('0'));
+    QDir versionDir( passDir.absoluteFilePath(vname) );
+    if (!versionDir.mkpath(QString::fromUtf8("."))) {
+        setPersistentMessage(eMessageTypeError,
+            std::string("Render to Disk: could not create ") + versionDir.absolutePath().toStdString());
+        return;
+    }
+
+    // --- Frame range + render params ---
+    int fStart = _imp->frameStart.lock() ? _imp->frameStart.lock()->getValue() : 1;
+    int fEnd   = _imp->frameEnd.lock()   ? _imp->frameEnd.lock()->getValue()   : fStart;
+    int fInc   = _imp->frameInc.lock()   ? _imp->frameInc.lock()->getValue()   : 1;
+    if (fInc < 1) fInc = 1;
+    if (fEnd < fStart) std::swap(fStart, fEnd);
+
+    int outW = _imp->outputWidth.lock()  ? _imp->outputWidth.lock()->getValue()  : 1920;
+    int outH = _imp->outputHeight.lock() ? _imp->outputHeight.lock()->getValue() : 1080;
+    if (outW <= 0) outW = 1920;
+    if (outH <= 0) outH = 1080;
+    const int  fallbackSamples = _imp->samples.lock() ? _imp->samples.lock()->getValue() : 16;
+    const bool denoise = _imp->denoise.lock() && _imp->denoise.lock()->getValue();
+    const std::vector<std::string> passes = getEnabledPassesRP(_imp.get());
+
+    refreshObjectLists();
+
+    // Cancel any in-flight preview so it doesn't contend with the disk render.
+    if (_imp->activeRenderer) { _imp->activeRenderer->cancelRender(); _imp->activeRenderer.reset(); }
+
+    CyclesRenderer::ExrOutputOptions opts;
+    opts.bitDepth    = "16-bit Half";
+    opts.compression = "ZIP";
+
+    CyclesRenderer renderer;
+    int nframes = 0, nok = 0;
+    const int total = ((fEnd - fStart) / fInc) + 1;
+    fprintf(stderr, "[CyclesRenderPass] Render to Disk '%s' -> %s  frames %d..%d step %d\n",
+            passName.c_str(), versionDir.absolutePath().toStdString().c_str(), fStart, fEnd, fInc);
+
+    // Native progress bar (with Cancel). progressUpdate pumps the event loop so the
+    // UI stays responsive during the blocking range render; it returns false when
+    // the user hits Cancel. Cancel is polled between frames (per-frame granularity).
+    AppInstancePtr app  = getApp();
+    NodePtr        node = getNode();
+    const bool useProgress = (app && node);
+    if (useProgress) {
+        app->progressStart(node,
+            std::string("Rendering '") + passName + "' to disk -> " + vname.toStdString()
+                + " (" + std::to_string(total) + (total == 1 ? " frame)" : " frames)"),
+            std::string());
+    }
+
+    bool canceled = false;
+    for (int f = fStart; f <= fEnd && !canceled; f += fInc) {
+        ++nframes;
+        std::map<std::string, std::vector<float>> buffers;
+        std::string err;
+        if (renderPassFrameToBuffers(this, renderer, (double)f, outW, outH,
+                                     fallbackSamples, passes, denoise, buffers, err)) {
+            const QString fname = QString::fromUtf8("%1.%2.exr")
+                .arg(QString::fromStdString(passName)).arg(f, 4, 10, QLatin1Char('0'));
+            const std::string filepath = versionDir.absoluteFilePath(fname).toStdString();
+            if (CyclesRenderer::saveMultiLayerEXR(filepath, buffers, outW, outH, opts)) {
+                ++nok;
+                fprintf(stderr, "[CyclesRenderPass]   frame %d -> %s\n", f, filepath.c_str());
+            } else {
+                fprintf(stderr, "[CyclesRenderPass]   frame %d: EXR write FAILED: %s\n", f, filepath.c_str());
+            }
+        } else {
+            fprintf(stderr, "[CyclesRenderPass]   frame %d FAILED: %s\n", f, err.c_str());
+        }
+        if (useProgress && !app->progressUpdate(node, (double)nframes / (double)total)) {
+            canceled = true;
+        }
+    }
+
+    if (useProgress) app->progressEnd(node);
+
+    std::string summary = "Render to Disk: wrote " + std::to_string(nok) + "/" +
+        std::to_string(total) + " frame(s) to " + versionDir.absolutePath().toStdString();
+    if (canceled) summary += "  (canceled)";
+    fprintf(stderr, "[CyclesRenderPass] %s\n", summary.c_str());
+    if (canceled || nok != total) {
+        setPersistentMessage(eMessageTypeWarning, summary);
+    }
+
+    // A newer version now exists on disk — flag the linked Read (if any) as outdated.
+    refreshLinkStatus();
+#endif // NATRON_CYCLES
+}
+
+#ifdef NATRON_CYCLES
+NodePtr
+CyclesRenderPass::getLinkedReadNode() const
+{
+    if (NodePtr n = _imp->linkedReadNode.lock()) return n;
+    KnobStringPtr nameK = _imp->linkedReadName.lock();
+    const std::string nm = nameK ? nameK->getValue() : std::string();
+    if (nm.empty() || !getNode()) return NodePtr();
+    NodeCollectionPtr grp = getNode()->getGroup();
+    if (!grp) return NodePtr();
+    const NodesList nodes = grp->getNodes();
+    for (const NodePtr& n : nodes) {
+        if (n && n->getScriptName_mt_safe() == nm) { _imp->linkedReadNode = n; return n; }
+    }
+    return NodePtr();
+}
+
+// Recompute the linked-Read status: compare the version baked into the Read's path
+// against the latest version on disk. Outdated -> warning badge on the Read + status
+// text here; current -> clear. No-op if nothing is linked.
+void
+CyclesRenderPass::refreshLinkStatus()
+{
+    KnobStringPtr statusK = _imp->linkStatus.lock();
+    NodePtr readNode = getLinkedReadNode();
+    if (!readNode) {
+        if (statusK) statusK->setValue("No linked Read (use Import Render).");
+        return;
+    }
+    const std::string readName = readNode->getScriptName_mt_safe();
+
+    int readVer = -1;
+    if (KnobIPtr fk = readNode->getKnobByName("filename")) {
+        if (KnobFilePtr ff = std::dynamic_pointer_cast<KnobFile>(fk))
+            readVer = versionFromPath(QString::fromStdString(ff->getValue()));
+    }
+
+    std::string passName;
+    const QString passDirPath = resolvePassDir(this, passName);
+    const int latestVer = passDirPath.isEmpty() ? 0 : maxVersionInDir(QDir(passDirPath));
+
+    if (latestVer > 0 && readVer > 0 && latestVer > readVer) {
+        const std::string m = "Linked Read '" + readName + "': OUTDATED (v"
+            + std::to_string(readVer) + " -> v" + std::to_string(latestVer)
+            + ") — press Update Render to adopt the latest.";
+        if (statusK) statusK->setValue(m);
+        readNode->getEffectInstance()->setPersistentMessage(eMessageTypeWarning,
+            "Outdated render: showing v" + std::to_string(readVer) + ", v"
+            + std::to_string(latestVer) + " available. Use 'Update Render' on the CyclesRenderPass.");
+    } else {
+        const std::string m = "Linked Read '" + readName + "': up to date"
+            + (readVer > 0 ? " (v" + std::to_string(readVer) + ")." : ".");
+        if (statusK) statusK->setValue(m);
+        readNode->getEffectInstance()->clearPersistentMessage(false);
+    }
+}
+
+void
+CyclesRenderPass::openInRV()
+{
+    clearPersistentMessage(false);
+    std::string passName;
+    const QString passDirPath = resolvePassDir(this, passName);
+    const int latestVer = passDirPath.isEmpty() ? 0 : maxVersionInDir(QDir(passDirPath));
+    if (latestVer <= 0) {
+        setPersistentMessage(eMessageTypeError, "Open in RV: nothing rendered yet — use Render to Disk first.");
+        return;
+    }
+    std::string rvExe = _imp->rvPathKnob.lock() ? _imp->rvPathKnob.lock()->getValue() : std::string();
+    if (rvExe.empty()) {
+        if (const char* envRv = std::getenv("NATRON_RV_PATH")) { if (envRv[0]) rvExe = envRv; }
+    }
+    if (rvExe.empty()) {
+        setPersistentMessage(eMessageTypeError,
+            "Open in RV: set the \"RV Executable\" path or the NATRON_RV_PATH environment variable.");
+        return;
+    }
+    const QString pattern = seqPatternForVersion(passDirPath, passName, latestVer);
+    QStringList rvArgs; rvArgs << pattern;   // RV understands ####/%04d natively
+    if (!QProcess::startDetached(QString::fromStdString(rvExe), rvArgs)) {
+        setPersistentMessage(eMessageTypeError,
+            "Open in RV: failed to launch. Verify the RV executable path.");
+    }
+}
+
+void
+CyclesRenderPass::importRender()
+{
+    clearPersistentMessage(false);
+    std::string passName;
+    const QString passDirPath = resolvePassDir(this, passName);
+    const int latestVer = passDirPath.isEmpty() ? 0 : maxVersionInDir(QDir(passDirPath));
+    if (latestVer <= 0) {
+        setPersistentMessage(eMessageTypeError, "Import Render: nothing rendered yet — use Render to Disk first.");
+        return;
+    }
+    const std::string pattern = seqPatternForVersion(passDirPath, passName, latestVer).toStdString();
+
+    // Already linked + still exists -> just re-point it (acts as Update too).
+    if (NodePtr existing = getLinkedReadNode()) {
+        if (KnobIPtr fk = existing->getKnobByName("filename")) {
+            if (KnobFilePtr ff = std::dynamic_pointer_cast<KnobFile>(fk)) {
+                ff->setValue(pattern);
+                existing->getEffectInstance()->clearPersistentMessage(false);
+            }
+        }
+        refreshLinkStatus();
+        return;
+    }
+
+    // Create a new Read pointing at the latest version, and remember it.
+    CreateNodeArgs args(PLUGINID_NATRON_READ, getNode() ? getNode()->getGroup() : NodeCollectionPtr());
+    args.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+    args.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+    NodePtr readNode = getApp() ? getApp()->createReader(pattern, args) : NodePtr();
+    if (!readNode) {
+        setPersistentMessage(eMessageTypeError, "Import Render: failed to create the Read node.");
+        return;
+    }
+    readNode->setLabel(passName + "_read");
+    _imp->linkedReadNode = readNode;
+    if (KnobStringPtr nameK = _imp->linkedReadName.lock())
+        nameK->setValue(readNode->getScriptName_mt_safe());
+    refreshLinkStatus();
+}
+
+void
+CyclesRenderPass::updateRender()
+{
+    clearPersistentMessage(false);
+    NodePtr readNode = getLinkedReadNode();
+    if (!readNode) {
+        setPersistentMessage(eMessageTypeWarning, "Update Render: no linked Read — use Import Render first.");
+        return;
+    }
+    std::string passName;
+    const QString passDirPath = resolvePassDir(this, passName);
+    const int latestVer = passDirPath.isEmpty() ? 0 : maxVersionInDir(QDir(passDirPath));
+    if (latestVer <= 0) {
+        setPersistentMessage(eMessageTypeWarning, "Update Render: nothing rendered yet.");
+        return;
+    }
+    const std::string pattern = seqPatternForVersion(passDirPath, passName, latestVer).toStdString();
+    if (KnobIPtr fk = readNode->getKnobByName("filename")) {
+        if (KnobFilePtr ff = std::dynamic_pointer_cast<KnobFile>(fk))
+            ff->setValue(pattern);
+    }
+    readNode->getEffectInstance()->clearPersistentMessage(false);
+    refreshLinkStatus();
+}
+#else
+NodePtr CyclesRenderPass::getLinkedReadNode() const { return NodePtr(); }
+void CyclesRenderPass::refreshLinkStatus() {}
+void CyclesRenderPass::openInRV() {}
+void CyclesRenderPass::importRender() {}
+void CyclesRenderPass::updateRender() {}
+#endif // NATRON_CYCLES
 
 NATRON_NAMESPACE_EXIT
 NATRON_NAMESPACE_USING

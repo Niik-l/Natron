@@ -118,6 +118,10 @@ public:
     // empty if unset/unavailable. Per-pass JSON "colorspace" overrides this.
     std::string getOutputColorspace(double time) const;
 
+    // Base output directory for disk renders. A connected CyclesRenderPass appends
+    // <Pass Name>/v###/<Pass Name>.####.exr. Empty falls back to the project folder.
+    std::string getOutputPath(double time) const;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;

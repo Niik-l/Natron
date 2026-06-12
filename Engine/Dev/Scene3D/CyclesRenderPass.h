@@ -180,6 +180,17 @@ private:
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
+    // "Render to Disk" button handler: render this pass over the Output-page frame
+    // range to multi-layer EXRs at <Output Path>/<Pass Name>/v###/<Pass Name>.####.exr.
+    void renderToDisk();
+
+    // Output-page review/import handlers.
+    void openInRV();       // launch RV on the latest rendered version's sequence
+    void importRender();   // create (or re-point) a linked Read at the latest version
+    void updateRender();   // re-point the linked Read to the latest version + clear stale flag
+    void refreshLinkStatus();        // update the linked-Read status + outdated badge
+    NodePtr getLinkedReadNode() const; // resolve the linked Read (cache, else by name)
+
     std::unique_ptr<RenderPassPrivate> _imp;
 };
 

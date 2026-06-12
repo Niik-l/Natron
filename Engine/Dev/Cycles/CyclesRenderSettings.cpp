@@ -23,6 +23,8 @@
 #include "CyclesRenderSettings.h"
 
 #include "../../AppManager.h"
+#include "../../AppInstance.h"
+#include "../../Project.h"
 #include "../../Image.h"
 #include "../../KnobTypes.h"
 #include "../../OCIOColorSpaceUtils.h"
@@ -52,6 +54,7 @@ struct CyclesRenderSettingsPrivate
     KnobChoiceWPtr shutterPosition;
 
     KnobChoiceWPtr outputColorspace;
+    KnobStringWPtr outputPath;
 };
 
 CyclesRenderSettings::CyclesRenderSettings(NodePtr node)
@@ -203,6 +206,21 @@ CyclesRenderSettings::initializeKnobs()
     // --- Output tab ---
     KnobPagePtr outPage = AppManager::createKnob<KnobPage>(this, tr("Output"));
     {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Output Path"));
+        k->setName("outputPath");
+        std::string defPath;
+        if ( getApp() && getApp()->getProject() ) {
+            defPath = getApp()->getProject()->getProjectPath().toStdString();
+        }
+        k->setDefaultValue(defPath);
+        k->setHintToolTip(tr(
+            "Base directory for disk renders. A connected CyclesRenderPass writes to\n"
+            "    <Output Path>/<Pass Name>/v###/<Pass Name>.####.exr\n"
+            "so each pass gets its own subfolder with an auto-incrementing version. "
+            "Defaults to the project folder; set it to wherever renders should land."));
+        outPage->addKnob(k); _imp->outputPath = k;
+    }
+    {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Output Colorspace"));
         k->setName("outputColorspace");
         // Populate from the active OCIO config so the names resolve downstream.
@@ -329,6 +347,12 @@ std::string CyclesRenderSettings::getOutputColorspace(double /*time*/) const
 {
     KnobChoicePtr k = _imp->outputColorspace.lock();
     return k ? k->getActiveEntry().id : std::string();
+}
+
+std::string CyclesRenderSettings::getOutputPath(double /*time*/) const
+{
+    KnobStringPtr k = _imp->outputPath.lock();
+    return k ? k->getValue() : std::string();
 }
 
 StatusEnum
