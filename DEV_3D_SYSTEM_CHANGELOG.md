@@ -17,6 +17,51 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Cycles: Alembic archive sub-meshes render under the CyclesRenderPass object tables (2026-06-12)** —
+  A `ReadAlembicArchive` emits one SceneNode per sub-mesh (named
+  `<archiveNode>/<entry/path>`), but the CyclesRenderPass visibility / holdout
+  tables key on each geo *node's* script name. So archive entries missed the table
+  lookup, fell into the "not in any category" branch, and were set invisible — the
+  archive was discovered but didn't render. Archive entries now map back to their
+  archive node's script name for the visibility, holdout and reflection-matte
+  lookups, so a whole archive inherits its node's row like any other geo.
+
+- **DevStamp routing node — the Stamps wireless-connection tool (2026-06-12)** —
+  - A transparent pass-through node for decluttering the graph (inspired by
+    Adrian Pueyo's Stamps for Nuke). An **Anchor** taps a source node; **Stamps**
+    placed anywhere reconnect to it with their input wire hidden (the node's
+    "Hide inputs" knob), so long cross-graph pipes disappear.
+  - Unlike a Dot it is a full `EffectInstance` — it has a settings panel, a label,
+    the Hide-inputs knob, and `title` / `tags` / `role` knobs (which the Python
+    driver sets). `isIdentity → input 0`, so 2D image streams pass through
+    unchanged; 3D / Cycles / material / camera streams are carried by topology.
+  - **Transparency**: `DotUtils.h` gains `isGraphPassthrough()` (Dot OR DevStamp),
+    and `skipDots()` routes through it — so the ~26 typed-input sites that already
+    call `skipDots` see through Stamps for free. The 3 explicit Dot-skip sites
+    (`SceneGraph` geo chain, `CyclesPassRender` scene discovery, `ParticleModifier`
+    force chain) use the helper too. So a Stamp is transparent everywhere a Dot is.
+  - Driven by a pure-Python tool (`~/.Natron/stamps.py` + `initGui.py`, currently
+    local user config): F8 contextual hotkey (anchor+stamp / another stamp /
+    searchable Anchor panel), reconnect-by-title, amber Anchor / green Stamp tints.
+
+- **ColorChartMatch: Normalize, reference-colorspace fix, Target corner-pin (2026-06-12)** —
+  Brought to parity with Marco Meyer's mmColorTarget gizmo.
+  - **Normalize** — pre-scales the source samples by the Rec.709 luminance ratio of
+    the mid-grey patch (target/source) before the least-squares solve, so the match
+    fixes chroma without changing the plate's exposure. Mid-grey patch 21 (15 for
+    ColorChecker Passport Video); auto-disables itself if that patch is off.
+  - **Reference-colorspace bug fixed** — the chart reference (linear sRGB) was only
+    converted to the working colorspace inside `knobChanged`, which never fired
+    because ACEScg is the default — so reference matching compared an ACEScg source
+    against an sRGB target (gamut mismatch, worst in red, vs the Nuke gizmo). The
+    patch defaults are now converted to the default colorspace at init.
+  - **Target corner-pin** — an independent Target corner-pin (`tgtTo`) plus a
+    Source / Target / Corrected view switch. A target chart framed differently from
+    the source can now be positioned and sampled on its own corners (previously it
+    reused the source corner-pin position). `render`/`getRegionOfDefinition` show the
+    viewed input (target fetched via `getImage` with a source fallback, render-clone
+    safe); the overlay + corner dragging follow the active view.
+
 - **ReadAlembicArchive: world-space user transform + Rotation Pivot (2026-06-11)** —
   - **Bug.** On an archive with a unit scale baked into its embedded chain (e.g. an
     FBX→Maya export with a 100× cm→m conversion on the top node), translating the

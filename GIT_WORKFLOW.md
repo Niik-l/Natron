@@ -94,7 +94,6 @@ If `git status` shows hundreds of files, something is wrong with `.gitignore`. S
 
 Some changes live in the working tree indefinitely and must stay out of **every** commit:
 
-- **DevShadowCatcher** — untracked `Engine/Dev/Cycles/DevShadowCatcher.{cpp,h}` plus the one-line hooks in `Engine/EffectInstance.h` and `Engine/AppManager.cpp` (RnD node).
 - **Gated debug instrumentation** — `Engine/OutputSchedulerThread.cpp` (`NATRON_DEBUG_PLAYBACK` playback-stop logging) and the `NATRON_DEBUG_CYCLES_SESSIONS` session counters in `Engine/Dev/Cycles/CyclesRenderer.cpp`. Off by default; debugging aids, not shipping code.
 
 Rules:
