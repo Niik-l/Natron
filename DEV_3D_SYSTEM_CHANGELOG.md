@@ -17,6 +17,54 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **ReadAlembicArchive: world-space user transform + Rotation Pivot (2026-06-11)** —
+  - **Bug.** On an archive with a unit scale baked into its embedded chain (e.g. an
+    FBX→Maya export with a 100× cm→m conversion on the top node), translating the
+    archive moved the geometry by 100× the knob value, so the viewport gizmo (drawn in
+    knob space) disconnected from the geo, worsening linearly with distance from the
+    pivot — *"matches at 0, drifts apart as you transform."* Root cause: the user T/R/S
+    was applied as the archive **root parent** (innermost in the matrix chain), and the
+    multiply convention scales a parent's *translation* by its child's scale.
+  - **Fix.** The archive's user T/R/S is now applied in **WORLD space** — post-multiplied
+    onto each entry's final world matrix in a dedicated pass (`archiveWorldXforms`) after
+    `computeWorldTransforms`, rather than baked into the root's local matrix. Translation
+    is added un-scaled (1:1 with the knob regardless of baked unit scale) and rotation/
+    scale pivot around the geometry centre in world space. The gizmo, the drag-writeback,
+    and the Cycles/viewport render all read this same world matrix, so they stay locked
+    together. Scale-agnostic — 1× archives are unaffected (no regression).
+  - **Rotation Pivot knob.** New "Rotation Pivot" choice on the Transform tab:
+    **Bounding-Box Center** (default — gizmo on the geo, rotate in place; computed per
+    rebuild from the archive's own geometry bounds), **Authored Origin** (the archive's
+    top-transform origin — for archives with a meaningful root, e.g. a rigged character),
+    **World Origin** (legacy pivot around 0,0,0). `SceneNode` gained a `pivot[3]` +
+    `SceneGraph::buildTRSPivot`; the gizmo seeds at `translate + pivot` and backs the
+    pivot out on writeback. Diagnosed live with a `NATRON_DEBUG_PIVOT` instrument
+    (since stripped) that compared the gizmo pivot against the actual rendered bbox
+    centre — confirmed the 100× via `abcechobounds` on the source archive.
+
+- **CyclesRenderPass: render-pass disk output + RV / linked-Read review (2026-06-11)** —
+  - **Render to Disk.** New Output tab on CyclesRenderPass: a **Render to Disk** button
+    + **Start / End / Increment** frame range (auto-filled from the project range)
+    writes the pass over the range to `<Output Path>/<Pass Name>/v###/<Pass Name>.####.exr`.
+    Output Path is a new knob on **CyclesRenderSettings** (defaults to the project folder);
+    a connected CyclesRenderPass inherits it and appends `<Pass Name>/v###/`. The version
+    **auto-increments** per render (scan the pass folder for the next free `v###`). One
+    multi-layer EXR per frame — Combined/beauty (RGBA) + every enabled AOV as named layers,
+    16-bit half / ZIP. Reuses `prepareCyclesPasses`/`executeCyclesPasses` (full res, scene
+    slot 0) → `CyclesRenderer::saveMultiLayerEXR`. Shows Natron's native progress bar
+    (`AppInstance::progressStart/progressUpdate/progressEnd`) with a Cancel button; the
+    range render blocks the UI but `progressUpdate` pumps the event loop so it stays
+    responsive (Cancel is polled between frames).
+  - **Open in RV** — launches RV / OpenRV on the latest version's sequence (RV Executable
+    knob, falls back to `NATRON_RV_PATH`); mirrors the Read node's button.
+  - **Import / Update Render + linked Read.** Import Render creates a Read reading the
+    latest version, linked to the pass (its script name stored in a hidden persistent knob,
+    so the link survives save/reload). Re-rendering does **not** auto-update the Read —
+    instead it's flagged outdated: a warning badge on the Read node (persistent message)
+    plus a status line on the pass (`OUTDATED v003 → v005`). **Update Render** re-points the
+    linked Read to the latest version and clears the flag. This keeps a broken re-render
+    from silently replacing a good version in comp — adoption is an explicit click.
+
 - **Dot-input fixes + RenderPass → CyclesRenderPass rename + denoise tick (2026-06-10)** —
   - **Denoise tick (OpenImageDenoise, CPU).** New **Denoise** checkbox on the
     CyclesRenderPass Preview tab (and the previously-dead CyclesRender / CyclesRenderSettings
