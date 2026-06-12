@@ -233,7 +233,7 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         // Resolve the target geo: walk input 0 through Dots and chained overrides.
         EffectInstancePtr geo = ov->getInput(0);
         while (geo) {
-            if (geo->getPluginID() == PLUGINID_NATRON_DOT) { geo = geo->getInput(0); continue; }
+            if (isGraphPassthrough(geo->getPluginID())) { geo = geo->getInput(0); continue; }
             if (dynamic_cast<GeoMaterialOverride*>(geo.get())) { geo = geo->getInput(0); continue; }
             break;
         }

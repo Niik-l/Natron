@@ -25,21 +25,35 @@
 NATRON_NAMESPACE_ENTER
 
 /**
- * @brief Follow input 0 through any chain of Dot routing nodes, returning the
- * first non-Dot effect (or null). Dots are pure pass-throughs in the node graph.
+ * @brief True if a plugin ID is a transparent graph-routing node: a Dot, or a
+ * DevStamp (the Stamps tool's Anchor/Stamp). Both are pure pass-throughs in the
+ * node graph (input 0 carries the real data) and must be seen-through wherever
+ * the 3D / Cycles / particle systems walk the graph.
+ */
+inline bool
+isGraphPassthrough(const std::string& pluginID)
+{
+    return pluginID == PLUGINID_NATRON_DOT
+        || pluginID == PLUGINID_NATRON_DEVSTAMP;
+}
+
+/**
+ * @brief Follow input 0 through any chain of routing nodes (Dots / DevStamps),
+ * returning the first real effect (or null).
  *
  * Any typed node input resolved via dynamic_cast — a camera (CameraProvider /
  * Camera3DNode), render settings (CyclesRenderSettings), a material
  * (MaterialProvider), a scene/geo node, etc. — MUST run its `getInput(slot)`
- * through this first. Otherwise a Dot wired between the source and the consumer
- * makes the dynamic_cast see the Dot (which is none of those types) and resolve
- * to null, so the input silently does nothing. Scene/geo discovery walks
- * (collectSceneNodes) already see through Dots; this is the single-input analog.
+ * through this first. Otherwise a routing node wired between the source and the
+ * consumer makes the dynamic_cast see the router (which is none of those types)
+ * and resolve to null, so the input silently does nothing. Scene/geo discovery
+ * walks (collectSceneNodes) also see through routers; this is the single-input
+ * analog.
  */
 inline EffectInstancePtr
 skipDots(EffectInstancePtr eff)
 {
-    while (eff && eff->getPluginID() == PLUGINID_NATRON_DOT) {
+    while (eff && isGraphPassthrough(eff->getPluginID())) {
         eff = eff->getInput(0);
     }
     return eff;

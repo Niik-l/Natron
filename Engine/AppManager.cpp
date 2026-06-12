@@ -216,6 +216,7 @@
 #include "Dev/Scene3D/ReadAlembicArchive.h"
 #include "Dev/Scene3D/ReadGeo.h"
 #include "Dev/Scene3D/GeoMaterialOverride.h"
+#include "Dev/Scene3D/DevStamp.h"
 #include "Dev/Scene3D/CyclesRenderPass.h"
 
 #include "sbkversion.h" // shiboken/pyside version
@@ -1685,6 +1686,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<ReadAlembicArchive>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadGeo>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<GeoMaterialOverride>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DevStamp>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<CyclesRenderPass>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
     // Dev nodes — Channel

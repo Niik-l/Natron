@@ -106,8 +106,8 @@ ParticleModifier::collectUpstreamForces(EffectInstance* startNode,
 
     EffectInstance* current = startNode;
     while (current) {
-        // See through Dot routing nodes anywhere in the particle force chain.
-        while (current && current->getPluginID() == PLUGINID_NATRON_DOT) {
+        // See through routing nodes (Dot / DevStamp) anywhere in the force chain.
+        while (current && isGraphPassthrough(current->getPluginID())) {
             current = current->getInput(0).get();
         }
         if (!current) break;

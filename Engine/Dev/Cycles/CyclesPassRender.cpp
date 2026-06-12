@@ -54,9 +54,9 @@ collectSceneNodes(EffectInstance* eff, NodesList& out, std::set<EffectInstance*>
     if (!eff || seen.count(eff)) return;
     seen.insert(eff);
 
-    // See through Dot routing nodes — they're transparent (input 0), so don't
-    // add the Dot itself, just continue from what it points at.
-    if (eff->getPluginID() == PLUGINID_NATRON_DOT) {
+    // See through routing nodes (Dot / DevStamp) — they're transparent (input 0),
+    // so don't add the router itself, just continue from what it points at.
+    if (isGraphPassthrough(eff->getPluginID())) {
         EffectInstancePtr inp = eff->getInput(0);
         if (inp) collectSceneNodes(inp.get(), out, seen);
         return;
