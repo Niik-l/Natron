@@ -54,6 +54,7 @@ struct ColorChartMatchPrivate
     KnobChoiceWPtr chartType;
     KnobBoolWPtr useReferenceValues;
     KnobChoiceWPtr colorspace;
+    KnobBoolWPtr normalization;
 
     // Source corner-pin: "to" points (draggable, 2D each)
     KnobDoubleWPtr srcTo[4];  // BL, BR, TR, TL
@@ -65,6 +66,16 @@ struct ColorChartMatchPrivate
     KnobChoiceWPtr srcOverlayPoints;
     // Interactive mode
     KnobBoolWPtr srcInteractive;
+
+    // Target corner-pin (mirror of source): independent corners on the TARGET image,
+    // used when matching to a second chart plate (Use Reference Values off). The
+    // target chart can be framed differently from the source, so it needs its own
+    // corner-pin instead of reusing the source positions.
+    KnobDoubleWPtr tgtTo[4];
+    KnobDoubleWPtr tgtFrom[4];
+    KnobBoolWPtr tgtEnable[4];
+    KnobChoiceWPtr tgtOverlayPoints;
+    KnobBoolWPtr tgtInteractive;
 
     // Sample size
     KnobDoubleWPtr sampleSize;
@@ -242,6 +253,24 @@ ColorChartMatch::initializeKnobs()
         _imp->sampleSize = k;
     }
 
+    // Normalize (matches mmColorTarget's "normalize"): pre-scale the source samples
+    // by a single Rec.709 luminance factor so the source mid-grey patch's luminance
+    // matches the target's, before solving the matrix. Net effect: the chroma is
+    // matched to the target while the output keeps the SOURCE luminance/exposure.
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Normalize"));
+        k->setName("normalization");
+        k->setHintToolTip(tr("Will try to maintain the source luminance: scales the "
+                              "source by the Rec.709 luminance ratio of the mid-grey "
+                              "patch (target/source) before solving, so the colour "
+                              "match doesn't also change your plate's exposure. "
+                              "Requires the mid-grey patch to be enabled."));
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        mainPage->addKnob(k);
+        _imp->normalization = k;
+    }
+
     // ---- Source Corner Pin (with draggable overlay) ----
     {
         KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Source Chart Corner Pin"));
@@ -325,6 +354,85 @@ ColorChartMatch::initializeKnobs()
         );
     }
 
+    // ---- Target Corner Pin (mirror of source) ----
+    {
+        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Target Chart Corner Pin"));
+        mainPage->addKnob(sep);
+
+        const char* fromNames[] = {"tgtFrom1", "tgtFrom2", "tgtFrom3", "tgtFrom4"};
+        const char* fromLabels[] = {"T From BL", "T From BR", "T From TR", "T From TL"};
+        double fromDefaults[][2] = {{0, 0}, {720, 0}, {720, 480}, {0, 480}};
+        for (int i = 0; i < 4; ++i) {
+            KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr(fromLabels[i]), 2);
+            k->setName(fromNames[i]);
+            k->setDefaultValue(fromDefaults[i][0], 0);
+            k->setDefaultValue(fromDefaults[i][1], 1);
+            k->setAnimationEnabled(false);
+            k->setSecret(true);
+            mainPage->addKnob(k);
+            _imp->tgtFrom[i] = k;
+        }
+
+        const char* toNames[] = {"tgtTo1", "tgtTo2", "tgtTo3", "tgtTo4"};
+        const char* toLabels[] = {"T To BL", "T To BR", "T To TR", "T To TL"};
+        double toDefaults[][2] = {{600, 300}, {1320, 300}, {1320, 780}, {600, 780}};
+        for (int i = 0; i < 4; ++i) {
+            KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr(toLabels[i]), 2);
+            k->setName(toNames[i]);
+            k->setDefaultValue(toDefaults[i][0], 0);
+            k->setDefaultValue(toDefaults[i][1], 1);
+            k->setAnimationEnabled(true);
+            mainPage->addKnob(k);
+            _imp->tgtTo[i] = k;
+        }
+
+        for (int i = 0; i < 4; ++i) {
+            std::string name = "tgtEnable" + std::to_string(i + 1);
+            KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Enable"));
+            k->setName(name.c_str());
+            k->setDefaultValue(true);
+            k->setSecret(true);
+            mainPage->addKnob(k);
+            _imp->tgtEnable[i] = k;
+        }
+
+        {
+            KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Overlay Points"));
+            k->setName("tgtOverlayPoints");
+            std::vector<ChoiceOption> entries;
+            entries.push_back(ChoiceOption("To", "", "Show 'to' points"));
+            entries.push_back(ChoiceOption("From", "", "Show 'from' points"));
+            k->populateChoices(entries);
+            k->setDefaultValue(0);
+            k->setSecret(true);
+            mainPage->addKnob(k);
+            _imp->tgtOverlayPoints = k;
+        }
+
+        {
+            KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Interactive"));
+            k->setName("tgtInteractive");
+            // Off by default — the target corner-pin only becomes interactive when the
+            // user switches Current View to "Target" (handled in knobChanged).
+            k->setDefaultValue(false);
+            k->setSecret(true);
+            mainPage->addKnob(k);
+            _imp->tgtInteractive = k;
+        }
+
+        getNode()->addCornerPinInteract(
+            _imp->tgtFrom[0].lock(), _imp->tgtFrom[1].lock(),
+            _imp->tgtFrom[2].lock(), _imp->tgtFrom[3].lock(),
+            _imp->tgtTo[0].lock(), _imp->tgtTo[1].lock(),
+            _imp->tgtTo[2].lock(), _imp->tgtTo[3].lock(),
+            _imp->tgtEnable[0].lock(), _imp->tgtEnable[1].lock(),
+            _imp->tgtEnable[2].lock(), _imp->tgtEnable[3].lock(),
+            _imp->tgtOverlayPoints.lock(),
+            KnobBoolPtr(),  // no invert
+            _imp->tgtInteractive.lock()
+        );
+    }
+
     // ---- Calculate Button ----
     {
         KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr(""));
@@ -371,10 +479,13 @@ ColorChartMatch::initializeKnobs()
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Current View"));
         k->setName("currentView");
-        k->setHintToolTip(tr("Source: pass through unchanged (for positioning corner-pin).\n"
-                              "Corrected: apply the computed color matrix."));
+        k->setHintToolTip(tr("Source: show input 0 unchanged (position the Source corner-pin).\n"
+                              "Target: show input 1 unchanged (position the Target corner-pin) "
+                              "— only meaningful when 'Use Reference Values' is off.\n"
+                              "Corrected: show input 0 with the computed color matrix applied."));
         std::vector<ChoiceOption> entries;
-        entries.push_back(ChoiceOption("Source", "", "Pass through source unchanged"));
+        entries.push_back(ChoiceOption("Source", "", "Show source unchanged"));
+        entries.push_back(ChoiceOption("Target", "", "Show target unchanged"));
         entries.push_back(ChoiceOption("Corrected", "", "Apply computed color matrix"));
         k->populateChoices(entries);
         k->setDefaultValue(0);  // Source by default
@@ -457,9 +568,19 @@ ColorChartMatch::initializeKnobs()
         KnobColorPtr colorK = AppManager::createKnob<KnobColor>(this, tr(""), 3);
         colorK->setName(colorName.c_str());
         colorK->setHintToolTip(tr(tooltip.c_str()));
-        colorK->setDefaultValue(defaultRef[i][0], 0);
-        colorK->setDefaultValue(defaultRef[i][1], 1);
-        colorK->setDefaultValue(defaultRef[i][2], 2);
+        // The chart reference data is stored as linear sRGB; convert it to the
+        // DEFAULT working colorspace (matches the colorspace knob's default, ACEScg)
+        // so the target patches are in the same space as the (colour-managed) source
+        // out of the box. Previously this conversion only ran in knobChanged, so a
+        // freshly-created node left the reference in sRGB while the source was ACEScg
+        // — a gamut mismatch that skewed the matrix (worst in red). knobChanged still
+        // re-converts when the chart / colorspace knob is changed.
+        double dcr, dcg, dcb;
+        convertSRGBtoColorspace(defaultRef[i][0], defaultRef[i][1], defaultRef[i][2],
+                                eColorspaceACEScg, dcr, dcg, dcb);
+        colorK->setDefaultValue(dcr, 0);
+        colorK->setDefaultValue(dcg, 1);
+        colorK->setDefaultValue(dcb, 2);
         colorK->setAnimationEnabled(false);
         patchPage->addKnob(colorK);
         _imp->patchColor[i] = colorK;
@@ -480,17 +601,21 @@ ColorChartMatch::knobChanged(KnobI* k,
     KnobButtonPtr calcBtn = _imp->calculateButton.lock();
     if (calcBtn.get() == k) {
         calculateMatrix();
-        // Auto-switch to Corrected view after computing
-        _imp->currentView.lock()->setValue(1);
+        // Auto-switch to Corrected view (index 2) after computing
+        _imp->currentView.lock()->setValue(2);
         _imp->applyMatrix.lock()->setValue(true);
         return true;
     }
 
-    // Current View changed
+    // Current View changed (0 = Source, 1 = Target, 2 = Corrected). Toggle which
+    // corner-pin is interactive so only the visible chart's handles are draggable,
+    // and apply the matrix only in Corrected view.
     KnobChoicePtr viewK = _imp->currentView.lock();
     if (viewK.get() == k) {
-        bool corrected = (viewK->getValue() == 1);
-        _imp->applyMatrix.lock()->setValue(corrected);
+        int view = viewK->getValue();
+        _imp->applyMatrix.lock()->setValue(view == 2);
+        if (KnobBoolPtr si = _imp->srcInteractive.lock()) si->setValue(view != 1);
+        if (KnobBoolPtr ti = _imp->tgtInteractive.lock()) ti->setValue(view == 1);
         return true;
     }
 
@@ -632,7 +757,23 @@ ColorChartMatch::calculateMatrix()
     double srcTRx = _imp->srcTo[2].lock()->getValue(0), srcTRy = _imp->srcTo[2].lock()->getValue(1);
     double srcTLx = _imp->srcTo[3].lock()->getValue(0), srcTLy = _imp->srcTo[3].lock()->getValue(1);
 
+    // Target corner-pin: independent corners on the target image (only used when
+    // sampling a target chart, i.e. Use Reference Values is off).
+    double tgtBLx = _imp->tgtTo[0].lock()->getValue(0), tgtBLy = _imp->tgtTo[0].lock()->getValue(1);
+    double tgtBRx = _imp->tgtTo[1].lock()->getValue(0), tgtBRy = _imp->tgtTo[1].lock()->getValue(1);
+    double tgtTRx = _imp->tgtTo[2].lock()->getValue(0), tgtTRy = _imp->tgtTo[2].lock()->getValue(1);
+    double tgtTLx = _imp->tgtTo[3].lock()->getValue(0), tgtTLy = _imp->tgtTo[3].lock()->getValue(1);
+
     double sampleSz = _imp->sampleSize.lock()->getValue();
+
+    // Normalize (mmColorTarget parity): mid-grey patch is index 21 on the standard
+    // 24-patch charts, 15 on the ColorChecker Passport Video. We track where that
+    // patch lands in the enabled list, then scale all source samples by the Rec.709
+    // luminance ratio (target/source) of that patch before solving.
+    bool normalize = _imp->normalization.lock()->getValue();
+    int chart = _imp->chartType.lock()->getValue();
+    const int midGreyPatch = (chart == eChartColorCheckerPassportVideo) ? 15 : 21;
+    int midGreyEnabled = -1;
 
     // Sample patches — 4 rows x 6 cols
     int enabledCount = 0;
@@ -682,7 +823,20 @@ ColorChartMatch::calculateMatrix()
     };
 
     for (int i = 0; i < 24; ++i) {
-        if (!_imp->patchEnable[i].lock()->getValue()) continue;
+        if (!_imp->patchEnable[i].lock()->getValue()) {
+            // mmColorTarget: if normalize is on but the mid-grey patch is disabled,
+            // it can't be done — warn and turn it off (matches the gizmo).
+            if (normalize && i == midGreyPatch) {
+                normalize = false;
+                _imp->normalization.lock()->setValue(false);
+                _imp->info.lock()->setValue("Normalize needs the mid-grey patch "
+                                            "(enabled) — it was disabled, so Normalize "
+                                            "was turned off.");
+            }
+            continue;
+        }
+
+        if (i == midGreyPatch) midGreyEnabled = enabledCount;
 
         int row = i / 6;
         int col = i % 6;
@@ -721,10 +875,20 @@ ColorChartMatch::calculateMatrix()
             enabledTgt[enabledCount][1] = colorK->getValue(1);
             enabledTgt[enabledCount][2] = colorK->getValue(2);
         } else {
-            // Sample from target image (same corner-pin position)
-            // Note: target chart should be at the same position in the target image
+            // Sample from the target image at the TARGET corner-pin position — the
+            // target chart can be framed differently from the source, so it has its
+            // own corner-pin (not the source's).
+            double tx, ty;
+            bilinearInterp(tgtBLx, tgtBLy, tgtBRx, tgtBRy,
+                           tgtTRx, tgtTRy, tgtTLx, tgtTLy,
+                           u, v, tx, ty);
+            double tHalfW = (int)(std::abs(tgtBRx - tgtBLx) / 6.0 * sampleSz * 0.5);
+            double tHalfH = (int)(std::abs(tgtTLy - tgtBLy) / 4.0 * sampleSz * 0.5);
+            if (tHalfW < 1) tHalfW = 1;
+            if (tHalfH < 1) tHalfH = 1;
             double tR, tG, tB;
-            if (!sampleRegion(*tgtRa, tgtBounds, tgtNComp, sx, sy, halfW, halfH, tR, tG, tB)) {
+            if (!sampleRegion(*tgtRa, tgtBounds, tgtNComp, tx, ty,
+                              (int)tHalfW, (int)tHalfH, tR, tG, tB)) {
                 continue;
             }
             enabledTgt[enabledCount][0] = tR;
@@ -740,6 +904,24 @@ ColorChartMatch::calculateMatrix()
     if (enabledCount < 3) {
         _imp->info.lock()->setValue("Error: Need at least 3 enabled patches with valid samples.");
         return;
+    }
+
+    // Normalize (mmColorTarget parity): scale every source sample by the Rec.709
+    // luminance ratio of the mid-grey patch (target / source) before the solve, so
+    // the resulting matrix matches chroma without changing the source's exposure.
+    if (normalize && midGreyEnabled >= 0) {
+        const double* sg = enabledSrc[midGreyEnabled];
+        const double* tg = enabledTgt[midGreyEnabled];
+        double srcLum = sg[0] * 0.2126 + sg[1] * 0.7152 + sg[2] * 0.0722;
+        double dstLum = tg[0] * 0.2126 + tg[1] * 0.7152 + tg[2] * 0.0722;
+        if (srcLum != 0.0) {
+            double lumMult = dstLum / srcLum;
+            for (int k = 0; k < enabledCount; ++k) {
+                enabledSrc[k][0] *= lumMult;
+                enabledSrc[k][1] *= lumMult;
+                enabledSrc[k][2] *= lumMult;
+            }
+        }
     }
 
     // Compute the matrix
@@ -774,7 +956,9 @@ ColorChartMatch::getRegionOfDefinition(U64 /*hash*/,
                                         ViewIdx view,
                                         RectD* rod)
 {
-    EffectInstancePtr input = getInput(0);
+    // Match the viewed input (Target view shows input 1, else input 0).
+    int viewMode = _imp->currentView.lock()->getValue();
+    EffectInstancePtr input = (viewMode == 1 && getInput(1)) ? getInput(1) : getInput(0);
     if (!input) return eStatusFailed;
     bool isProjectFormat = false;
     return input->getRegionOfDefinition_public(input->getHash(), time, scale, view, rod, &isProjectFormat);
@@ -786,11 +970,27 @@ ColorChartMatch::getRegionOfDefinition(U64 /*hash*/,
 StatusEnum
 ColorChartMatch::render(const RenderActionArgs& args)
 {
-    // Get source image
+    // Current View: 0 = Source (input 0), 1 = Target (input 1), 2 = Corrected.
+    // In Target view we show input 1 unchanged so the target corner-pin can be
+    // positioned on it; otherwise we show input 0 (with or without the matrix).
+    // Don't rely on getInput(1) here (unreliable on render-clone threads) — just
+    // try to fetch the target image and fall back to the source if it isn't there.
+    int view = _imp->currentView.lock()->getValue();
+
     RectI srcRoi;
-    ImagePtr srcImg = getImage(0, args.time, args.mappedScale, args.view,
-                               NULL, NULL, false, false,
-                               eStorageModeRAM, 0, &srcRoi);
+    ImagePtr srcImg;
+    bool showingTarget = false;
+    if (view == 1) {
+        srcImg = getImage(1, args.time, args.mappedScale, args.view,
+                          NULL, NULL, false, false,
+                          eStorageModeRAM, 0, &srcRoi);
+        showingTarget = (srcImg != NULL);
+    }
+    if (!srcImg) {
+        srcImg = getImage(0, args.time, args.mappedScale, args.view,
+                          NULL, NULL, false, false,
+                          eStorageModeRAM, 0, &srcRoi);
+    }
     if (!srcImg) return eStatusFailed;
 
     // Get output image
@@ -798,7 +998,8 @@ ColorChartMatch::render(const RenderActionArgs& args)
     ImagePtr outImg = args.outputPlanes.front().second;
     if (!outImg) return eStatusFailed;
 
-    bool apply = _imp->applyMatrix.lock()->getValue();
+    // Only apply the matrix in Corrected view (never when previewing the target).
+    bool apply = (view == 2) && !showingTarget;
 
     // Read matrix
     double M[3][3];
@@ -855,10 +1056,16 @@ ColorChartMatch::drawOverlay(double /*time*/,
                               const RenderScale& /*renderScale*/,
                               ViewIdx /*view*/)
 {
+    // In Target view, overlay the TARGET corner-pin (on the target image); otherwise
+    // the source corner-pin. This way the patch grid lands on whichever chart the
+    // viewer is showing.
+    const bool targetView = (_imp->currentView.lock()->getValue() == 1);
+    KnobDoubleWPtr* corners = targetView ? _imp->tgtTo : _imp->srcTo;
+
     // Read corner positions
     double to[4][2];
     for (int i = 0; i < 4; ++i) {
-        KnobDoublePtr k = _imp->srcTo[i].lock();
+        KnobDoublePtr k = corners[i].lock();
         if (!k) return;
         to[i][0] = k->getValue(0);
         to[i][1] = k->getValue(1);
@@ -872,8 +1079,9 @@ ColorChartMatch::drawOverlay(double /*time*/,
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_DONT_CARE);
 
-    // Draw the corner-pin quad outline (yellow)
-    glColor4f(1.0f, 1.0f, 0.0f, 0.8f);
+    // Draw the corner-pin quad outline (yellow for source, cyan for target)
+    if (targetView) glColor4f(0.0f, 1.0f, 1.0f, 0.8f);
+    else            glColor4f(1.0f, 1.0f, 0.0f, 0.8f);
     glLineWidth(1.5f);
     glBegin(GL_LINE_LOOP);
     for (int i = 0; i < 4; ++i) {
@@ -883,7 +1091,8 @@ ColorChartMatch::drawOverlay(double /*time*/,
 
     // Draw corner handles (small squares)
     double handleSize = 6.0;
-    glColor4f(1.0f, 1.0f, 0.0f, 1.0f);
+    if (targetView) glColor4f(0.0f, 1.0f, 1.0f, 1.0f);
+    else            glColor4f(1.0f, 1.0f, 0.0f, 1.0f);
     for (int i = 0; i < 4; ++i) {
         double cx = to[i][0], cy = to[i][1];
         glBegin(GL_LINE_LOOP);
@@ -966,9 +1175,12 @@ ColorChartMatch::onOverlayPenDown(double /*time*/,
                                    double /*timestamp*/,
                                    PenType /*pen*/)
 {
+    // Drag the corner-pin matching the current view (Target view -> target corners).
+    KnobDoubleWPtr* corners = (_imp->currentView.lock()->getValue() == 1)
+                              ? _imp->tgtTo : _imp->srcTo;
     double threshold = 15.0;
     for (int i = 0; i < 4; ++i) {
-        KnobDoublePtr k = _imp->srcTo[i].lock();
+        KnobDoublePtr k = corners[i].lock();
         double cx = k->getValue(0);
         double cy = k->getValue(1);
         double dx = pos.x() - cx;
@@ -994,7 +1206,9 @@ ColorChartMatch::onOverlayPenMotion(double /*time*/,
                                      double /*timestamp*/)
 {
     if (_imp->draggingCorner >= 0 && _imp->draggingCorner < 4) {
-        KnobDoublePtr k = _imp->srcTo[_imp->draggingCorner].lock();
+        KnobDoubleWPtr* corners = (_imp->currentView.lock()->getValue() == 1)
+                                  ? _imp->tgtTo : _imp->srcTo;
+        KnobDoublePtr k = corners[_imp->draggingCorner].lock();
         k->setValue(pos.x(), ViewSpec::all(), 0);
         k->setValue(pos.y(), ViewSpec::all(), 1);
         return true;
