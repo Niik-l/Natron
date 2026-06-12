@@ -2100,12 +2100,26 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         // because the motion-blur block below still consults it.
         NodePtr srcNode = sn.sourceNode.lock();
         NodePtr matOverrideNode = sn.materialNode.lock(); // per-part (GeoMaterialOverride)
+
+        // Visibility / holdout / matte lookup key. The CyclesRenderPass object
+        // tables (visibilityMap, holdoutObjects) key on each geo NODE's script
+        // name (one row per node, from enumerateSceneGeo -> getScriptName_mt_safe).
+        // A multi-emit ReadAlembicArchive emits one SceneNode per sub-mesh whose
+        // name is "<archiveNode>/<entry/path>", which never matches the table key,
+        // so every archive entry used to fall through to the "not in map" branch
+        // and get set_visibility(0) — discovered but invisible. Map archive entries
+        // back to their archive node so they inherit that node's row.
+        std::string visKey = sn.name;
+        if (sn.archiveEntryIdx >= 0 && srcNode) {
+            visKey = srcNode->getScriptName_mt_safe();
+        }
+
         // Reflection matte: in the second (matte) render pass, flagged objects
         // become pure white emitters so they read as a matte directly AND in
         // reflections (emission carries through glossy bounces).
         bool isMatteObj = false;
         if (visibilityMap) {
-            auto vit = visibilityMap->find(sn.name);
+            auto vit = visibilityMap->find(visKey);
             if (vit != visibilityMap->end() && vit->second.reflectionMatte) isMatteObj = true;
         }
         ccl::Shader* objShader = nullptr;
@@ -2240,7 +2254,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
         // Apply CyclesRenderPass visibility if provided
         if (visibilityMap) {
-            auto it = visibilityMap->find(sn.name);
+            auto it = visibilityMap->find(visKey);
             if (it != visibilityMap->end()) {
                 const ObjectVisibility& vis = it->second;
                 if (scDebugEnabled())
@@ -2283,7 +2297,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         // Additive holdout: geo wired to the CyclesRender "holdout" input
         // renders as a Cycles holdout (a transparent matte of its shape),
         // independent of any CyclesRenderPass visMap above.
-        if (holdoutObjects && holdoutObjects->count(sn.name)) {
+        if (holdoutObjects && holdoutObjects->count(visKey)) {
             obj->set_use_holdout(true);
         }
 
