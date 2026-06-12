@@ -93,6 +93,15 @@ struct SceneNode {
     // SceneGraph::rebuild when a GeoMaterialOverride lists this entry's path.
     NodeWPtr materialNode;
 
+    // Rotation/scale pivot for this node's user transform, in the space where the
+    // user T/R/S is applied (world / parent space). The user transform rotates and
+    // scales around this point instead of the origin — set for ReadAlembicArchive
+    // from its "Rotation Pivot" knob so the archive turns around its authored origin
+    // or bbox centre rather than swinging around (0,0,0). {0,0,0} = origin (default
+    // for every other node — no behaviour change). The gizmo reads it too so the
+    // handle sits on the pivot.
+    float pivot[3];
+
     SceneNode()
         : type(eSceneNodeGroup)
         , parentIndex(-1)
@@ -102,6 +111,7 @@ struct SceneNode {
     {
         setIdentity(localMatrix);
         setIdentity(worldMatrix);
+        pivot[0] = pivot[1] = pivot[2] = 0.0f;
     }
 
     static void setIdentity(float m[16])
@@ -155,6 +165,14 @@ public:
                          float rx, float ry, float rz,
                          float sx, float sy, float sz,
                          float out[16]);
+
+    // Like buildTRS but rotates/scales around `pivot` (px,py,pz) instead of the
+    // origin: out = T(t) · T(P) · R · S · T(-P). At pivot=(0,0,0) it equals buildTRS.
+    static void buildTRSPivot(float tx, float ty, float tz,
+                              float rx, float ry, float rz,
+                              float sx, float sy, float sz,
+                              float px, float py, float pz,
+                              float out[16]);
 
     static void multiply(const float a[16], const float b[16], float out[16]);
 

@@ -468,6 +468,26 @@ ReadAlembicArchive::initializeKnobs()
         k->setHintToolTip(tr("Multiplies all three scale axes — quick way to scale the whole archive up or down."));
         xformPage->addKnob(k);
     }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Rotation Pivot"));
+        k->setName("rotationPivot");
+        std::vector<ChoiceOption> opts;
+        opts.push_back(ChoiceOption("Bounding-Box Center", "", ""));
+        opts.push_back(ChoiceOption("Authored Origin", "", ""));
+        opts.push_back(ChoiceOption("World Origin", "", ""));
+        k->populateChoices(opts);
+        k->setDefaultValue(0);  // Bounding-Box Center
+        k->setHintToolTip(tr(
+            "Point the Translate/Rotate/Scale knobs pivot around:\n"
+            "• Bounding-Box Center — the centre of the archive's geometry, so the gizmo "
+            "sits on the object and it rotates in place. Default — works for baked / "
+            "world-space archives where the authored top transform is at the origin.\n"
+            "• Authored Origin — the archive's own top transform origin (rotates the "
+            "archive the way it was authored). Useful when the archive has a meaningful "
+            "root transform (e.g. a rigged character).\n"
+            "• World Origin — legacy behaviour: pivot around (0,0,0)."));
+        xformPage->addKnob(k);
+    }
 }
 
 bool

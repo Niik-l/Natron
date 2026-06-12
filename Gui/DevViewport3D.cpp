@@ -25,6 +25,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 
 CLANG_DIAG_OFF(deprecated)
@@ -1325,11 +1327,19 @@ DevViewport3D::paintGL()
                 // Skip ImGuizmo for read-only transform nodes (Alembic imports)
                 if (sn.type == eSceneNodeTransform) break;
 
-                // Read T/R/S from knobs, build matrix using ImGuizmo's Recompose
+                // Read T/R/S from knobs, build matrix using ImGuizmo's Recompose.
                 float translation[3], rotation[3], scale[3];
                 readTRSFromNode(effect, translation, rotation, scale);
+                // Pivot offset: seed the gizmo at (translate + pivot) so the handle
+                // sits on the node's pivot and rotation/scale turn around it (e.g. an
+                // Alembic archive's authored origin / bbox centre). pivot is {0,0,0}
+                // for every other node, so this is a no-op there.
+                const float* piv = sn.pivot;
+                float gizT[3] = { translation[0] + piv[0],
+                                  translation[1] + piv[1],
+                                  translation[2] + piv[2] };
                 float objMat[16];
-                ImGuizmo::RecomposeMatrixFromComponents(translation, rotation, scale, objMat);
+                ImGuizmo::RecomposeMatrixFromComponents(gizT, rotation, scale, objMat);
 
                 // Capture drag start values when ImGuizmo begins using
                 if (ImGuizmo::IsUsing() && !_imp->gizmoDragging) {
@@ -1368,9 +1378,11 @@ DevViewport3D::paintGL()
                                           _imp->imguizmoOp, _imp->imguizmoMode,
                                           objMat, NULL, NULL))
                 {
-                    // Decompose modified matrix back to T/R/S
+                    // Decompose modified matrix back to T/R/S, then back out the
+                    // pivot offset so the plain translate knobs are stored.
                     float newT[3], newR[3], newS[3];
                     ImGuizmo::DecomposeMatrixToComponents(objMat, newT, newR, newS);
+                    newT[0] -= piv[0]; newT[1] -= piv[1]; newT[2] -= piv[2];
 
                     KnobIPtr kTX = effect->getKnobByName("translateX");
                     KnobIPtr kTY = effect->getKnobByName("translateY");
