@@ -17,6 +17,48 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **3D viewport: geometry shaded with its connected material/texture (2026-06-13)** —
+  Geometry in the 3D viewport was flat/grey unless wireframe was on. Now, when a
+  geo has a material or image connected, the viewport previews it textured across
+  every draw path — Card3D, Sphere3D, Cube3D, Cylinder3D and meshes
+  (ReadGeo / ReadAlembicArchive). Per geo the texture is resolved from a connected
+  **Material3D**, the geo's own image input, or a downstream **UVProject**'s
+  projection plate (a new `findUVProjectForGeo` walk locates the UVProject so its
+  projected UVs show in the viewport, not only in ScanlineRender). Material3D and
+  UVProject each gained a `CachedTexture` + `updateCachedTexture()` to render the
+  preview (Material3D from its Diffuse input, UVProject from its img input).
+  Cached preview textures are scene-linear, so a new `uploadPreviewTextureSRGB()`
+  converts them through an sRGB transform on upload — previously the 3D view drew
+  raw linear and looked darker than the 2D viewer; now they match. Supports
+  primitives, meshes, and common image formats including EXR.
+
+- **3D viewport tabs persist across project save/load (2026-06-13)** —
+  A 3D viewport (`viewport3d{N}`) placed in a split pane was lost on reload: the
+  tab was never serialized the way histograms are, so the saved pane layout
+  referenced a tab that didn't exist on load and its split was dropped. The tab
+  script names are now saved in `ProjectGuiSerialization` (new class version 13,
+  back-compatible load), and on load each viewport3d is recreated + registered
+  *before* `restoreLayout()` — mirroring how viewer tabs survive `wipeLayout` — so
+  the layout relocation drops each 3D viewport back into its saved split pane.
+  Note: like all workspace restore, this only applies when the
+  **"Load workspace embedded within projects"** preference is enabled (off by
+  default — when off, no saved layout is restored at all; the save side was always
+  correct).
+
+- **DevViewport3D survives GL context recreation + timeline frame sync fixed (2026-06-13)** —
+  When a 3D viewport is reparented during a workspace/layout restore, Qt can
+  recreate the `QOpenGLWidget`'s GL context and call `initializeGL()` again. The
+  ImGui font texture and particle shader from the destroyed context were kept
+  (guarded by `imguiInitialized`), so `paintGL` bound stale GL handles and crashed
+  intermittently on an in-session File→Open (masked by NDEBUG in release builds).
+  `initializeGL` now rebuilds the font texture and particle shader program on every
+  context init, keeps the ImGui CPU-side context one-time, and guards the refresh
+  `QTimer` so it isn't stacked on a second init. Same GL-lifetime class as the
+  earlier viewer shader-context crash. Also fixed the timeline sync: the slot
+  `onFrameChanged(double)` didn't match `TimeLine::frameChanged(SequenceTime,int)`,
+  so the connect silently failed and scrubbing never updated the 3D viewport — the
+  slot now matches the signal signature.
+
 - **Cycles: Alembic archive sub-meshes render under the CyclesRenderPass object tables (2026-06-12)** —
   A `ReadAlembicArchive` emits one SceneNode per sub-mesh (named
   `<archiveNode>/<entry/path>`), but the CyclesRenderPass visibility / holdout
