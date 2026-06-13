@@ -83,7 +83,8 @@ GCC_DIAG_ON(unused-parameter)
 #define PROJECT_GUI_SERIALIZATION_MERGE_BACKDROP 10
 #define PROJECT_GUI_SERIALIZATION_INTRODUCES_PYTHON_PANELS 11
 #define PROJECT_GUI_SERIALIZATION_INTRODUCES_PANEL_STATES 12
-#define PROJECT_GUI_SERIALIZATION_VERSION PROJECT_GUI_SERIALIZATION_INTRODUCES_PANEL_STATES
+#define PROJECT_GUI_SERIALIZATION_INTRODUCES_VIEWPORT3D 13
+#define PROJECT_GUI_SERIALIZATION_VERSION PROJECT_GUI_SERIALIZATION_INTRODUCES_VIEWPORT3D
 
 #define PANE_SERIALIZATION_INTRODUCES_CURRENT_TAB 2
 #define PANE_SERIALIZATION_INTRODUCES_SIZE 3
@@ -654,6 +655,9 @@ class ProjectGuiSerialization
     ///Active histograms
     std::list<std::string> _histograms;
 
+    ///Active 3D viewports (script names of viewport3d{N} tabs)
+    std::list<std::string> _viewport3Ds;
+
     ///Active backdrops (kept here for bw compatibility with Natron < 1.1
     std::list<NodeBackdropSerialization> _backdrops;
 
@@ -687,6 +691,7 @@ class ProjectGuiSerialization
         }
         ar & ::boost::serialization::make_nvp("OpenedPanelsMinimized", _openedPanelsMinimizedOrdered);
         ar & ::boost::serialization::make_nvp("OpenedPanelsHideUnmodified", _openedPanelsHideUnmodifiedOrdered);
+        ar & ::boost::serialization::make_nvp("Viewport3Ds", _viewport3Ds);
     }
 
     template<class Archive>
@@ -736,6 +741,10 @@ class ProjectGuiSerialization
             ar & ::boost::serialization::make_nvp("OpenedPanelsHideUnmodified", _openedPanelsHideUnmodifiedOrdered);
         }
 
+        if (version >= PROJECT_GUI_SERIALIZATION_INTRODUCES_VIEWPORT3D) {
+            ar & ::boost::serialization::make_nvp("Viewport3Ds", _viewport3Ds);
+        }
+
         _version = version;
     }
 
@@ -746,6 +755,7 @@ public:
         , _layoutSerialization()
         , _viewersData()
         , _histograms()
+        , _viewport3Ds()
         , _backdrops()
         , _openedPanelsOrdered()
         , _openedPanelsMinimizedOrdered()
@@ -779,6 +789,11 @@ public:
     const std::list<std::string> & getHistograms() const
     {
         return _histograms;
+    }
+
+    const std::list<std::string> & getViewport3Ds() const
+    {
+        return _viewport3Ds;
     }
 
     const std::list<NodeBackdropSerialization> & getBackdrops() const

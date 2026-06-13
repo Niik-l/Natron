@@ -670,6 +670,14 @@ Gui::getHistograms_mt_safe() const
     return _imp->_histograms;
 }
 
+std::list<Viewport3DTab*>
+Gui::getViewport3Ds_mt_safe() const
+{
+    QMutexLocker l(&_imp->_viewport3DMutex);
+
+    return _imp->_viewport3Ds;
+}
+
 void
 Gui::unregisterPane(TabWidget* pane)
 {

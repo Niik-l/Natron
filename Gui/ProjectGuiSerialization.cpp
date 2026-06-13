@@ -57,6 +57,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Gui/TabWidget.h"
 #include "Gui/ViewerGL.h"
 #include "Gui/ViewerTab.h"
+#include "Gui/Viewport3DTab.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -137,6 +138,12 @@ ProjectGuiSerialization::initialize(const ProjectGui* projectGui)
     std::list<Histogram*> histograms = projectGui->getGui()->getHistograms_mt_safe();
     for (std::list<Histogram*>::const_iterator it = histograms.begin(); it != histograms.end(); ++it) {
         _histograms.push_back( (*it)->objectName().toStdString() );
+    }
+
+    ///save 3D viewports (by tab script name, so the layout can relocate them on load)
+    std::list<Viewport3DTab*> viewport3Ds = projectGui->getGui()->getViewport3Ds_mt_safe();
+    for (std::list<Viewport3DTab*>::const_iterator it = viewport3Ds.begin(); it != viewport3Ds.end(); ++it) {
+        _viewport3Ds.push_back( (*it)->getScriptName() );
     }
 
     ///save opened panels by order
