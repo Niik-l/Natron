@@ -622,19 +622,35 @@ DevViewport3D::initializeGL()
     glClearColor(0.15f, 0.15f, 0.15f, 1.0f);
     glEnable(GL_POINT_SMOOTH);
 
-    // Initialize ImGui + ImGuizmo
+    // Initialize ImGui + ImGuizmo.
+    // The ImGui *context* is CPU-side state — create it once for this widget.
     if (!_imp->imguiInitialized) {
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = NULL; // don't save imgui.ini
         io.LogFilename = NULL;
         io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-        ImGui_ImplOpenGL2_CreateFontsTexture();
         _imp->imguiInitialized = true;
     }
+    // The font texture is a GL resource. QOpenGLWidget calls initializeGL again
+    // whenever its GL context is recreated (e.g. when the widget is reparented
+    // during a workspace/layout restore). The previous handle belongs to the now
+    // destroyed context, so delete it and rebuild against the current context —
+    // otherwise paintGL binds a stale texture and crashes (masked by NDEBUG).
+    if (g_DevImGuiFontTexture) {
+        glDeleteTextures(1, &g_DevImGuiFontTexture);
+        g_DevImGuiFontTexture = 0;
+    }
+    ImGui_ImplOpenGL2_CreateFontsTexture();
 
-    // Compile particle point-sprite shader
+    // Compile particle point-sprite shader. Also a per-context GL resource, so
+    // drop any program from a previous context before rebuilding.
     {
+        if (_imp->particleShaderProgram) {
+            glDeleteProgram(_imp->particleShaderProgram);
+            _imp->particleShaderProgram = 0;
+        }
+        _imp->particleShaderReady = false;
         const char* vtxSrc =
             "#version 430 compatibility\n"
             "attribute float psize;\n"
@@ -690,10 +706,14 @@ DevViewport3D::initializeGL()
         glDeleteShader(fs);
     }
 
-    // Refresh at 30fps
-    _imp->refreshTimer = new QTimer(this);
-    connect(_imp->refreshTimer, SIGNAL(timeout()), this, SLOT(update()));
-    _imp->refreshTimer->start(33);
+    // Refresh at 30fps. The timer is not a GL resource — create it only once,
+    // even if initializeGL runs again after a context recreation, so we don't
+    // stack multiple timers all driving update().
+    if (!_imp->refreshTimer) {
+        _imp->refreshTimer = new QTimer(this);
+        connect(_imp->refreshTimer, SIGNAL(timeout()), this, SLOT(update()));
+        _imp->refreshTimer->start(33);
+    }
 }
 
 

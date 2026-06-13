@@ -261,7 +261,7 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
             TimeLinePtr timeline = app->getTimeLine();
             if (timeline) {
                 connect(timeline.get(), SIGNAL(frameChanged(SequenceTime,int)),
-                        this, SLOT(onFrameChanged(double)));
+                        this, SLOT(onFrameChanged(SequenceTime,int)));
             }
         }
     }
@@ -474,7 +474,7 @@ Viewport3DTab::onCyclesRender()
 }
 
 void
-Viewport3DTab::onFrameChanged(double frame)
+Viewport3DTab::onFrameChanged(SequenceTime frame, int /*reason*/)
 {
     _frameSpin->blockSignals(true);
     _frameSpin->setValue((int)frame);

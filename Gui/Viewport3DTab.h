@@ -26,6 +26,7 @@
 
 #include "Global/Macros.h"
 #include "Global/QtCompat.h"
+#include "Global/GlobalDefines.h"
 
 #include <QWidget>
 
@@ -73,7 +74,7 @@ public Q_SLOTS:
     void onResetCamera();
     void onToggleGrid();
     void onCyclesRender();
-    void onFrameChanged(double frame);
+    void onFrameChanged(SequenceTime frame, int reason);
     void onPlayForward();
     void onPlayBackward();
     void onPrevFrame();
