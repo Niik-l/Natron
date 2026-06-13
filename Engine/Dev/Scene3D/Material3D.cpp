@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <algorithm>
 
 NATRON_NAMESPACE_ENTER
 
@@ -313,6 +314,60 @@ Material3D::getMaterialBaseColor(double time, double& r, double& g, double& b) c
     KnobColorPtr c = _imp->baseColor.lock();
     if (c) { r = c->getValueAtTime(time, 0); g = c->getValueAtTime(time, 1); b = c->getValueAtTime(time, 2); }
     else { r = 0.8; g = 0.8; b = 0.8; }
+}
+
+void
+Material3D::updateCachedTexture(double time)
+{
+    // Render the Diffuse input (input 0) at a preview size, so a geo shape this
+    // material is connected to can display the texture in the 3D viewport. Mirrors
+    // Card3D::updateCachedTexture. Empty cache => no diffuse texture connected.
+    _cachedTexture.pixels.clear();
+    _cachedTexture.width = 0;
+    _cachedTexture.height = 0;
+
+    EffectInstancePtr diffuseInput = getInput(0);
+    if (!diffuseInput) return;
+
+    const int maxSize = 512;
+    RectI roiPixel;
+    ImagePtr img = getImage(0, time, RenderScale(), ViewIdx(0),
+                            NULL, NULL, false, true,
+                            eStorageModeRAM, 0, &roiPixel);
+    if (!img) return;
+
+    RectI bounds = img->getBounds();
+    int w = bounds.width();
+    int h = bounds.height();
+    if (w <= 0 || h <= 0) return;
+
+    int dstW = w, dstH = h;
+    if (w > maxSize || h > maxSize) {
+        float scale = (float)maxSize / std::max(w, h);
+        dstW = std::max(1, (int)(w * scale));
+        dstH = std::max(1, (int)(h * scale));
+    }
+
+    _cachedTexture.width = dstW;
+    _cachedTexture.height = dstH;
+    _cachedTexture.pixels.resize(dstW * dstH * 4, 0.0f);
+
+    Image::ReadAccess ra(img.get());
+    const int nComp = img->getComponents().getNumComponents();
+    for (int dy = 0; dy < dstH; ++dy) {
+        int sy = bounds.y1 + (dy * h / dstH);
+        for (int dx = 0; dx < dstW; ++dx) {
+            int sx = bounds.x1 + (dx * w / dstW);
+            const float* pix = (const float*)ra.pixelAt(sx, sy);
+            if (pix) {
+                int idx = (dy * dstW + dx) * 4;
+                _cachedTexture.pixels[idx + 0] = pix[0];
+                _cachedTexture.pixels[idx + 1] = (nComp >= 2) ? pix[1] : pix[0];
+                _cachedTexture.pixels[idx + 2] = (nComp >= 3) ? pix[2] : pix[0];
+                _cachedTexture.pixels[idx + 3] = (nComp >= 4) ? pix[3] : 1.0f;
+            }
+        }
+    }
 }
 
 double Material3D::getMaterialRoughness(double time) const

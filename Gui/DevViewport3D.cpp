@@ -64,8 +64,12 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/RotationConventions.h"
 #include "Engine/Dev/Scene3D/Camera3DNode.h"
 #include "Engine/Dev/Scene3D/Sphere3D.h"
+#include "Engine/Dev/Scene3D/UVProject.h"
+#include "Engine/Dev/DotUtils.h"
 #include "Engine/Dev/Scene3D/Group3D.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
+#include "Engine/Dev/Scene3D/Material3D.h"
+#include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/TimeLine.h"
 #include "Engine/Dev/Deep/DeepToPoints.h"
@@ -403,6 +407,54 @@ private:
 };
 
 NATRON_NAMESPACE_ENTER
+
+// Upload a scene-linear RGBA preview texture, applying an approximate display
+// transform (sRGB / Rec.709 OETF on RGB) so geo textures in the 3D view match the
+// 2D viewer instead of reading dark. The cached textures are scene-linear (rendered
+// from the image pipeline); without this the midtones look much darker than the
+// display-transformed 2D viewer. Reuses a scratch buffer (paintGL is single-thread).
+static void
+uploadPreviewTextureSRGB(const float* pixels, int w, int h, GLint wrapS, GLint wrapT)
+{
+    static std::vector<float> tmp;
+    const size_t n = (size_t)w * (size_t)h;
+    tmp.resize(n * 4);
+    for (size_t i = 0; i < n; ++i) {
+        for (int c = 0; c < 3; ++c) {
+            float v = pixels[i * 4 + c];
+            if (v <= 0.0f) { tmp[i * 4 + c] = 0.0f; continue; }
+            tmp[i * 4 + c] = (v <= 0.0031308f) ? (v * 12.92f)
+                                               : (1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f);
+        }
+        tmp[i * 4 + 3] = pixels[i * 4 + 3]; // alpha unchanged
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapS);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_FLOAT, tmp.data());
+}
+
+// Find a UVProject whose geo input (through Dots) resolves to `geoNode`, i.e. a
+// "geo -> UVProject" chain. Used so the viewport can display the projected texture
+// (UVProject input 2) with rewritten UVs on the geo, matching ScanlineRender.
+static UVProject*
+findUVProjectForGeo(GuiAppInstance* app, const NodePtr& geoNode)
+{
+    if (!app || !geoNode) return NULL;
+    ProjectPtr proj = app->getProject();
+    if (!proj) return NULL;
+    NodesList nodes;
+    proj->getNodes_recursive(nodes, true);
+    for (NodesList::const_iterator it = nodes.begin(); it != nodes.end(); ++it) {
+        if (!*it || !(*it)->isActivated()) continue;
+        UVProject* uvp = dynamic_cast<UVProject*>( (*it)->getEffectInstance().get() );
+        if (!uvp) continue;
+        EffectInstancePtr geo = skipDots(uvp->getGeoInput());
+        if (geo && geo->getNode() == geoNode) return uvp;
+    }
+    return NULL;
+}
 
 // ============================================================================
 // Section 3: Private struct — demo-style camera + ImGuizmo state
@@ -2306,6 +2358,58 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
     const ShadingMode mode = _imp->shadingMode;
     const int nv = (int)mesh->numVertices;
 
+    // ----- Resolve a texture for the shaded fill -----
+    // A downstream UVProject (geo -> UVProject) projects its img (input 2) onto this
+    // mesh with rewritten PER-VERTEX UVs and takes precedence. Otherwise a connected
+    // Material3D's diffuse texture, mapped by the mesh's own PER-FACE-VERTEX UVs.
+    NodePtr meshSrc = sn.sourceNode.lock();
+    double meshTime = 0.0;
+    { Gui* g = getGui(); GuiAppInstancePtr a = g ? g->getApp() : GuiAppInstancePtr();
+      if (a) meshTime = a->getTimeLine()->currentFrame(); }
+    const float* texPixels = NULL;
+    int texW = 0, texH = 0;
+    bool texWrapRepeat = true;
+    std::vector<float> projUVs, projSTW;  // per-vertex (UVProject rewriteUVs)
+    int projComp = 0;                      // 0 = none, 2 = uv, 3 = stw
+    bool useOwnUVs = false;                // material texture mapped by mesh->uvs
+    if (meshSrc) {
+        Gui* g = getGui();
+        GuiAppInstancePtr a = g ? g->getApp() : GuiAppInstancePtr();
+        UVProject* uvp = a ? findUVProjectForGeo(a.get(), meshSrc) : NULL;
+        if (uvp) {
+            uvp->updateCachedTexture(meshTime);
+            const UVProject::CachedTexture& ut = uvp->getCachedTexture();
+            if (ut.width > 0 && ut.height > 0 && !ut.pixels.empty()) {
+                std::vector<float> newUVs, newSTW; int comp = 0;
+                uvp->rewriteUVs(mesh->vertices, sn.worldMatrix, meshTime, newUVs, newSTW, comp);
+                if (comp == 2 || comp == 3) {
+                    texPixels = ut.pixels.data(); texW = ut.width; texH = ut.height;
+                    texWrapRepeat = false; projComp = comp;
+                    if (comp == 2) projUVs.swap(newUVs); else projSTW.swap(newSTW);
+                }
+            }
+        }
+        if (!texPixels && mesh->hasUVs && mesh->texCoordComponents == 2 && !mesh->uvs.empty()) {
+            // Per-part archive override first, else the geo's connected material.
+            Material3D* m3d = NULL;
+            if (NodePtr mn = sn.materialNode.lock())
+                m3d = dynamic_cast<Material3D*>(mn->getEffectInstance().get());
+            if (!m3d) {
+                MaterialProvider* mp = dynamic_cast<MaterialProvider*>(meshSrc->getEffectInstance().get());
+                if (mp) m3d = dynamic_cast<Material3D*>(mp->getConnectedMaterial());
+            }
+            if (m3d) {
+                m3d->updateCachedTexture(meshTime);
+                const Material3D::CachedTexture& mt = m3d->getCachedTexture();
+                if (mt.width > 0 && mt.height > 0 && !mt.pixels.empty()) {
+                    texPixels = mt.pixels.data(); texW = mt.width; texH = mt.height;
+                    useOwnUVs = true;
+                }
+            }
+        }
+    }
+    const bool meshHasTex = (texPixels != NULL);
+
     // ----- Shaded fill (Shaded / Shaded+Wire / Flat) -----
     // Fan-triangulate the polygon-soup mesh via faceCounts. If faceCounts is
     // empty, treat faceIndices as already-triangulated (GL_TRIANGLES every 3).
@@ -2318,19 +2422,43 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
         const float baseGrey = 0.45f;
         float mvForLit[16];
         if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
-        if (!lit) glColor3f(baseGrey, baseGrey, baseGrey);
+
+        GLuint glTex = 0;
+        if (meshHasTex) {
+            glGenTextures(1, &glTex);
+            glBindTexture(GL_TEXTURE_2D, glTex);
+            uploadPreviewTextureSRGB(texPixels, texW, texH,
+                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE,
+                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+            glEnable(GL_TEXTURE_2D);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        if (!lit && !meshHasTex) glColor3f(baseGrey, baseGrey, baseGrey);
+
+        // Emit a vertex with the right UV. fv = face-vertex index (for the mesh's
+        // own per-face-vertex UVs); v = vertex index (for UVProject per-vertex UVs).
+        auto emitVtx = [&](int v, size_t fv) {
+            if (projComp == 2)      glTexCoord2f(projUVs[v * 2], projUVs[v * 2 + 1]);
+            else if (projComp == 3) glTexCoord4f(projSTW[v * 3], projSTW[v * 3 + 1], 0.0f, projSTW[v * 3 + 2]);
+            else if (useOwnUVs && (fv * 2 + 1) < mesh->uvs.size())
+                                    glTexCoord2f(mesh->uvs[fv * 2], mesh->uvs[fv * 2 + 1]);
+            const float* p = &mesh->vertices[v * 3];
+            glVertex3f(p[0], p[1], p[2]);
+        };
         glBegin(GL_TRIANGLES);
-        auto emitTri = [&](int v0, int v1, int v2) {
-            const float* p0 = &mesh->vertices[v0*3];
-            const float* p1 = &mesh->vertices[v1*3];
-            const float* p2 = &mesh->vertices[v2*3];
+        auto emitTri = [&](int v0, int v1, int v2, size_t f0, size_t f1, size_t f2) {
             if (lit) {
+                const float* p0 = &mesh->vertices[v0*3];
+                const float* p1 = &mesh->vertices[v1*3];
+                const float* p2 = &mesh->vertices[v2*3];
                 float f = ViewportFaceLitFactor(p0, p1, p2, mvForLit);
-                glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
+                if (meshHasTex) glColor4f(f, f, f, 0.95f);
+                else            glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
+            } else if (meshHasTex) {
+                glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
             }
-            glVertex3f(p0[0], p0[1], p0[2]);
-            glVertex3f(p1[0], p1[1], p1[2]);
-            glVertex3f(p2[0], p2[1], p2[2]);
+            emitVtx(v0, f0); emitVtx(v1, f1); emitVtx(v2, f2);
         };
         if (!mesh->faceCounts.empty()) {
             size_t off = 0;
@@ -2345,7 +2473,7 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
                     const int v1 = mesh->faceIndices[off + i];
                     const int v2 = mesh->faceIndices[off + i + 1];
                     if (v0 >= 0 && v0 < nv && v1 >= 0 && v1 < nv && v2 >= 0 && v2 < nv) {
-                        emitTri(v0, v1, v2);
+                        emitTri(v0, v1, v2, off, off + i, off + i + 1);
                     }
                 }
                 off += (size_t)c;
@@ -2357,11 +2485,16 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
                 const int v1 = mesh->faceIndices[i + 1];
                 const int v2 = mesh->faceIndices[i + 2];
                 if (v0 >= 0 && v0 < nv && v1 >= 0 && v1 < nv && v2 >= 0 && v2 < nv) {
-                    emitTri(v0, v1, v2);
+                    emitTri(v0, v1, v2, i, i + 1, i + 2);
                 }
             }
         }
         glEnd();
+        if (meshHasTex) {
+            glDisable(GL_TEXTURE_2D);
+            glDisable(GL_BLEND);
+            glDeleteTextures(1, &glTex);
+        }
         if (mode == eShadedWire) {
             glDisable(GL_POLYGON_OFFSET_FILL);
         }
@@ -2406,12 +2539,46 @@ DevViewport3D::drawCardNode(const SceneNode& sn) const
 
     card3dNew->updateCachedTexture(time);
     const Card3D::CachedTexture& tex = card3dNew->getCachedTexture();
-    const bool hasTex = (tex.width > 0 && tex.height > 0 && !tex.pixels.empty());
 
-    if (tex.width > 0 && tex.height > 0) {
-        halfW = (float)tex.width / (float)tex.height * 0.5f;
+    // Texture + UVs — prefer a downstream UVProject (projects its img onto the card
+    // with rewritten UVs), else the card's own cached texture.
+    const float* texPixels = NULL;
+    int texW = 0, texH = 0;
+    bool texWrapRepeat = true;
+    std::vector<float> projUVs, projSTW;
+    int projComp = 0;
+    UVProject* uvpCard = findUVProjectForGeo(app.get(), node);
+    if (uvpCard) {
+        uvpCard->updateCachedTexture(time);
+        const UVProject::CachedTexture& ut = uvpCard->getCachedTexture();
+        if (ut.width > 0 && ut.height > 0 && !ut.pixels.empty()) {
+            texPixels = ut.pixels.data(); texW = ut.width; texH = ut.height;
+            texWrapRepeat = false;
+        } else {
+            uvpCard = NULL;
+        }
+    }
+    if (!texPixels && tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
+        texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
+    }
+    const bool hasTex = (texPixels != NULL);
+
+    if (texW > 0 && texH > 0) {
+        halfW = (float)texW / (float)texH * 0.5f;
     } else {
         halfW = 16.0f / 9.0f * 0.5f;
+    }
+
+    // For UVProject, rewrite the 4 corner UVs from the card's world-space corners.
+    if (uvpCard) {
+        float corners[12] = { -halfW, -halfH, 0.0f,  halfW, -halfH, 0.0f,
+                               halfW,  halfH, 0.0f, -halfW,  halfH, 0.0f };
+        std::vector<float> xyz(corners, corners + 12);
+        std::vector<float> newUVs, newSTW; int comp = 0;
+        uvpCard->rewriteUVs(xyz, sn.worldMatrix, time, newUVs, newSTW, comp);
+        projComp = comp;
+        if (comp == 2) projUVs.swap(newUVs);
+        else if (comp == 3) projSTW.swap(newSTW);
     }
 
     const ShadingMode mode = _imp->shadingMode;
@@ -2435,21 +2602,30 @@ DevViewport3D::drawCardNode(const SceneNode& sn) const
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
             glBindTexture(GL_TEXTURE_2D, glTex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width, tex.height,
-                         0, GL_RGBA, GL_FLOAT, tex.pixels.data());
+            uploadPreviewTextureSRGB(texPixels, texW, texH,
+                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE,
+                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
 
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glColor4f(litF, litF, litF, 0.85f);
 
+            // Corner UVs: projected (UVProject) or the default 0..1 quad mapping.
+            const float quadU[4] = {0.0f, 1.0f, 1.0f, 0.0f};
+            const float quadV[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+            const float quadX[4] = {-halfW,  halfW,  halfW, -halfW};
+            const float quadY[4] = {-halfH, -halfH,  halfH,  halfH};
             glBegin(GL_QUADS);
-            glTexCoord2f(0, 0); glVertex3f(-halfW, -halfH, 0);
-            glTexCoord2f(1, 0); glVertex3f( halfW, -halfH, 0);
-            glTexCoord2f(1, 1); glVertex3f( halfW,  halfH, 0);
-            glTexCoord2f(0, 1); glVertex3f(-halfW,  halfH, 0);
+            for (int ci = 0; ci < 4; ++ci) {
+                if (projComp == 2)
+                    glTexCoord2f(projUVs[ci * 2], projUVs[ci * 2 + 1]);
+                else if (projComp == 3)
+                    glTexCoord4f(projSTW[ci * 3], projSTW[ci * 3 + 1], 0.0f, projSTW[ci * 3 + 2]);
+                else
+                    glTexCoord2f(quadU[ci], quadV[ci]);
+                glVertex3f(quadX[ci], quadY[ci], 0.0f);
+            }
             glEnd();
 
             glDisable(GL_TEXTURE_2D);
@@ -2594,8 +2770,45 @@ DevViewport3D::drawSphereNode(const SceneNode& sn) const
     int numTris = (int)(triIndices.size() / 3);
 
     const ShadingMode mode = _imp->shadingMode;
-    const Sphere3D::CachedTexture& tex = sphere->getCachedTexture();
-    const bool hasTex = (tex.width > 0 && tex.height > 0 && !tex.pixels.empty());
+
+    // Texture + UVs. A downstream UVProject (geo -> UVProject) projects its img
+    // (input 2) onto this geo with rewritten UVs — prefer it so the projection
+    // shows in the viewport. Otherwise use the sphere's own cached texture.
+    const float* texPixels = NULL;
+    int texW = 0, texH = 0;
+    bool texWrapRepeat = true;
+    std::vector<float> projUVs;   // 2/vert (standard projection modes)
+    std::vector<float> projSTW;   // 3/vert (perspective mode)
+    int projComp = 0;
+    {
+        UVProject* uvp = findUVProjectForGeo(app.get(), node);
+        if (uvp) {
+            uvp->updateCachedTexture(time);
+            const UVProject::CachedTexture& ut = uvp->getCachedTexture();
+            if (ut.width > 0 && ut.height > 0 && !ut.pixels.empty()) {
+                std::vector<float> xyz; xyz.reserve(sphereVerts.size() * 3);
+                for (size_t vi = 0; vi < sphereVerts.size(); ++vi) {
+                    xyz.push_back(sphereVerts[vi].x);
+                    xyz.push_back(sphereVerts[vi].y);
+                    xyz.push_back(sphereVerts[vi].z);
+                }
+                std::vector<float> newUVs, newSTW; int comp = 0;
+                uvp->rewriteUVs(xyz, sn.worldMatrix, time, newUVs, newSTW, comp);
+                if (comp == 2 || comp == 3) {
+                    texPixels = ut.pixels.data(); texW = ut.width; texH = ut.height;
+                    texWrapRepeat = false; projComp = comp;
+                    if (comp == 2) projUVs.swap(newUVs); else projSTW.swap(newSTW);
+                }
+            }
+        }
+        if (!texPixels) {
+            const Sphere3D::CachedTexture& tex = sphere->getCachedTexture();
+            if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
+                texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
+            }
+        }
+    }
+    const bool hasTex = (texPixels != NULL);
 
     // ----- Shaded fill -----
     if (mode != eWireframe) {
@@ -2619,12 +2832,9 @@ DevViewport3D::drawSphereNode(const SceneNode& sn) const
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
             glBindTexture(GL_TEXTURE_2D, glTex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width, tex.height,
-                         0, GL_RGBA, GL_FLOAT, tex.pixels.data());
+            uploadPreviewTextureSRGB(texPixels, texW, texH,
+                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE,
+                                     GL_CLAMP_TO_EDGE);
 
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
@@ -2645,7 +2855,12 @@ DevViewport3D::drawSphereNode(const SceneNode& sn) const
                 }
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    glTexCoord2f(sphereVerts[idx].u, sphereVerts[idx].v);
+                    if (projComp == 2)
+                        glTexCoord2f(projUVs[idx * 2], projUVs[idx * 2 + 1]);
+                    else if (projComp == 3)
+                        glTexCoord4f(projSTW[idx * 3], projSTW[idx * 3 + 1], 0.0f, projSTW[idx * 3 + 2]);
+                    else
+                        glTexCoord2f(sphereVerts[idx].u, sphereVerts[idx].v);
                     glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
                 }
             }
@@ -2745,8 +2960,41 @@ DevViewport3D::drawCubeNode(const SceneNode& sn) const
     int numTris = (int)(triIndices.size() / 3);
 
     const ShadingMode mode = _imp->shadingMode;
-    const Cube3D::CachedTexture& tex = cube->getCachedTexture();
-    const bool hasTex = (tex.width > 0 && tex.height > 0 && !tex.pixels.empty());
+
+    // Texture + UVs — prefer a downstream UVProject (projects its img with rewritten
+    // UVs), else the cube's own cached texture (incl. a connected material).
+    const float* texPixels = NULL;
+    int texW = 0, texH = 0;
+    bool texWrapRepeat = true;
+    std::vector<float> projUVs, projSTW;
+    int projComp = 0;
+    {
+        UVProject* uvp = findUVProjectForGeo(app.get(), node);
+        if (uvp) {
+            uvp->updateCachedTexture(time);
+            const UVProject::CachedTexture& ut = uvp->getCachedTexture();
+            if (ut.width > 0 && ut.height > 0 && !ut.pixels.empty()) {
+                std::vector<float> xyz; xyz.reserve(cubeVerts.size() * 3);
+                for (size_t vi = 0; vi < cubeVerts.size(); ++vi) {
+                    xyz.push_back(cubeVerts[vi].x); xyz.push_back(cubeVerts[vi].y); xyz.push_back(cubeVerts[vi].z);
+                }
+                std::vector<float> newUVs, newSTW; int comp = 0;
+                uvp->rewriteUVs(xyz, sn.worldMatrix, time, newUVs, newSTW, comp);
+                if (comp == 2 || comp == 3) {
+                    texPixels = ut.pixels.data(); texW = ut.width; texH = ut.height;
+                    texWrapRepeat = false; projComp = comp;
+                    if (comp == 2) projUVs.swap(newUVs); else projSTW.swap(newSTW);
+                }
+            }
+        }
+        if (!texPixels) {
+            const Cube3D::CachedTexture& tex = cube->getCachedTexture();
+            if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
+                texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
+            }
+        }
+    }
+    const bool hasTex = (texPixels != NULL);
 
     if (mode != eWireframe) {
         if (mode == eShadedWire) {
@@ -2768,10 +3016,9 @@ DevViewport3D::drawCubeNode(const SceneNode& sn) const
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
             glBindTexture(GL_TEXTURE_2D, glTex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width, tex.height,
-                         0, GL_RGBA, GL_FLOAT, tex.pixels.data());
+            uploadPreviewTextureSRGB(texPixels, texW, texH,
+                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE,
+                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
 
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
@@ -2792,7 +3039,12 @@ DevViewport3D::drawCubeNode(const SceneNode& sn) const
                 }
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    glTexCoord2f(cubeVerts[idx].u, cubeVerts[idx].v);
+                    if (projComp == 2)
+                        glTexCoord2f(projUVs[idx * 2], projUVs[idx * 2 + 1]);
+                    else if (projComp == 3)
+                        glTexCoord4f(projSTW[idx * 3], projSTW[idx * 3 + 1], 0.0f, projSTW[idx * 3 + 2]);
+                    else
+                        glTexCoord2f(cubeVerts[idx].u, cubeVerts[idx].v);
                     glVertex3f(cubeVerts[idx].x, cubeVerts[idx].y, cubeVerts[idx].z);
                 }
             }
@@ -2875,8 +3127,41 @@ DevViewport3D::drawCylinderNode(const SceneNode& sn) const
     int numTris = (int)(triIndices.size() / 3);
 
     const ShadingMode mode = _imp->shadingMode;
-    const Cylinder3D::CachedTexture& tex = cyl->getCachedTexture();
-    const bool hasTex = (tex.width > 0 && tex.height > 0 && !tex.pixels.empty());
+
+    // Texture + UVs — prefer a downstream UVProject (projects its img with rewritten
+    // UVs), else the cylinder's own cached texture (incl. a connected material).
+    const float* texPixels = NULL;
+    int texW = 0, texH = 0;
+    bool texWrapRepeat = true;
+    std::vector<float> projUVs, projSTW;
+    int projComp = 0;
+    {
+        UVProject* uvp = findUVProjectForGeo(app.get(), node);
+        if (uvp) {
+            uvp->updateCachedTexture(time);
+            const UVProject::CachedTexture& ut = uvp->getCachedTexture();
+            if (ut.width > 0 && ut.height > 0 && !ut.pixels.empty()) {
+                std::vector<float> xyz; xyz.reserve(cylVerts.size() * 3);
+                for (size_t vi = 0; vi < cylVerts.size(); ++vi) {
+                    xyz.push_back(cylVerts[vi].x); xyz.push_back(cylVerts[vi].y); xyz.push_back(cylVerts[vi].z);
+                }
+                std::vector<float> newUVs, newSTW; int comp = 0;
+                uvp->rewriteUVs(xyz, sn.worldMatrix, time, newUVs, newSTW, comp);
+                if (comp == 2 || comp == 3) {
+                    texPixels = ut.pixels.data(); texW = ut.width; texH = ut.height;
+                    texWrapRepeat = false; projComp = comp;
+                    if (comp == 2) projUVs.swap(newUVs); else projSTW.swap(newSTW);
+                }
+            }
+        }
+        if (!texPixels) {
+            const Cylinder3D::CachedTexture& tex = cyl->getCachedTexture();
+            if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
+                texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
+            }
+        }
+    }
+    const bool hasTex = (texPixels != NULL);
 
     if (mode != eWireframe) {
         if (mode == eShadedWire) {
@@ -2887,10 +3172,9 @@ DevViewport3D::drawCylinderNode(const SceneNode& sn) const
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
             glBindTexture(GL_TEXTURE_2D, glTex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex.width, tex.height,
-                         0, GL_RGBA, GL_FLOAT, tex.pixels.data());
+            uploadPreviewTextureSRGB(texPixels, texW, texH,
+                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE,
+                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
 
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
@@ -2917,7 +3201,12 @@ DevViewport3D::drawCylinderNode(const SceneNode& sn) const
                 }
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    glTexCoord2f(cylVerts[idx].u, cylVerts[idx].v);
+                    if (projComp == 2)
+                        glTexCoord2f(projUVs[idx * 2], projUVs[idx * 2 + 1]);
+                    else if (projComp == 3)
+                        glTexCoord4f(projSTW[idx * 3], projSTW[idx * 3 + 1], 0.0f, projSTW[idx * 3 + 2]);
+                    else
+                        glTexCoord2f(cylVerts[idx].u, cylVerts[idx].v);
                     glVertex3f(cylVerts[idx].x, cylVerts[idx].y, cylVerts[idx].z);
                 }
             }

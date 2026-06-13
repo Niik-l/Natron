@@ -114,6 +114,18 @@ public:
      */
     void bakeInputTextures(double time);
 
+    // Cached diffuse texture for viewport preview (rendered from input 0). Geo
+    // shapes (Card/Sphere/Cube/Cylinder) display this when this Material3D is
+    // connected to their material input, so a textured material shows in the 3D
+    // view (not just the Cycles render). Same shape as the geo CachedTexture.
+    struct CachedTexture {
+        std::vector<float> pixels; // RGBA float
+        int width, height;
+        CachedTexture() : width(0), height(0) {}
+    };
+    const CachedTexture& getCachedTexture() const { return _cachedTexture; }
+    void updateCachedTexture(double time);
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
@@ -121,6 +133,7 @@ private:
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     std::unique_ptr<Material3DPrivate> _imp;
+    mutable CachedTexture _cachedTexture;
 };
 
 NATRON_NAMESPACE_EXIT

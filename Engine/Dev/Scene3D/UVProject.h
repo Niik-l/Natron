@@ -136,6 +136,17 @@ public:
                     std::vector<float>& outSTW,
                     int& outComponents) const;
 
+    // Cached projection texture for viewport preview (rendered from the img input,
+    // input 2). The 3D viewport displays this on a geo whose UVs this UVProject
+    // rewrites, so the projection shows in the view (not only in ScanlineRender).
+    struct CachedTexture {
+        std::vector<float> pixels; // RGBA float
+        int width, height;
+        CachedTexture() : width(0), height(0) {}
+    };
+    const CachedTexture& getCachedTexture() const { return _cachedTexture; }
+    void updateCachedTexture(double time);
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
@@ -143,6 +154,7 @@ private:
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     std::unique_ptr<UVProjectPrivate> _imp;
+    mutable CachedTexture _cachedTexture;
 };
 
 NATRON_NAMESPACE_EXIT

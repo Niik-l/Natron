@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "Cylinder3D.h"
+#include "Material3D.h"
 #include "../DotUtils.h"
 
 #include <cmath>
@@ -457,6 +458,19 @@ Cylinder3D::updateCachedTexture(double time)
     _cachedTexture.pixels.clear();
     _cachedTexture.width = 0;
     _cachedTexture.height = 0;
+
+    // Prefer a connected Material3D's diffuse texture so a textured material shows
+    // on this shape in the 3D viewport (not only in the Cycles render).
+    if (Material3D* m3d = dynamic_cast<Material3D*>(getConnectedMaterial())) {
+        m3d->updateCachedTexture(time);
+        const Material3D::CachedTexture& mt = m3d->getCachedTexture();
+        if (mt.width > 0 && mt.height > 0 && !mt.pixels.empty()) {
+            _cachedTexture.width = mt.width;
+            _cachedTexture.height = mt.height;
+            _cachedTexture.pixels = mt.pixels;
+            return;
+        }
+    }
 
     EffectInstancePtr imgInput = getInput(0);
     if (!imgInput) return;
