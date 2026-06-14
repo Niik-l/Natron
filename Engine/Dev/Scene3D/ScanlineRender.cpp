@@ -98,6 +98,21 @@ struct ScanlineRenderPrivate
     // 2 = Wireframe (solid white lines from triangle edges).
     KnobChoiceWPtr shadingMode;
 
+    // Spatial antialiasing level — maps to MSAA sample count
+    // (None=1, Low=2, Medium=4, High=8), clamped to the driver's GL_MAX_SAMPLES.
+    KnobChoiceWPtr antialiasing;
+
+    // Overscan: extra pixels rendered beyond each edge of the Width x Height
+    // frame. The output RoD grows by this amount on all four sides and the
+    // frustum widens proportionally (so the extra pixels reveal more of the
+    // scene rather than zooming). 0 = no overscan.
+    KnobIntWPtr overscan;
+
+    // Projection mode: 0 = Perspective (pinhole, default), 1 = Orthographic
+    // (parallel rays; extents from Ortho Width below). UV / Spherical to follow.
+    KnobChoiceWPtr projectionMode;
+    KnobDoubleWPtr orthoWidth;  // orthographic frustum width in world units
+
     // Phase 3D/3E — per-pixel AOV outputs. The GLSL/MRT pipeline is mandatory
     // since Phase 3E; AOVs only depend on their own knobs being on.
     KnobBoolWPtr outputDepth;     // depth.Z plane (linear camera-space distance)
@@ -211,6 +226,59 @@ ScanlineRender::initializeKnobs()
                               "Flat: no lighting — just texture or per-vertex color. "
                               "Wireframe: solid white edges derived from triangle indices."));
         outPage->addKnob(k); _imp->shadingMode = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Projection Mode"));
+        k->setName("projectionMode"); k->setAnimationEnabled(false);
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("Perspective",  "perspective",  "Pinhole projection from the camera's focal length + aperture"));
+        entries.push_back(ChoiceOption("Orthographic", "orthographic", "Parallel projection — no perspective foreshortening; extents from Ortho Width"));
+        entries.push_back(ChoiceOption("UV",           "uv",           "Bake to UV space — rasterize each surface at its UV coords. Lit texture + Normal / Pref (object-space position) / UV AOVs bake into the texture map layout. (World Position / Velocity / Depth AOVs are not meaningful in this mode.)"));
+        entries.push_back(ChoiceOption("Spherical",    "spherical",    "360 degree equirectangular (lat-long) render from the camera position. Per-vertex projection: coarse geometry near the poles or the +/-180 longitude seam will distort (subdivide dense meshes for clean results)."));
+        k->populateChoices(entries);
+        k->setDefaultValue(0); // Perspective
+        k->setHintToolTip(tr("How the 3D scene is projected to 2D. "
+                              "Perspective: standard pinhole camera. "
+                              "Orthographic: parallel rays (technical/elevation views), sized by Ortho Width. "
+                              "UV: render each surface into its UV/texture space — bake lit texture, Normal, and object-space position (Pref) into a texture map. "
+                              "Spherical: 360 degree lat-long environment render from the camera."));
+        outPage->addKnob(k); _imp->projectionMode = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Ortho Width"));
+        k->setName("orthoWidth"); k->setDefaultValue(10.0);
+        k->setMinimum(0.0001); k->setDisplayMinimum(0.1); k->setDisplayMaximum(100.0);
+        k->setHintToolTip(tr("Width (in world units) of the orthographic view frustum. "
+                              "Height is derived from the camera's aperture aspect. "
+                              "Only used when Projection Mode = Orthographic."));
+        outPage->addKnob(k); _imp->orthoWidth = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Antialiasing"));
+        k->setName("antialiasing"); k->setAnimationEnabled(false);
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("None",   "", "No multisampling (1 sample/pixel) — fastest, hard aliased edges"));
+        entries.push_back(ChoiceOption("Low",    "", "2x MSAA"));
+        entries.push_back(ChoiceOption("Medium", "", "4x MSAA (default)"));
+        entries.push_back(ChoiceOption("High",   "", "8x MSAA — smoothest edges, slowest"));
+        k->populateChoices(entries);
+        k->setDefaultValue(2); // Medium = 4x, matches the previous hard-coded behaviour
+        k->setHintToolTip(tr("Spatial antialiasing quality. Maps to the MSAA sample count "
+                              "(None=1, Low=2, Medium=4, High=8), clamped to the GPU's maximum. "
+                              "Higher is smoother but slower. This is separate from Motion Blur Samples."));
+        outPage->addKnob(k); _imp->antialiasing = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Overscan"));
+        k->setName("overscan"); k->setDefaultValue(0);
+        k->setMinimum(0); k->setDisplayMinimum(0); k->setDisplayMaximum(512);
+        k->setHintToolTip(tr("Render this many extra pixels beyond each edge of the "
+                              "Width x Height frame (output bounds grow by this amount on "
+                              "all four sides). The frustum widens proportionally so the "
+                              "extra pixels reveal more of the scene — useful so downstream "
+                              "blurs/transforms/defocus have data past the frame edge. "
+                              "0 = off."));
+        outPage->addKnob(k); _imp->overscan = k;
     }
 
     // -------- Motion Blur group (Output tab) --------
@@ -414,10 +482,11 @@ StatusEnum
 ScanlineRender::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
                                       ViewIdx /*view*/, RectD* rod)
 {
-    rod->x1 = 0;
-    rod->y1 = 0;
-    rod->x2 = _imp->outputWidth.lock()->getValue();
-    rod->y2 = _imp->outputHeight.lock()->getValue();
+    const int ov = _imp->overscan.lock() ? _imp->overscan.lock()->getValue() : 0;
+    rod->x1 = -ov;
+    rod->y1 = -ov;
+    rod->x2 = _imp->outputWidth.lock()->getValue()  + ov;
+    rod->y2 = _imp->outputHeight.lock()->getValue() + ov;
     return eStatusOK;
 }
 
@@ -495,6 +564,37 @@ buildViewMatrix(double tx, double ty, double tz,
 // (independent fov_h / fov_v from both apertures). Image aspect is no longer
 // used to derive the Y FOV — that was a long-standing bug producing CG drift
 // proportional to camera motion when sensor aspect != image aspect.
+
+// Build the projection matrix for the selected projection mode, applying the
+// overscan extent scaling. projMode: 0 = Perspective, 1 = Orthographic.
+// Centralized so every projection site (main, motion-blur sub-sample, and the
+// previous-frame velocity reference) stays consistent.
+static void
+buildProjectionForMode(int projMode,
+                       double focalLength, double hAperture, double vAperture,
+                       double orthoWidth, double ovScaleX, double ovScaleY,
+                       float nearZ, float farZ, float out[16])
+{
+    if (projMode == 1) {
+        // Orthographic: symmetric parallel frustum. Width is user-set (world
+        // units); height preserves the aperture aspect (vA/hA). Overscan widens
+        // the extents proportionally, mirroring the perspective aperture scale.
+        const double halfW = 0.5 * orthoWidth * ovScaleX;
+        const double aspect = (hAperture > 1e-6) ? (vAperture / hAperture) : 1.0;
+        const double halfH = 0.5 * orthoWidth * aspect * ovScaleY;
+        std::memset(out, 0, 16 * sizeof(float));
+        out[0]  = (halfW > 1e-9) ? (float)(1.0 / halfW) : 1.0f;
+        out[5]  = (halfH > 1e-9) ? (float)(1.0 / halfH) : 1.0f;
+        out[10] = -2.0f / (farZ - nearZ);
+        out[14] = -(farZ + nearZ) / (farZ - nearZ);
+        out[15] = 1.0f;
+    } else {
+        // Perspective (default). Overscan scales each aperture so the extra
+        // pixels reveal more scene at the same per-pixel angular size.
+        CameraMath::composeProjectionMatrix(focalLength, hAperture * ovScaleX,
+                                            vAperture * ovScaleY, nearZ, farZ, out);
+    }
+}
 
 // ==================== 4x4 matrix helpers (column-major, OpenGL convention) ====================
 
@@ -777,6 +877,10 @@ static const char* kBeautyVert =
     "uniform mat4 u_localMatrix;               // object -> world (for v_worldPos in Shaded mode)\n"
     "uniform mat3 u_normalMatrix;              // transpose(inverse(localMatrix3x3)) for world normals\n"
     "uniform vec2 u_viewportSize;              // (width, height) in pixels — scales NDC delta to screen pixels\n"
+    "uniform int  u_projMode;                  // 0/1 = matrix (perspective/orthographic), 2 = UV bake, 3 = spherical\n"
+    "uniform mat4 u_view;                      // world->view, for spherical lat-long projection\n"
+    "uniform float u_near;\n"
+    "uniform float u_far;\n"
     "out vec2 v_uv;\n"
     "out vec4 v_stw;\n"
     "out vec3 v_worldNormal;\n"
@@ -792,7 +896,22 @@ static const char* kBeautyVert =
     "    v_prefPos     = in_pos;\n"
     "    v_currClipPos = u_mvp * vec4(in_pos, 1.0);\n"
     "    v_prevClipPos = u_prevMvp * vec4(in_prevPos, 1.0);\n"
-    "    gl_Position   = v_currClipPos;\n"
+    "    if (u_projMode == 2) {\n"
+    "        // UV bake: place the vertex at its UV coordinate (UV [0,1] -> NDC\n"
+    "        // [-1,1]) so the lit/textured surface is rasterized into texture space.\n"
+    "        gl_Position = vec4(in_uv * 2.0 - 1.0, 0.0, 1.0);\n"
+    "    } else if (u_projMode == 3) {\n"
+    "        // Spherical (equirectangular lat-long): map the view-space direction\n"
+    "        // to longitude (x) and latitude (y); radius drives depth for occlusion.\n"
+    "        vec3 vp = (u_view * vec4(v_worldPos, 1.0)).xyz;\n"
+    "        float r = length(vp);\n"
+    "        float lon = atan(vp.x, -vp.z);                                  // -PI..PI\n"
+    "        float lat = asin(clamp(vp.y / max(r, 1e-6), -1.0, 1.0));        // -PI/2..PI/2\n"
+    "        float ndcZ = clamp((r - u_near) / max(u_far - u_near, 1e-6), 0.0, 1.0) * 2.0 - 1.0;\n"
+    "        gl_Position = vec4(lon / 3.14159265, lat / 1.5707963, ndcZ, 1.0);\n"
+    "    } else {\n"
+    "        gl_Position = v_currClipPos;\n"
+    "    }\n"
     "}\n";
 
 static const char* kBeautyFrag =
@@ -1064,6 +1183,10 @@ static const char* kInstanceVert =
     "uniform int  u_fadeEnabled;     // 1 = apply stretch-mode alpha fade based on object-Y\n"
     "uniform float u_fadeCenterY;\n"
     "uniform float u_fadeHalfY;\n"
+    "uniform int  u_projMode;        // 0/1 = matrix, 2 = UV bake, 3 = spherical\n"
+    "uniform mat4 u_view;            // world->view, for spherical projection\n"
+    "uniform float u_near;\n"
+    "uniform float u_far;\n"
     "out vec3 v_worldNormal;\n"
     "out vec3 v_worldPos;\n"
     "out vec3 v_objPos;              // object-space position — drives Pref AOV\n"
@@ -1079,7 +1202,18 @@ static const char* kInstanceVert =
     "    v_worldNormal = u_normalMatrix * in_normal;\n"
     "    v_currClip    = u_projView * worldPos4;\n"
     "    v_prevClip    = u_prevProjView * (u_prevLocalMatrix * vec4(in_pos, 1.0));\n"
-    "    gl_Position   = v_currClip;\n"
+    "    if (u_projMode == 2) {\n"
+    "        gl_Position = vec4(in_uv * 2.0 - 1.0, 0.0, 1.0);\n"
+    "    } else if (u_projMode == 3) {\n"
+    "        vec3 vp = (u_view * worldPos4).xyz;\n"
+    "        float r = length(vp);\n"
+    "        float lon = atan(vp.x, -vp.z);\n"
+    "        float lat = asin(clamp(vp.y / max(r, 1e-6), -1.0, 1.0));\n"
+    "        float ndcZ = clamp((r - u_near) / max(u_far - u_near, 1e-6), 0.0, 1.0) * 2.0 - 1.0;\n"
+    "        gl_Position = vec4(lon / 3.14159265, lat / 1.5707963, ndcZ, 1.0);\n"
+    "    } else {\n"
+    "        gl_Position = v_currClip;\n"
+    "    }\n"
     // Cheat-mode stretch fade: normalize object-Y to [-1, 1] across bbox, fade
     // alpha toward the stretched ends. Matches the legacy immediate-mode code
     // verbatim (1.0 - clamp(|normY|, 0, 1) * 0.7 → 30% min alpha at extremes).
@@ -1926,8 +2060,26 @@ ScanlineRender::render(const RenderActionArgs& args)
     ImagePtr outImg = args.outputPlanes.front().second;
     if (!outImg) return eStatusFailed;
 
-    int outW = _imp->outputWidth.lock()->getValue();
-    int outH = _imp->outputHeight.lock()->getValue();
+    const int baseW = _imp->outputWidth.lock()->getValue();
+    const int baseH = _imp->outputHeight.lock()->getValue();
+    const int overscan = _imp->overscan.lock() ? _imp->overscan.lock()->getValue() : 0;
+    // Padded render dimensions: the frame plus 'overscan' pixels on every side.
+    // All framebuffers, the viewport, readback, and the output write loop use
+    // outW/outH, and the output RoD (getRegionOfDefinition) starts at (-overscan,
+    // -overscan), so the write loop's fbX = x - outBounds.x1 maps 1:1 with no
+    // further offsetting needed.
+    int outW = baseW + 2 * overscan;
+    int outH = baseH + 2 * overscan;
+    // Aperture scale to widen the frustum for overscan. Scaling each aperture by
+    // paddedPixels/basePixels keeps every original pixel on the exact same world
+    // ray and extends the view into the overscan border (symmetric padding keeps
+    // the frustum centered). 1.0 when overscan == 0.
+    const double ovScaleX = (baseW > 0) ? (double)outW / (double)baseW : 1.0;
+    const double ovScaleY = (baseH > 0) ? (double)outH / (double)baseH : 1.0;
+
+    // Projection mode (0 = Perspective, 1 = Orthographic) + orthographic width.
+    const int projMode = _imp->projectionMode.lock() ? _imp->projectionMode.lock()->getValue() : 0;
+    const double orthoWidth = _imp->orthoWidth.lock() ? _imp->orthoWidth.lock()->getValue() : 10.0;
 
     // --- Get camera from input 2 (through any Dots) ---
     EffectInstancePtr camEffect = skipDots(getInput(2));
@@ -2041,10 +2193,13 @@ ScanlineRender::render(const RenderActionArgs& args)
 
     glContext->setContextCurrentNoRender();
 
-    // --- Determine MSAA sample count (clamp to driver max) ---
+    // --- Determine MSAA sample count from the Antialiasing knob (clamp to driver max) ---
     GLint maxSamples = 0;
     glGetIntegerv(GL_MAX_SAMPLES, &maxSamples);
-    int samples = std::min(4, (int)maxSamples); // 4x MSAA default
+    int aaLevel = _imp->antialiasing.lock() ? _imp->antialiasing.lock()->getValue() : 2; // default Medium
+    static const int kAaSamples[4] = { 1, 2, 4, 8 }; // None / Low / Medium / High
+    if (aaLevel < 0 || aaLevel > 3) aaLevel = 2;
+    int samples = std::min(kAaSamples[aaLevel], (int)maxSamples);
     if (samples < 1) samples = 1;
 
     // --- Create MSAA FBO (multisampled color + depth renderbuffers) ---
@@ -2164,7 +2319,7 @@ ScanlineRender::render(const RenderActionArgs& args)
     // motion when sensor aspect != image aspect.
     float viewMatrix[16], projMatrix[16];
     buildViewMatrix(camTX, camTY, camTZ, camRX, camRY, camRZ, viewMatrix);
-    CameraMath::composeProjectionMatrix(camFL, camHA, camVA, camNear, camFar, projMatrix);
+    buildProjectionForMode(projMode, camFL, camHA, camVA, orthoWidth, ovScaleX, ovScaleY, camNear, camFar, projMatrix);
 
     // --- Motion blur setup ---
     int motionSamples = _imp->motionSamples.lock() ? _imp->motionSamples.lock()->getValue() : 1;
@@ -2258,8 +2413,8 @@ ScanlineRender::render(const RenderActionArgs& args)
         }
         buildViewMatrix((float)pTx, (float)pTy, (float)pTz,
                         (float)pRx, (float)pRy, (float)pRz, prevViewMatrix);
-        CameraMath::composeProjectionMatrix((float)pFL, (float)pHA, (float)pVA,
-                                            (float)pNear, (float)pFar, prevProjMatrix);
+        buildProjectionForMode(projMode, pFL, pHA, pVA, orthoWidth, ovScaleX, ovScaleY,
+                               (float)pNear, (float)pFar, prevProjMatrix);
         mat4Mul(prevProjViewMatrix, prevProjMatrix, prevViewMatrix);
     }
 
@@ -2391,8 +2546,8 @@ ScanlineRender::render(const RenderActionArgs& args)
             const double sFar  = cam->getCameraFar(sampleTime);
             buildViewMatrix((float)sTx, (float)sTy, (float)sTz,
                             (float)sRx, (float)sRy, (float)sRz, viewMatrix);
-            CameraMath::composeProjectionMatrix((float)sFL, (float)sHA, (float)sVA,
-                                                 (float)sNear, (float)sFar, projMatrix);
+            buildProjectionForMode(projMode, sFL, sHA, sVA, orthoWidth, ovScaleX, ovScaleY,
+                                   (float)sNear, (float)sFar, projMatrix);
             mat4Mul(projViewMatrix, projMatrix, viewMatrix);
         }
 
@@ -2451,6 +2606,18 @@ ScanlineRender::render(const RenderActionArgs& args)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     if (glslBeautyProg) {
+        // Projection mode (UV bake / spherical) applies to every geo via this
+        // program; set it once (uniforms persist across renderGeoObjectGlsl's
+        // repeated glUseProgram). u_view/u_near/u_far feed the spherical path.
+        glUseProgram(glslBeautyProg);
+        const GLint locBeautyMode = glGetUniformLocation(glslBeautyProg, "u_projMode");
+        if (locBeautyMode >= 0) glUniform1i(locBeautyMode, projMode);
+        const GLint locBeautyView = glGetUniformLocation(glslBeautyProg, "u_view");
+        if (locBeautyView >= 0) glUniformMatrix4fv(locBeautyView, 1, GL_FALSE, viewMatrix);
+        const GLint locBeautyNear = glGetUniformLocation(glslBeautyProg, "u_near");
+        if (locBeautyNear >= 0) glUniform1f(locBeautyNear, camNear);
+        const GLint locBeautyFar = glGetUniformLocation(glslBeautyProg, "u_far");
+        if (locBeautyFar >= 0) glUniform1f(locBeautyFar, camFar);
         for (size_t gi = 0; gi < geoObjects.size(); ++gi) {
             renderGeoObjectGlsl(geoObjects[gi], glslBeautyProg,
                                 projViewMatrix, prevProjViewMatrix,
@@ -3182,7 +3349,15 @@ ScanlineRender::render(const RenderActionArgs& args)
             const GLint locWritePref     = glGetUniformLocation(glslInstanceProg, "u_writePref");
             const GLint locWriteVelocity = glGetUniformLocation(glslInstanceProg, "u_writeVelocity");
             const GLint locViewportSize  = glGetUniformLocation(glslInstanceProg, "u_viewportSize");
+            const GLint locProjMode      = glGetUniformLocation(glslInstanceProg, "u_projMode");
+            const GLint locViewMat       = glGetUniformLocation(glslInstanceProg, "u_view");
+            const GLint locNearI         = glGetUniformLocation(glslInstanceProg, "u_near");
+            const GLint locFarI          = glGetUniformLocation(glslInstanceProg, "u_far");
 
+            if (locProjMode     >= 0) glUniform1i(locProjMode, projMode);
+            if (locViewMat      >= 0) glUniformMatrix4fv(locViewMat, 1, GL_FALSE, viewMatrix);
+            if (locNearI        >= 0) glUniform1f(locNearI, camNear);
+            if (locFarI         >= 0) glUniform1f(locFarI, camFar);
             if (locProjView     >= 0) glUniformMatrix4fv(locProjView,     1, GL_FALSE, projViewMatrix);
             if (locPrevProjView >= 0) glUniformMatrix4fv(locPrevProjView, 1, GL_FALSE, prevProjViewMatrix);
             if (locShadingMode  >= 0) glUniform1i(locShadingMode, shadingMode);
@@ -3866,7 +4041,11 @@ ScanlineRender::render(const RenderActionArgs& args)
                     float d = depthBuf[(size_t)fbY * outW + fbX];
                     if (d >= 1.0f - 1e-6f) {
                         dst[0] = camFar;
+                    } else if (projMode == 1) {
+                        // Orthographic: depth buffer is linear in [near, far].
+                        dst[0] = camNear + d * (camFar - camNear);
                     } else {
+                        // Perspective: un-project the non-linear depth.
                         float zNdc = 2.0f * d - 1.0f;
                         dst[0] = (2.0f * camNear * camFar) /
                                  (camFar + camNear - zNdc * (camFar - camNear));
