@@ -41,8 +41,17 @@ After installing, open **MSYS2 MINGW64** terminal (not the regular MSYS2 termina
 
 Run these commands in the MSYS2 MINGW64 terminal:
 
+> **Do the full `pacman -Syu` — don't skip it.** MSYS2 is rolling-release and does
+> **not** support partial upgrades. If you `pacman -S` individual packages without a
+> preceding full `-Syu`, you can get soname mismatches between a freshly-pulled lib and
+> a not-upgraded transitive dependency — e.g. a newer OpenImageIO needing
+> `libopenjph-0.28.dll` while `openjph` is still 0.27, which surfaces at runtime as
+> `NatronRenderer.exe` exiting 127 with a "DLL not found". If you must skip the `-Syu`
+> (to avoid a mid-session MSYS2 runtime restart), be ready to fix a missing transitive
+> DLL with a targeted `pacman -S <pkg>` and re-bundle it (re-run the staging step).
+
 ```bash
-# Update MSYS2 first
+# Update MSYS2 first (full sync — avoids partial-upgrade soname mismatches)
 pacman -Syu
 
 # Core build tools
@@ -216,7 +225,7 @@ cmake .. -G "MinGW Makefiles" \
 mingw32-make -j2     # builds BOTH Misc.ofx (~170 MB) and CImg.ofx (~60 MB)
 ```
 
-> **CMake error about CMAKE_SYSTEM_PROCESSOR?** On recent MSYS2 cmake builds `CMAKE_SYSTEM_PROCESSOR` is empty even when targeting x86_64 (`CMAKE_SIZEOF_VOID_P=8`). The bare `if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")` parses as `if(STREQUAL "x86_64")` → cmake error. **Quoting alone isn't enough** — `if("" STREQUAL "x86_64")` evaluates false, so `OFX_ARCH` silently stays `Win32` (wrong; the .ofx ends up under `Contents/Win64`). In the `if(MINGW)` block of `openfx-misc/CMakeLists.txt` (~line 528) AND `openfx-io/CMakeLists.txt` (~line 402), change:
+> **CMake error about CMAKE_SYSTEM_PROCESSOR?** On recent MSYS2 cmake builds `CMAKE_SYSTEM_PROCESSOR` is empty even when targeting x86_64 (`CMAKE_SIZEOF_VOID_P=8`). The bare `if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")` parses as `if(STREQUAL "x86_64")` → cmake error. **Quoting alone isn't enough** — `if("" STREQUAL "x86_64")` evaluates false, so `OFX_ARCH` silently stays `Win32` (wrong; the .ofx ends up under `Contents/Win64`). Each file has **three** `CMAKE_SYSTEM_PROCESSOR` checks (one per platform — MINGW / FreeBSD / Linux); edit the **first one**, inside the `if(MINGW)` block — `openfx-misc/CMakeLists.txt` (~line 528, first occurrence) AND `openfx-io/CMakeLists.txt` (~line 402, first occurrence). Change:
 > ```cmake
 > if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")
 > ```
@@ -658,6 +667,14 @@ App/NatronApp_main.cpp:65:5: warning: no previous declaration for 'int wmain(int
 ```
 
 Cosmetic. `wmain` is the wide-char entry point; the warning is GCC asking for a forward declaration. Doesn't affect the build or runtime.
+
+### Harmless runtime warning: `Fontconfig: Cannot load default config file`
+
+```
+Fontconfig: Cannot load default config file: No such file: (null)
+```
+
+Cosmetic. The bundle doesn't ship a `Resources/etc/fonts` Fontconfig config, so Fontconfig falls back to system fonts on Windows. Non-fatal — the GUI renders normally. (Distinct from the *fatal* `libfontconfig-1.dll was not found` below, which is a missing-DLL error.)
 
 ### "cmake: command not found" or "mingw32-make: command not found"
 

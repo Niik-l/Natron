@@ -134,6 +134,11 @@ git -C $NATRON_ROOT/openfx-io diff > tools/win-build/patches/openfx-io.patch
 - Runs under **MSYS2 git** (mingw64 on PATH). Idempotency for `cycles-mingw.patch` uses a
   content sentinel, not `git apply --reverse --check` (that check differs across git builds).
 - `pacman -Syu` may demand you reopen the MINGW64 terminal; `00-deps.sh` warns if so — reopen and re-run it.
+- **Don't skip the full `-Syu`.** MSYS2 doesn't support partial upgrades: `pacman -S`'ing
+  packages without it can leave soname mismatches (e.g. a newer OpenImageIO wanting
+  `libopenjph-0.28.dll` while `openjph` is still 0.27 → `NatronRenderer.exe` exits 127 at
+  runtime). If you hit a missing transitive DLL, `pacman -S <pkg>` it and re-run
+  `06-install.sh` to re-bundle. See `BUILDING.md` §2.
 - Cycles statically links into Natron, so the exes are large (debug info); the install
   folder is ~6 GB with Cycles, far less without (the build tree is ~9 GB on top of that).
 
