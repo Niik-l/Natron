@@ -25,8 +25,8 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 Matching Nuke's ScanlineRender controls.
 Done + pushed: Antialiasing level (None/Low/Medium/High = MSAA), Overscan,
-Projection Mode (Perspective / Orthographic / UV / Spherical).
-Done but UNCOMMITTED: Ambient (works), Transparency (revisit — see below).
+Projection Mode (Perspective / Orthographic / UV / Spherical), Ambient.
+Done but UNCOMMITTED: Transparency (revisit — see below).
 
 Remaining:
 

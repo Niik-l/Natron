@@ -17,6 +17,16 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **ScanlineRender: ambient fill colour control (2026-06-14)** —
+  The previously hard-coded 0.15 ambient term is now a 3-component **Ambient**
+  colour knob on the Output tab (Shaded mode). It multiplies the surface colour
+  (ambient * albedo), so unlit / back-facing areas aren't pure black. Default
+  0.15 grey preserves the prior look; set to black for no fill or tint for a
+  coloured ambient. Wired into both the kBeauty (mesh/primitive) and kInstance
+  (particle-instanced) shaders via a u_ambient uniform; no effect in Flat or
+  Wireframe mode. (Transparency toggle is also built but held uncommitted pending
+  a semantics review — see TODO.)
+
 - **ScanlineRender: antialiasing level, overscan, and projection modes (2026-06-14)** —
   Nuke-ScanlineRender-parity controls on the Output tab.
   **Antialiasing** (None/Low/Medium/High = 1/2/4/8x MSAA; the sample count was
