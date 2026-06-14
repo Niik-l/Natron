@@ -17,6 +17,28 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **ScanlineRender: antialiasing level, overscan, and projection modes (2026-06-14)** —
+  Nuke-ScanlineRender-parity controls on the Output tab.
+  **Antialiasing** (None/Low/Medium/High = 1/2/4/8x MSAA; the sample count was
+  previously hard-coded to 4x, now user-selectable and clamped to GL_MAX_SAMPLES).
+  **Overscan** (pixels): the output RoD grows on all four sides and the frustum
+  widens proportionally (aperture scaled per axis by paddedPixels/basePixels), so
+  the original frame stays pixel-identical and the extra pixels reveal more scene
+  — for downstream blur / transform / defocus. The output write loop already
+  offsets by outBounds.x1, so the padded framebuffer maps 1:1.
+  **Projection Mode**: Perspective (default) / Orthographic (parallel, sized by a
+  new Ortho Width knob, height from aperture aspect; Depth AOV switched to a
+  linear near..far mapping in ortho) / UV (rasterize each surface at its UV coords
+  — gl_Position = uv*2-1 — to bake lit texture + Normal/Pref AOVs into the
+  texture-map layout) / Spherical (per-vertex equirectangular lat-long from the
+  camera, radius drives depth for occlusion; coarse geo distorts at the poles /
+  ±180° seam). Projection is centralized in a buildProjectionForMode() helper
+  used by all three matrix sites (main, motion-blur sub-sample, previous-frame
+  velocity); UV/Spherical run in the kBeauty/kInstance vertex shaders via a
+  u_projMode uniform (+ u_view/u_near/u_far for spherical). "Render Camera" mode
+  was intentionally dropped — our cameras have no projection-type, so it would
+  just equal Perspective.
+
 - **3D viewport: geometry shaded with its connected material/texture (2026-06-13)** —
   Geometry in the 3D viewport was flat/grey unless wireframe was on. Now, when a
   geo has a material or image connected, the viewport previews it textured across
