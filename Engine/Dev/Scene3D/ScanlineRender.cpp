@@ -98,6 +98,11 @@ struct ScanlineRenderPrivate
     // 2 = Wireframe (solid white lines from triangle edges).
     KnobChoiceWPtr shadingMode;
 
+    // Global ambient fill colour added to surfaces in Shaded mode (so unlit /
+    // back-facing areas aren't pure black). Multiplies the surface colour, like
+    // the previously hard-coded 0.15 grey. Default 0.15 grey preserves that.
+    KnobColorWPtr ambient;
+
     // Spatial antialiasing level — maps to MSAA sample count
     // (None=1, Low=2, Medium=4, High=8), clamped to the driver's GL_MAX_SAMPLES.
     KnobChoiceWPtr antialiasing;
@@ -226,6 +231,17 @@ ScanlineRender::initializeKnobs()
                               "Flat: no lighting — just texture or per-vertex color. "
                               "Wireframe: solid white edges derived from triangle indices."));
         outPage->addKnob(k); _imp->shadingMode = k;
+    }
+    {
+        KnobColorPtr k = AppManager::createKnob<KnobColor>(this, tr("Ambient"), 3);
+        k->setName("ambient");
+        k->setDefaultValue(0.15, 0); k->setDefaultValue(0.15, 1); k->setDefaultValue(0.15, 2);
+        k->setHintToolTip(tr("Global ambient fill colour added to surfaces in Shaded mode, so "
+                              "unlit or back-facing areas are not pure black. It multiplies the "
+                              "surface colour (ambient * albedo). Default 0.15 grey matches the "
+                              "previous fixed ambient; set to black for no fill, or tint for a "
+                              "coloured ambient. No effect in Flat or Wireframe mode."));
+        outPage->addKnob(k); _imp->ambient = k;
     }
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Projection Mode"));
@@ -932,6 +948,7 @@ static const char* kBeautyFrag =
     "uniform vec3 u_lightColor;\n"
     "uniform float u_lightIntensity;\n"
     "uniform vec3 u_cameraPos;       // world-space camera position (fallback headlight when no Light3D)\n"
+    "uniform vec3 u_ambient;         // global ambient fill colour (Shaded mode)\n"
     "uniform int u_writeNormal;      // attachment 1 (Phase 3D)\n"
     "uniform int u_writeUV;          // attachment 2 (Phase 3D)\n"
     "uniform int u_writePref;        // attachment 3 (Phase 3D)\n"
@@ -981,8 +998,7 @@ static const char* kBeautyFrag =
     "                lInt = 1.0;\n"
     "            }\n"
     "            float NL      = max(0.0, dot(N, L));\n"
-    "            float ambient = 0.15;\n"
-    "            vec3 lit      = baseColor.rgb * (ambient + NL * lCol * lInt);\n"
+    "            vec3 lit      = baseColor.rgb * (u_ambient + NL * lCol * lInt);\n"
     "            out_color     = vec4(lit, baseColor.a);\n"
     "        } else {\n"
     "            // --- Flat: no lighting, just base color ---\n"
@@ -1241,6 +1257,7 @@ static const char* kInstanceFrag =
     "uniform vec3 u_lightColor;\n"
     "uniform float u_lightIntensity;\n"
     "uniform vec3 u_cameraPos;\n"
+    "uniform vec3 u_ambient;\n"
     "uniform int  u_writeNormal;\n"
     "uniform int  u_writeUV;\n"
     "uniform int  u_writePref;\n"
@@ -1263,7 +1280,7 @@ static const char* kInstanceFrag =
     "            L = normalize(u_cameraPos - v_worldPos); lCol = vec3(1.0); lInt = 1.0;\n"
     "        }\n"
     "        float NL = max(0.0, dot(N, L));\n"
-    "        vec3 lit = v_color.rgb * (0.15 + NL * lCol * lInt);\n"
+    "        vec3 lit = v_color.rgb * (u_ambient + NL * lCol * lInt);\n"
     "        out_color = vec4(lit, v_color.a);\n"
     "    } else {\n"
     "        out_color = v_color;\n"
@@ -2081,6 +2098,15 @@ ScanlineRender::render(const RenderActionArgs& args)
     const int projMode = _imp->projectionMode.lock() ? _imp->projectionMode.lock()->getValue() : 0;
     const double orthoWidth = _imp->orthoWidth.lock() ? _imp->orthoWidth.lock()->getValue() : 10.0;
 
+    // Global ambient fill colour (Shaded mode). Default 0.15 grey matches the
+    // previously hard-coded ambient term.
+    float ambient[3] = { 0.15f, 0.15f, 0.15f };
+    if (KnobColorPtr ac = _imp->ambient.lock()) {
+        ambient[0] = (float)ac->getValueAtTime(args.time, 0);
+        ambient[1] = (float)ac->getValueAtTime(args.time, 1);
+        ambient[2] = (float)ac->getValueAtTime(args.time, 2);
+    }
+
     // --- Get camera from input 2 (through any Dots) ---
     EffectInstancePtr camEffect = skipDots(getInput(2));
     CameraProvider* cam = camEffect ? dynamic_cast<CameraProvider*>(camEffect.get()) : NULL;
@@ -2618,6 +2644,8 @@ ScanlineRender::render(const RenderActionArgs& args)
         if (locBeautyNear >= 0) glUniform1f(locBeautyNear, camNear);
         const GLint locBeautyFar = glGetUniformLocation(glslBeautyProg, "u_far");
         if (locBeautyFar >= 0) glUniform1f(locBeautyFar, camFar);
+        const GLint locBeautyAmbient = glGetUniformLocation(glslBeautyProg, "u_ambient");
+        if (locBeautyAmbient >= 0) glUniform3fv(locBeautyAmbient, 1, ambient);
         for (size_t gi = 0; gi < geoObjects.size(); ++gi) {
             renderGeoObjectGlsl(geoObjects[gi], glslBeautyProg,
                                 projViewMatrix, prevProjViewMatrix,
@@ -3353,8 +3381,10 @@ ScanlineRender::render(const RenderActionArgs& args)
             const GLint locViewMat       = glGetUniformLocation(glslInstanceProg, "u_view");
             const GLint locNearI         = glGetUniformLocation(glslInstanceProg, "u_near");
             const GLint locFarI          = glGetUniformLocation(glslInstanceProg, "u_far");
+            const GLint locAmbientI      = glGetUniformLocation(glslInstanceProg, "u_ambient");
 
             if (locProjMode     >= 0) glUniform1i(locProjMode, projMode);
+            if (locAmbientI     >= 0) glUniform3fv(locAmbientI, 1, ambient);
             if (locViewMat      >= 0) glUniformMatrix4fv(locViewMat, 1, GL_FALSE, viewMatrix);
             if (locNearI        >= 0) glUniform1f(locNearI, camNear);
             if (locFarI         >= 0) glUniform1f(locFarI, camFar);
