@@ -21,6 +21,26 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ---
 
+## ScanlineRender — Nuke parity
+
+Matching Nuke's ScanlineRender controls.
+Done + pushed: Antialiasing level (None/Low/Medium/High = MSAA), Overscan,
+Projection Mode (Perspective / Orthographic / UV / Spherical).
+Done but UNCOMMITTED: Ambient (works), Transparency (revisit — see below).
+
+Remaining:
+
+- [ ] **Check / revisit Transparency** — built (on = respect surface alpha, off = force opaque) but the intended semantics vs Nuke are unclear; our renderer already alpha-blends, so verify what behaviour we actually want before relying on it. Currently UNCOMMITTED.
+- [ ] **Tessellation max** — adaptive screen-space subdivision of polygons. Also the fix for the Spherical-projection pole/±180° seam distortion (coarse geo smears without it).
+- [ ] **Z-blend (mode + range)** — blend intersecting / coplanar surfaces so they don't z-fight flicker (Nuke: none / smooth / linear + a range).
+- [ ] **Depth of field** — Nuke does it on the MultiSample tab via `focus diameter` + `samples` (orbit the camera around the focal distance per sample; no f-stop knob). Needs the camera's focal distance.
+
+## New nodes
+
+- [ ] **Project3DShader node** — live camera-projection *shader*: project a 2D plate through a camera onto scene geometry as a material (plugs into a geo's material input; rendered by ScanlineRender). Controls to match Nuke's Project3D/Project3DShader: **project on** (front / back / both), **occlusion mode** (none / self / world), **crop**, and **near/far clip** (Project3DShader). This is DISTINCT from both the retired monolithic Project3D (standalone FBO renderer, no occlusion, not composable) and from UVProject (which rewrites UVs / bakes). Pairs with ScanlineRender's Perspective/Orthographic modes; the classic matte-painting lock workflow uses a FrameHold on the projection camera.
+
+---
+
 ## DevShuffle (Channel Routing)
 
 ### Known Issues
