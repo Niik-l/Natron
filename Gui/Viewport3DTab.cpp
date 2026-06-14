@@ -62,10 +62,16 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
     , _viewport(NULL)
     , _timelineGui(NULL)
     , _frameLabel(NULL)
+    , _frameSpin(NULL)
+    , _rangeStart(NULL)
+    , _rangeEnd(NULL)
     , _translateBtn(NULL)
     , _rotateBtn(NULL)
     , _scaleBtn(NULL)
     , _gridBtn(NULL)
+    , _spaceBtn(NULL)
+    , _cameraDropdown(NULL)
+    , _shadingDropdown(NULL)
     , _gridVisible(true)
 {
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
@@ -476,10 +482,18 @@ Viewport3DTab::onCyclesRender()
 void
 Viewport3DTab::onFrameChanged(SequenceTime frame, int /*reason*/)
 {
-    _frameSpin->blockSignals(true);
-    _frameSpin->setValue((int)frame);
-    _frameSpin->blockSignals(false);
-    _viewport->update();
+    // The frame is shown by the timeline scrubber (_timelineGui); _frameSpin is
+    // currently never created, so guard it (dereferencing it crashed when the
+    // timeline frameChanged signal fired during project load). Just refresh the
+    // 3D viewport at the new frame.
+    if (_frameSpin) {
+        _frameSpin->blockSignals(true);
+        _frameSpin->setValue((int)frame);
+        _frameSpin->blockSignals(false);
+    }
+    if (_viewport) {
+        _viewport->update();
+    }
 }
 
 void
