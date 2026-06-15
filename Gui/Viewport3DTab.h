@@ -41,7 +41,6 @@ NATRON_NAMESPACE_ENTER
 
 class TimeLineGui;
 class Viewport3D;
-class Viewport3D;
 
 /**
  * @brief Wrapper panel for the 3D viewport, matching the 2D viewer layout.
@@ -84,6 +83,10 @@ public Q_SLOTS:
     void onFrameSpinChanged(int value);
     void onToggleTransformSpace();
 
+    /** Pause Updates (checkable) + Force New Render — mirror the 2D viewer. */
+    void onTogglePause(bool paused);
+    void onForceRefresh();
+
     /** Build the camera dropdown menu by enumerating CameraProvider nodes in
      *  the project right now. Called on aboutToShow so we always see fresh
      *  state (without subscribing to node-graph changes). */
@@ -113,6 +116,8 @@ private:
     QToolButton* _spaceBtn;
     QToolButton* _cameraDropdown;
     QToolButton* _shadingDropdown;
+    QToolButton* _pauseBtn;
+    QToolButton* _refreshBtn;
     bool _gridVisible;
 };
 

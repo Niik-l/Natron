@@ -129,6 +129,18 @@ public:
     void setIsolateSelected(bool enabled);
     bool isIsolateSelected() const;
 
+    // Pause Updates / Force New Render — mirrors the 2D viewer's pause + refresh.
+    /** Pause (true) / resume (false). On-demand rendering: while paused, requestRedraw()
+     *  and frame-change updates are ignored; manual camera nav still repaints. Resume
+     *  repaints once to catch up. Toggled from the Viewport3DTab toolbar. */
+    void setPaused(bool paused);
+    bool isPaused() const;
+    /** Event-driven repaint request (from Gui::redrawAllViewers on knob/graph changes).
+     *  No-op while paused. */
+    void requestRedraw();
+    /** One-shot: re-pull the scene (point cloud) and repaint once, even when paused. */
+    void forceRefresh();
+
 private:
 
     virtual void initializeGL() OVERRIDE FINAL;

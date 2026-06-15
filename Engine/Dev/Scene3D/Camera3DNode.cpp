@@ -63,6 +63,9 @@ struct Camera3DNodePrivate
     // Depth of Field (F-Stop on Lens page; other DOF params on CyclesRender)
     KnobDoubleWPtr fStop;
 
+    // Viewport display only — length of the frustum gizmo drawn in the 3D viewport.
+    KnobDoubleWPtr frustumDisplayLength;
+
     // Sensor / project-format aspect info — discoverable mismatch + 1-click fix.
     KnobStringWPtr aspectInfo;
     KnobButtonWPtr matchAspectButton;
@@ -222,6 +225,18 @@ Camera3DNode::initializeKnobs()
         k->setHintToolTip(tr("Lens f-stop. Controls depth of field strength when DOF is enabled on CyclesRender."));
         k->setAnimationEnabled(true);
         lensPage->addKnob(k); _imp->fStop = k;
+    }
+
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Frustum Display Length"));
+        k->setName("frustumDisplayLength");
+        k->setDefaultValue(3.0);
+        k->setMinimum(0.1); k->setDisplayMinimum(0.5); k->setDisplayMaximum(20.0);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false); // viewport gizmo only — never triggers a re-render
+        k->setHintToolTip(tr("Length of the camera frustum drawn in the 3D viewport. "
+                             "Display only — does not affect rendering or the camera itself."));
+        lensPage->addKnob(k); _imp->frustumDisplayLength = k;
     }
 
     // --- Aspect info (informational, refreshed live) ---

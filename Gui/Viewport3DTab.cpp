@@ -30,6 +30,8 @@
 #include <QKeyEvent>
 #include <QFrame>
 #include <QSpinBox>
+#include <QPixmap>
+#include <QIcon>
 #include <QMenu>
 #include <QAction>
 #include <QActionGroup>
@@ -143,6 +145,39 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
     resetBtn->setFixedHeight(22);
     connect(resetBtn, SIGNAL(clicked()), this, SLOT(onResetCamera()));
     toolbarLayout->addWidget(resetBtn);
+
+    // Force New Render + Pause Updates — same icons + size as the 2D viewer.
+    const QSize v3dBtnSize( TO_DPIX(NATRON_MEDIUM_BUTTON_SIZE), TO_DPIY(NATRON_MEDIUM_BUTTON_SIZE) );
+    const QSize v3dBtnIconSize( TO_DPIX(NATRON_MEDIUM_BUTTON_ICON_SIZE), TO_DPIY(NATRON_MEDIUM_BUTTON_ICON_SIZE) );
+    QPixmap pixRefresh, pixPauseOn, pixPauseOff;
+    appPTR->getIcon(NATRON_PIXMAP_VIEWER_REFRESH, &pixRefresh);
+    appPTR->getIcon(NATRON_PIXMAP_PLAYER_PAUSE_ENABLED, &pixPauseOn);
+    appPTR->getIcon(NATRON_PIXMAP_PLAYER_PAUSE_DISABLED, &pixPauseOff);
+
+    _refreshBtn = new QToolButton(toolbar);
+    _refreshBtn->setFocusPolicy(Qt::NoFocus);
+    _refreshBtn->setFixedSize(v3dBtnSize);
+    _refreshBtn->setIconSize(v3dBtnIconSize);
+    _refreshBtn->setIcon( QIcon(pixRefresh) );
+    _refreshBtn->setToolTip(QString::fromUtf8("Force New Render: re-pull the scene and redraw once (even while paused)."));
+    connect(_refreshBtn, SIGNAL(clicked()), this, SLOT(onForceRefresh()));
+    toolbarLayout->addWidget(_refreshBtn);
+
+    _pauseBtn = new QToolButton(toolbar);
+    _pauseBtn->setFocusPolicy(Qt::NoFocus);
+    _pauseBtn->setFixedSize(v3dBtnSize);
+    _pauseBtn->setIconSize(v3dBtnIconSize);
+    _pauseBtn->setCheckable(true);
+    _pauseBtn->setChecked(false);
+    {
+        QIcon icPause;
+        icPause.addPixmap(pixPauseOff, QIcon::Normal, QIcon::Off);
+        icPause.addPixmap(pixPauseOn, QIcon::Normal, QIcon::On);
+        _pauseBtn->setIcon(icPause);
+    }
+    _pauseBtn->setToolTip(QString::fromUtf8("Pause Updates: freeze the 3D viewport (stop auto-refresh). Camera navigation still works."));
+    connect(_pauseBtn, SIGNAL(toggled(bool)), this, SLOT(onTogglePause(bool)));
+    toolbarLayout->addWidget(_pauseBtn);
 
     // Separator
     QFrame* sep2 = new QFrame(toolbar);
@@ -431,6 +466,22 @@ Viewport3DTab::onToggleTransformSpace()
 }
 
 void
+Viewport3DTab::onTogglePause(bool paused)
+{
+    if (_viewport) {
+        _viewport->setPaused(paused);
+    }
+}
+
+void
+Viewport3DTab::onForceRefresh()
+{
+    if (_viewport) {
+        _viewport->forceRefresh();
+    }
+}
+
+void
 Viewport3DTab::onCyclesRender()
 {
 #ifdef NATRON_CYCLES
@@ -491,7 +542,7 @@ Viewport3DTab::onFrameChanged(SequenceTime frame, int /*reason*/)
         _frameSpin->setValue((int)frame);
         _frameSpin->blockSignals(false);
     }
-    if (_viewport) {
+    if (_viewport && !_viewport->isPaused()) {
         _viewport->update();
     }
 }

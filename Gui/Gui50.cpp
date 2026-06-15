@@ -84,6 +84,8 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include "Gui/GuiAppInstance.h"
 #include "Gui/GuiApplicationManager.h" // appPTR
 #include "Gui/GuiPrivate.h"
+#include "Gui/Viewport3D.h"
+#include "Gui/Viewport3DTab.h"
 #include "Gui/KnobWidgetDnD.h"
 #include "Gui/GuiMacros.h"
 #include "Gui/LogWindow.h"
@@ -822,6 +824,16 @@ Gui::redrawAllViewers()
     for (std::list<ViewerTab*>::const_iterator it = _imp->_viewerTabs.begin(); it != _imp->_viewerTabs.end(); ++it) {
         if ( (*it)->isVisible() ) {
             (*it)->getViewer()->redraw();
+        }
+    }
+
+    // On-demand rendering for the 3D viewports: same central trigger the 2D viewers
+    // use, so any knob/graph change that refreshes a 2D viewer also repaints the 3D
+    // view — no 30fps polling. requestRedraw() is a no-op when that viewport is paused.
+    const std::list<Viewport3DTab*> viewport3Ds = getViewport3Ds_mt_safe();
+    for (std::list<Viewport3DTab*>::const_iterator it = viewport3Ds.begin(); it != viewport3Ds.end(); ++it) {
+        if ( (*it)->isVisible() && (*it)->getViewport() ) {
+            (*it)->getViewport()->requestRedraw();
         }
     }
 }

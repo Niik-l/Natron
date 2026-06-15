@@ -550,8 +550,7 @@ struct Viewport3DPrivate
     float dragStartT[3], dragStartR[3], dragStartS[3];
     NodeWPtr dragNode; // weak ref to the node being dragged
 
-    // Refresh timer
-    QTimer* refreshTimer;
+    bool paused;  // Pause Updates: skip auto + frame-change repaints (on-demand rendering)
 
     // Particle shader (for per-particle size via gl_PointSize)
     GLuint particleShaderProgram;
@@ -587,7 +586,7 @@ struct Viewport3DPrivate
         , viewH(100)
         , pointSize(2.0f)
         , gizmoDragging(false)
-        , refreshTimer(nullptr)
+        , paused(false)
         , particleShaderProgram(0)
         , particleShaderReady(false)
     {
@@ -758,14 +757,9 @@ Viewport3D::initializeGL()
         glDeleteShader(fs);
     }
 
-    // Refresh at 30fps. The timer is not a GL resource — create it only once,
-    // even if initializeGL runs again after a context recreation, so we don't
-    // stack multiple timers all driving update().
-    if (!_imp->refreshTimer) {
-        _imp->refreshTimer = new QTimer(this);
-        connect(_imp->refreshTimer, SIGNAL(timeout()), this, SLOT(update()));
-        _imp->refreshTimer->start(33);
-    }
+    // On-demand rendering: no auto-refresh timer. The viewport repaints only when
+    // something requests it — Gui::redrawAllViewers() (knob/graph changes, same path
+    // the 2D viewers use), frame changes, camera navigation, or the Refresh button.
 }
 
 
@@ -1973,6 +1967,43 @@ Viewport3D::isIsolateSelected() const
     return _imp->isolateSelected;
 }
 
+void
+Viewport3D::setPaused(bool paused)
+{
+    _imp->paused = paused;
+    // On-demand mode: pausing makes requestRedraw() + frame-change updates no-op;
+    // manual camera navigation still repaints. On resume, repaint once to catch up
+    // to the current scene.
+    if (!paused) {
+        update();
+    }
+}
+
+void
+Viewport3D::requestRedraw()
+{
+    // Event-driven repaint entry point — called by Gui::redrawAllViewers() on any
+    // knob/graph change (same central trigger the 2D viewers use). No-op while paused.
+    if (!_imp->paused) {
+        update();
+    }
+}
+
+bool
+Viewport3D::isPaused() const
+{
+    return _imp->paused;
+}
+
+void
+Viewport3D::forceRefresh()
+{
+    // One-shot "force new render": re-pull the scene data (point cloud) and repaint
+    // once, regardless of the paused state.
+    refreshPointCloud();
+    update();
+}
+
 Viewport3D::ShadingMode
 Viewport3D::getShadingMode() const
 {
@@ -2677,6 +2708,16 @@ Viewport3D::drawCameraNode(const SceneNode& sn) const
     double focalLength = 50.0;
     double hAperture = 24.576;
     float frustumLength = 3.0f;
+
+    // Per-camera viewport frustum length (Camera3D "Frustum Display Length" knob).
+    // Display-only; cameras without the knob (e.g. ReadAlembicCamera) keep 3.0.
+    {
+        KnobIPtr fk = effect->getKnobByName("frustumDisplayLength");
+        if (fk) {
+            KnobDouble* fd = dynamic_cast<KnobDouble*>(fk.get());
+            if (fd) frustumLength = (float)fd->getValueAtTime(time);
+        }
+    }
 
     CameraProvider* camProvider = dynamic_cast<CameraProvider*>(effect.get());
     if (camProvider) {
