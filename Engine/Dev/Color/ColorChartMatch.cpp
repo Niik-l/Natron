@@ -55,6 +55,7 @@ struct ColorChartMatchPrivate
     KnobBoolWPtr useReferenceValues;
     KnobChoiceWPtr colorspace;
     KnobBoolWPtr normalization;
+    KnobChoiceWPtr samplingMethod;  // 0 = Direct (clamp >=0), 1 = No Clip (raw float)
 
     // Source corner-pin: "to" points (draggable, 2D each)
     KnobDoubleWPtr srcTo[4];  // BL, BR, TR, TL
@@ -192,49 +193,23 @@ ColorChartMatch::initializeKnobs()
 {
     KnobPagePtr mainPage = AppManager::createKnob<KnobPage>(this, tr("ColorChartMatch"));
 
-    // Chart type
+    // Current View (top of the panel, like mmColorTarget)
     {
-        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Chart"));
-        k->setName("chartType");
-        k->setHintToolTip(tr("Type of color reference chart being used."));
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Current View"));
+        k->setName("currentView");
+        k->setHintToolTip(tr("Source: show input 0 unchanged (position the Source corner-pin).\n"
+                              "Target: show input 1 unchanged (position the Target corner-pin) "
+                              "— only meaningful when 'Use Reference Values' is off.\n"
+                              "Corrected: show input 0 with the computed color matrix applied."));
         std::vector<ChoiceOption> entries;
-        for (int i = 0; i < eChartCount; ++i) {
-            entries.push_back(ChoiceOption(kChartLabels[i], "", ""));
-        }
+        entries.push_back(ChoiceOption("Source", "", "Show source unchanged"));
+        entries.push_back(ChoiceOption("Target", "", "Show target unchanged"));
+        entries.push_back(ChoiceOption("Corrected", "", "Apply computed color matrix"));
         k->populateChoices(entries);
-        k->setDefaultValue(eChartColorChecker24_Post2014);
+        k->setDefaultValue(0);  // Source by default
         k->setAnimationEnabled(false);
         mainPage->addKnob(k);
-        _imp->chartType = k;
-    }
-
-    // Use reference values
-    {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Use Reference Values as Target"));
-        k->setName("useReferenceValues");
-        k->setHintToolTip(tr("Use built-in reference sRGB values instead of sampling a target image. "
-                              "This effectively calibrates the source to a known standard."));
-        k->setDefaultValue(true);
-        k->setAnimationEnabled(false);
-        mainPage->addKnob(k);
-        _imp->useReferenceValues = k;
-    }
-
-    // Colorspace
-    {
-        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Colorspace"));
-        k->setName("colorspace");
-        k->setHintToolTip(tr("Working colorspace for reference values. "
-                              "Reference patch values will be converted from sRGB to this colorspace."));
-        std::vector<ChoiceOption> entries;
-        for (int i = 0; i < eColorspaceCount; ++i) {
-            entries.push_back(ChoiceOption(kColorspaceLabels[i], "", ""));
-        }
-        k->populateChoices(entries);
-        k->setDefaultValue(eColorspaceACEScg);
-        k->setAnimationEnabled(false);
-        mainPage->addKnob(k);
-        _imp->colorspace = k;
+        _imp->currentView = k;
     }
 
     // Sample size
@@ -253,29 +228,8 @@ ColorChartMatch::initializeKnobs()
         _imp->sampleSize = k;
     }
 
-    // Normalize (matches mmColorTarget's "normalize"): pre-scale the source samples
-    // by a single Rec.709 luminance factor so the source mid-grey patch's luminance
-    // matches the target's, before solving the matrix. Net effect: the chroma is
-    // matched to the target while the output keeps the SOURCE luminance/exposure.
-    {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Normalize"));
-        k->setName("normalization");
-        k->setHintToolTip(tr("Will try to maintain the source luminance: scales the "
-                              "source by the Rec.709 luminance ratio of the mid-grey "
-                              "patch (target/source) before solving, so the colour "
-                              "match doesn't also change your plate's exposure. "
-                              "Requires the mid-grey patch to be enabled."));
-        k->setDefaultValue(false);
-        k->setAnimationEnabled(false);
-        mainPage->addKnob(k);
-        _imp->normalization = k;
-    }
-
     // ---- Source Corner Pin (with draggable overlay) ----
     {
-        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Source Chart Corner Pin"));
-        mainPage->addKnob(sep);
-
         // "from" points: fixed reference rectangle (chart outline in ideal space)
         const char* fromNames[] = {"srcFrom1", "srcFrom2", "srcFrom3", "srcFrom4"};
         const char* fromLabels[] = {"From BL", "From BR", "From TR", "From TL"};
@@ -291,18 +245,27 @@ ColorChartMatch::initializeKnobs()
             _imp->srcFrom[i] = k;
         }
 
-        // "to" points: user-draggable corners on the image
-        const char* toNames[] = {"srcTo1", "srcTo2", "srcTo3", "srcTo4"};
-        const char* toLabels[] = {"To BL", "To BR", "To TR", "To TL"};
-        double toDefaults[][2] = {{600, 300}, {1320, 300}, {1320, 780}, {600, 780}};
-        for (int i = 0; i < 4; ++i) {
-            KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr(toLabels[i]), 2);
-            k->setName(toNames[i]);
-            k->setDefaultValue(toDefaults[i][0], 0);
-            k->setDefaultValue(toDefaults[i][1], 1);
+        // "to" points: user-draggable corners, laid out two per row (TL TR / BL BR)
+        // like mmColorTarget. The srcTo[] index + script-name keep their original
+        // semantic corner (srcTo[3]=TL, [2]=TR, [0]=BL, [1]=BR) so saved projects and
+        // the overlay/solve still map correctly — only the label + visual order change.
+        struct SrcToCorner { int idx; const char* name; const char* label; double x, y; bool sameRow; };
+        const SrcToCorner srcToCorners[] = {
+            { 3, "srcTo4", "srcTL", 600,  780, true  },  // row 1:  srcTL | srcTR
+            { 2, "srcTo3", "srcTR", 1320, 780, false },
+            { 0, "srcTo1", "srcBL", 600,  300, true  },  // row 2:  srcBL | srcBR
+            { 1, "srcTo2", "srcBR", 1320, 300, false },
+        };
+        for (int j = 0; j < 4; ++j) {
+            const SrcToCorner& c = srcToCorners[j];
+            KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr(c.label), 2);
+            k->setName(c.name);
+            k->setDefaultValue(c.x, 0);
+            k->setDefaultValue(c.y, 1);
             k->setAnimationEnabled(true);
+            if (c.sameRow) k->setAddNewLine(false);
             mainPage->addKnob(k);
-            _imp->srcTo[i] = k;
+            _imp->srcTo[c.idx] = k;
         }
 
         // Enable per corner
@@ -356,9 +319,10 @@ ColorChartMatch::initializeKnobs()
 
     // ---- Target Corner Pin (mirror of source) ----
     {
-        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Target Chart Corner Pin"));
-        mainPage->addKnob(sep);
-
+        // Target corner-pin is hidden from the panel (the source settings above cover
+        // the common case). It stays functional for matching to a SECOND chart plate
+        // (Use Reference Values off): the corners sample input 1 and are positioned by
+        // dragging the viewer overlay with Current View = "Target".
         const char* fromNames[] = {"tgtFrom1", "tgtFrom2", "tgtFrom3", "tgtFrom4"};
         const char* fromLabels[] = {"T From BL", "T From BR", "T From TR", "T From TL"};
         double fromDefaults[][2] = {{0, 0}, {720, 0}, {720, 480}, {0, 480}};
@@ -382,6 +346,7 @@ ColorChartMatch::initializeKnobs()
             k->setDefaultValue(toDefaults[i][0], 0);
             k->setDefaultValue(toDefaults[i][1], 1);
             k->setAnimationEnabled(true);
+            k->setSecret(true);  // hidden from panel; positioned via the viewer overlay
             mainPage->addKnob(k);
             _imp->tgtTo[i] = k;
         }
@@ -433,6 +398,87 @@ ColorChartMatch::initializeKnobs()
         );
     }
 
+    // Chart type
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Chart"));
+        k->setName("chartType");
+        k->setHintToolTip(tr("Type of color reference chart being used."));
+        std::vector<ChoiceOption> entries;
+        for (int i = 0; i < eChartCount; ++i) {
+            entries.push_back(ChoiceOption(kChartLabels[i], "", ""));
+        }
+        k->populateChoices(entries);
+        k->setDefaultValue(eChartColorChecker24_Post2014);
+        k->setAnimationEnabled(false);
+        mainPage->addKnob(k);
+        _imp->chartType = k;
+    }
+
+    // Use reference values
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Use Reference Values as Target"));
+        k->setName("useReferenceValues");
+        k->setHintToolTip(tr("Use built-in reference sRGB values instead of sampling a target image. "
+                              "This effectively calibrates the source to a known standard."));
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        mainPage->addKnob(k);
+        _imp->useReferenceValues = k;
+    }
+
+    // Colorspace
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Colorspace"));
+        k->setName("colorspace");
+        k->setHintToolTip(tr("Working colorspace for reference values. "
+                              "Reference patch values will be converted from sRGB to this colorspace."));
+        std::vector<ChoiceOption> entries;
+        for (int i = 0; i < eColorspaceCount; ++i) {
+            entries.push_back(ChoiceOption(kColorspaceLabels[i], "", ""));
+        }
+        k->populateChoices(entries);
+        k->setDefaultValue(eColorspaceACEScg);
+        k->setAnimationEnabled(false);
+        mainPage->addKnob(k);
+        _imp->colorspace = k;
+    }
+
+    // Sampling Method (mmColorTarget parity) — shares its row with Normalize.
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Sampling Method"));
+        k->setName("samplingMethod");
+        k->setHintToolTip(tr("How patch samples are conditioned before solving the matrix.\n"
+                              "Direct: clamp each sampled value to >= 0 (safe default).\n"
+                              "No Clip: keep the full unclamped float (better for HDR / over-range plates)."));
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("Direct", "", "Clamp samples to >= 0 before solving"));
+        entries.push_back(ChoiceOption("No Clip", "", "Keep full unclamped float samples"));
+        k->populateChoices(entries);
+        k->setDefaultValue(0);  // Direct
+        k->setAnimationEnabled(false);
+        k->setAddNewLine(false);  // Normalize sits to the right (mmColorTarget layout)
+        mainPage->addKnob(k);
+        _imp->samplingMethod = k;
+    }
+
+    // Normalize (matches mmColorTarget's "normalize"): pre-scale the source samples
+    // by a single Rec.709 luminance factor so the source mid-grey patch's luminance
+    // matches the target's, before solving the matrix. Net effect: the chroma is
+    // matched to the target while the output keeps the SOURCE luminance/exposure.
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Normalize"));
+        k->setName("normalization");
+        k->setHintToolTip(tr("Will try to maintain the source luminance: scales the "
+                              "source by the Rec.709 luminance ratio of the mid-grey "
+                              "patch (target/source) before solving, so the colour "
+                              "match doesn't also change your plate's exposure. "
+                              "Requires the mid-grey patch to be enabled."));
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        mainPage->addKnob(k);
+        _imp->normalization = k;
+    }
+
     // ---- Calculate Button ----
     {
         KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr(""));
@@ -465,6 +511,7 @@ ColorChartMatch::initializeKnobs()
                 double def = (c == 0) ? d0 : (c == 1) ? d1 : d2;
                 k->setDefaultValue(def);
                 k->setAnimationEnabled(true);
+                if (c < 2) k->setAddNewLine(false);  // 3 columns per row -> 3x3 grid
                 grp->addKnob(k);
                 out[c] = k;
             }
@@ -473,25 +520,6 @@ ColorChartMatch::initializeKnobs()
         makeRow("matrix_r", "R←", 0, 1.0, 0.0, 0.0, _imp->matrixR);
         makeRow("matrix_g", "G←", 1, 0.0, 1.0, 0.0, _imp->matrixG);
         makeRow("matrix_b", "B←", 2, 0.0, 0.0, 1.0, _imp->matrixB);
-    }
-
-    // Current View
-    {
-        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Current View"));
-        k->setName("currentView");
-        k->setHintToolTip(tr("Source: show input 0 unchanged (position the Source corner-pin).\n"
-                              "Target: show input 1 unchanged (position the Target corner-pin) "
-                              "— only meaningful when 'Use Reference Values' is off.\n"
-                              "Corrected: show input 0 with the computed color matrix applied."));
-        std::vector<ChoiceOption> entries;
-        entries.push_back(ChoiceOption("Source", "", "Show source unchanged"));
-        entries.push_back(ChoiceOption("Target", "", "Show target unchanged"));
-        entries.push_back(ChoiceOption("Corrected", "", "Apply computed color matrix"));
-        k->populateChoices(entries);
-        k->setDefaultValue(0);  // Source by default
-        k->setAnimationEnabled(false);
-        mainPage->addKnob(k);
-        _imp->currentView = k;
     }
 
     // Apply toggle (hidden — controlled by Current View now)
@@ -771,6 +799,9 @@ ColorChartMatch::calculateMatrix()
     // patch lands in the enabled list, then scale all source samples by the Rec.709
     // luminance ratio (target/source) of that patch before solving.
     bool normalize = _imp->normalization.lock()->getValue();
+    // Sampling Method: Direct (0) clamps each sampled patch value to >= 0 before the
+    // solve (safe default); No Clip (1) keeps the full unclamped float (HDR/over-range).
+    bool clampSamples = (_imp->samplingMethod.lock()->getValue() == 0);
     int chart = _imp->chartType.lock()->getValue();
     const int midGreyPatch = (chart == eChartColorCheckerPassportVideo) ? 15 : 21;
     int midGreyEnabled = -1;
@@ -863,6 +894,7 @@ ColorChartMatch::calculateMatrix()
             continue;
         }
 
+        if (clampSamples) { sR = std::max(0.0, sR); sG = std::max(0.0, sG); sB = std::max(0.0, sB); }
         enabledSrc[enabledCount][0] = sR;
         enabledSrc[enabledCount][1] = sG;
         enabledSrc[enabledCount][2] = sB;
@@ -891,6 +923,7 @@ ColorChartMatch::calculateMatrix()
                               (int)tHalfW, (int)tHalfH, tR, tG, tB)) {
                 continue;
             }
+            if (clampSamples) { tR = std::max(0.0, tR); tG = std::max(0.0, tG); tB = std::max(0.0, tB); }
             enabledTgt[enabledCount][0] = tR;
             enabledTgt[enabledCount][1] = tG;
             enabledTgt[enabledCount][2] = tB;
