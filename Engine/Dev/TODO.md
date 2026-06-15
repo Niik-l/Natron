@@ -153,7 +153,7 @@ Remaining:
   the archive root SceneNode → scales/moves the whole archive (worldMatrix
   propagation). `ReadAlembicArchive.cpp` + `SceneGraph.cpp`.
 - **3D viewport "Isolate Selected"** — new second toolbar row + toggle; draws only
-  the selected node + descendants. `Gui/Viewport3DTab.cpp`, `Gui/DevViewport3D.{h,cpp}`.
+  the selected node + descendants. `Gui/Viewport3DTab.cpp`, `Gui/Viewport3D.{h,cpp}`.
 - **Read node grow-on-scrub fix** — `NodeGui::adjustSizeToContent` fits width to
   content deterministically (no `boundingRect()` pen-margin creep). `Gui/NodeGui.cpp`.
 
@@ -493,7 +493,7 @@ Remaining:
 - **Normal AOV fix for file-loaded meshes** — `Engine/Dev/Scene3D/ScanlineRender.cpp`. ReadGeo and ReadAlembicArchive paths weren't populating `geo.normals` → GLSL `normalize(vec3(0))` returns NaN → renders white in float AOV. Added `computeVertexNormalsFromTris` helper (area-weighted face-normal averaging per vertex), called from both mesh paths. Procedural shapes (Sphere3D etc.) already had explicit normals — unchanged.
 - **Non-cubic VDB 3D texture** — `Engine/Dev/Scene3D/ReadVDB.{h,cpp}` + `Engine/Dev/Scene3D/ScanlineRender.cpp`. `VDBVolumeData::resolution` → `resX/resY/resZ`. Sampling loop maps the largest VDB axis to `maxResolution`, scales other axes proportionally (min 8 per axis), preserving the VDB's voxel aspect. Non-cubic smoke / fire no longer renders as a soft blob filling the bounding box.
 - **Legacy fixed-function stack removed** — `Engine/Dev/Scene3D/ScanlineRender.cpp`. With volume + instance now GLSL, the per-sample `glMatrixMode` / `glLoadMatrixf` calls inside the multi-sample loop have no remaining consumers and are gone. Every draw path in ScanlineRender is now GLSL 3.30 core, uniform-driven.
-- **3D viewport `F` works in look-through** — `Gui/DevViewport3D.cpp`. F (Frame Selected / point cloud / reset) now also handles look-through-camera mode: if the look-through source is an editable Camera3D, the camera node's translate knobs get rewritten so the framed target sits at framing distance along the camera's view direction, preserving its rotation. ReadAlembicCamera (read-only) falls back to perspective-mode framing so the user still gets a useful view.
+- **3D viewport `F` works in look-through** — `Gui/Viewport3D.cpp`. F (Frame Selected / point cloud / reset) now also handles look-through-camera mode: if the look-through source is an editable Camera3D, the camera node's translate knobs get rewritten so the framed target sits at framing distance along the camera's view direction, preserving its rotation. ReadAlembicCamera (read-only) falls back to perspective-mode framing so the user still gets a useful view.
 
 ### Completed (2026-05-27) — ParticleAttribute (V2 three-section design) + KnobGradient + ScanlineRender Solid
 
@@ -527,7 +527,7 @@ Remaining:
 - **6 per-pixel AOVs** — Depth (linear camera-space), World Position (reconstructed via inverse(MVP)), Normal (world-space), UV, Pref (object-space ref position), Velocity (screen-pixels-per-frame). Declared on plane -1 via `isMultiPlanar()` + `getComponentsNeededAndProduced`. MRT attachments allocated lazily per-AOV. AOV blend overridden to `GL_ONE / GL_ZERO` (replace) via `glBlendFunci` so values don't accumulate across overlapping fragments.
 - **Particle AOVs** — Normal/UV/Pref/Velocity work for all four particle modes (Point/Disc/Sphere/Sprite + motion-blur stretch variants). Per-vertex AOV defaults set via a `fillAovs` lambda (normal = +fwd camera-facing, pref = particle world pos, velocity = per-frame displacement). Sphere static overrides normal/pref with real per-vertex sphere values; Sprite static overrides UVs with quad-corner layout. Depth/WorldPos for particles is by-design only contributed by static Sphere (other modes disable depth writes for translucency). Motion-blur stretch is documented as beauty-only — for AOV-correct motion blur use Motion Samples > 1.
 - **Shading modes** — new `Shading Mode` knob on ScanlineRender (default Shaded). Shaded does per-pixel N.L diffuse + 0.15 ambient against a `Light3D` if connected, otherwise a camera-relative headlight (Maya default convention). Flat preserves the legacy unlit behavior. Wireframe renders solid white GL_LINES derived from triangle indices.
-- **3D viewport shading parity** — `DevViewport3D` adds `eFlat` to `ShadingMode` enum (legacy unlit). `eShaded` + `eShadedWire` now compute per-face flat N.L using averaged per-vertex normals on primitives (Sphere/Card/Cube/Cylinder — winding-agnostic) and cross-product face normals on ReadGeo/Alembic (CCW-from-outside assumption). Light is camera-locked top-right-eye, orbits with viewer.
+- **3D viewport shading parity** — `Viewport3D` adds `eFlat` to `ShadingMode` enum (legacy unlit). `eShaded` + `eShadedWire` now compute per-face flat N.L using averaged per-vertex normals on primitives (Sphere/Card/Cube/Cylinder — winding-agnostic) and cross-product face normals on ReadGeo/Alembic (CCW-from-outside assumption). Light is camera-locked top-right-eye, orbits with viewer.
 
 ### Completed (2026-04-08)
 

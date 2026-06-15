@@ -17,6 +17,15 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Gui 3D viewport renamed `DevViewport3D` → `Viewport3D` (2026-06-15)** —
+  The viewport widget dropped its `Dev` prefix since it's a shipping feature,
+  not an RnD node: `Gui/DevViewport3D.{h,cpp}` → `Gui/Viewport3D.{h,cpp}`,
+  class `DevViewport3D` → `Viewport3D` (+ `DevViewport3DPrivate`, header guard,
+  include, debug strings, on-screen overlay). Pure rename, no behaviour change.
+  The `Viewport3DTab` wrapper and the user-facing "3D Viewport" tab label were
+  already de-prefixed. (Older entries below pre-date the rename and have been
+  swept to the new name for consistency.)
+
 - **ScanlineRender: ambient fill colour control (2026-06-14)** —
   The previously hard-coded 0.15 ambient term is now a 3-component **Ambient**
   colour knob on the Output tab (Shaded mode). It multiplies the surface colour
@@ -77,7 +86,7 @@ Recent milestones:
   default — when off, no saved layout is restored at all; the save side was always
   correct).
 
-- **DevViewport3D survives GL context recreation + timeline frame sync fixed (2026-06-13)** —
+- **Viewport3D survives GL context recreation + timeline frame sync fixed (2026-06-13)** —
   When a 3D viewport is reparented during a workspace/layout restore, Qt can
   recreate the `QOpenGLWidget`'s GL context and call `initializeGL()` again. The
   ImGui font texture and particle shader from the destroyed context were kept
@@ -347,7 +356,7 @@ Recent milestones:
     free (both read worldMatrix; the Cycles cache already hashes it).
   - **3D viewport "Isolate Selected"** — new second toolbar row in
     `Viewport3DTab` (room for future buttons) with an Isolate toggle. When on,
-    `DevViewport3D` draws only the selected node + its descendants (archive
+    `Viewport3D` draws only the selected node + its descendants (archive
     sub-entries are `selected/...`); nothing selected = no-op. Viewport-only
     (doesn't affect the Cycles render); grid stays visible.
   - **Read node no longer grows on scrub** — `NodeGui::adjustSizeToContent` now
@@ -749,7 +758,7 @@ lands. Categories:
 | `Engine/Dev/Cycles/` | CyclesRender Natron node + CyclesRenderer API bridge (gated by `NATRON_CYCLES`) |
 | `Engine/Dev/Deep/` | All Deep* nodes + PointCloudData + DeepUtils |
 | `Engine/Dev/Particles/` | Particle solver + emitter + 11 modifier/instancer/spawn nodes + shared ParticleData header |
-| `Gui/DevViewport3D.{h,cpp}` | ImGuizmo-based 3D viewport (camera orbit, gizmos, shading modes, look-through camera, axis grid) |
+| `Gui/Viewport3D.{h,cpp}` | ImGuizmo-based 3D viewport (camera orbit, gizmos, shading modes, look-through camera, axis grid) |
 | `Gui/Viewport3DTab.{h,cpp}` | Panel wrapper (toolbar + viewport + timeline integration) |
 | `Gui/ShuffleWidget.{h,cpp}` + `KnobGuiShuffle.{h,cpp}` | DevShuffle UI |
 | `Gui/ImGuizmo/` | ImGui + ImGuizmo vendored (MIT licensed) |
@@ -808,7 +817,7 @@ class CameraProvider {
 ## Architecture Decisions
 
 ### Matrix Convention
-ALL matrices are **column-major** (OpenGL convention). ImGuizmo's demo math functions (LookAt, Perspective, Cross, Dot, Normalize) are used verbatim throughout DevViewport3D to prevent convention mismatches.
+ALL matrices are **column-major** (OpenGL convention). ImGuizmo's demo math functions (LookAt, Perspective, Cross, Dot, Normalize) are used verbatim throughout Viewport3D to prevent convention mismatches.
 
 ### Cycles Integration
 - **Hybrid approach**: Raw GL viewport for interactive work + Cycles path tracer for final renders
@@ -816,8 +825,8 @@ ALL matrices are **column-major** (OpenGL convention). ImGuizmo's demo math func
 - **Camera convention**: Cycles looks +Z (not -Z like OpenGL) — forward column negated in camera matrix
 - **Light convention**: Cycles lights emit along -column2 of Object transform
 
-### Viewport (DevViewport3D)
-Replaced hand-rolled Viewport3D with ImGuizmo-based DevViewport3D:
+### Viewport (Viewport3D)
+Replaced the original hand-rolled 3D viewport with this ImGuizmo-based rewrite:
 - Spherical camera (camYAngle, camXAngle, camDistance) → LookAt matrix
 - ImGuizmo::Manipulate for translate/rotate/scale gizmos
 - ImGuizmo::DecomposeMatrixToComponents/RecomposeMatrixFromComponents for T/R/S ↔ matrix
@@ -893,7 +902,7 @@ own pipeline and aren't affected):
 | Flat | No lighting — texture / per-vertex color only. |
 | Wireframe | Solid white GL_LINES from triangle indices. |
 
-`DevViewport3D` has the same modes (`eWireframe / eFlat / eShaded /
+`Viewport3D` has the same modes (`eWireframe / eFlat / eShaded /
 eShadedWire`) — lighting in the viewport is per-face flat against a fixed
 eye-space light direction. Procedural primitives use their per-vertex normals;
 ReadGeo/Alembic use a cross-product face normal (CCW-from-outside assumption).
@@ -1004,7 +1013,7 @@ in `Engine/Dev/TODO.md` per subsystem.
 | 2026-03-24 | Cycles standalone build, link into Natron, CyclesRender node, Light3D |
 | 2026-03-27 | Animation cache fix (3 bugs) |
 | 2026-03-28 | Material system (MaterialProvider, Material3D, per-object shaders) |
-| 2026-03-29 | DevViewport3D (ImGuizmo), undo, light icons, spot/area knobs, code cleanup |
+| 2026-03-29 | Viewport3D (ImGuizmo), undo, light icons, spot/area knobs, code cleanup |
 | 2026-03-29 | ReadGeo rewrite, Alembic Cycles rendering, UVs, material support |
 | 2026-03-29 | PBR texture maps (Normal, Roughness, Metallic, Emission) |
 | 2026-03-30 | Texture tab reorganization, Material3D 2D inputs, documentation |
