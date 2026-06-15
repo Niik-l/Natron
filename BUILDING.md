@@ -51,10 +51,10 @@ Run these commands in the MSYS2 MINGW64 terminal:
 > now `0.28` (or the reverse), the exact-named DLL is gone and **both `Natron.exe` and
 > `NatronRenderer.exe` exit at startup** — `0xc0000135` / STATUS_DLL_NOT_FOUND under gdb
 > ("During startup program exited with code 0xc0000135"), or exit 127 from the terminal.
-> Fix: keep everything in sync with a full `-Syu`, or reinstall the lagging consumer
-> (`pacman -S mingw-w64-x86_64-libheif`) so it relinks against the installed openjph. See
-> the **"missing `libopenjph-0.XX.dll`"** troubleshooting entry below for diagnosis + a
-> quick temporary workaround.
+> A related variant is `0xc0000139` / STATUS_ENTRYPOINT_NOT_FOUND (DLL present, missing a
+> symbol). The fix for all of these is a **full `pacman -Syu`** — do **not** try to repair
+> it with a targeted `pacman -S <pkg>`, which is itself a partial upgrade and can make it
+> worse. See the **`0xc0000135` / `0xc0000139` startup** troubleshooting entry below.
 
 ```bash
 # Update MSYS2 first (full sync — avoids partial-upgrade soname mismatches)
@@ -704,33 +704,53 @@ mingw32-make -j2
 ### "libfontconfig-1.dll was not found" (or other DLL errors on double-click)
 The MSYS2 DLLs aren't bundled with the exe. Either launch from the MSYS2 terminal (step 9a) or bundle the DLLs (step 9b).
 
-### `Natron.exe` / `NatronRenderer.exe` exits at startup (`0xc0000135` / exit 127) — missing `libopenjph-0.XX.dll`
-A version-stamped transitive DLL is missing because an MSYS2 partial upgrade left a soname
-skew (see the `pacman -Syu` warning in §2). Most common: **`libheif.dll` was built against
-`libopenjph-0.27.dll` but `openjph` has since been upgraded to `0.28`** (or the reverse), so
-the exact-named DLL no longer exists. `libheif` is pulled in via OpenImageIO, so this stops
-the GUI **and** the renderer.
+### `Natron.exe` / `NatronRenderer.exe` exits at startup (`0xc0000135` or `0xc0000139` / exit 127)
+**Both codes mean the MSYS2 install is in a partially-upgraded, internally-inconsistent state** —
+some package was upgraded on its own (a `pacman -S <pkg>` *without* a preceding full `-Syu`),
+leaving it incompatible with the not-upgraded rest of the system. Two faces of the same bug:
+- **`0xc0000135` = STATUS_DLL_NOT_FOUND.** A version-stamped DLL the chain wants is gone — e.g.
+  `libheif.dll` was built against `libopenjph-0.27.dll` but `openjph` got bumped to `0.28`
+  alone, so the exact-named `libopenjph-0.27.dll` no longer exists.
+- **`0xc0000139` = STATUS_ENTRYPOINT_NOT_FOUND.** The DLL is present but missing a *function* a
+  newer consumer expects — e.g. `libheif 1.23` needs a symbol from `libde265 1.1`, but only
+  `libde265 1.0` is installed.
 
-`ldd ./Natron.exe` shows nothing wrong — it only walks **direct** imports. Use the recursive
-walker and filter out the `ext-ms-*` / `api-ms-*` Windows API-set stubs (those always say
-"not found" and are resolved by the OS) to find the real culprit:
+`libheif` is pulled in transitively via OpenImageIO, so this stops the GUI **and** the renderer.
+`ldd ./Natron.exe` shows nothing wrong (it only walks *direct* imports and can't see missing
+*symbols* at all). To find the missing-DLL case, use the recursive walker and filter out the
+`ext-ms-*` / `api-ms-*` Windows API-set stubs (those always say "not found" but are OS-resolved):
 ```bash
 export PATH="/c/msys64/mingw64/bin:$PATH"
 ntldd -R ./Natron.exe | grep -i "not found" | grep -viE "ext-ms-|api-ms-"
-# -> e.g.  libopenjph-0.27.dll => not found
+# missing-DLL case prints e.g.  libopenjph-0.27.dll => not found
+# entrypoint case prints nothing here — the DLL is present, only a symbol is absent
 ```
 
-**Proper fix — realign the packages** (rebuilds the lagging consumer against the installed openjph):
+**Proper fix — one full sync, never a single-package install.** MSYS2 is rolling-release and
+unsupported for partial upgrades; the only correct repair is to bring everything to one coherent
+snapshot. Close **all** MSYS2 processes first (Natron, gdb, every MINGW64 shell), then in a fresh
+MINGW64 terminal:
 ```bash
-pacman -S --noconfirm mingw-w64-x86_64-libheif   # or a full: pacman -Syu
+pacman -Syu      # may say to close the terminal and re-run; repeat until "nothing to do"
 ```
+After it, check what actually changed — `grep "$(date +%Y-%m-%d)" /c/msys64/var/log/pacman.log | grep upgraded`.
+A Natron **rebuild is only needed if something Natron links against moved** — `qt6-base`, the
+`gcc` compiler, `OpenImageIO`, `OpenColorIO`, `OpenEXR`/`Imath`, `boost`, or `Python`. If only
+runtime/transitive libs bumped (codecs, `libstdc++` minor, fonts, QML), the existing binary just
+loads the updated DLLs — relaunch, no rebuild.
 
-**Quick temporary workaround** — alias the installed DLL under the name the consumer wants.
-Only safe if the soname bump is ABI-compatible (usually fine just to get the app open to test):
+> **Do NOT "fix" this with `pacman -S mingw-w64-x86_64-<pkg>`.** That's another partial upgrade —
+> it can turn a `0xc0000135` into a harder `0xc0000139` by pulling a newer package whose own deps
+> are now stale. (Learned the hard way: a lone `pacman -S openjph` caused the first error, and a
+> lone `pacman -S libheif` to "fix" it caused the second. `pacman -Syu` resolved both.)
+
+**Stopgap only** (to open the app *once* for a quick test before you can run `-Syu`) — alias the
+installed DLL under the missing name. Works *only* for the missing-DLL (`0xc0000135`) case and
+only if the soname bump is ABI-compatible:
 ```bash
 cp /c/msys64/mingw64/bin/libopenjph-0.28.dll /c/msys64/mingw64/bin/libopenjph-0.27.dll
 ```
-Delete the spoofed copy (`rm /c/msys64/mingw64/bin/libopenjph-0.27.dll`) after doing the proper fix.
+Delete the alias (`rm /c/msys64/mingw64/bin/libopenjph-0.27.dll`) and run the real `-Syu` after.
 
 ### "Failed to import encodings module" on launch
 Python's standard library isn't bundled. Copy it with:
