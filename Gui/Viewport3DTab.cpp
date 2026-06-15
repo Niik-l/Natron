@@ -41,7 +41,7 @@
 #include "Gui/GuiApplicationManager.h"
 #include "Gui/SpinBox.h"
 #include "Gui/TimeLineGui.h"
-#include "Gui/DevViewport3D.h"
+#include "Gui/Viewport3D.h"
 #include "Engine/TimeLine.h"
 #include "Engine/Project.h"
 #include "Engine/Node.h"
@@ -180,10 +180,10 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
         _shadingDropdown->setPopupMode(QToolButton::InstantPopup);
         QMenu* shMenu = new QMenu(_shadingDropdown);
         const char* labels[4]  = { "Wireframe", "Flat", "Shaded", "Shaded+Wire" };
-        const int   modes[4]   = { (int)DevViewport3D::eWireframe,
-                                   (int)DevViewport3D::eFlat,
-                                   (int)DevViewport3D::eShaded,
-                                   (int)DevViewport3D::eShadedWire };
+        const int   modes[4]   = { (int)Viewport3D::eWireframe,
+                                   (int)Viewport3D::eFlat,
+                                   (int)Viewport3D::eShaded,
+                                   (int)Viewport3D::eShadedWire };
         for (int i = 0; i < 4; ++i) {
             QAction* a = shMenu->addAction(QString::fromUtf8(labels[i]));
             a->setData(modes[i]);
@@ -234,7 +234,7 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
     }
 
     // ==================== 3D Viewport ====================
-    _viewport = new DevViewport3D(gui);
+    _viewport = new Viewport3D(gui);
     mainLayout->addWidget(_viewport, 1); // stretch factor 1 = takes all remaining space
 
     // ==================== Timeline Scrubber ====================
@@ -409,14 +409,14 @@ Viewport3DTab::onShadingModeSelected()
     QAction* a = qobject_cast<QAction*>(sender());
     if (!a) return;
     const int modeInt = a->data().toInt();
-    const DevViewport3D::ShadingMode mode = (DevViewport3D::ShadingMode)modeInt;
+    const Viewport3D::ShadingMode mode = (Viewport3D::ShadingMode)modeInt;
     _viewport->setShadingMode(mode);
     QString label;
     switch (mode) {
-        case DevViewport3D::eWireframe:   label = QString::fromUtf8("Wireframe"); break;
-        case DevViewport3D::eFlat:        label = QString::fromUtf8("Flat"); break;
-        case DevViewport3D::eShaded:      label = QString::fromUtf8("Shaded"); break;
-        case DevViewport3D::eShadedWire:  label = QString::fromUtf8("Shaded+Wire"); break;
+        case Viewport3D::eWireframe:   label = QString::fromUtf8("Wireframe"); break;
+        case Viewport3D::eFlat:        label = QString::fromUtf8("Flat"); break;
+        case Viewport3D::eShaded:      label = QString::fromUtf8("Shaded"); break;
+        case Viewport3D::eShadedWire:  label = QString::fromUtf8("Shaded+Wire"); break;
     }
     _shadingDropdown->setText(QString::fromUtf8("Shading: ") + label);
 }
@@ -462,7 +462,7 @@ Viewport3DTab::onCyclesRender()
         QString::fromUtf8("PNG (*.png);;EXR (*.exr)"));
     if (savePath.isEmpty()) return;
 
-    // TODO: DevViewport3D uses demo-style camera, not Camera3D.
+    // TODO: Viewport3D uses demo-style camera, not Camera3D.
     // Viewport Render button needs updating to use the new camera matrices.
     // For now, CyclesRender node is the primary render path.
     bool ok = false;

@@ -21,7 +21,7 @@
 #include <Python.h>
 // ***** END PYTHON BLOCK *****
 
-#include "DevViewport3D.h"
+#include "Viewport3D.h"
 
 #include <cmath>
 #include <cstring>
@@ -460,7 +460,7 @@ findUVProjectForGeo(GuiAppInstance* app, const NodePtr& geoNode)
 // Section 3: Private struct — demo-style camera + ImGuizmo state
 // ============================================================================
 
-struct DevViewport3DPrivate
+struct Viewport3DPrivate
 {
     // Camera (ImGuizmo demo-style spherical coords)
     float camYAngle;     // horizontal orbit angle (radians)
@@ -502,7 +502,7 @@ struct DevViewport3DPrivate
     // Viewport shading style — driven by the Shading dropdown in Viewport3DTab.
     // Default Shaded+Wire so meshes show solid grey + edges (Maya-like) while
     // shapes carrying textures still display them.
-    DevViewport3D::ShadingMode shadingMode;
+    Viewport3D::ShadingMode shadingMode;
 
     // Right-click context menu — track the press position so we only show the
     // menu when the user releases without dragging (otherwise right-drag for
@@ -557,7 +557,7 @@ struct DevViewport3DPrivate
     GLuint particleShaderProgram;
     bool particleShaderReady;
 
-    DevViewport3DPrivate()
+    Viewport3DPrivate()
         : camYAngle(2.7f)
         , camXAngle(0.4f)
         , camDistance(8.0f)
@@ -572,7 +572,7 @@ struct DevViewport3DPrivate
         , boxStartX(0), boxStartY(0)
         , boxEndX(0), boxEndY(0)
         , showGrid(true)
-        , shadingMode(DevViewport3D::eShadedWire)
+        , shadingMode(Viewport3D::eShadedWire)
         , rightButtonDown(false)
         , rightPressX(0), rightPressY(0)
         , lookThroughEditMode(LT_NONE)
@@ -604,11 +604,11 @@ struct DevViewport3DPrivate
 // Constructor / Destructor
 // ============================================================================
 
-DevViewport3D::DevViewport3D(Gui* gui,
+Viewport3D::Viewport3D(Gui* gui,
                              const QOpenGLWidget* shareWidget)
     : QOpenGLWidget()
     , _gui(gui)
-    , _imp(new DevViewport3DPrivate())
+    , _imp(new Viewport3DPrivate())
 {
     Q_UNUSED(shareWidget);
     setMouseTracking(true);
@@ -619,18 +619,18 @@ DevViewport3D::DevViewport3D(Gui* gui,
     setContextMenuPolicy(Qt::PreventContextMenu);
 }
 
-DevViewport3D::~DevViewport3D()
+Viewport3D::~Viewport3D()
 {
 }
 
 QSize
-DevViewport3D::sizeHint() const
+Viewport3D::sizeHint() const
 {
     return QSize(640, 480);
 }
 
 void
-DevViewport3D::setPointCloud(const PointCloudDataPtr& cloud, float pointSize)
+Viewport3D::setPointCloud(const PointCloudDataPtr& cloud, float pointSize)
 {
     QMutexLocker lock(&_imp->cloudMutex);
     _imp->pointCloud = cloud;
@@ -639,19 +639,19 @@ DevViewport3D::setPointCloud(const PointCloudDataPtr& cloud, float pointSize)
 }
 
 void
-DevViewport3D::getCameraView(float m16[16]) const
+Viewport3D::getCameraView(float m16[16]) const
 {
     std::memcpy(m16, _imp->cameraView, sizeof(float) * 16);
 }
 
 void
-DevViewport3D::getCameraProjection(float m16[16]) const
+Viewport3D::getCameraProjection(float m16[16]) const
 {
     std::memcpy(m16, _imp->cameraProjection, sizeof(float) * 16);
 }
 
 void
-DevViewport3D::resetCamera()
+Viewport3D::resetCamera()
 {
     _imp->camYAngle = 2.7f;
     _imp->camXAngle = 0.4f;
@@ -668,7 +668,7 @@ DevViewport3D::resetCamera()
 // ============================================================================
 
 void
-DevViewport3D::initializeGL()
+Viewport3D::initializeGL()
 {
     glEnable(GL_DEPTH_TEST);
     glClearColor(0.15f, 0.15f, 0.15f, 1.0f);
@@ -730,7 +730,7 @@ DevViewport3D::initializeGL()
         glGetShaderiv(vs, GL_COMPILE_STATUS, &ok);
         if (!ok) {
             char log[512]; glGetShaderInfoLog(vs, 512, NULL, log);
-            printf("[DevViewport3D] Particle VS error: %s\n", log);
+            printf("[Viewport3D] Particle VS error: %s\n", log);
         }
 
         GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
@@ -739,7 +739,7 @@ DevViewport3D::initializeGL()
         glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
         if (!ok) {
             char log[512]; glGetShaderInfoLog(fs, 512, NULL, log);
-            printf("[DevViewport3D] Particle FS error: %s\n", log);
+            printf("[Viewport3D] Particle FS error: %s\n", log);
         }
 
         _imp->particleShaderProgram = glCreateProgram();
@@ -749,7 +749,7 @@ DevViewport3D::initializeGL()
         glGetProgramiv(_imp->particleShaderProgram, GL_LINK_STATUS, &ok);
         if (!ok) {
             char log[512]; glGetProgramInfoLog(_imp->particleShaderProgram, 512, NULL, log);
-            printf("[DevViewport3D] Particle shader link error: %s\n", log);
+            printf("[Viewport3D] Particle shader link error: %s\n", log);
         } else {
             _imp->particleShaderReady = true;
         }
@@ -770,7 +770,7 @@ DevViewport3D::initializeGL()
 
 
 void
-DevViewport3D::resizeGL(int w, int h)
+Viewport3D::resizeGL(int w, int h)
 {
     _imp->viewW = w;
     _imp->viewH = h;
@@ -1015,7 +1015,7 @@ applyDollyToCamera3D(Camera3DNode* cam, double time, const float pivot[3], int d
 }
 
 void
-DevViewport3D::paintGL()
+Viewport3D::paintGL()
 {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -1350,7 +1350,7 @@ DevViewport3D::paintGL()
         ImGuizmo::SetGizmoSizeClipSpace(0.2f); // 2x default size
 
         // Debug overlay
-        ImGui::GetForegroundDrawList()->AddText(ImVec2(10, 10), 0xFFFFFFFF, "DevViewport3D");
+        ImGui::GetForegroundDrawList()->AddText(ImVec2(10, 10), 0xFFFFFFFF, "Viewport3D");
         ImGui::GetForegroundDrawList()->AddText(ImVec2(10, 30), 0xFFFFFFFF,
             _imp->selectedNodeName.empty() ? "No selection" : _imp->selectedNodeName.c_str());
         char dbg[128];
@@ -1496,7 +1496,7 @@ DevViewport3D::paintGL()
 // ============================================================================
 
 void
-DevViewport3D::mousePressEvent(QMouseEvent* e)
+Viewport3D::mousePressEvent(QMouseEvent* e)
 {
     _imp->lastMouseX = e->x();
     _imp->lastMouseY = e->y();
@@ -1534,9 +1534,9 @@ DevViewport3D::mousePressEvent(QMouseEvent* e)
             _imp->lookThroughPivot[0] = pos[0] - dist * (float)R[0][2];
             _imp->lookThroughPivot[1] = pos[1] - dist * (float)R[1][2];
             _imp->lookThroughPivot[2] = pos[2] - dist * (float)R[2][2];
-            if (isOrbit)      _imp->lookThroughEditMode = DevViewport3DPrivate::LT_ORBIT;
-            else if (isPan)   _imp->lookThroughEditMode = DevViewport3DPrivate::LT_PAN;
-            else              _imp->lookThroughEditMode = DevViewport3DPrivate::LT_DOLLY;
+            if (isOrbit)      _imp->lookThroughEditMode = Viewport3DPrivate::LT_ORBIT;
+            else if (isPan)   _imp->lookThroughEditMode = Viewport3DPrivate::LT_PAN;
+            else              _imp->lookThroughEditMode = Viewport3DPrivate::LT_DOLLY;
             // Right-button: still track for context-menu suppression in case
             // the user does a small drag (we won't show the menu either way
             // since they wanted to dolly, but keep the state coherent).
@@ -1602,7 +1602,7 @@ DevViewport3D::mousePressEvent(QMouseEvent* e)
 }
 
 void
-DevViewport3D::mouseMoveEvent(QMouseEvent* e)
+Viewport3D::mouseMoveEvent(QMouseEvent* e)
 {
     int dx = e->x() - _imp->lastMouseX;
     int dy = e->y() - _imp->lastMouseY;
@@ -1622,7 +1622,7 @@ DevViewport3D::mouseMoveEvent(QMouseEvent* e)
     }
 
     // Look-through-edit: dispatch to the appropriate Camera3D mutation.
-    if (_imp->lookThroughEditMode != DevViewport3DPrivate::LT_NONE) {
+    if (_imp->lookThroughEditMode != Viewport3DPrivate::LT_NONE) {
         Camera3DNode* editCam = getEditableCamera3D(_imp->lookThroughCam);
         if (editCam) {
             double time = 0.0;
@@ -1630,11 +1630,11 @@ DevViewport3D::mouseMoveEvent(QMouseEvent* e)
                 time = getGui()->getApp()->getTimeLine()->currentFrame();
             }
             switch (_imp->lookThroughEditMode) {
-                case DevViewport3DPrivate::LT_ORBIT:
+                case Viewport3DPrivate::LT_ORBIT:
                     applyOrbitToCamera3D(editCam, time, _imp->lookThroughPivot, dx, dy); break;
-                case DevViewport3DPrivate::LT_PAN:
+                case Viewport3DPrivate::LT_PAN:
                     applyPanToCamera3D(editCam, time, _imp->lookThroughPivot, dx, dy); break;
-                case DevViewport3DPrivate::LT_DOLLY:
+                case Viewport3DPrivate::LT_DOLLY:
                     applyDollyToCamera3D(editCam, time, _imp->lookThroughPivot, dx, dy); break;
                 default: break;
             }
@@ -1679,7 +1679,7 @@ DevViewport3D::mouseMoveEvent(QMouseEvent* e)
 }
 
 void
-DevViewport3D::mouseReleaseEvent(QMouseEvent* e)
+Viewport3D::mouseReleaseEvent(QMouseEvent* e)
 {
     // Feed ImGui
     if (_imp->imguiInitialized) {
@@ -1723,11 +1723,11 @@ DevViewport3D::mouseReleaseEvent(QMouseEvent* e)
     _imp->orbiting = false;
     _imp->panning = false;
     _imp->zooming = false;
-    _imp->lookThroughEditMode = DevViewport3DPrivate::LT_NONE;
+    _imp->lookThroughEditMode = Viewport3DPrivate::LT_NONE;
 }
 
 void
-DevViewport3D::wheelEvent(QWheelEvent* e)
+Viewport3D::wheelEvent(QWheelEvent* e)
 {
     float delta = e->angleDelta().y() / 120.0f;
     _imp->camDistance *= (1.0f - delta * 0.1f);
@@ -1742,7 +1742,7 @@ DevViewport3D::wheelEvent(QWheelEvent* e)
 // ============================================================================
 
 void
-DevViewport3D::keyPressEvent(QKeyEvent* e)
+Viewport3D::keyPressEvent(QKeyEvent* e)
 {
     if (e->key() == Qt::Key_W) {
         _imp->imguizmoOp = ImGuizmo::TRANSLATE;
@@ -1837,7 +1837,7 @@ DevViewport3D::keyPressEvent(QKeyEvent* e)
 }
 
 void
-DevViewport3D::toggleTransformSpace()
+Viewport3D::toggleTransformSpace()
 {
     if (_imp->imguizmoMode == ImGuizmo::WORLD) {
         _imp->imguizmoMode = ImGuizmo::LOCAL;
@@ -1848,7 +1848,7 @@ DevViewport3D::toggleTransformSpace()
 }
 
 bool
-DevViewport3D::isLocalSpace() const
+Viewport3D::isLocalSpace() const
 {
     return _imp->imguizmoMode == ImGuizmo::LOCAL;
 }
@@ -1885,7 +1885,7 @@ static bool worldToScreenDev(const float cameraView[16], const float cameraProje
 }
 
 bool
-DevViewport3D::pickPointAtPosition(int screenX, int screenY)
+Viewport3D::pickPointAtPosition(int screenX, int screenY)
 {
     QMutexLocker lock(&_imp->cloudMutex);
     if (!_imp->pointCloud || _imp->pointCloud->numPoints() == 0) {
@@ -1944,7 +1944,7 @@ DevViewport3D::pickPointAtPosition(int screenX, int screenY)
 }
 
 void
-DevViewport3D::setShowGrid(bool show)
+Viewport3D::setShowGrid(bool show)
 {
     if (_imp->showGrid == show) return;
     _imp->showGrid = show;
@@ -1952,7 +1952,7 @@ DevViewport3D::setShowGrid(bool show)
 }
 
 void
-DevViewport3D::setShadingMode(DevViewport3D::ShadingMode mode)
+Viewport3D::setShadingMode(Viewport3D::ShadingMode mode)
 {
     if (_imp->shadingMode == mode) return;
     _imp->shadingMode = mode;
@@ -1960,7 +1960,7 @@ DevViewport3D::setShadingMode(DevViewport3D::ShadingMode mode)
 }
 
 void
-DevViewport3D::setIsolateSelected(bool enabled)
+Viewport3D::setIsolateSelected(bool enabled)
 {
     if (_imp->isolateSelected == enabled) return;
     _imp->isolateSelected = enabled;
@@ -1968,32 +1968,32 @@ DevViewport3D::setIsolateSelected(bool enabled)
 }
 
 bool
-DevViewport3D::isIsolateSelected() const
+Viewport3D::isIsolateSelected() const
 {
     return _imp->isolateSelected;
 }
 
-DevViewport3D::ShadingMode
-DevViewport3D::getShadingMode() const
+Viewport3D::ShadingMode
+Viewport3D::getShadingMode() const
 {
     return _imp->shadingMode;
 }
 
 void
-DevViewport3D::setLookThroughCamera(const NodePtr& cameraNode)
+Viewport3D::setLookThroughCamera(const NodePtr& cameraNode)
 {
     _imp->lookThroughCam = cameraNode;
     update();
 }
 
 NodePtr
-DevViewport3D::getLookThroughCamera() const
+Viewport3D::getLookThroughCamera() const
 {
     return _imp->lookThroughCam.lock();
 }
 
 Blast*
-DevViewport3D::getActiveBlast() const
+Viewport3D::getActiveBlast() const
 {
     NodePtr active = _imp->activeBlastNode.lock();
     if (!active) return nullptr;
@@ -2003,7 +2003,7 @@ DevViewport3D::getActiveBlast() const
 }
 
 void
-DevViewport3D::showBlastContextMenu(const QPoint& globalPos)
+Viewport3D::showBlastContextMenu(const QPoint& globalPos)
 {
     Blast* blast = getActiveBlast();
     if (!blast) return; // no Blast in scene → nothing to do
@@ -2045,7 +2045,7 @@ DevViewport3D::showBlastContextMenu(const QPoint& globalPos)
 }
 
 void
-DevViewport3D::boxSelectPoints()
+Viewport3D::boxSelectPoints()
 {
     QMutexLocker lock(&_imp->cloudMutex);
     _imp->selectedPointIndices.clear();
@@ -2094,7 +2094,7 @@ DevViewport3D::boxSelectPoints()
 }
 
 void
-DevViewport3D::selectObjectAtPosition(int screenX, int screenY)
+Viewport3D::selectObjectAtPosition(int screenX, int screenY)
 {
     const std::vector<SceneNode>& sceneNodes = _imp->sceneGraph.nodes();
 
@@ -2182,7 +2182,7 @@ DevViewport3D::selectObjectAtPosition(int screenX, int screenY)
 // ============================================================================
 
 void
-DevViewport3D::drawGrid() const
+Viewport3D::drawGrid() const
 {
     glBegin(GL_LINES);
     glColor3f(0.3f, 0.3f, 0.3f);
@@ -2196,7 +2196,7 @@ DevViewport3D::drawGrid() const
 }
 
 void
-DevViewport3D::drawAxes() const
+Viewport3D::drawAxes() const
 {
     glLineWidth(2.0f);
     glBegin(GL_LINES);
@@ -2214,7 +2214,7 @@ DevViewport3D::drawAxes() const
 }
 
 void
-DevViewport3D::drawPointCloud() const
+Viewport3D::drawPointCloud() const
 {
     QMutexLocker lock(&_imp->cloudMutex);
     if (!_imp->pointCloud || _imp->pointCloud->numPoints() == 0) {
@@ -2338,7 +2338,7 @@ DevViewport3D::drawPointCloud() const
 }
 
 void
-DevViewport3D::drawMeshNode(const SceneNode& sn) const
+Viewport3D::drawMeshNode(const SceneNode& sn) const
 {
     // Prefer mesh data carried directly on the SceneNode (set by
     // ReadGeo and ReadAlembicArchive). Fall back to the source-node
@@ -2518,7 +2518,7 @@ DevViewport3D::drawMeshNode(const SceneNode& sn) const
 }
 
 void
-DevViewport3D::drawCardNode(const SceneNode& sn) const
+Viewport3D::drawCardNode(const SceneNode& sn) const
 {
     NodePtr node = sn.sourceNode.lock();
     if (!node) return;
@@ -2660,7 +2660,7 @@ DevViewport3D::drawCardNode(const SceneNode& sn) const
 }
 
 void
-DevViewport3D::drawCameraNode(const SceneNode& sn) const
+Viewport3D::drawCameraNode(const SceneNode& sn) const
 {
     NodePtr node = sn.sourceNode.lock();
     if (!node) return;
@@ -2743,7 +2743,7 @@ DevViewport3D::drawCameraNode(const SceneNode& sn) const
 }
 
 void
-DevViewport3D::drawSphereNode(const SceneNode& sn) const
+Viewport3D::drawSphereNode(const SceneNode& sn) const
 {
     NodePtr node = sn.sourceNode.lock();
     if (!node) return;
@@ -2937,7 +2937,7 @@ DevViewport3D::drawSphereNode(const SceneNode& sn) const
 }
 
 void
-DevViewport3D::drawCubeNode(const SceneNode& sn) const
+Viewport3D::drawCubeNode(const SceneNode& sn) const
 {
     NodePtr node = sn.sourceNode.lock();
     if (!node) return;
@@ -3104,7 +3104,7 @@ DevViewport3D::drawCubeNode(const SceneNode& sn) const
 }
 
 void
-DevViewport3D::drawCylinderNode(const SceneNode& sn) const
+Viewport3D::drawCylinderNode(const SceneNode& sn) const
 {
     NodePtr node = sn.sourceNode.lock();
     if (!node) return;
@@ -3287,7 +3287,7 @@ DevViewport3D::drawCylinderNode(const SceneNode& sn) const
 }
 
 void
-DevViewport3D::drawVolumeNode(const SceneNode& sn) const
+Viewport3D::drawVolumeNode(const SceneNode& sn) const
 {
     NodePtr node = sn.sourceNode.lock();
     if (!node) return;
@@ -3380,7 +3380,7 @@ DevViewport3D::drawVolumeNode(const SceneNode& sn) const
 }
 
 void
-DevViewport3D::drawLightNode(const SceneNode& sn) const
+Viewport3D::drawLightNode(const SceneNode& sn) const
 {
     bool selected = (sn.name == _imp->selectedNodeName);
     glColor3f(1.0f, 0.9f, 0.3f);
@@ -3529,7 +3529,7 @@ DevViewport3D::drawLightNode(const SceneNode& sn) const
 }
 
 void
-DevViewport3D::drawTransformNode(const SceneNode& sn) const
+Viewport3D::drawTransformNode(const SceneNode& sn) const
 {
     bool selected = (sn.name == _imp->selectedNodeName);
     float axisLen = 0.8f;
@@ -3574,7 +3574,7 @@ DevViewport3D::drawTransformNode(const SceneNode& sn) const
 }
 
 void
-DevViewport3D::drawParticlesNode(const SceneNode& sn) const
+Viewport3D::drawParticlesNode(const SceneNode& sn) const
 {
     NodePtr node = sn.sourceNode.lock();
     if (!node) return;
@@ -3813,14 +3813,14 @@ DevViewport3D::drawParticlesNode(const SceneNode& sn) const
 }
 
 void
-DevViewport3D::drawPointCloudNode(const SceneNode& sn) const
+Viewport3D::drawPointCloudNode(const SceneNode& sn) const
 {
     Q_UNUSED(sn);
     // Actual drawing is done by drawPointCloud() which uses the cached PointCloudDataPtr.
 }
 
 void
-DevViewport3D::drawGroupNode(const SceneNode& sn) const
+Viewport3D::drawGroupNode(const SceneNode& sn) const
 {
     Q_UNUSED(sn);
 
@@ -3855,7 +3855,7 @@ DevViewport3D::drawGroupNode(const SceneNode& sn) const
 // ============================================================================
 
 void
-DevViewport3D::refreshPointCloud()
+Viewport3D::refreshPointCloud()
 {
     Gui* gui = getGui();
     if (!gui) return;

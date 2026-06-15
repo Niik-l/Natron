@@ -17,8 +17,8 @@
  * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef NATRON_GUI_DEVVIEWPORT3D_H
-#define NATRON_GUI_DEVVIEWPORT3D_H
+#ifndef NATRON_GUI_VIEWPORT3D_H
+#define NATRON_GUI_VIEWPORT3D_H
 
 // ***** BEGIN PYTHON BLOCK *****
 #include <Python.h>
@@ -43,17 +43,17 @@ CLANG_DIAG_ON(uninitialized)
 NATRON_NAMESPACE_ENTER
 
 class Blast; // forward — full include not needed for the pointer return type
-struct DevViewport3DPrivate;
+struct Viewport3DPrivate;
 
 /**
- * @class DevViewport3D — replacement 3D viewport using ImGuizmo demo camera architecture.
+ * @class Viewport3D — replacement 3D viewport using ImGuizmo demo camera architecture.
  *
  * Camera uses spherical coordinates (camYAngle, camXAngle, camDistance) and LookAt,
  * copied verbatim from the ImGuizmo demo's main.cpp.
  * Object matrices use ImGuizmo::RecomposeMatrixFromComponents so GL rendering
  * and ImGuizmo gizmo manipulation agree on orientation.
  */
-class DevViewport3D
+class Viewport3D
     : public QOpenGLWidget
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
@@ -62,10 +62,10 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
 
-    DevViewport3D(Gui* gui,
+    Viewport3D(Gui* gui,
                   const QOpenGLWidget* shareWidget = NULL);
 
-    virtual ~DevViewport3D();
+    virtual ~Viewport3D();
 
     Gui* getGui() const { return _gui; }
 
@@ -173,9 +173,9 @@ private:
     void drawTransformNode(const SceneNode& sn) const;
 
     Gui* _gui;
-    std::unique_ptr<DevViewport3DPrivate> _imp;
+    std::unique_ptr<Viewport3DPrivate> _imp;
 };
 
 NATRON_NAMESPACE_EXIT
 
-#endif // NATRON_GUI_DEVVIEWPORT3D_H
+#endif // NATRON_GUI_VIEWPORT3D_H

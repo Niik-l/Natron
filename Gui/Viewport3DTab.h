@@ -41,7 +41,7 @@ NATRON_NAMESPACE_ENTER
 
 class TimeLineGui;
 class Viewport3D;
-class DevViewport3D;
+class Viewport3D;
 
 /**
  * @brief Wrapper panel for the 3D viewport, matching the 2D viewer layout.
@@ -64,7 +64,7 @@ public:
     Viewport3DTab(Gui* gui, QWidget* parent = NULL);
     virtual ~Viewport3DTab();
 
-    DevViewport3D* getViewport() const { return _viewport; }
+    Viewport3D* getViewport() const { return _viewport; }
 
 public Q_SLOTS:
 
@@ -100,7 +100,7 @@ private:
     virtual void leaveEvent(QEvent* e) OVERRIDE FINAL;
     virtual void keyPressEvent(QKeyEvent* e) OVERRIDE FINAL;
 
-    DevViewport3D* _viewport;
+    Viewport3D* _viewport;
     TimeLineGui* _timelineGui;
     QLabel* _frameLabel;
     QSpinBox* _frameSpin;

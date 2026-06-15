@@ -583,7 +583,7 @@ ParticleEmitter::getParticleData(double time)
 
             // Card3D local plane spans (-halfW, -halfH, 0) to (+halfW, +halfH, 0).
             // halfW carries the texture aspect, halfH = 0.5 (same convention
-            // drawCardNode uses in DevViewport3D).
+            // drawCardNode uses in Viewport3D).
             if (card3dTex->width > 0 && card3dTex->height > 0) {
                 card3dHalfW = (float)card3dTex->width / (float)card3dTex->height * 0.5f;
             }
