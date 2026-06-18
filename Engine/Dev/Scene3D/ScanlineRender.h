@@ -107,7 +107,14 @@ private:
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
+
+private:
+    // Single source of truth for the Nuke-style bg conform: if input 0 (bg) is connected,
+    // returns its output rectangle (format preferred, RoD as fallback) so the output FORMAT,
+    // the RoD, and the render framebuffer all agree. Returns false when no bg conforms.
+    bool getBgConformRect(double time, ViewIdx view, RectI* outRect);
 
     std::unique_ptr<ScanlineRenderPrivate> _imp;
 };

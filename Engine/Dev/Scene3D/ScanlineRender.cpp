@@ -23,6 +23,7 @@
 
 #include "ScanlineRender.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -58,11 +59,13 @@
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
+#include "../../NodeMetadata.h"
 #include "../../OSGLContext.h"
 #include "ReadGeo.h"
 #include "SceneGraph.h"
 #include "Sphere3D.h"
 #include "UVProject.h"
+#include "Project3D.h"
 #include "../../ViewIdx.h"
 
 #ifndef M_PI
@@ -102,6 +105,11 @@ struct ScanlineRenderPrivate
     // back-facing areas aren't pure black). Multiplies the surface colour, like
     // the previously hard-coded 0.15 grey. Default 0.15 grey preserves that.
     KnobColorWPtr ambient;
+
+    // Transparency: when on (default), surfaces respect their alpha (alpha < 1
+    // is see-through, blended over what's behind). When off, geometry is forced
+    // opaque (output alpha = 1 wherever a surface is hit).
+    KnobBoolWPtr transparency;
 
     // Spatial antialiasing level — maps to MSAA sample count
     // (None=1, Low=2, Medium=4, High=8), clamped to the driver's GL_MAX_SAMPLES.
@@ -242,6 +250,15 @@ ScanlineRender::initializeKnobs()
                               "previous fixed ambient; set to black for no fill, or tint for a "
                               "coloured ambient. No effect in Flat or Wireframe mode."));
         outPage->addKnob(k); _imp->ambient = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Transparency"));
+        k->setName("transparency"); k->setDefaultValue(true);
+        k->setHintToolTip(tr("When on, surfaces respect their alpha — areas where alpha is "
+                              "less than 1 are see-through (blended over whatever is behind). "
+                              "When off, geometry renders opaque (output alpha forced to 1 "
+                              "where a surface is hit), ignoring texture/material alpha."));
+        outPage->addKnob(k); _imp->transparency = k;
     }
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Projection Mode"));
@@ -494,15 +511,83 @@ ScanlineRender::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     return false;
 }
 
-StatusEnum
-ScanlineRender::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
-                                      ViewIdx /*view*/, RectD* rod)
+bool
+ScanlineRender::getBgConformRect(double time, ViewIdx view, RectI* outRect)
 {
+    // Nuke-style conform: a connected bg (input 0) defines the output rectangle so the render
+    // matches the bg / Reformat. Important for UV-bake projection, where the render res should
+    // match the UV space (e.g. a square plate).
+    //
+    // Prefer the bg's output FORMAT over its region of definition. A Reformat sets a new format
+    // (e.g. a square) but, with "black outside" off, keeps the original (e.g. 1920x1080) data
+    // window as its RoD — so the RoD would not be square even though the format is. The format
+    // is exactly the conform target the user means by "set the Reformat to square". Fall back to
+    // the RoD only when the bg reports no usable format (e.g. some input-less generators).
+    EffectInstancePtr bg = getInput(0);
+    if (!bg) {
+        return false;
+    }
+    const RectI fmt = bg->getOutputFormat();
+    if (fmt.x2 > fmt.x1 && fmt.y2 > fmt.y1) {
+        *outRect = fmt;
+        return true;
+    }
+    RectD bgRod;
+    if (bg->getRegionOfDefinition_public(bg->getRenderHash(), time, RenderScale(), view, &bgRod, NULL) == eStatusOK
+        && bgRod.x2 > bgRod.x1 && bgRod.y2 > bgRod.y1) {
+        outRect->x1 = (int)std::floor(bgRod.x1);
+        outRect->y1 = (int)std::floor(bgRod.y1);
+        outRect->x2 = (int)std::ceil(bgRod.x2);
+        outRect->y2 = (int)std::ceil(bgRod.y2);
+        return true;
+    }
+    return false;
+}
+
+StatusEnum
+ScanlineRender::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale& /*scale*/,
+                                      ViewIdx view, RectD* rod)
+{
+    RectI bgRect;
+    if (getBgConformRect(time, view, &bgRect)) {
+        rod->x1 = bgRect.x1;
+        rod->y1 = bgRect.y1;
+        rod->x2 = bgRect.x2;
+        rod->y2 = bgRect.y2;
+        return eStatusOK;
+    }
     const int ov = _imp->overscan.lock() ? _imp->overscan.lock()->getValue() : 0;
     rod->x1 = -ov;
     rod->y1 = -ov;
     rod->x2 = _imp->outputWidth.lock()->getValue()  + ov;
     rod->y2 = _imp->outputHeight.lock()->getValue() + ov;
+    return eStatusOK;
+}
+
+StatusEnum
+ScanlineRender::getPreferredMetadata(NodeMetadata& metadata)
+{
+    // The render depends on the current frame (animated geo / lights / camera).
+    metadata.setIsFrameVarying(true);
+
+    // Declare the output FORMAT (the displayed canvas, distinct from the RoD). Without this the
+    // node would inherit the project format (e.g. HD) and the viewer/downstream would show HD
+    // even though the RoD conformed to the bg. Conform the format to the bg the same way the RoD
+    // does, so format + RoD + framebuffer all agree.
+    RectI bgRect;
+    if ( getBgConformRect(0., ViewIdx(0), &bgRect) ) {
+        RectI fmt;
+        fmt.x1 = 0; fmt.y1 = 0;
+        fmt.x2 = std::max(1, bgRect.width());
+        fmt.y2 = std::max(1, bgRect.height());
+        metadata.setOutputFormat(fmt);
+    } else {
+        RectI fmt;
+        fmt.x1 = 0; fmt.y1 = 0;
+        fmt.x2 = std::max(1, _imp->outputWidth.lock()->getValue());
+        fmt.y2 = std::max(1, _imp->outputHeight.lock()->getValue());
+        metadata.setOutputFormat(fmt);
+    }
     return eStatusOK;
 }
 
@@ -897,6 +982,8 @@ static const char* kBeautyVert =
     "uniform mat4 u_view;                      // world->view, for spherical lat-long projection\n"
     "uniform float u_near;\n"
     "uniform float u_far;\n"
+    "uniform int  u_useProjector;             // 1 = a Project3D material is active on this geo\n"
+    "uniform mat4 u_projectorVP;              // projector view*projection (world -> projector clip)\n"
     "out vec2 v_uv;\n"
     "out vec4 v_stw;\n"
     "out vec3 v_worldNormal;\n"
@@ -904,11 +991,13 @@ static const char* kBeautyVert =
     "out vec3 v_prefPos;                       // object-space position (= in_pos) — Pref AOV\n"
     "out vec4 v_currClipPos;                   // current-frame clip-space position — for velocity\n"
     "out vec4 v_prevClipPos;                   // previous-frame clip-space position — for velocity\n"
+    "out vec4 v_projClip;                      // projector clip-space position — Project3D\n"
     "void main() {\n"
     "    v_uv          = in_uv;\n"
     "    v_stw         = in_stw;\n"
     "    v_worldNormal = u_normalMatrix * in_normal;\n"
     "    v_worldPos    = (u_localMatrix * vec4(in_pos, 1.0)).xyz;\n"
+    "    v_projClip    = (u_useProjector == 1) ? (u_projectorVP * vec4(v_worldPos, 1.0)) : vec4(0.0);\n"
     "    v_prefPos     = in_pos;\n"
     "    v_currClipPos = u_mvp * vec4(in_pos, 1.0);\n"
     "    v_prevClipPos = u_prevMvp * vec4(in_prevPos, 1.0);\n"
@@ -939,9 +1028,19 @@ static const char* kBeautyFrag =
     "in vec3 v_prefPos;\n"
     "in vec4 v_currClipPos;\n"
     "in vec4 v_prevClipPos;\n"
+    "in vec4 v_projClip;\n"
     "uniform sampler2D u_tex;\n"
     "uniform vec2 u_viewportSize;\n"
     "uniform int u_hasTexture;       // 0=no, 1=regular UV, 2=STW projective\n"
+    "uniform int u_useProjector;     // 1 = Project3D material active on this geo\n"
+    "uniform sampler2D u_projPlate;  // the plate to project (texture unit 1)\n"
+    "uniform int u_projOn;           // 0=front, 1=back, 2=both faces\n"
+    "uniform int u_projCrop;         // 1=transparent outside the plate frame\n"
+    "uniform float u_projNear;       // projector-space near clip (distance)\n"
+    "uniform float u_projFar;        // projector-space far clip (distance)\n"
+    "uniform vec3 u_projForward;     // projector forward direction (world)\n"
+    "uniform int u_occMode;          // 0=none, 1/2 = occlude (depth map on unit 2)\n"
+    "uniform sampler2D u_occDepth;   // projector depth map (nearest-surface distance)\n"
     "uniform int u_shadingMode;      // 0=Shaded, 1=Flat, 2=Wireframe\n"
     "uniform int u_hasLight;         // 1 if Light3D connected, 0 = fallback default\n"
     "uniform vec3 u_lightPos;        // world-space point light position\n"
@@ -949,6 +1048,7 @@ static const char* kBeautyFrag =
     "uniform float u_lightIntensity;\n"
     "uniform vec3 u_cameraPos;       // world-space camera position (fallback headlight when no Light3D)\n"
     "uniform vec3 u_ambient;         // global ambient fill colour (Shaded mode)\n"
+    "uniform int u_transparency;     // 1 = respect surface alpha, 0 = force opaque\n"
     "uniform int u_writeNormal;      // attachment 1 (Phase 3D)\n"
     "uniform int u_writeUV;          // attachment 2 (Phase 3D)\n"
     "uniform int u_writePref;        // attachment 3 (Phase 3D)\n"
@@ -965,7 +1065,32 @@ static const char* kBeautyFrag =
     "    } else {\n"
     "        // --- Base color from texture / STW / vertex (existing logic) ---\n"
     "        vec4 baseColor;\n"
-    "        if (u_hasTexture == 2) {\n"
+    "        if (u_useProjector == 1) {\n"
+    "            // Project3D: project the plate from the projector camera.\n"
+    "            if (v_projClip.w <= 0.0) {\n"
+    "                baseColor = vec4(0.0);            // behind the projector\n"
+    "            } else {\n"
+    "                float pd  = v_projClip.w;         // distance in front of the projector\n"
+    "                vec2 puv  = (v_projClip.xy / v_projClip.w) * 0.5 + 0.5;\n"
+    "                float f   = dot(normalize(v_worldNormal), normalize(u_projForward));\n"
+    "                bool faceOK  = (u_projOn == 2) || (u_projOn == 0 && f < 0.0) || (u_projOn == 1 && f > 0.0);\n"
+    "                bool depthOK = (pd >= u_projNear && pd <= u_projFar);\n"
+    "                bool inFrame = (puv.x >= 0.0 && puv.x <= 1.0 && puv.y >= 0.0 && puv.y <= 1.0);\n"
+    "                bool occluded = false;\n"
+    "                if (u_occMode != 0 && inFrame) {\n"
+    "                    // Shadow-map compare: this fragment's projector-NDC depth vs the\n"
+    "                    // nearest surface the projector sees at this UV. Farther => blocked.\n"
+    "                    float fragDepth = (v_projClip.z / v_projClip.w) * 0.5 + 0.5;\n"
+    "                    float nearest = texture(u_occDepth, puv).r;\n"
+    "                    if (fragDepth > nearest + 0.0015) occluded = true;\n"
+    "                }\n"
+    "                if (!faceOK || !depthOK || occluded || (u_projCrop == 1 && !inFrame)) {\n"
+    "                    baseColor = vec4(0.0);\n"
+    "                } else {\n"
+    "                    baseColor = texture(u_projPlate, clamp(puv, 0.0, 1.0));\n"
+    "                }\n"
+    "            }\n"
+    "        } else if (u_hasTexture == 2) {\n"
     "            if (v_stw.w <= 0.0) discard;\n"
     "            vec2 uv = v_stw.xy / v_stw.w;\n"
     "            if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {\n"
@@ -1005,6 +1130,8 @@ static const char* kBeautyFrag =
     "            out_color = baseColor;\n"
     "        }\n"
     "    }\n"
+    "    // Transparency off: force opaque coverage (ignore surface alpha).\n"
+    "    if (u_transparency == 0) out_color.a = 1.0;\n"
     "    // --- Normal AOV ---\n"
     "    if (u_writeNormal == 1) {\n"
     "        vec3 n = normalize(v_worldNormal);\n"
@@ -1258,6 +1385,7 @@ static const char* kInstanceFrag =
     "uniform float u_lightIntensity;\n"
     "uniform vec3 u_cameraPos;\n"
     "uniform vec3 u_ambient;\n"
+    "uniform int  u_transparency;\n"
     "uniform int  u_writeNormal;\n"
     "uniform int  u_writeUV;\n"
     "uniform int  u_writePref;\n"
@@ -1285,6 +1413,7 @@ static const char* kInstanceFrag =
     "    } else {\n"
     "        out_color = v_color;\n"
     "    }\n"
+    "    if (u_transparency == 0) out_color.a = 1.0;\n"
     "    out_normal = (u_writeNormal == 1)   ? vec4(normalize(v_worldNormal), 1.0) : vec4(0.0);\n"
     "    out_uv     = (u_writeUV == 1)       ? vec4(v_uv, 0.0, 1.0)                 : vec4(0.0);\n"
     "    out_pref   = (u_writePref == 1)     ? vec4(v_objPos, 1.0)                  : vec4(0.0);\n"
@@ -1414,10 +1543,25 @@ struct GeoData {
     std::vector<float> prevVerts;
     float prevLocalMatrix[16];
 
+    // Project3D (camera-projected material). Filled by applyProjectorMaterial when this
+    // geo's material input is a Project3D with a camera + plate.
+    bool     useProjector;
+    float    projectorVP[16];  // projector view*projection (world -> projector clip)
+    float    projForward[3];   // projector forward direction (world), for front/back
+    int      projOn;           // 0 front, 1 back, 2 both
+    int      projCrop;         // 1 = transparent outside the plate frame
+    float    projNear, projFar;// projector-space depth crop
+    int      occMode;          // 0 none, 1 self, 2 world
+    GLuint   occDepthTex;      // projector depth map (0 = not built -> occlusion inactive)
+    ImagePtr projPlateImg;     // the plate to project
+
     GeoData()
+        : useProjector(false), projOn(0), projCrop(1), projNear(0.1f), projFar(10000.f),
+          occMode(0), occDepthTex(0)
     {
-        // Identity for prevLocalMatrix so velocity = 0 by default (static).
         for (int i = 0; i < 16; ++i) prevLocalMatrix[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+        for (int i = 0; i < 16; ++i) projectorVP[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+        projForward[0] = 0.f; projForward[1] = 0.f; projForward[2] = -1.f;
     }
 };
 
@@ -1743,6 +1887,46 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
 // extractGeometry) and multi-emit nodes (ReadAlembicArchive — one GeoData per
 // visible mesh entry, world transform composed from the archive's parent chain).
 // Appends 0..N entries to `out`.
+// If the geo's material input is a Project3D (with a connected camera + plate), fill the
+// projector fields of `g` so renderGeoObjectGlsl projects the plate onto it.
+static void
+applyProjectorMaterial(const EffectInstancePtr& geoEffect, double time, ViewIdx view, GeoData& g)
+{
+    if (!geoEffect) return;
+    MaterialProvider* geoMat = dynamic_cast<MaterialProvider*>(geoEffect.get());
+    if (!geoMat || !geoMat->hasMaterialInput()) return;
+    Project3D* proj = dynamic_cast<Project3D*>(geoMat->getConnectedMaterial());
+    if (!proj) return;
+
+    double tx, ty, tz, rx, ry, rz, focal, hAp, vAp;
+    if (!proj->getProjectorCamera(time, tx, ty, tz, rx, ry, rz, focal, hAp, vAp)) {
+        return;  // no projection camera connected
+    }
+
+    const float pNear = (float)proj->getNearClip(time);
+    const float pFar  = (float)proj->getFarClip(time);
+
+    float pView[16], pProj[16];
+    buildViewMatrix(tx, ty, tz, rx, ry, rz, pView);
+    CameraMath::composeProjectionMatrix(focal, hAp, vAp, (pNear > 1e-4f ? pNear : 0.1f), pFar, pProj);
+    mat4Mul(g.projectorVP, pProj, pView);  // world -> projector clip
+
+    // Projector forward in world = -(row 2 of the view rotation) = -(pView[2,6,10]).
+    g.projForward[0] = -pView[2];
+    g.projForward[1] = -pView[6];
+    g.projForward[2] = -pView[10];
+
+    g.projOn   = proj->getProjectOn(time);
+    g.projCrop = proj->getCropToFrame(time) ? 1 : 0;
+    g.projNear = pNear;
+    g.projFar  = pFar;
+    g.occMode  = proj->getOcclusionMode(time);
+
+    RectI roi;
+    g.projPlateImg = proj->getImage(0, time, RenderScale(), view, NULL, NULL, false, true, eStorageModeRAM, 0, &roi);
+    g.useProjector = (bool)g.projPlateImg;  // active only if a plate is connected
+}
+
 static void
 extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vector<GeoData>& out)
 {
@@ -1841,6 +2025,7 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
     // Single-result path: delegate to the existing extractGeometry helper.
     GeoData g;
     if (extractGeometry(effect, time, view, g)) {
+        applyProjectorMaterial(effect, time, view, g);
         out.push_back(g);
     }
 }
@@ -1903,6 +2088,42 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
             hasTextureMode = useSTW ? 2 : 1;
         }
     }
+
+    // Project3D: upload the plate to texture unit 1 (the fragment shader projects it
+    // from the projector camera when u_useProjector == 1).
+    GLuint projTex = 0;
+    if (geo.useProjector && geo.projPlateImg) {
+        RectI pb = geo.projPlateImg->getBounds();
+        const int pw = pb.width(), ph = pb.height();
+        if (pw > 0 && ph > 0) {
+            glGenTextures(1, &projTex);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, projTex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            std::vector<float> pData((size_t)pw * ph * 4, 0.0f);
+            {
+                Image::ReadAccess ra(geo.projPlateImg.get());
+                const int nc = geo.projPlateImg->getComponents().getNumComponents();
+                for (int y = pb.y1; y < pb.y2; ++y) {
+                    for (int x = pb.x1; x < pb.x2; ++x) {
+                        const float* pix = (const float*)ra.pixelAt(x, y);
+                        if (!pix) continue;
+                        int idx = ((y - pb.y1) * pw + (x - pb.x1)) * 4;
+                        pData[idx + 0] = pix[0];
+                        pData[idx + 1] = pix[1];
+                        pData[idx + 2] = pix[2];
+                        pData[idx + 3] = (nc >= 4) ? pix[3] : 1.0f;
+                    }
+                }
+            }
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F_ARB, pw, ph, 0, GL_RGBA, GL_FLOAT, pData.data());
+            glActiveTexture(GL_TEXTURE0);  // restore the default active unit
+        }
+    }
+    const int useProjector = (geo.useProjector && projTex) ? 1 : 0;
 
     // --- Per-mesh MVP = projView * localMatrix (current + previous) ---
     float mvp[16];
@@ -2030,6 +2251,16 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
     GLint locWriteUV       = glGetUniformLocation(program, "u_writeUV");
     GLint locWritePref     = glGetUniformLocation(program, "u_writePref");
     GLint locWriteVelocity = glGetUniformLocation(program, "u_writeVelocity");
+    GLint locUseProjector  = glGetUniformLocation(program, "u_useProjector");
+    GLint locProjectorVP   = glGetUniformLocation(program, "u_projectorVP");
+    GLint locProjPlate     = glGetUniformLocation(program, "u_projPlate");
+    GLint locProjOn        = glGetUniformLocation(program, "u_projOn");
+    GLint locProjCrop      = glGetUniformLocation(program, "u_projCrop");
+    GLint locProjNear      = glGetUniformLocation(program, "u_projNear");
+    GLint locProjFar       = glGetUniformLocation(program, "u_projFar");
+    GLint locProjForward   = glGetUniformLocation(program, "u_projForward");
+    GLint locOccMode       = glGetUniformLocation(program, "u_occMode");
+    GLint locOccDepth      = glGetUniformLocation(program, "u_occDepth");
     if (locMvp >= 0)            glUniformMatrix4fv(locMvp,         1, GL_FALSE, mvp);
     if (locPrevMvp >= 0)        glUniformMatrix4fv(locPrevMvp,     1, GL_FALSE, prevMvp);
     if (locLocalMatrix >= 0)    glUniformMatrix4fv(locLocalMatrix, 1, GL_FALSE, geo.localMatrix);
@@ -2053,6 +2284,23 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
     if (locWriteUV >= 0)        glUniform1i(locWriteUV,       writeUV       ? 1 : 0);
     if (locWritePref >= 0)      glUniform1i(locWritePref,     writePref     ? 1 : 0);
     if (locWriteVelocity >= 0)  glUniform1i(locWriteVelocity, writeVelocity ? 1 : 0);
+    if (locUseProjector >= 0)   glUniform1i(locUseProjector, useProjector);
+    if (locProjectorVP >= 0)    glUniformMatrix4fv(locProjectorVP, 1, GL_FALSE, geo.projectorVP);
+    if (locProjPlate >= 0)      glUniform1i(locProjPlate, 1);   // plate on texture unit 1
+    if (locProjOn >= 0)         glUniform1i(locProjOn, geo.projOn);
+    if (locProjCrop >= 0)       glUniform1i(locProjCrop, geo.projCrop);
+    if (locProjNear >= 0)       glUniform1f(locProjNear, geo.projNear);
+    if (locProjFar >= 0)        glUniform1f(locProjFar, geo.projFar);
+    if (locProjForward >= 0)    glUniform3f(locProjForward, geo.projForward[0], geo.projForward[1], geo.projForward[2]);
+    // Occlusion: active only once the projector depth map exists (built in render()).
+    const int occUniform = (geo.occMode != 0 && geo.occDepthTex != 0) ? geo.occMode : 0;
+    if (geo.occDepthTex) {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, geo.occDepthTex);
+        glActiveTexture(GL_TEXTURE0);
+    }
+    if (locOccMode >= 0)        glUniform1i(locOccMode, occUniform);
+    if (locOccDepth >= 0)       glUniform1i(locOccDepth, 2);
 
     if (shadingMode == 2) {
         glDrawElements(GL_LINES, (GLsizei)wireIndices.size(), GL_UNSIGNED_INT, 0);
@@ -2066,6 +2314,7 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
     glDeleteBuffers(1, &ibo);
     glDeleteVertexArrays(1, &vao);
     if (srcTex) glDeleteTextures(1, &srcTex);
+    if (projTex) glDeleteTextures(1, &projTex);
 }
 
 // ==================== Render ====================
@@ -2077,9 +2326,33 @@ ScanlineRender::render(const RenderActionArgs& args)
     ImagePtr outImg = args.outputPlanes.front().second;
     if (!outImg) return eStatusFailed;
 
-    const int baseW = _imp->outputWidth.lock()->getValue();
-    const int baseH = _imp->outputHeight.lock()->getValue();
-    const int overscan = _imp->overscan.lock() ? _imp->overscan.lock()->getValue() : 0;
+    int baseW = _imp->outputWidth.lock()->getValue();
+    int baseH = _imp->outputHeight.lock()->getValue();
+    int overscan = _imp->overscan.lock() ? _imp->overscan.lock()->getValue() : 0;
+
+    // A connected bg (input 0) overrides the resolution (Nuke-style): render at the bg's FORMAT
+    // and skip overscan so the composite aligns 1:1. Important for UV-bake projection (match
+    // the UV-space, e.g. a square plate). Use the format (matches getRegionOfDefinition) rather
+    // than the bg image bounds: a Reformat with "black outside" off keeps the original data
+    // window as its bounds even when its format is square. Fetched up-front here + reused below.
+    ImagePtr bgImg;
+    {
+        EffectInstancePtr bgEffect = getInput(0);
+        if (bgEffect) {
+            // Size the framebuffer from the SAME conform helper as the format/RoD, so all three
+            // agree (the bug we chased: RoD conformed to 2K while the framebuffer stayed HD).
+            RectI bgRect;
+            if (getBgConformRect(args.time, args.view, &bgRect)) {
+                baseW = bgRect.width();
+                baseH = bgRect.height();
+                overscan = 0;
+            }
+            RectI bgRoi;
+            bgImg = getImage(0, args.time, RenderScale(), args.view,
+                             NULL, NULL, false, true, eStorageModeRAM, 0, &bgRoi);
+        }
+    }
+
     // Padded render dimensions: the frame plus 'overscan' pixels on every side.
     // All framebuffers, the viewport, readback, and the output write loop use
     // outW/outH, and the output RoD (getRegionOfDefinition) starts at (-overscan,
@@ -2106,6 +2379,9 @@ ScanlineRender::render(const RenderActionArgs& args)
         ambient[1] = (float)ac->getValueAtTime(args.time, 1);
         ambient[2] = (float)ac->getValueAtTime(args.time, 2);
     }
+
+    // Transparency: 1 = respect surface alpha, 0 = force opaque.
+    const int transparency = (_imp->transparency.lock() && !_imp->transparency.lock()->getValue()) ? 0 : 1;
 
     // --- Get camera from input 2 (through any Dots) ---
     EffectInstancePtr camEffect = skipDots(getInput(2));
@@ -2646,6 +2922,8 @@ ScanlineRender::render(const RenderActionArgs& args)
         if (locBeautyFar >= 0) glUniform1f(locBeautyFar, camFar);
         const GLint locBeautyAmbient = glGetUniformLocation(glslBeautyProg, "u_ambient");
         if (locBeautyAmbient >= 0) glUniform3fv(locBeautyAmbient, 1, ambient);
+        const GLint locBeautyTransp = glGetUniformLocation(glslBeautyProg, "u_transparency");
+        if (locBeautyTransp >= 0) glUniform1i(locBeautyTransp, transparency);
         for (size_t gi = 0; gi < geoObjects.size(); ++gi) {
             renderGeoObjectGlsl(geoObjects[gi], glslBeautyProg,
                                 projViewMatrix, prevProjViewMatrix,
@@ -3382,9 +3660,11 @@ ScanlineRender::render(const RenderActionArgs& args)
             const GLint locNearI         = glGetUniformLocation(glslInstanceProg, "u_near");
             const GLint locFarI          = glGetUniformLocation(glslInstanceProg, "u_far");
             const GLint locAmbientI      = glGetUniformLocation(glslInstanceProg, "u_ambient");
+            const GLint locTranspI       = glGetUniformLocation(glslInstanceProg, "u_transparency");
 
             if (locProjMode     >= 0) glUniform1i(locProjMode, projMode);
             if (locAmbientI     >= 0) glUniform3fv(locAmbientI, 1, ambient);
+            if (locTranspI      >= 0) glUniform1i(locTranspI, transparency);
             if (locViewMat      >= 0) glUniformMatrix4fv(locViewMat, 1, GL_FALSE, viewMatrix);
             if (locNearI        >= 0) glUniform1f(locNearI, camNear);
             if (locFarI         >= 0) glUniform1f(locFarI, camFar);
@@ -3962,14 +4242,7 @@ ScanlineRender::render(const RenderActionArgs& args)
     std::vector<float> velocityPixels = wantsVelocityMrt ? avgAovAccum(velocityAccumPixels) : std::vector<float>();
 
     // --- Composite with background if connected ---
-    ImagePtr bgImg;
-    EffectInstancePtr bgEffect = getInput(0);
-    if (bgEffect) {
-        RectI bgRoi;
-        bgImg = getImage(0, args.time, RenderScale(), args.view,
-                         NULL, NULL, false, true,
-                         eStorageModeRAM, 0, &bgRoi);
-    }
+    // (bgImg was fetched up-front for the resolution override; reused here.)
 
     // --- Depth + World Position readback ---
     // Multi-sampled depth doesn't compose meaningfully (motion-blurred depth is
