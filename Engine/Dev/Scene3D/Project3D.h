@@ -24,30 +24,37 @@
 #include <Python.h>
 // ***** END PYTHON BLOCK *****
 
-#include "../../../Global/Macros.h"
+#include <vector>
 
+#include "../../../Global/Macros.h"
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
+#include "MaterialProvider.h"
 
 NATRON_NAMESPACE_ENTER
 
 struct Project3DPrivate;
 
 /**
- * @brief Project a 2D image through a camera onto 3D geometry, rendered from a second camera.
+ * @class Project3D — camera-projection shader, applied as a material (Nuke Project3D parity).
  *
- * Input 0 (img):       2D image to project (matte painting, photo, etc.)
- * Input 1 (projCam):   Projection camera (Camera3D or ReadAlembicCamera)
- * Input 2 (geo):       Geometry to project onto (ReadGeo — optional, uses built-in card)
- * Input 3 (renderCam): Render camera (Camera3D or ReadAlembicCamera)
+ * Projects a 2D plate (input 0) through a projection camera (input 1) onto whatever
+ * geometry this node's output is connected to (plug into a geo's material / "mat" input,
+ * like Material3D). ScanlineRender performs the projection per-fragment: it transforms
+ * each geo fragment's world position by the projector camera's view-projection, divides
+ * to the plate's UV, and samples the plate.
  *
- * Output: 2D rendered image showing the projected texture from the render camera's POV.
+ * Controls match Nuke's Project3D: project-on (front / back / both), crop, and occlusion
+ * (none / self / world). It is a composable material shader — NOT a standalone renderer —
+ * so multiple projections compose into a single scene rendered by ScanlineRender.
  *
- * Cameras are standalone nodes — connect Camera3D or ReadAlembicCamera to the cam inputs.
+ * (This replaces the original monolithic Project3D, which was a standalone FBO renderer.
+ * The shader architecture matches how Nuke and other DCCs actually do camera projection.)
  */
 class Project3D
     : public EffectInstance
+    , public MaterialProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -60,10 +67,11 @@ public:
     Project3D(NodePtr node);
     virtual ~Project3D();
 
-    virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
+    virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 2; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 4; }
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 2; }  // 0=plate, 1=cam
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
+    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return PLUGINID_NATRON_PROJECT3D; }
@@ -75,8 +83,6 @@ public:
 
     virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
     { grouping->push_back("3D"); }
-
-    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual bool isInputOptional(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
@@ -91,19 +97,56 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
+    // ---- MaterialProvider interface (neutral defaults; the projection is done by
+    //      ScanlineRender via the query methods below, not via a flat texture) ----
+    virtual void getMaterialBaseColor(double time, double& r, double& g, double& b) const OVERRIDE;
+    virtual double getMaterialRoughness(double time) const OVERRIDE;
+    virtual double getMaterialMetallic(double time) const OVERRIDE;
+    virtual double getMaterialSpecular(double time) const OVERRIDE;
+    virtual void getMaterialEmission(double time, double& r, double& g, double& b, double& strength) const OVERRIDE;
+    virtual double getMaterialTransmission(double time) const OVERRIDE;
+    virtual double getMaterialIOR(double time) const OVERRIDE;
+    virtual std::string getMaterialTextureFile() const OVERRIDE { return std::string(); }
+
+    // ---- Projection query (read by ScanlineRender when this is a geo's material) ----
+    enum ProjectOn { eProjectFront = 0, eProjectBack = 1, eProjectBoth = 2 };
+    enum OcclusionMode { eOcclusionNone = 0, eOcclusionSelf = 1, eOcclusionWorld = 2 };
+
+    /** Read the projector camera (input 1). Returns false if no camera is connected
+     *  (projection inactive — the geo keeps its own material/texture). */
+    bool getProjectorCamera(double time,
+                            double& tx, double& ty, double& tz,
+                            double& rx, double& ry, double& rz,
+                            double& focal, double& hAperture, double& vAperture) const;
+
+    int getProjectOn(double time) const;       // ProjectOn
+    bool getCropToFrame(double time) const;     // true = transparent outside the plate frame
+    double getNearClip(double time) const;
+    double getFarClip(double time) const;
+    int getOcclusionMode(double time) const;    // OcclusionMode
+
+    // ---- 3D-viewport preview (so a geo this material is on shows the live projection) ----
+    struct CachedTexture {
+        std::vector<float> pixels;  // RGBA float
+        int width, height;
+        CachedTexture() : width(0), height(0) {}
+    };
+    const CachedTexture& getCachedTexture() const { return _cachedTexture; }
+    /** Render the plate (input 0) to a small preview texture for the 3D viewport. */
+    void updateCachedTexture(double time);
+    /** Build the projector view*projection matrix from the camera (input 1), column-major
+     *  float[16]. Returns false if no camera. The viewport uses it for perspective-correct
+     *  projected UVs (same STW math as UVProject). */
+    bool getProjectorViewProj(double time, float outVP[16]) const;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
-    // Build camera view and projection matrices
-    static void buildViewMatrix(double tx, double ty, double tz,
-                                double rx, double ry, double rz,
-                                float out[16]);
-    // Projection matrix construction lives in CameraMath::composeProjectionMatrix.
-
     std::unique_ptr<Project3DPrivate> _imp;
+    mutable CachedTexture _cachedTexture;
 };
 
 NATRON_NAMESPACE_EXIT

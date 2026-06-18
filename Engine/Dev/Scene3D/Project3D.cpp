@@ -17,51 +17,58 @@
  * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
  * ***** END LICENSE BLOCK ***** */
 
-// ***** BEGIN PYTHON BLOCK *****
-#include <Python.h>
-// ***** END PYTHON BLOCK *****
-
 #include "Project3D.h"
 
-#include <cassert>
-#include <cmath>
-#include <cstring>
-#include <vector>
+#include <algorithm>
 
+#include "../../AppManager.h"
+#include "../../KnobTypes.h"
+#include "../../Image.h"
+#include "../../Node.h"
+#include "CameraProvider.h"
 #include "CameraMath.h"
 #include "RotationConventions.h"
-
-#include "../../../Global/GLIncludes.h"
-
-#include "../../AppInstance.h"
-#include "../../AppManager.h"
-#include "CameraProvider.h"
 #include "../DotUtils.h"
-#include "../../GPUContextPool.h"
-#include "../../Image.h"
-#include "../../ImagePlaneDesc.h"
-#include "../../KnobTypes.h"
-#include "../../Node.h"
-#include "../../OSGLContext.h"
-#include "ReadGeo.h"
-#include "../../ViewIdx.h"
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 NATRON_NAMESPACE_ENTER
 
 struct Project3DPrivate
 {
-    // Options
-    KnobChoiceWPtr projectOn; // Front/Back/Both
-    KnobBoolWPtr   cropAtEdges;
-
-    // Output
-    KnobIntWPtr outputWidth, outputHeight;
+    KnobChoiceWPtr projectOn;    // 0 Front, 1 Back, 2 Both
+    KnobBoolWPtr   cropToFrame;  // transparent outside the plate frame
+    KnobDoubleWPtr nearClip;
+    KnobDoubleWPtr farClip;
+    KnobChoiceWPtr occlusion;    // 0 None, 1 Self, 2 World
 };
 
+// View matrix = inverse of camera-to-world (Natron extrinsic XYZ convention). Same as
+// ScanlineRender::buildViewMatrix / the old Project3D.
+static void
+p3dBuildViewMatrix(double tx, double ty, double tz, double rx, double ry, double rz, float out[16])
+{
+    double mInv[3][3];
+    RotationConventions::composeInverse(rx, ry, rz, mInv);
+    const float ntx = -(float)tx, nty = -(float)ty, ntz = -(float)tz;
+    out[0]  = (float)mInv[0][0]; out[1]  = (float)mInv[1][0]; out[2]  = (float)mInv[2][0]; out[3]  = 0.f;
+    out[4]  = (float)mInv[0][1]; out[5]  = (float)mInv[1][1]; out[6]  = (float)mInv[2][1]; out[7]  = 0.f;
+    out[8]  = (float)mInv[0][2]; out[9]  = (float)mInv[1][2]; out[10] = (float)mInv[2][2]; out[11] = 0.f;
+    out[12] = (float)(mInv[0][0]*ntx + mInv[0][1]*nty + mInv[0][2]*ntz);
+    out[13] = (float)(mInv[1][0]*ntx + mInv[1][1]*nty + mInv[1][2]*ntz);
+    out[14] = (float)(mInv[2][0]*ntx + mInv[2][1]*nty + mInv[2][2]*ntz);
+    out[15] = 1.f;
+}
+
+// out = a * b (column-major).
+static void
+p3dMat4Mul(float out[16], const float a[16], const float b[16])
+{
+    for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r) {
+            float s = 0.f;
+            for (int k = 0; k < 4; ++k) s += a[k * 4 + r] * b[c * 4 + k];
+            out[c * 4 + r] = s;
+        }
+}
 
 Project3D::Project3D(NodePtr node)
     : EffectInstance(node)
@@ -77,38 +84,42 @@ Project3D::~Project3D()
 std::string
 Project3D::getPluginDescription() const
 {
-    return tr("Project a 2D image through a camera onto 3D geometry.\n\n"
-              "Input 0 (img): The 2D image to project\n"
-              "Input 1 (projCam): Projection camera (Camera3D or ReadAlembicCamera)\n"
-              "Input 2 (geo): Geometry to project onto (ReadGeo — optional, uses flat card)\n"
-              "Input 3 (renderCam): Render camera — the output viewpoint\n\n"
-              "Connect Camera3D or ReadAlembicCamera nodes to the camera inputs.\n"
-              "Move the render camera to see parallax.").toStdString();
+    return tr("Project a 2D plate through a camera onto geometry, as a live material "
+              "(Nuke Project3D parity).\n\n"
+              "Connect a plate to 'img' and a Camera3D to 'cam', then connect this node to "
+              "a geometry node's material ('mat') input. ScanlineRender projects the plate "
+              "onto the geo from the camera's point of view, per fragment.\n\n"
+              "Controls follow Nuke's Project3D: project on (front / back / both faces), "
+              "crop (clip to the plate frame), near / far clip, and occlusion (none / self / "
+              "world — hide surfaces blocked from the projector by nearer geometry).\n\n"
+              "The classic matte-painting 'lock' is a FrameHold on the projection camera. "
+              "(Projected in ScanlineRender; the Cycles path renders it as a plain white "
+              "material for now.)").toStdString();
 }
 
 std::string
 Project3D::getInputLabel(int inputNb) const
 {
     switch (inputNb) {
-        case 0: return "img";
-        case 1: return "projCam";
-        case 2: return "geo";
-        case 3: return "renderCam";
-        default: return "";
+        case 0: return "img";   // the plate to project
+        case 1: return "cam";   // the projection camera
+        default: return std::string();
     }
 }
 
 bool
-Project3D::isInputOptional(int inputNb) const
+Project3D::isInputOptional(int /*inputNb*/) const
 {
-    // img and projCam required; geo and renderCam optional
-    return (inputNb == 2 || inputNb == 3);
+    // Both optional so the node never errors in the graph; projection is simply
+    // inactive until both a plate and a camera are connected.
+    return true;
 }
 
 void
 Project3D::addAcceptedComponents(int /*inputNb*/, std::list<ImagePlaneDesc>* comps)
 {
     comps->push_back(ImagePlaneDesc::getRGBAComponents());
+    comps->push_back(ImagePlaneDesc::getRGBComponents());
 }
 
 void
@@ -123,446 +134,260 @@ Project3D::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
     return false;
 }
 
-// ==================== Knobs ====================
-
 void
 Project3D::initializeKnobs()
 {
-    // --- Options page ---
-    KnobPagePtr optPage = AppManager::createKnob<KnobPage>(this, tr("Options"));
+    KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Project3D"));
 
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Project On"));
         k->setName("projectOn");
+        k->setHintToolTip(tr("Which faces receive the projection, relative to the projection camera.\n"
+                             "Front: faces pointing toward the camera (default).\n"
+                             "Back: faces pointing away.\n"
+                             "Both: every face."));
         std::vector<ChoiceOption> entries;
-        entries.push_back(ChoiceOption("front", "Front Face", "Project only on front-facing surfaces"));
-        entries.push_back(ChoiceOption("back", "Back Face", "Project only on back-facing surfaces"));
-        entries.push_back(ChoiceOption("both", "Both Faces", "Project on all surfaces"));
+        entries.push_back(ChoiceOption("Front", "", "Faces pointing toward the camera"));
+        entries.push_back(ChoiceOption("Back", "", "Faces pointing away from the camera"));
+        entries.push_back(ChoiceOption("Both", "", "All faces"));
         k->populateChoices(entries);
-        k->setDefaultValue(0);
-        optPage->addKnob(k); _imp->projectOn = k;
-    }
-    {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Crop at Image Edges"));
-        k->setName("cropAtEdges"); k->setDefaultValue(true);
-        optPage->addKnob(k); _imp->cropAtEdges = k;
+        k->setDefaultValue(eProjectBoth);   // matches Nuke's Project3D default
+        k->setAnimationEnabled(false);
+        page->addKnob(k);
+        _imp->projectOn = k;
     }
 
-    // --- Output page ---
-    KnobPagePtr outPage = AppManager::createKnob<KnobPage>(this, tr("Output"));
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Crop"));
+        k->setName("crop");
+        k->setHintToolTip(tr("On: the projection is transparent outside the plate frame (the "
+                             "camera's view rectangle). Off: the plate's edge pixels are clamped "
+                             "and smear outward."));
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        page->addKnob(k);
+        _imp->cropToFrame = k;
+    }
 
     {
-        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Width"));
-        k->setName("outputWidth"); k->setDefaultValue(1920);
-        k->setMinimum(1); k->setDisplayMinimum(320); k->setDisplayMaximum(4096);
-        outPage->addKnob(k); _imp->outputWidth = k;
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Occlusion"));
+        k->setName("occlusion");
+        k->setHintToolTip(tr("Hide surfaces the projector can't 'see' because nearer geometry "
+                             "blocks them (raycast / depth test from the projection camera).\n"
+                             "None: project through everything (default).\n"
+                             "Self: occlude against the geometry this material is on.\n"
+                             "World: occlude against all geometry in the scene."));
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("None", "", "Project through (no occlusion)"));
+        entries.push_back(ChoiceOption("Self", "", "Occlude against this object"));
+        entries.push_back(ChoiceOption("World", "", "Occlude against the whole scene"));
+        k->populateChoices(entries);
+        k->setDefaultValue(eOcclusionNone);
+        k->setAnimationEnabled(false);
+        page->addKnob(k);
+        _imp->occlusion = k;
     }
+
     {
-        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Height"));
-        k->setName("outputHeight"); k->setDefaultValue(1080);
-        k->setMinimum(1); k->setDisplayMinimum(240); k->setDisplayMaximum(4096);
-        outPage->addKnob(k); _imp->outputHeight = k;
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Near Clip"));
+        k->setName("nearClip");
+        k->setHintToolTip(tr("Geometry closer to the projection camera than this distance is not "
+                             "projected onto."));
+        k->setDefaultValue(0.1);
+        k->setMinimum(0.0);
+        k->setDisplayMinimum(0.0);
+        k->setDisplayMaximum(100.0);
+        k->setAnimationEnabled(false);
+        page->addKnob(k);
+        _imp->nearClip = k;
+    }
+
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Far Clip"));
+        k->setName("farClip");
+        k->setHintToolTip(tr("Geometry farther from the projection camera than this distance is "
+                             "not projected onto."));
+        k->setDefaultValue(10000.0);
+        k->setMinimum(0.0);
+        k->setDisplayMinimum(1.0);
+        k->setDisplayMaximum(100000.0);
+        k->setAnimationEnabled(false);
+        page->addKnob(k);
+        _imp->farClip = k;
     }
 }
 
-// ==================== Matrix helpers ====================
+// ---- MaterialProvider: neutral defaults (the real work is the projection below) ----
 
 void
-Project3D::buildViewMatrix(double tx, double ty, double tz,
-                           double rx, double ry, double rz,
-                           float out[16])
+Project3D::getMaterialBaseColor(double /*time*/, double& r, double& g, double& b) const
 {
-    // View matrix = inverse of camera-to-world transform.
-    // Camera-to-world uses Natron's standard extrinsic XYZ convention
-    // (M = Rz*Ry*Rx column-vector, Maya/Blender/Houdini default, same as
-    // SceneGraph::buildTRS and ImGuizmo). The inverse is M^T.
-    double mInv[3][3];
-    RotationConventions::composeInverse(rx, ry, rz, mInv);
-
-    const float ntx = -(float)tx, nty = -(float)ty, ntz = -(float)tz;
-
-    // Pack into column-major float[16]: out[col*4 + row] = mInv[row][col].
-    out[0]  = (float)mInv[0][0]; out[1]  = (float)mInv[1][0]; out[2]  = (float)mInv[2][0]; out[3]  = 0.f;
-    out[4]  = (float)mInv[0][1]; out[5]  = (float)mInv[1][1]; out[6]  = (float)mInv[2][1]; out[7]  = 0.f;
-    out[8]  = (float)mInv[0][2]; out[9]  = (float)mInv[1][2]; out[10] = (float)mInv[2][2]; out[11] = 0.f;
-    out[12] = (float)(mInv[0][0]*ntx + mInv[0][1]*nty + mInv[0][2]*ntz);
-    out[13] = (float)(mInv[1][0]*ntx + mInv[1][1]*nty + mInv[1][2]*ntz);
-    out[14] = (float)(mInv[2][0]*ntx + mInv[2][1]*nty + mInv[2][2]*ntz);
-    out[15] = 1.f;
+    r = g = b = 1.0;
 }
 
-// Project3D::buildProjectionMatrix removed — projection is now built via
-// CameraMath::composeProjectionMatrix (independent fov_h / fov_v from both
-// apertures). The old single-FOV form forced fy = fx / image_aspect, which
-// produced V scaling tied to the render aspect instead of to the camera's V
-// aperture — causing CG drift under camera motion when sensor aspect != image
-// aspect.
+double Project3D::getMaterialRoughness(double /*time*/) const { return 0.5; }
+double Project3D::getMaterialMetallic(double /*time*/) const { return 0.0; }
+double Project3D::getMaterialSpecular(double /*time*/) const { return 0.5; }
 
-// ==================== RoD ====================
+void
+Project3D::getMaterialEmission(double /*time*/, double& r, double& g, double& b, double& strength) const
+{
+    r = g = b = 0.0;
+    strength = 0.0;
+}
+
+double Project3D::getMaterialTransmission(double /*time*/) const { return 0.0; }
+double Project3D::getMaterialIOR(double /*time*/) const { return 1.45; }
+
+// ---- Projection query (read by ScanlineRender) ----
+
+bool
+Project3D::getProjectorCamera(double time,
+                              double& tx, double& ty, double& tz,
+                              double& rx, double& ry, double& rz,
+                              double& focal, double& hAperture, double& vAperture) const
+{
+    EffectInstancePtr camEff = skipDots(getInput(1));
+    CameraProvider* cam = camEff ? dynamic_cast<CameraProvider*>(camEff.get()) : NULL;
+    if (!cam) {
+        return false;
+    }
+    cam->getCameraPosition(time, tx, ty, tz, rx, ry, rz);
+    focal = cam->getCameraFocalLength(time);
+    hAperture = cam->getCameraHAperture(time);
+    vAperture = cam->getCameraVAperture(time);
+    return true;
+}
+
+int
+Project3D::getProjectOn(double time) const
+{
+    KnobChoicePtr k = _imp->projectOn.lock();
+    return k ? k->getValueAtTime(time) : (int)eProjectFront;
+}
+
+bool
+Project3D::getCropToFrame(double time) const
+{
+    KnobBoolPtr k = _imp->cropToFrame.lock();
+    return k ? k->getValueAtTime(time) : true;
+}
+
+double
+Project3D::getNearClip(double time) const
+{
+    KnobDoublePtr k = _imp->nearClip.lock();
+    return k ? k->getValueAtTime(time) : 0.1;
+}
+
+double
+Project3D::getFarClip(double time) const
+{
+    KnobDoublePtr k = _imp->farClip.lock();
+    return k ? k->getValueAtTime(time) : 10000.0;
+}
+
+int
+Project3D::getOcclusionMode(double time) const
+{
+    KnobChoicePtr k = _imp->occlusion.lock();
+    return k ? k->getValueAtTime(time) : (int)eOcclusionNone;
+}
+
+bool
+Project3D::getProjectorViewProj(double time, float outVP[16]) const
+{
+    double tx, ty, tz, rx, ry, rz, focal, hAp, vAp;
+    if (!getProjectorCamera(time, tx, ty, tz, rx, ry, rz, focal, hAp, vAp)) {
+        return false;
+    }
+    float view[16], proj[16];
+    p3dBuildViewMatrix(tx, ty, tz, rx, ry, rz, view);
+    const float nearC = (float)getNearClip(time);
+    CameraMath::composeProjectionMatrix(focal, hAp, vAp, (nearC > 1e-4f ? nearC : 0.1f),
+                                        (float)getFarClip(time), proj);
+    p3dMat4Mul(outVP, proj, view);  // outVP = proj * view (world -> projector clip)
+    return true;
+}
+
+void
+Project3D::updateCachedTexture(double time)
+{
+    // Render the plate (input 0) at a preview size so a geo this material is on can show
+    // the projection live in the 3D viewport. Mirrors Material3D::updateCachedTexture.
+    _cachedTexture.pixels.clear();
+    _cachedTexture.width = 0;
+    _cachedTexture.height = 0;
+
+    if (!getInput(0)) return;
+
+    const int maxSize = 512;
+    RectI roiPixel;
+    ImagePtr img = getImage(0, time, RenderScale(), ViewIdx(0),
+                            NULL, NULL, false, true, eStorageModeRAM, 0, &roiPixel);
+    if (!img) return;
+
+    RectI bounds = img->getBounds();
+    int w = bounds.width();
+    int h = bounds.height();
+    if (w <= 0 || h <= 0) return;
+
+    int dstW = w, dstH = h;
+    if (w > maxSize || h > maxSize) {
+        float scale = (float)maxSize / std::max(w, h);
+        dstW = std::max(1, (int)(w * scale));
+        dstH = std::max(1, (int)(h * scale));
+    }
+
+    _cachedTexture.width = dstW;
+    _cachedTexture.height = dstH;
+    _cachedTexture.pixels.resize((size_t)dstW * dstH * 4, 0.0f);
+
+    Image::ReadAccess ra(img.get());
+    const int nComp = img->getComponents().getNumComponents();
+    for (int dy = 0; dy < dstH; ++dy) {
+        int sy = bounds.y1 + (dy * h / dstH);
+        for (int dx = 0; dx < dstW; ++dx) {
+            int sx = bounds.x1 + (dx * w / dstW);
+            const float* pix = (const float*)ra.pixelAt(sx, sy);
+            if (pix) {
+                int idx = (dy * dstW + dx) * 4;
+                _cachedTexture.pixels[idx + 0] = pix[0];
+                _cachedTexture.pixels[idx + 1] = (nComp >= 2) ? pix[1] : pix[0];
+                _cachedTexture.pixels[idx + 2] = (nComp >= 3) ? pix[2] : pix[0];
+                _cachedTexture.pixels[idx + 3] = (nComp >= 4) ? pix[3] : 1.0f;
+            }
+        }
+    }
+}
+
+// ---- Effect plumbing: this is a material/data node, not an image producer ----
 
 StatusEnum
 Project3D::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
                                  ViewIdx /*view*/, RectD* rod)
 {
-    rod->x1 = 0;
-    rod->y1 = 0;
-    rod->x2 = _imp->outputWidth.lock()->getValue();
-    rod->y2 = _imp->outputHeight.lock()->getValue();
+    rod->x1 = 0; rod->y1 = 0;
+    rod->x2 = 1; rod->y2 = 1;
     return eStatusOK;
-}
-
-// ==================== Render ====================
-
-static void
-mat4Multiply(const float a[16], const float b[16], float out[16])
-{
-    for (int col = 0; col < 4; ++col) {
-        for (int row = 0; row < 4; ++row) {
-            float sum = 0;
-            for (int k = 0; k < 4; ++k) {
-                sum += a[k * 4 + row] * b[col * 4 + k];
-            }
-            out[col * 4 + row] = sum;
-        }
-    }
-}
-
-static void
-transformPoint(const float m[16], float x, float y, float z,
-               float& outX, float& outY, float& outZ, float& outW)
-{
-    outX = m[0]*x + m[4]*y + m[8]*z  + m[12];
-    outY = m[1]*x + m[5]*y + m[9]*z  + m[13];
-    outZ = m[2]*x + m[6]*y + m[10]*z + m[14];
-    outW = m[3]*x + m[7]*y + m[11]*z + m[15];
 }
 
 StatusEnum
 Project3D::render(const RenderActionArgs& args)
 {
-    assert(!args.outputPlanes.empty());
-    const std::pair<ImagePlaneDesc, ImagePtr>& output = args.outputPlanes.front();
-    ImagePtr outImg = output.second;
-    if (!outImg) return eStatusFailed;
+    if (args.outputPlanes.empty()) return eStatusOK;
+    ImagePtr outImg = args.outputPlanes.front().second;
+    if (!outImg) return eStatusOK;
 
-    int outW = _imp->outputWidth.lock()->getValue();
-    int outH = _imp->outputHeight.lock()->getValue();
-
-    // --- Get projection camera from input 1 (through any Dots) ---
-    EffectInstancePtr projCamEffect = skipDots(getInput(1));
-    CameraProvider* projCam = projCamEffect ? dynamic_cast<CameraProvider*>(projCamEffect.get()) : NULL;
-    if (!projCam) return eStatusFailed; // Projection camera is required
-
-    double projTX, projTY, projTZ, projRX, projRY, projRZ;
-    projCam->getCameraPosition(args.time, projTX, projTY, projTZ, projRX, projRY, projRZ);
-    double projFL = projCam->getCameraFocalLength(args.time);
-    double projHA = projCam->getCameraHAperture(args.time);
-    double projVA = projCam->getCameraVAperture(args.time);
-
-    // --- Get render camera from input 3 (optional — falls back to projection camera; through any Dots) ---
-    EffectInstancePtr renCamEffect = skipDots(getInput(3));
-    CameraProvider* renCam = renCamEffect ? dynamic_cast<CameraProvider*>(renCamEffect.get()) : NULL;
-    if (!renCam) renCam = projCam; // Use projection camera if no render camera
-
-    double renTX, renTY, renTZ, renRX, renRY, renRZ;
-    renCam->getCameraPosition(args.time, renTX, renTY, renTZ, renRX, renRY, renRZ);
-    double renFL = renCam->getCameraFocalLength(args.time);
-    double renHA = renCam->getCameraHAperture(args.time);
-    double renVA = renCam->getCameraVAperture(args.time);
-
-    // --- Get input image (input 0) ---
-    EffectInstancePtr imgInput = getInput(0);
-    if (!imgInput) return eStatusFailed;
-
-    RectI roiPixel;
-    ImagePtr srcImg = getImage(0, args.time, RenderScale(), args.view,
-                               NULL, NULL, false, true,
-                               eStorageModeRAM, 0, &roiPixel);
-    if (!srcImg) return eStatusFailed;
-
-    RectI srcBounds = srcImg->getBounds();
-    int srcW = srcBounds.width();
-    int srcH = srcBounds.height();
-    if (srcW <= 0 || srcH <= 0) return eStatusFailed;
-
-    // --- Get geometry from input 2 (optional — uses flat card) ---
-    std::vector<float> vertices;
-    std::vector<int> triangleIndices;
-    float geoTransform[16];
-    for (int i = 0; i < 16; ++i) geoTransform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
-
-    EffectInstancePtr geoInput = skipDots(getInput(2));
-    ReadGeo* readGeo = geoInput ? dynamic_cast<ReadGeo*>(geoInput.get()) : NULL;
-    MeshDataPtr mesh;
-
-    if (readGeo) {
-        mesh = readGeo->getMeshData(args.time);
-    }
-
-    if (mesh && mesh->numVertices > 0) {
-        vertices = mesh->vertices;
-        triangleIndices = mesh->faceIndices;
-        std::memcpy(geoTransform, mesh->transform, 16 * sizeof(float));
-    } else {
-        // Built-in card matching input image aspect ratio
-        float imgAspect = (float)srcW / std::max(1, srcH);
-        float hw = imgAspect * 0.5f;
-        float hh = 0.5f;
-
-        float cardVerts[] = {
-            -hw, -hh, 0.0f,
-             hw, -hh, 0.0f,
-             hw,  hh, 0.0f,
-            -hw,  hh, 0.0f,
-        };
-        vertices.assign(cardVerts, cardVerts + 12);
-
-        int cardIdx[] = { 0, 1, 2,  0, 2, 3 };
-        triangleIndices.assign(cardIdx, cardIdx + 6);
-    }
-
-    int numVerts = (int)(vertices.size() / 3);
-    int numTris = (int)(triangleIndices.size() / 3);
-    if (numVerts == 0 || numTris == 0) return eStatusFailed;
-
-    // --- Build projection camera matrices ---
-    // Projection uses both apertures from the projection camera. srcW/srcH are
-    // NOT involved — see CameraMath.h.
-    float projView[16], projProj[16], projVP[16];
-    buildViewMatrix(projTX, projTY, projTZ, projRX, projRY, projRZ, projView);
-    (void)srcW; (void)srcH;
-    float projNear = (float)projCam->getCameraNear(args.time);
-    float projFar = (float)projCam->getCameraFar(args.time);
-    CameraMath::composeProjectionMatrix(projFL, projHA, projVA, projNear, projFar, projProj);
-    mat4Multiply(projProj, projView, projVP);
-
-    // --- Compute projective texture coordinates ---
-    bool cropAtEdges = _imp->cropAtEdges.lock()->getValue();
-    int projectOnMode = _imp->projectOn.lock()->getValue();
-
-    std::vector<float> texCoords(numVerts * 2);
-
-    // Geometry transform: row-major from Imath → column-major
-    float geoTransformCM[16];
-    if (mesh && mesh->numVertices > 0) {
-        for (int r = 0; r < 4; ++r)
-            for (int c = 0; c < 4; ++c)
-                geoTransformCM[c * 4 + r] = geoTransform[r * 4 + c];
-    } else {
-        std::memcpy(geoTransformCM, geoTransform, 16 * sizeof(float));
-    }
-
-    for (int v = 0; v < numVerts; ++v) {
-        float lx = vertices[v * 3 + 0];
-        float ly = vertices[v * 3 + 1];
-        float lz = vertices[v * 3 + 2];
-
-        // Local → world
-        float wx, wy, wz, ww;
-        transformPoint(geoTransformCM, lx, ly, lz, wx, wy, wz, ww);
-        if (std::fabs(ww) > 1e-6f) { wx /= ww; wy /= ww; wz /= ww; }
-
-        // World → projection camera clip space
-        float cx, cy, cz, cw;
-        transformPoint(projVP, wx, wy, wz, cx, cy, cz, cw);
-
-        // Perspective divide → NDC → UV
-        float u = 0.5f, vc = 0.5f;
-        if (std::fabs(cw) > 1e-6f) {
-            u = (cx / cw + 1.0f) * 0.5f;
-            vc = (cy / cw + 1.0f) * 0.5f;
-        }
-
-        if (cropAtEdges) {
-            if (u < 0.0f || u > 1.0f || vc < 0.0f || vc > 1.0f) {
-                u = -1.0f;
-                vc = -1.0f;
-            }
-        } else {
-            u = std::max(0.0f, std::min(1.0f, u));
-            vc = std::max(0.0f, std::min(1.0f, vc));
-        }
-
-        texCoords[v * 2 + 0] = u;
-        texCoords[v * 2 + 1] = vc;
-    }
-
-    // --- Acquire GL context for FBO rendering ---
-    GPUContextPool* pool = appPTR->getGPUContextPool();
-    if (!pool) return eStatusFailed;
-
-    OSGLContextPtr glContext;
-    try {
-        glContext = pool->attachGLContextToRender(true);
-    } catch (...) {
-        return eStatusFailed;
-    }
-    if (!glContext) return eStatusFailed;
-
-    glContext->setContextCurrentNoRender();
-
-    // --- Create FBO ---
-    GLuint fbo = 0, colorTex = 0, depthRB = 0;
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-
-    glGenTextures(1, &colorTex);
-    glBindTexture(GL_TEXTURE_2D, colorTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F_ARB, outW, outH, 0, GL_RGBA, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTex, 0);
-
-    glGenRenderbuffers(1, &depthRB);
-    glBindRenderbuffer(GL_RENDERBUFFER, depthRB);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, outW, outH);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRB);
-
-    GLenum fbStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    if (fbStatus != GL_FRAMEBUFFER_COMPLETE) {
-        glDeleteFramebuffers(1, &fbo);
-        glDeleteTextures(1, &colorTex);
-        glDeleteRenderbuffers(1, &depthRB);
-        OSGLContext::unsetCurrentContextNoRender();
-        pool->releaseGLContextFromRender(glContext);
-        return eStatusFailed;
-    }
-
-    glViewport(0, 0, outW, outH);
-    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST);
-
-    // --- Set up render camera ---
-    // Projection uses both apertures from the render camera. outW/outH are
-    // NOT involved.
-    float renView[16], renProj[16];
-    (void)outW; (void)outH;
-    float renNear = (float)renCam->getCameraNear(args.time);
-    float renFar = (float)renCam->getCameraFar(args.time);
-    buildViewMatrix(renTX, renTY, renTZ, renRX, renRY, renRZ, renView);
-    CameraMath::composeProjectionMatrix(renFL, renHA, renVA, renNear, renFar, renProj);
-
-    glMatrixMode(GL_PROJECTION);
-    glLoadMatrixf(renProj);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadMatrixf(renView);
-
-    // --- Upload source image as texture ---
-    GLuint srcTex = 0;
-    glGenTextures(1, &srcTex);
-    glBindTexture(GL_TEXTURE_2D, srcTex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    std::vector<float> texData(srcW * srcH * 4, 0.0f);
-    {
-        Image::ReadAccess ra(srcImg.get());
-        for (int y = srcBounds.y1; y < srcBounds.y2; ++y) {
-            for (int x = srcBounds.x1; x < srcBounds.x2; ++x) {
-                const float* pix = (const float*)ra.pixelAt(x, y);
-                if (pix) {
-                    int idx = ((y - srcBounds.y1) * srcW + (x - srcBounds.x1)) * 4;
-                    texData[idx + 0] = pix[0];
-                    texData[idx + 1] = pix[1];
-                    texData[idx + 2] = pix[2];
-                    texData[idx + 3] = (srcImg->getComponents().getNumComponents() >= 4) ? pix[3] : 1.0f;
-                }
-            }
+    RectI bounds = outImg->getBounds();
+    Image::WriteAccess wa(outImg.get());
+    for (int y = bounds.y1; y < bounds.y2; ++y) {
+        for (int x = bounds.x1; x < bounds.x2; ++x) {
+            float* pix = (float*)wa.pixelAt(x, y);
+            if (pix) { pix[0] = pix[1] = pix[2] = pix[3] = 0.f; }
         }
     }
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F_ARB, srcW, srcH, 0, GL_RGBA, GL_FLOAT, texData.data());
-
-    // --- Render geometry with projected texture ---
-    glEnable(GL_TEXTURE_2D);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    glPushMatrix();
-    glMultMatrixf(geoTransformCM);
-
-    if (projectOnMode == 0) {
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-    } else if (projectOnMode == 1) {
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_FRONT);
-    }
-
-    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-
-    glBegin(GL_TRIANGLES);
-    for (int t = 0; t < numTris; ++t) {
-        for (int vi = 0; vi < 3; ++vi) {
-            int idx = triangleIndices[t * 3 + vi];
-            if (idx < 0 || idx >= numVerts) continue;
-
-            float u = texCoords[idx * 2 + 0];
-            float v = texCoords[idx * 2 + 1];
-
-            if (u < 0.0f) {
-                glColor4f(0.0f, 0.0f, 0.0f, 0.0f);
-            } else {
-                glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-            }
-
-            glTexCoord2f(u, v);
-            glVertex3f(vertices[idx * 3 + 0],
-                       vertices[idx * 3 + 1],
-                       vertices[idx * 3 + 2]);
-        }
-    }
-    glEnd();
-
-    if (projectOnMode < 2) {
-        glDisable(GL_CULL_FACE);
-    }
-
-    glPopMatrix();
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_BLEND);
-
-    // --- Read back pixels ---
-    std::vector<float> pixels(outW * outH * 4);
-    glReadPixels(0, 0, outW, outH, GL_RGBA, GL_FLOAT, pixels.data());
-
-    RectI outBounds = outImg->getBounds();
-    {
-        Image::WriteAccess wa(outImg.get());
-        for (int y = outBounds.y1; y < outBounds.y2; ++y) {
-            for (int x = outBounds.x1; x < outBounds.x2; ++x) {
-                float* dst = (float*)wa.pixelAt(x, y);
-                if (!dst) continue;
-
-                int fbX = x - outBounds.x1;
-                int fbY = y - outBounds.y1;
-                if (fbX >= 0 && fbX < outW && fbY >= 0 && fbY < outH) {
-                    int idx = (fbY * outW + fbX) * 4;
-                    dst[0] = pixels[idx + 0];
-                    dst[1] = pixels[idx + 1];
-                    dst[2] = pixels[idx + 2];
-                    dst[3] = pixels[idx + 3];
-                }
-            }
-        }
-    }
-
-    // Cleanup
-    glDeleteTextures(1, &srcTex);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glDeleteFramebuffers(1, &fbo);
-    glDeleteTextures(1, &colorTex);
-    glDeleteRenderbuffers(1, &depthRB);
-
-    OSGLContext::unsetCurrentContextNoRender();
-    pool->releaseGLContextFromRender(glContext);
-
     return eStatusOK;
 }
 
 NATRON_NAMESPACE_EXIT
-NATRON_NAMESPACE_USING
-
-#include "moc_Project3D.cpp"

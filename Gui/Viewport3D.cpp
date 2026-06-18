@@ -70,6 +70,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/ReadGeo.h"
 #include "Engine/Dev/Scene3D/Material3D.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
+#include "Engine/Dev/Scene3D/Project3D.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/TimeLine.h"
 #include "Engine/Dev/Deep/DeepToPoints.h"
@@ -454,6 +455,48 @@ findUVProjectForGeo(GuiAppInstance* app, const NodePtr& geoNode)
         if (geo && geo->getNode() == geoNode) return uvp;
     }
     return NULL;
+}
+
+// If the geo's material input is a Project3D, set up viewport projective texturing: the
+// plate as the texture + perspective-correct STW for `localXYZ` (xyz interleaved, geo-local).
+// No-op if texPixels is already set (UVProject takes precedence) or no Project3D is connected.
+// Mirrors the UVProject path; the projector matrix comes from Project3D's camera.
+static void
+applyProject3DToGeo(const EffectInstancePtr& geoEffect,
+                    const std::vector<float>& localXYZ, const float worldMatrix[16], double time,
+                    const float*& texPixels, int& texW, int& texH, bool& texWrapRepeat,
+                    std::vector<float>& projSTW, int& projComp)
+{
+    if (texPixels || localXYZ.empty()) return;
+    MaterialProvider* mp = dynamic_cast<MaterialProvider*>(geoEffect.get());
+    Project3D* p3d = mp ? dynamic_cast<Project3D*>(mp->getConnectedMaterial()) : NULL;
+    if (!p3d) return;
+    p3d->updateCachedTexture(time);
+    const Project3D::CachedTexture& pt = p3d->getCachedTexture();
+    if (pt.width <= 0 || pt.height <= 0 || pt.pixels.empty()) return;
+    float vp[16];
+    if (!p3d->getProjectorViewProj(time, vp)) return;
+    // mvp = projVP * worldMatrix (column-major).
+    float mvp[16];
+    for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r) {
+            float s = 0.f;
+            for (int k = 0; k < 4; ++k) s += vp[k*4+r] * worldMatrix[c*4+k];
+            mvp[c*4+r] = s;
+        }
+    const size_t n = localXYZ.size() / 3;
+    projSTW.resize(n * 3);
+    for (size_t i = 0; i < n; ++i) {
+        const float lx = localXYZ[i*3], ly = localXYZ[i*3+1], lz = localXYZ[i*3+2];
+        const float cx = mvp[0]*lx + mvp[4]*ly + mvp[8]*lz  + mvp[12];
+        const float cy = mvp[1]*lx + mvp[5]*ly + mvp[9]*lz  + mvp[13];
+        const float cw = mvp[3]*lx + mvp[7]*ly + mvp[11]*lz + mvp[15];
+        projSTW[i*3+0] = (cx + cw) * 0.5f;
+        projSTW[i*3+1] = (cy + cw) * 0.5f;
+        projSTW[i*3+2] = cw;
+    }
+    texPixels = pt.pixels.data(); texW = pt.width; texH = pt.height;
+    texWrapRepeat = false; projComp = 3;
 }
 
 // ============================================================================
@@ -2420,6 +2463,10 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
                 }
             }
         }
+        if (!texPixels) {
+            applyProject3DToGeo(meshSrc->getEffectInstance(), mesh->vertices, sn.worldMatrix, meshTime,
+                                texPixels, texW, texH, texWrapRepeat, projSTW, projComp);
+        }
         if (!texPixels && mesh->hasUVs && mesh->texCoordComponents == 2 && !mesh->uvs.empty()) {
             // Per-part archive override first, else the geo's connected material.
             Material3D* m3d = NULL;
@@ -2589,6 +2636,25 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
             uvpCard = NULL;
         }
     }
+
+    // Project3D material on the card's "mat" input: project the plate onto the card from
+    // the projection camera (same perspective-correct STW path as UVProject).
+    Project3D* p3dCard = NULL;
+    if (!texPixels) {
+        MaterialProvider* mp = dynamic_cast<MaterialProvider*>(effect.get());
+        if (mp) p3dCard = dynamic_cast<Project3D*>(mp->getConnectedMaterial());
+        if (p3dCard) {
+            p3dCard->updateCachedTexture(time);
+            const Project3D::CachedTexture& pt = p3dCard->getCachedTexture();
+            if (pt.width > 0 && pt.height > 0 && !pt.pixels.empty()) {
+                texPixels = pt.pixels.data(); texW = pt.width; texH = pt.height;
+                texWrapRepeat = false;
+            } else {
+                p3dCard = NULL;
+            }
+        }
+    }
+
     if (!texPixels && tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
         texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
     }
@@ -2610,6 +2676,36 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
         projComp = comp;
         if (comp == 2) projUVs.swap(newUVs);
         else if (comp == 3) projSTW.swap(newSTW);
+    }
+
+    // For Project3D, compute perspective-correct STW for the 4 corners from the projector
+    // camera: clip = (projVP * worldMatrix) * localCorner, encoded as (s,t,w) = ((cx+cw)/2,
+    // (cy+cw)/2, cw) so the GPU does the perspective divide (matches UVProject's STW form).
+    if (p3dCard) {
+        float vp[16];
+        if (p3dCard->getProjectorViewProj(time, vp)) {
+            float mvp[16];
+            const float* M = sn.worldMatrix;
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 4; ++r) {
+                    float s = 0.f;
+                    for (int k = 0; k < 4; ++k) s += vp[k*4+r] * M[c*4+k];
+                    mvp[c*4+r] = s;
+                }
+            const float corners[12] = { -halfW, -halfH, 0.0f,  halfW, -halfH, 0.0f,
+                                         halfW,  halfH, 0.0f, -halfW,  halfH, 0.0f };
+            projSTW.resize(12);
+            for (int ci = 0; ci < 4; ++ci) {
+                const float lx = corners[ci*3], ly = corners[ci*3+1], lz = corners[ci*3+2];
+                const float cx = mvp[0]*lx + mvp[4]*ly + mvp[8]*lz  + mvp[12];
+                const float cy = mvp[1]*lx + mvp[5]*ly + mvp[9]*lz  + mvp[13];
+                const float cw = mvp[3]*lx + mvp[7]*ly + mvp[11]*lz + mvp[15];
+                projSTW[ci*3+0] = (cx + cw) * 0.5f;
+                projSTW[ci*3+1] = (cy + cw) * 0.5f;
+                projSTW[ci*3+2] = cw;
+            }
+            projComp = 3;
+        }
     }
 
     const ShadingMode mode = _imp->shadingMode;
@@ -2843,6 +2939,14 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
             }
         }
         if (!texPixels) {
+            std::vector<float> xyz; xyz.reserve(sphereVerts.size() * 3);
+            for (size_t vi = 0; vi < sphereVerts.size(); ++vi) {
+                xyz.push_back(sphereVerts[vi].x); xyz.push_back(sphereVerts[vi].y); xyz.push_back(sphereVerts[vi].z);
+            }
+            applyProject3DToGeo(effect, xyz, sn.worldMatrix, time,
+                                texPixels, texW, texH, texWrapRepeat, projSTW, projComp);
+        }
+        if (!texPixels) {
             const Sphere3D::CachedTexture& tex = sphere->getCachedTexture();
             if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
                 texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
@@ -3029,6 +3133,14 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
             }
         }
         if (!texPixels) {
+            std::vector<float> xyz; xyz.reserve(cubeVerts.size() * 3);
+            for (size_t vi = 0; vi < cubeVerts.size(); ++vi) {
+                xyz.push_back(cubeVerts[vi].x); xyz.push_back(cubeVerts[vi].y); xyz.push_back(cubeVerts[vi].z);
+            }
+            applyProject3DToGeo(effect, xyz, sn.worldMatrix, time,
+                                texPixels, texW, texH, texWrapRepeat, projSTW, projComp);
+        }
+        if (!texPixels) {
             const Cube3D::CachedTexture& tex = cube->getCachedTexture();
             if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
                 texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
@@ -3194,6 +3306,14 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
                     if (comp == 2) projUVs.swap(newUVs); else projSTW.swap(newSTW);
                 }
             }
+        }
+        if (!texPixels) {
+            std::vector<float> xyz; xyz.reserve(cylVerts.size() * 3);
+            for (size_t vi = 0; vi < cylVerts.size(); ++vi) {
+                xyz.push_back(cylVerts[vi].x); xyz.push_back(cylVerts[vi].y); xyz.push_back(cylVerts[vi].z);
+            }
+            applyProject3DToGeo(effect, xyz, sn.worldMatrix, time,
+                                texPixels, texW, texH, texWrapRepeat, projSTW, projComp);
         }
         if (!texPixels) {
             const Cylinder3D::CachedTexture& tex = cyl->getCachedTexture();
