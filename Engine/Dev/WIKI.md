@@ -1,6 +1,8 @@
-# Natron Particle System — Wiki
+# Natron Dev System — Wiki
 
-Complete reference for all particle nodes, architecture, and workflows.
+User-facing reference for the custom dev nodes — architecture, knobs, and workflows.
+Started as the particle-system wiki (the bulk below); now also covers volume rendering
+(FastVolumeRender / Volume3D / ReadVDB). See `NODE_REGISTRY.md` for the full node list.
 
 ---
 
@@ -384,3 +386,82 @@ ParticleEmitter → Gravity → Wind → ParticleSolver (Cube3D geo)
                                      Scene → ScanlineRender + Camera3D
 ```
 
+
+---
+
+## Volume Rendering
+
+> **Scope note:** this wiki started as the particle-system reference; the volume nodes below
+> were added when the FastVolumeRender GPU renderer landed. See `NODE_REGISTRY.md` for one-line
+> summaries and `DEV_3D_SYSTEM_CHANGELOG.md` for history.
+
+Wire `ReadVDB` (or a procedural `Volume3D`) + a `Light3D` under a `Group3D`, then into
+`FastVolumeRender` for interactive GPU preview (or `CyclesRender` for final quality).
+
+### FastVolumeRender
+**Group:** 3D | **Inputs:** 2 (Scene, Camera) | **Output:** image (RGBA + AOVs)
+**Build:** gated `NATRON_FASTVOLUME` (needs wgpu-native — see `BUILDING.md`).
+
+Real-time GPU volume renderer (wgpu-native compute ray-marcher) — an interactive stand-in for
+CyclesRender volumes. **Input 0 = Scene**: a `ReadVDB` *or* `Volume3D`, plus `Light3D`(s),
+optionally under a `Group3D`. **Input 1 = Camera** (optional; auto-frames if absent).
+**Lighting is entirely from scene Light3D nodes** (no sun/ambient knobs):
+- A **Distant** light = the sun (direction = the light's world +Z, plus colour/intensity).
+- A **Dome** light = ambient fill (solid colour; no HDRI sampling).
+- Multiple key lights at once (Point/Distant/Spot/Area, cap 8), each self-shadowed. **Area = a
+  rectangular beam** (Width/Height → laser/light-shaft).
+- **Fire-as-light**: flames illuminate nearby smoke (Fire Light knob). Zero lights = unlit.
+
+A fresh Light3D defaults to **Point** — set it to **Distant** for a sun. The light **must** be
+upstream (through the Group/Scene input) or the render won't update when you tweak it.
+
+| Knob | Type | Default | Description |
+|------|------|---------|-------------|
+| Density Scale | Double | 0.55 | Extinction multiplier — thicker smoke |
+| Albedo | Double | 0.72 | Scattering albedo (1 = white, lower = sootier) |
+| Anisotropy | Double | 0.5 | Henyey-Greenstein phase (>0 = forward / silver lining) |
+| Fire Intensity | Double | 2.2 | Flames-grid emission to camera |
+| Fire Max | Double | 3.0 | Flames value mapped to the top of the fire ramp |
+| Fire Light | Double | 1.0 | How much fire lights surrounding smoke (0 = emit only) |
+| Steps | Int | 1024 | Ray-march steps |
+| AOVs (page) | Bools | on | Emission, AmbientScatter, Depth, Temperature, Shadow, per-Light-Group RGBA |
+
+**Performance:** per-frame compression + uniform-buffer cache — look/light tweaks reuse the
+resident GPU upload (draw-only). First render of a session pays a one-time ~0.7–1 s GPU init;
+scrubbing a VDB *sequence* is ~1 s/frame (per-frame recompress). GPU: verified NVIDIA only;
+cross-vendor (DX12/Vulkan) so AMD/Intel should work but are untested; no GPU → error, no crash;
+Windows-only as built.
+
+### Volume3D (procedural cloud)
+**Group:** 3D | **Inputs:** 0 | **Output:** volume (density-only — no fire)
+
+Procedural cloud/volume primitive. Feeds FastVolumeRender (GPU), ScanlineRender, or Cycles.
+
+| Knob | Type | Default | Description |
+|------|------|---------|-------------|
+| Preset | Choice | Custom | Cumulus / Stratus / Cumulonimbus / Wispy (loads a full combo) |
+| Base Shape | Choice | Sphere | Sphere or Box |
+| Resolution | Int | 64 | Voxel grid resolution (fine Edge Detail needs ≥~112) |
+| Density | Double | 8.0 | Density multiplier |
+| Enable Noise | Bool | off | Layer cloud noise onto the base shape |
+| Warp | Double | 0.3 | Domain-warp → billows / cauliflower |
+| Noise Scale / Detail | Double | — | FBM frequency / octaves |
+| Coverage | Double | 1.0 | Cloud amount (lower → scattered puffs, → 0 fades out) |
+| Edge Erosion | Double | 0.0 | Thins the rim into wisps |
+| Edge Detail | Double | 0.0 | Fine high-contrast carve — fragments the rim into tendrils |
+| Seed | Int | 0 | Per-copy variation |
+| Wind X/Y/Z | Double | 0 | Noise drift / boil over time (cells/frame) |
+| Base Flatness | Double | 0.0 | Flat condensation base |
+| Top Flatness | Double | 0.0 | Flat top / anvil (with Base = a slab) |
+| Height Falloff | Double | 0.0 | Dense base → wispy top (range 0–4) |
+
+A static Volume3D caches; animating Wind (or any shape knob) re-generates + re-uploads. The 3D
+viewport previews it as soft splats. (Legacy Step Size / Volume Bounces apply only to
+ScanlineRender / Cycles — FastVolumeRender ignores them.)
+
+### ReadVDB (viewport preview)
+The OpenVDB loader (Cycles PrincipledVolume + a FastVolumeRender source) previews in the 3D
+viewport as soft fire/smoke **splats**: it trilinearly samples the real density + fire grids on
+a coarse lattice (cached per path/frame/res), smoke grey + fire via a black-body ramp. The
+**Viewport Display Res** knob (`viewportDisplayRes`, default 40) controls the lattice density
+(preview-only — no render trigger).

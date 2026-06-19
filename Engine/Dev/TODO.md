@@ -25,19 +25,20 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 Matching Nuke's ScanlineRender controls.
 Done + pushed: Antialiasing level (None/Low/Medium/High = MSAA), Overscan,
-Projection Mode (Perspective / Orthographic / UV / Spherical), Ambient.
-Done but UNCOMMITTED: Transparency (revisit — see below).
+Projection Mode (Perspective / Orthographic / UV / Spherical), Ambient,
+Transparency (`ffea831c4`), bg-input resolution/format conform (`ffea831c4` —
+a connected bg/Reformat drives the output res AND format, Nuke-style).
 
 Remaining:
 
-- [ ] **Check / revisit Transparency** — built (on = respect surface alpha, off = force opaque) but the intended semantics vs Nuke are unclear; our renderer already alpha-blends, so verify what behaviour we actually want before relying on it. Currently UNCOMMITTED.
+- [ ] **Revisit Transparency semantics** — the `transparency` knob (on = respect surface alpha, off = force opaque) shipped 2026-06-17 in `ffea831c4` (rode along with the Project3D projective-texturing commit, disclosed in the message). It's committed + working; what's still open is whether the intended behaviour vs Nuke is right — our renderer already alpha-blends, so confirm the desired semantics before relying on it.
 - [ ] **Tessellation max** — adaptive screen-space subdivision of polygons. Also the fix for the Spherical-projection pole/±180° seam distortion (coarse geo smears without it).
 - [ ] **Z-blend (mode + range)** — blend intersecting / coplanar surfaces so they don't z-fight flicker (Nuke: none / smooth / linear + a range).
 - [ ] **Depth of field** — Nuke does it on the MultiSample tab via `focus diameter` + `samples` (orbit the camera around the focal distance per sample; no f-stop knob). Needs the camera's focal distance.
 
 ## New nodes
 
-- [ ] **Project3DShader node** — live camera-projection *shader*: project a 2D plate through a camera onto scene geometry as a material (plugs into a geo's material input; rendered by ScanlineRender). Controls to match Nuke's Project3D/Project3DShader: **project on** (front / back / both), **occlusion mode** (none / self / world), **crop**, and **near/far clip** (Project3DShader). This is DISTINCT from both the retired monolithic Project3D (standalone FBO renderer, no occlusion, not composable) and from UVProject (which rewrites UVs / bakes). Pairs with ScanlineRender's Perspective/Orthographic modes; the classic matte-painting lock workflow uses a FrameHold on the projection camera.
+- [x] **Project3D (camera-projection material shader)** — DONE, pushed 2026-06-17 (`b1d83b512`). Rebuilt **Project3D itself** as the material shader (plugs into a geo's mat input; projected by ScanlineRender; live preview in the 3D viewport for all geo types), matching Nuke's Project3D. **Project On** (front/back/both, default both), **Crop**, **Near/Far Clip** all work. The separate "Project3DShader" node was dropped — Nuke's Project3D vs Project3DShader is just legacy-3D vs USD-3D (same function); we have one 3D system → one node. **REMAINING:** the **Occlusion** mode (none/self/world) knob + shader compare are wired, but the projector **depth pre-pass isn't built**, so occlusion currently projects through regardless of the setting ("self" first, then "world"). The matte-painting lock workflow uses a FrameHold on the projection camera.
 
 ---
 
@@ -129,6 +130,13 @@ Remaining:
 ### Known Issues
 
 - None currently — Camera3D, Card3D, Sphere3D, Scene, ScanlineRender all working in 3D viewport.
+
+### Completed (2026-06-18) — FastVolumeRender ingest + Volume3D overhaul + viewport previews + ReadAlembicArchive fixes
+
+- **FastVolumeRender** — real-time GPU VDB volume node (wgpu-native compute ray-marcher) ingested as a built-in sibling to CyclesRender; scene-driven lighting from Light3D (Distant=sun, Dome=ambient, multi-light Point/Spot/Area-beam each self-shadowed, fire-as-light), per-frame compression + uniform-buffer cache, multi-plane AOVs incl. per-light-group. Gated `NATRON_FASTVOLUME` (external wgpu dep — see BUILDING.md). Verified NVIDIA-only. **Follow-ups:** test AMD/Intel GPUs; brick compression is single-threaded (cold-frame cost); beauty-only / async readback to cut the ~45 ms draw floor.
+- **Volume3D** — procedural-cloud overhaul (Sphere/Box + Enable-Noise: warp / coverage / erosion / edge-detail / seed / wind; vertical profile: base/top flatness + height-falloff; presets). Feeds FastVolumeRender (GPU, density-only). Possible polish: soft box edges, density-remap curve.
+- **3D-viewport previews** — soft fire/smoke splats for Volume3D + ReadVDB (trilinear sampling, cached per path/frame/res, `viewportDisplayRes` slider).
+- **ReadAlembicArchive viewport** — fixed the giant locator gizmo on baked-unit-scale archives (`drawTransformNode` was re-applying `localMatrix` on top of the dispatch's already-applied `worldMatrix` + inheriting the baked scale → now drawn once at a constant per-axis world size); added **Show Locators** + **Locator Size** knobs (Display page); **F (frame selected)** now fits the selection's real world-space mesh AABB so it tracks the user scale.
 
 ### Completed (2026-06-06) — Material override + archive transform + viewport isolate + fixes
 

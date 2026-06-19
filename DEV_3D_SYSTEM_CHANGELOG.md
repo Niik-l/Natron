@@ -17,6 +17,40 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **FastVolumeRender — real-time GPU VDB volume node (2026-06-18, ingested)** —
+  A new built-in node sibling to CyclesRender: a wgpu-native compute ray-marcher that renders
+  VDB smoke/fire (and procedural Volume3D) at interactive rates as a stand-in for Cycles
+  volumes. Input 0 = a Scene (ReadVDB or Volume3D + Light3D(s), optionally under a Group3D),
+  input 1 = optional Camera. Lighting comes from scene Light3D nodes (Distant = sun, Dome =
+  ambient, multi-light Point/Spot/Area-beam each self-shadowed, fire-as-light); per-frame
+  compression + uniform-buffer cache (look tweaks are draw-only); multi-plane AOVs incl.
+  per-light-group passes. Gated `NATRON_FASTVOLUME`, depends on wgpu-native (external — see
+  BUILDING.md); verified NVIDIA-only. Files in `Engine/Dev/FastVolume/` + build wiring. See
+  `NODE_REGISTRY.md` for the full feature list + GPU-portability notes.
+
+- **Volume3D — procedural cloud overhaul (2026-06-15→16)** —
+  The procedural volume grew from "sphere/box" into a cloud toolkit: Sphere/Box base + an
+  Enable-Noise toggle layering domain-warped FBM (Warp / Coverage / Edge Erosion / Edge Detail
+  / Seed / Wind), a vertical density profile (Base/Top Flatness, Height Falloff) and
+  Cumulus/Stratus/Cumulonimbus/Wispy presets. Per-voxel `volumeDensityAt()`, parallel z-slice
+  generation, `getShapeHash(time)` caching. Feeds FastVolumeRender (GPU, density-only) as well
+  as ScanlineRender and Cycles.
+
+- **3D-viewport soft-splat previews for Volume3D + ReadVDB (2026-06-16)** —
+  Both now preview as soft over-blended point-sprite splats (through the particle shader)
+  instead of hard additive dots / a bare wireframe bbox. ReadVDB trilinearly samples the real
+  density + fire grids on a coarse lattice (cached per path/frame/res via
+  `getViewportDensitySamples`), smoke grey + fire via a black-body ramp, with a preview-only
+  `viewportDisplayRes` slider.
+
+- **ReadAlembicArchive 3D-viewport: locator fix + controls + frame-selected (2026-06-18)** —
+  Fixed the giant locator "diamond" on baked-unit-scale archives: `Viewport3D::drawTransformNode`
+  was re-applying `localMatrix` on top of the dispatch's already-applied `worldMatrix` AND
+  inheriting the archive's baked scale — now drawn once at a constant per-axis world size.
+  Added **Show Locators** + **Locator Size** knobs (new Display page, viewport-only). And **F
+  (frame selected)** now fits the selection's real world-space mesh AABB (was the translate
+  knob + a fixed distance), so it tracks the archive's user scale.
+
 - **Gui 3D viewport renamed `DevViewport3D` → `Viewport3D` (2026-06-15)** —
   The viewport widget dropped its `Dev` prefix since it's a shipping feature,
   not an RnD node: `Gui/DevViewport3D.{h,cpp}` → `Gui/Viewport3D.{h,cpp}`,
@@ -700,17 +734,18 @@ Recent milestones:
 | **Cylinder3D** | `fr.inria.built-in.Cylinder3D` | Tessellated cylinder with caps |
 | **ReadGeo** | `fr.inria.built-in.ReadGeo` | Single-mesh `.abc` / `.obj` loader |
 | **ReadAlembicArchive** | `fr.inria.built-in.ReadAlembicArchive` | Multi-mesh Alembic archive (full hierarchy) |
-| **ReadVDB** | `fr.inria.built-in.ReadVDB` | OpenVDB volume loader (PrincipledVolume rendering via Cycles) |
+| **ReadVDB** | `fr.inria.built-in.ReadVDB` | OpenVDB volume loader (Cycles PrincipledVolume + FastVolumeRender GPU source); soft fire/smoke splat viewport preview (`viewportDisplayRes`) |
 | **Group3D** | `fr.inria.built-in.Group3D` | Groups 3D objects with unified transform |
 
-### 3D Scene & Render (6 nodes — 5 registered, Project3D disabled)
+### 3D Scene & Render (7 nodes — FastVolumeRender gated `NATRON_FASTVOLUME`)
 | Node | Plugin ID | Description |
 |------|-----------|-------------|
 | **Scene3D** | `fr.inria.built-in.Scene3D` | Aggregates 3D objects for rendering |
 | **CyclesRenderPass** | `fr.inria.built-in.RenderPass` | Multi-pass filter: visibility, holdout, shadow catcher, light selection |
-| **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | GLSL 3.3 + MRT rasterizer; 6 AOVs; Shading modes; particle render |
+| **ScanlineRender** | `fr.inria.built-in.ScanlineRender` | GLSL 3.3 + MRT rasterizer; 6 AOVs; Shading modes; particle render; projects Project3D materials; bg-input res/format conform |
 | **CyclesRender** | `fr.inria.built-in.CyclesRender` | Cycles path tracer (NATRON_CYCLES); 12 AOVs |
-| ~~**Project3D**~~ | ~~`fr.inria.built-in.Project3D`~~ | **Disabled 2026-05-24** — ~~Camera projection onto geometry~~. Superseded by UVProject. |
+| **FastVolumeRender** | `fr.inria.built-in.FastVolumeRender` | Real-time GPU VDB volume renderer (wgpu-native compute ray-marcher); gated `NATRON_FASTVOLUME` — see NODE_REGISTRY |
+| **Project3D** | `fr.inria.built-in.Project3D` | Re-enabled 2026-06-17 (b1d83b512) as a camera-projection **material shader** (Nuke parity) — projected by ScanlineRender onto a geo's mat input |
 | **UVProject** | `fr.inria.built-in.UVProject` | Rewrite mesh UVs (6 projection modes incl. STW perspective) |
 
 ### Camera & Lighting (4 nodes)
@@ -725,7 +760,7 @@ Recent milestones:
 | Node | Plugin ID | Description |
 |------|-----------|-------------|
 | **Material3D** | `fr.inria.built-in.Material3D` | Standalone PBR material with texture map inputs |
-| **Volume3D** | `fr.inria.built-in.Volume3D` | Procedural volume (sphere, box) — Cycles shader graph |
+| **Volume3D** | `fr.inria.built-in.Volume3D` | Procedural cloud volume — Sphere/Box + Enable-Noise (warp/coverage/erosion/edge-detail/seed/wind), vertical profile (base/top flatness, height falloff), presets; renders via FastVolumeRender (GPU) / ScanlineRender / Cycles |
 
 ### Deep Compositing — registered (17 nodes)
 DeepRead, DeepWrite, DeepFlatten, DeepMerge, DeepRecolor, DeepSlice, DeepHoldout,

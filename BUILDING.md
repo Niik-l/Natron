@@ -165,6 +165,36 @@ You should see output ending with:
 -- Build files have been written to: ...
 ```
 
+### Optional — FastVolumeRender (GPU VDB volume node)
+
+`FastVolumeRender` is a real-time GPU volume renderer (see `NODE_REGISTRY.md`). It is
+**off by default** and depends on **wgpu-native**, which is **not vendored in this repo**.
+
+1. **Get wgpu-native** — `webgpu.h`, `wgpu.h`, and the runtime DLL. Either download a
+   release from <https://github.com/gfx-rs/wgpu-native/releases>, or extract them from the
+   `wgpu` Python wheel (`.../site-packages/wgpu/resources/`). Put the two headers + the DLL
+   in one directory, and **rename the DLL to exactly `wgpu_native.dll`** (the import-table
+   name — the release file may be `wgpu_native-release.dll`).
+
+2. **Configure** with two extra flags appended to the `cmake` line above:
+   ```bash
+   -DNATRON_FASTVOLUME=ON \
+   -DNATRON_WGPU_DIR=/path/to/your/wgpu
+   ```
+   With `NATRON_CYCLES=ON` the OpenVDB stack is already linked via Cycles; the FastVolume
+   block links its own OpenVDB stack only `if(NOT NATRON_CYCLES)`.
+
+3. **Deploy the DLL** next to BOTH executables after building (it must sit beside each `.exe`
+   at runtime — `Natron` and `NatronRenderer` are separate targets):
+   ```bash
+   cp /path/to/your/wgpu/wgpu_native.dll build-qt6/App/
+   cp /path/to/your/wgpu/wgpu_native.dll build-qt6/Renderer/
+   ```
+
+> **GPU note:** verified on NVIDIA only; cross-vendor via DX12/Vulkan, so AMD/Intel should
+> work but are untested. With no compatible GPU/driver the node shows an error and skips the
+> render (no crash). Windows-only as built. See the FastVolumeRender row in `NODE_REGISTRY.md`.
+
 ---
 
 ## 5. Build Natron
