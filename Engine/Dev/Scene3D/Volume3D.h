@@ -96,14 +96,29 @@ public:
         float density;
         float colorR, colorG, colorB;
         int resolution;
-        int volumeType; // 0=sphere, 1=box
+        int volumeType;  // 0=sphere, 1=box (base shape)
+        bool enableNoise; // layer procedural noise on the base shape
+        float baseFlatness;  // flat cloud base (vertical cut at bottom), 0=off
+        float topFlatness;   // flat cloud top (vertical cut at top, anvil/stratus), 0=off
+        float heightFalloff; // vertical density gradient (dense base->wispy top), 0=off
         float noiseScale;
         float noiseDetail;
+        float warp;     // domain-warp strength (noise cloud)
+        float coverage; // cloud amount: 1=full (default), lower carves puffs
+        float erosion;  // edge erosion: high-freq dissolve of the rim into wisps
+        float edgeDetail; // fine edge breakup: high-freq carve that fragments the rim
+        int   seed;     // noise variation seed (offsets the sampling)
+        float windX, windY, windZ;      // drift speed (noise cells / frame)
+        float noiseOffX, noiseOffY, noiseOffZ; // seed offset + wind*time (applied to noise)
         float stepSize;
         int volumeBounces;
     };
 
     VolumeParams getVolumeParams(double time) const;
+
+    // Hash of the shape params (placement/colour excluded) — lets downstream
+    // renderers cache the generated field and re-build only when it changes.
+    U64 getShapeHash(double time) const;
 
     // Generate the 3D density data (resolution^3 floats)
     void generateVolumeData(double time, std::vector<float>& outData, int& resolution) const;
@@ -111,8 +126,16 @@ public:
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
+    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
+
+    // Show/hide the noise knobs based on the Enable Noise toggle.
+    void updateKnobVisibility();
+
+    // Load a cloud shape preset (1=Cumulus, 2=Stratus, 3=Cumulonimbus, 4=Wispy)
+    // into the shape/noise/profile knobs. 0 (Custom) is a no-op.
+    void applyPreset(int idx);
 
     std::unique_ptr<Volume3DPrivate> _imp;
     mutable std::vector<float> _cachedVolData;
