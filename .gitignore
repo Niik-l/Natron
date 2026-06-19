@@ -304,6 +304,9 @@ Gui/Qt5
 # Qt6/Qt5 build directories
 build-qt6/
 build-qt5/
+# Vendored wgpu-native runtime + headers for FastVolumeRender (external dependency,
+# not committed — passed to CMake via -DNATRON_WGPU_DIR=./wgpu).
+wgpu/
 # Internal research/design docs (keep local only)
 Engine/Dev/Research_*.md
 

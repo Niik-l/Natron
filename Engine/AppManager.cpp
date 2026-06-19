@@ -204,6 +204,9 @@
 #include "Dev/Cycles/CyclesRenderPassManager.h"
 #include "Dev/Cycles/CyclesRenderSettings.h"
 #endif
+#ifdef NATRON_FASTVOLUME
+#include "Dev/FastVolume/FastVolumeRender.h"
+#endif
 #include "Dev/Scene3D/Light3D.h"
 #include "Dev/Scene3D/Material3D.h"
 #include "Dev/Scene3D/Project3D.h"
@@ -1670,6 +1673,9 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<CyclesRender>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<CyclesRenderPassManager>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<CyclesRenderSettings>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+#endif
+#ifdef NATRON_FASTVOLUME
+    registerBuiltInPlugin<FastVolumeRender>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 #endif
     registerBuiltInPlugin<Light3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Material3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);

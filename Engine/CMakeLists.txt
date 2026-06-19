@@ -62,11 +62,19 @@ if(NATRON_CYCLES)
     file(GLOB DevCycles_HEADERS Dev/Cycles/*.h)
     file(GLOB DevCycles_SOURCES Dev/Cycles/*.cpp)
 endif()
+if(NATRON_FASTVOLUME)
+    file(GLOB DevFastVolume_HEADERS Dev/FastVolume/*.h)
+    file(GLOB DevFastVolume_SOURCES Dev/FastVolume/*.cpp)
+endif()
 list(APPEND NatronEngine_HEADERS ${DevDeep_HEADERS} ${DevScene3D_HEADERS} ${DevParticles_HEADERS} ${DevChannel_HEADERS} ${DevTransform_HEADERS} ${DevColor_HEADERS} ${DevPostFX_HEADERS})
 list(APPEND NatronEngine_SOURCES ${DevDeep_SOURCES} ${DevScene3D_SOURCES} ${DevParticles_SOURCES} ${DevChannel_SOURCES} ${DevTransform_SOURCES} ${DevColor_SOURCES} ${DevPostFX_SOURCES})
 if(NATRON_CYCLES)
     list(APPEND NatronEngine_HEADERS ${DevCycles_HEADERS})
     list(APPEND NatronEngine_SOURCES ${DevCycles_SOURCES})
+endif()
+if(NATRON_FASTVOLUME)
+    list(APPEND NatronEngine_HEADERS ${DevFastVolume_HEADERS})
+    list(APPEND NatronEngine_SOURCES ${DevFastVolume_SOURCES})
 endif()
 
 set(PYENGINE_OUT ${CMAKE_CURRENT_BINARY_DIR}/Qt${QT_VERSION_MAJOR})
@@ -198,6 +206,31 @@ if(NATRON_CYCLES)
     # Cycles needs _USE_MATH_DEFINES on Windows for M_PI in OpenSubdiv headers
     if(WIN32)
         target_compile_definitions(NatronEngine PRIVATE _USE_MATH_DEFINES)
+    endif()
+endif()
+if(NATRON_FASTVOLUME)
+    # GPU volume node: wgpu-native + system OpenVDB, independent of Cycles.
+    target_include_directories(NatronEngine SYSTEM PRIVATE
+        ${NATRON_WGPU_DIR}
+        /c/msys64/mingw64/include/Imath
+        /c/msys64/mingw64/include/OpenEXR
+    )
+    # NATRON_HAVE_OPENVDB enables ReadVDB::getVDBDirect / VDBDirectData (the
+    # data the node consumes). When Cycles is off this block is the only thing
+    # enabling OpenVDB; CMake dedupes the define if Cycles also set it.
+    target_compile_definitions(NatronEngine PRIVATE NATRON_FASTVOLUME NATRON_HAVE_OPENVDB)
+    if(WIN32)
+        target_compile_definitions(NatronEngine PRIVATE _USE_MATH_DEFINES)
+    endif()
+    # MinGW links the DLL directly (no import lib needed). PRIVATE on a STATIC
+    # lib still propagates to the final executable link.
+    target_link_libraries(NatronEngine PRIVATE ${NATRON_WGPU_DIR}/wgpu_native.dll)
+    # Only supply the OpenVDB stack ourselves when Cycles isn't already linking
+    # its own (bundled) copy — otherwise the system and bundled OpenVDB/TBB
+    # would clash at link time. Matches the validated standalone build.
+    if(NOT NATRON_CYCLES)
+        target_link_libraries(NatronEngine PRIVATE
+            openvdb tbb12 OpenEXR Imath Iex IlmThread)
     endif()
 endif()
 # Non-Qt includes that AUTOMOC/moc doesn't need — mark as SYSTEM to keep
