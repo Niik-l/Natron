@@ -114,6 +114,17 @@ public:
                       float& outMinX, float& outMinY, float& outMinZ,
                       float& outMaxX, float& outMaxY, float& outMaxZ);
 
+    // Coarse density (+ fire) sampling for the 3D viewport splat preview (plain
+    // floats — no OpenVDB in the API). Samples the density grid on a lattice
+    // ~targetN along the longest axis (proportional on the others), normalized to
+    // [0,1]. Also samples a fire grid (flames / temperature / heat) on the same
+    // lattice if present — `outFire` is left empty for a pure smoke sim. EXPENSIVE
+    // (re-reads the file) — the caller MUST cache the result per (path, frame).
+    bool getViewportDensitySamples(double time, int targetN,
+                                   std::vector<float>& outDensity,
+                                   std::vector<float>& outFire,
+                                   int& outNx, int& outNy, int& outNz);
+
     // Direct VDB grid access for Cycles (skips dense conversion)
     // Returns the OpenVDB grid and render params without converting to dense array.
     // REVERT NOTE: if this causes issues, use getVolumeData() instead (dense path).

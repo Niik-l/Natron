@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <map>
 
 CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
@@ -503,6 +504,19 @@ applyProject3DToGeo(const EffectInstancePtr& geoEffect,
 // Section 3: Private struct — demo-style camera + ImGuizmo state
 // ============================================================================
 
+// Cached coarse density lattice for a ReadVDB viewport splat preview. Sampling a
+// VDB re-reads the file (~80 ms), so we keep the lattice and only re-sample when
+// the path or frame changes; the per-frame draw just rebuilds the splat buffer.
+struct VdbSplatCache
+{
+    std::string path;
+    int frame = -1000000;
+    int res = 0;                  // viewport-display-res the lattice was sampled at
+    int nx = 0, ny = 0, nz = 0;
+    std::vector<float> density;   // normalized [0,1], nx*ny*nz (z*ny*nx + y*nx + x)
+    std::vector<float> fire;      // normalized [0,1] flames/temp; empty for pure smoke
+};
+
 struct Viewport3DPrivate
 {
     // Camera (ImGuizmo demo-style spherical coords)
@@ -522,6 +536,10 @@ struct Viewport3DPrivate
     // Selection
     std::string selectedNodeName;
     int selectedCardIndex;
+
+    // Per-ReadVDB cached density lattice for the viewport splat preview (keyed by
+    // SceneNode name; re-sampled only when its path/frame changes).
+    std::map<std::string, VdbSplatCache> vdbSplatCache;
 
     // Isolate Selected: when true, only the selected node (and its descendants)
     // is drawn in the viewport. Toggled from the Viewport3DTab toolbar.
@@ -1813,19 +1831,54 @@ Viewport3D::keyPressEvent(QKeyEvent* e)
         }
 
         if (!framed && !_imp->selectedNodeName.empty()) {
+            // Frame the selection's ACTUAL world-space geometry bounds, so framing
+            // stays correct when the node (e.g. an archive) is scaled. A multi-emit
+            // archive shares one name across all its entries — union the world AABB of
+            // every mesh entry, transforming each vertex by that entry's worldMatrix
+            // (which includes the user scale). Falls back to the node's world position
+            // when it has no mesh geometry (e.g. a locator-only selection).
             const std::vector<SceneNode>& nodes = _imp->sceneGraph.nodes();
+            float mn[3] = {0,0,0}, mx[3] = {0,0,0};
+            bool haveBounds = false;
             for (size_t i = 0; i < nodes.size(); ++i) {
-                if (nodes[i].name == _imp->selectedNodeName) {
-                    NodePtr node = nodes[i].sourceNode.lock();
-                    if (node) {
-                        EffectInstancePtr effect = node->getEffectInstance();
-                        float t[3], r[3], s[3];
-                        readTRSFromNode(effect, t, r, s);
-                        targetX = t[0]; targetY = t[1]; targetZ = t[2];
+                if (nodes[i].name != _imp->selectedNodeName) continue;
+                const MeshDataPtr& md = nodes[i].meshData;
+                if (!md || md->vertices.empty()) continue;
+                const float* M = nodes[i].worldMatrix;
+                const std::vector<float>& v = md->vertices;
+                for (size_t k = 0; k + 2 < v.size(); k += 3) {
+                    const float lx = v[k], ly = v[k+1], lz = v[k+2];
+                    const float wx = M[0]*lx + M[4]*ly + M[8]*lz + M[12];
+                    const float wy = M[1]*lx + M[5]*ly + M[9]*lz + M[13];
+                    const float wz = M[2]*lx + M[6]*ly + M[10]*lz + M[14];
+                    if (!haveBounds) {
+                        mn[0]=mx[0]=wx; mn[1]=mx[1]=wy; mn[2]=mx[2]=wz;
+                        haveBounds = true;
+                    } else {
+                        if (wx < mn[0]) mn[0] = wx; else if (wx > mx[0]) mx[0] = wx;
+                        if (wy < mn[1]) mn[1] = wy; else if (wy > mx[1]) mx[1] = wy;
+                        if (wz < mn[2]) mn[2] = wz; else if (wz > mx[2]) mx[2] = wz;
+                    }
+                }
+            }
+            if (haveBounds) {
+                targetX = 0.5f * (mn[0] + mx[0]);
+                targetY = 0.5f * (mn[1] + mx[1]);
+                targetZ = 0.5f * (mn[2] + mx[2]);
+                const float ex = mx[0]-mn[0], ey = mx[1]-mn[1], ez = mx[2]-mn[2];
+                float radius = 0.5f * std::sqrt(ex*ex + ey*ey + ez*ez);
+                if (radius < 0.1f) radius = 1.0f;
+                distance = radius * 2.5f;   // same fit factor as the point-cloud path
+                framed = true;
+            } else {
+                for (size_t i = 0; i < nodes.size(); ++i) {
+                    if (nodes[i].name == _imp->selectedNodeName) {
+                        const float* M = nodes[i].worldMatrix;
+                        targetX = M[12]; targetY = M[13]; targetZ = M[14];
                         distance = 5.0f;
                         framed = true;
+                        break;
                     }
-                    break;
                 }
             }
         }
@@ -3447,6 +3500,79 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
     }
 }
 
+// Black-body-ish fire ramp for the viewport (dark red → orange → yellow → white),
+// clamped to [0,1] for display. Mirrors the renderer's fire_color() shape.
+static void
+fireRamp(float x, float& r, float& g, float& b)
+{
+    x = std::min(1.0f, std::max(0.0f, x));
+    r = std::min(1.0f, std::pow(x, 0.5f) * 1.5f);
+    g = std::min(1.0f, std::pow(x, 1.7f) * 1.3f);
+    b = std::min(1.0f, std::pow(x, 4.0f) * 1.2f);
+}
+
+// Draw a packed soft-splat buffer [px,py,pz, r,g,b,a, size] (8 floats/sample)
+// through the particle point-sprite shader (soft round sprites, over-blended).
+// Shared by the Volume3D and ReadVDB viewport previews.
+static void
+drawSoftSplatBuffer(const std::vector<float>& buf, GLuint shaderProg, bool shaderReady)
+{
+    const int FPP = 8;
+    const int count = (int)(buf.size() / FPP);
+    if (count <= 0) return;
+
+    GLuint vbo = 0;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, buf.size() * sizeof(float), buf.data(), GL_STREAM_DRAW);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // over (not additive)
+    glDepthMask(GL_FALSE);
+    const GLsizei stride = FPP * sizeof(float);
+
+    if (shaderReady) {
+        glUseProgram(shaderProg);
+        glEnable(GL_PROGRAM_POINT_SIZE);
+        glEnable(GL_POINT_SPRITE);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glVertexPointer(3, GL_FLOAT, stride, (void*)0);
+        glColorPointer(4, GL_FLOAT, stride, (void*)(3 * sizeof(float)));
+        GLint psizeLoc = glGetAttribLocation(shaderProg, "psize");
+        if (psizeLoc >= 0) {
+            glEnableVertexAttribArray(psizeLoc);
+            glVertexAttribPointer(psizeLoc, 1, GL_FLOAT, GL_FALSE, stride, (void*)(7 * sizeof(float)));
+        }
+        glDrawArrays(GL_POINTS, 0, count);
+        if (psizeLoc >= 0) glDisableVertexAttribArray(psizeLoc);
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        glDisable(GL_POINT_SPRITE);
+        glDisable(GL_PROGRAM_POINT_SIZE);
+        glUseProgram(0);
+    } else {
+        // Fallback (no shader): round-ish smooth points.
+        glEnable(GL_POINT_SMOOTH);
+        glHint(GL_POINT_SMOOTH_HINT, GL_NICEST);
+        glPointSize(4.0f);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glVertexPointer(3, GL_FLOAT, stride, (void*)0);
+        glColorPointer(4, GL_FLOAT, stride, (void*)(3 * sizeof(float)));
+        glDrawArrays(GL_POINTS, 0, count);
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        glDisable(GL_POINT_SMOOTH);
+        glPointSize(1.0f);
+    }
+
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDeleteBuffers(1, &vbo);
+}
+
 void
 Viewport3D::drawVolumeNode(const SceneNode& sn) const
 {
@@ -3479,32 +3605,50 @@ Viewport3D::drawVolumeNode(const SceneNode& sn) const
         vol->generateVolumeData(time, volData, res);
 
         if (res > 0 && !volData.empty()) {
-            int step = std::max(1, res / 12);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-            glPointSize(3.0f);
-            glBegin(GL_POINTS);
+            // Soft-splat cloud preview: sample the density field and draw each
+            // sample as a soft round point-sprite through the same shader the
+            // ParticleSystem uses. Splats are sized to the sample spacing (× the
+            // node's world scale) so neighbours overlap into a continuous cloud,
+            // over-blended (not additive, which blew out), with a gentle top-down
+            // shade so it reads as a 3D form rather than flat haze.
+            const int step = std::max(1, res / 32);          // ~32 samples/axis
+            const float spacing = (float)step / (float)res;  // local-space gap
+
+            // World scale from the node's matrix columns, so the splat size tracks
+            // the actual on-screen size of the volume (incl. parent transforms).
+            const float* M = sn.worldMatrix;
+            const float sclX = std::sqrt(M[0]*M[0] + M[1]*M[1] + M[2]*M[2]);
+            const float sclY = std::sqrt(M[4]*M[4] + M[5]*M[5] + M[6]*M[6]);
+            const float sclZ = std::sqrt(M[8]*M[8] + M[9]*M[9] + M[10]*M[10]);
+            const float splat = spacing * 2.4f * std::max(0.05f, (sclX + sclY + sclZ) / 3.0f);
+
+            const int FPP = 8;   // px,py,pz, r,g,b,a, size  (matches particle shader)
+            std::vector<float> buf;
+            buf.reserve(4096 * FPP);
             for (int z = 0; z < res; z += step) {
                 for (int y = 0; y < res; y += step) {
                     for (int x = 0; x < res; x += step) {
                         float density = volData[z * res * res + y * res + x];
-                        if (density < 0.05f) continue;
+                        if (density < 0.04f) continue;
                         float lx = ((float)x / (float)res - 0.5f);
                         float ly = ((float)y / (float)res - 0.5f);
                         float lz = ((float)z / (float)res - 0.5f);
-                        float alpha = std::min(1.0f, density * 0.8f);
-                        glColor4f(colR, colG, colB, alpha);
-                        glVertex3f(lx, ly, lz);
+                        float shade = 0.55f + 0.45f * (ly + 0.5f);   // dark base -> light top
+                        float a = std::min(0.85f, density * 0.55f);
+                        buf.push_back(lx); buf.push_back(ly); buf.push_back(lz);
+                        buf.push_back(colR * shade); buf.push_back(colG * shade); buf.push_back(colB * shade);
+                        buf.push_back(a);
+                        buf.push_back(splat);
                     }
                 }
             }
-            glEnd();
-            glDisable(GL_BLEND);
+            drawSoftSplatBuffer(buf, _imp->particleShaderProgram, _imp->particleShaderReady);
         }
     } else if (vdb) {
         // Read actual VDB bounds from the grid (cached per-path)
         float minX, minY, minZ, maxX, maxY, maxZ;
-        if (vdb->getVDBBounds(time, minX, minY, minZ, maxX, maxY, maxZ)) {
+        bool haveBounds = vdb->getVDBBounds(time, minX, minY, minZ, maxX, maxY, maxZ);
+        if (haveBounds) {
             bboxMinX = minX; bboxMinY = minY; bboxMinZ = minZ;
             bboxMaxX = maxX; bboxMaxY = maxY; bboxMaxZ = maxZ;
         } else {
@@ -3513,6 +3657,82 @@ Viewport3D::drawVolumeNode(const SceneNode& sn) const
             bboxMaxX = 1.0f;  bboxMaxY = 1.0f;  bboxMaxZ = 1.0f;
         }
         colR = 0.5f; colG = 0.7f; colB = 1.0f;
+
+        // Soft-splat preview of the actual VDB density (same look as Volume3D).
+        // Sampling re-reads the file (~80 ms), so the coarse lattice is CACHED per
+        // (path, frame) and only re-sampled when those change; the per-frame work
+        // is just rebuilding the splat buffer from the cached lattice.
+        if (haveBounds) {
+            std::string path;
+            if (KnobIPtr pk = effect->getKnobByName("filePath")) {
+                if (KnobStringBase* s = dynamic_cast<KnobStringBase*>(pk.get())) path = s->getValue();
+            }
+            const int frame = (int)std::floor(time + 0.5);
+            int dispRes = 40;
+            if (KnobIPtr rk = effect->getKnobByName("viewportDisplayRes")) {
+                if (KnobInt* ri = dynamic_cast<KnobInt*>(rk.get())) dispRes = ri->getValue();
+            }
+            VdbSplatCache& c = _imp->vdbSplatCache[sn.name];
+            if (c.path != path || c.frame != frame || c.res != dispRes || c.density.empty()) {
+                c.path = path; c.frame = frame; c.res = dispRes;
+                if (!vdb->getViewportDensitySamples(time, dispRes, c.density, c.fire, c.nx, c.ny, c.nz)) {
+                    c.density.clear(); c.fire.clear(); c.nx = c.ny = c.nz = 0;
+                }
+            }
+            if (!c.density.empty() && c.nx > 1 && c.ny > 1 && c.nz > 1) {
+                const float ex = bboxMaxX - bboxMinX;
+                const float ey = bboxMaxY - bboxMinY;
+                const float ez = bboxMaxZ - bboxMinZ;
+                const float* M = sn.worldMatrix;
+                const float sclX = std::sqrt(M[0]*M[0] + M[1]*M[1] + M[2]*M[2]);
+                const float sclY = std::sqrt(M[4]*M[4] + M[5]*M[5] + M[6]*M[6]);
+                const float sclZ = std::sqrt(M[8]*M[8] + M[9]*M[9] + M[10]*M[10]);
+                const float avgScl = std::max(0.05f, (sclX + sclY + sclZ) / 3.0f);
+                // splat ~ average world-space gap between lattice samples
+                const float spacing = ((ex / c.nx) + (ey / c.ny) + (ez / c.nz)) / 3.0f;
+                const float splat = spacing * 2.4f * avgScl;
+
+                const bool haveFire = (c.fire.size() == c.density.size());
+                // Smoke = neutral grey; fire voxels glow via the fire ramp (emissive,
+                // so they show even where smoke density is low).
+                const float smR = 0.78f, smG = 0.78f, smB = 0.82f;
+                const int FPP = 8;
+                std::vector<float> buf;
+                buf.reserve(4096 * FPP);
+                for (int k = 0; k < c.nz; ++k) {
+                    for (int j = 0; j < c.ny; ++j) {
+                        for (int i = 0; i < c.nx; ++i) {
+                            const size_t idx = ((size_t)k * c.ny + j) * c.nx + i;
+                            float density = c.density[idx];
+                            float fireVal = haveFire ? c.fire[idx] : 0.0f;
+                            if (density < 0.04f && fireVal < 0.05f) continue;
+                            float u = (float)i / (float)(c.nx - 1);
+                            float v = (float)j / (float)(c.ny - 1);
+                            float w = (float)k / (float)(c.nz - 1);
+                            float px = bboxMinX + u * ex;
+                            float py = bboxMinY + v * ey;
+                            float pz = bboxMinZ + w * ez;
+                            float shade = 0.55f + 0.45f * v;          // dark base -> light top
+                            float r = smR * shade, g = smG * shade, b = smB * shade;
+                            float a = std::min(0.85f, density * 0.7f);
+                            if (fireVal > 0.02f) {
+                                float fr, fg, fb; fireRamp(fireVal, fr, fg, fb);
+                                float fw = std::min(1.0f, fireVal * 1.6f);   // fire blend weight
+                                r = r * (1.0f - fw) + fr * fw;
+                                g = g * (1.0f - fw) + fg * fw;
+                                b = b * (1.0f - fw) + fb * fw;
+                                a = std::max(a, std::min(0.9f, fireVal * 0.95f));
+                            }
+                            buf.push_back(px); buf.push_back(py); buf.push_back(pz);
+                            buf.push_back(r); buf.push_back(g); buf.push_back(b);
+                            buf.push_back(a);
+                            buf.push_back(splat);
+                        }
+                    }
+                }
+                drawSoftSplatBuffer(buf, _imp->particleShaderProgram, _imp->particleShaderReady);
+            }
+        }
     }
 
     bool selected = (sn.name == _imp->selectedNodeName);
@@ -3692,46 +3912,80 @@ Viewport3D::drawLightNode(const SceneNode& sn) const
 void
 Viewport3D::drawTransformNode(const SceneNode& sn) const
 {
+    // The dispatch loop has already applied sn.worldMatrix (= parent.world * local),
+    // so we are at this transform's world frame — draw the locator at the origin.
+    // Do NOT re-apply sn.localMatrix: worldMatrix already contains it, and re-applying
+    // it double-transformed the gizmo.
+    //
+    // Keep the locator a fixed VISUAL size by dividing each axis by the node's world
+    // scale, so a baked unit scale (e.g. an FBX->Alembic cm->m conversion, common in
+    // these archives — and often non-uniform across the xform chain) doesn't balloon
+    // it into a viewport-spanning diamond.
     bool selected = (sn.name == _imp->selectedNodeName);
-    float axisLen = 0.8f;
     float lineW = selected ? 3.0f : 2.0f;
 
-    glPushMatrix();
-    glMultMatrixf(sn.localMatrix);
+    // Viewport-only controls, read from the source node (e.g. ReadAlembicArchive's
+    // "Show Locators" / "Locator Size"). Transform nodes from sources without these
+    // knobs fall back to on / 0.8 (the previous fixed size).
+    bool showLoc = true;
+    float locSize = 0.8f;
+    if (NodePtr src = sn.sourceNode.lock()) {
+        if (EffectInstancePtr eff = src->getEffectInstance()) {
+            if (KnobIPtr k = eff->getKnobByName("showLocators")) {
+                if (KnobBool* b = dynamic_cast<KnobBool*>(k.get())) showLoc = b->getValue();
+            }
+            if (KnobIPtr k = eff->getKnobByName("locatorSize")) {
+                if (KnobDouble* db = dynamic_cast<KnobDouble*>(k.get())) locSize = (float)db->getValue();
+            }
+        }
+    }
+    if (!showLoc) return;
+
+    const float* M = sn.worldMatrix;
+    float sx = std::sqrt(M[0]*M[0] + M[1]*M[1] + M[2]*M[2]);
+    float sy = std::sqrt(M[4]*M[4] + M[5]*M[5] + M[6]*M[6]);
+    float sz = std::sqrt(M[8]*M[8] + M[9]*M[9] + M[10]*M[10]);
+    if (sx < 1e-6f) sx = 1.0f;
+    if (sy < 1e-6f) sy = 1.0f;
+    if (sz < 1e-6f) sz = 1.0f;
+    // Axis lengths + diamond half-extents at a constant ~world size (locSize, with the
+    // diamond at the original 0.12/0.8 = 0.15 ratio), per-axis so non-uniform scale
+    // stays even.
+    const float diamond = locSize * 0.15f;
+    const float ax = locSize / sx,  ay = locSize / sy,  az = locSize / sz;
+    const float dx = diamond / sx,  dy = diamond / sy,  dz = diamond / sz;
 
     glLineWidth(lineW);
     glBegin(GL_LINES);
 
     // X axis — red
     glColor3f(1.0f, 0.2f, 0.2f);
-    glVertex3f(0, 0, 0); glVertex3f(axisLen, 0, 0);
+    glVertex3f(0, 0, 0); glVertex3f(ax, 0, 0);
 
     // Y axis — green
     glColor3f(0.2f, 1.0f, 0.2f);
-    glVertex3f(0, 0, 0); glVertex3f(0, axisLen, 0);
+    glVertex3f(0, 0, 0); glVertex3f(0, ay, 0);
 
     // Z axis — blue
     glColor3f(0.3f, 0.3f, 1.0f);
-    glVertex3f(0, 0, 0); glVertex3f(0, 0, axisLen);
+    glVertex3f(0, 0, 0); glVertex3f(0, 0, az);
 
     glEnd();
 
     // Draw a small diamond/cross at the origin to mark the null
     glColor3f(1.0f, 0.8f, 0.0f); // yellow
-    float d = 0.12f;
     glBegin(GL_LINES);
-    glVertex3f(-d, 0, 0); glVertex3f(d, 0, 0);
-    glVertex3f(0, -d, 0); glVertex3f(0, d, 0);
-    glVertex3f(0, 0, -d); glVertex3f(0, 0, d);
+    glVertex3f(-dx, 0, 0); glVertex3f(dx, 0, 0);
+    glVertex3f(0, -dy, 0); glVertex3f(0, dy, 0);
+    glVertex3f(0, 0, -dz); glVertex3f(0, 0, dz);
     // Diamond shape in XY plane
-    glVertex3f(0, d, 0); glVertex3f(d, 0, 0);
-    glVertex3f(d, 0, 0); glVertex3f(0, -d, 0);
-    glVertex3f(0, -d, 0); glVertex3f(-d, 0, 0);
-    glVertex3f(-d, 0, 0); glVertex3f(0, d, 0);
+    glVertex3f(0, dy, 0); glVertex3f(dx, 0, 0);
+    glVertex3f(dx, 0, 0); glVertex3f(0, -dy, 0);
+    glVertex3f(0, -dy, 0); glVertex3f(-dx, 0, 0);
+    glVertex3f(-dx, 0, 0); glVertex3f(0, dy, 0);
     glEnd();
 
     glLineWidth(1.0f);
-    glPopMatrix();
 }
 
 void

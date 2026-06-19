@@ -27,12 +27,14 @@
 #include <iomanip>
 #include <sstream>
 #include <fstream>
+#include <memory>
 
 #include <iostream>
 
 #ifdef NATRON_HAVE_OPENVDB
 #include <openvdb/openvdb.h>
 #include <openvdb/tools/Dense.h>
+#include <openvdb/tools/Interpolation.h>  // BoxSampler (trilinear) for viewport preview
 #endif
 
 #include "../../AppManager.h"
@@ -55,6 +57,7 @@ struct ReadVDBPrivate
     KnobDoubleWPtr colorR, colorG, colorB;
     KnobDoubleWPtr absorptionR, absorptionG, absorptionB;
     KnobIntWPtr frameOffset;
+    KnobIntWPtr viewportDisplayRes;   // 3D-viewport splat preview resolution (preview only)
 
     // Render settings
     KnobDoubleWPtr stepSize;
@@ -212,6 +215,19 @@ ReadVDB::initializeKnobs()
         k->setDisplayMinimum(-100); k->setDisplayMaximum(100);
         mainPage->addKnob(k);
         _imp->frameOffset = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Viewport Display Res"));
+        k->setName("viewportDisplayRes"); k->setDefaultValue(40);
+        k->setMinimum(8); k->setMaximum(96);
+        k->setDisplayMinimum(8); k->setDisplayMaximum(96);
+        k->setHintToolTip(tr("Resolution of the 3D-viewport splat preview (samples along "
+                             "the longest axis). Higher = finer/denser preview but more "
+                             "splats and a slightly longer re-sample when scrubbing. Does "
+                             "NOT affect the render — preview only."));
+        k->setEvaluateOnChange(false);   // preview-only: don't trigger a re-render
+        mainPage->addKnob(k);
+        _imp->viewportDisplayRes = k;
     }
 
     // Transform
@@ -583,6 +599,126 @@ ReadVDB::getVDBBounds(double time,
     (void)time;
     (void)outMinX; (void)outMinY; (void)outMinZ;
     (void)outMaxX; (void)outMaxY; (void)outMaxZ;
+    return false;
+#endif
+}
+
+bool
+ReadVDB::getViewportDensitySamples(double time, int targetN,
+                                   std::vector<float>& outDensity,
+                                   std::vector<float>& outFire,
+                                   int& outNx, int& outNy, int& outNz)
+{
+    outDensity.clear();
+    outFire.clear();
+    outNx = outNy = outNz = 0;
+#ifdef NATRON_HAVE_OPENVDB
+    if (targetN < 2) targetN = 2;
+    if (targetN > 96) targetN = 96;
+
+    KnobFilePtr fileKnob = _imp->filePath.lock();
+    if (!fileKnob) return false;
+    std::string templatePath = fileKnob->getValue();
+    if (templatePath.empty()) return false;
+
+    int frame = (int)time + _imp->frameOffset.lock()->getValueAtTime(time);
+    if (frame < 0) frame = 0;
+    std::string path = resolveFramePath(templatePath, frame);
+    {
+        std::ifstream testFile(path.c_str());
+        if (!testFile.good()) path = templatePath;
+    }
+
+    try {
+        openvdb::initialize();
+        openvdb::io::File file(path);
+        file.open();
+
+        // List grid names once, then read the density and (optional) fire grids.
+        std::vector<std::string> names;
+        for (auto it = file.beginName(); it != file.endName(); ++it) names.push_back(*it);
+
+        openvdb::GridBase::Ptr densBase;
+        for (const std::string& n : names) {
+            if (n == "density") { densBase = file.readGrid(n); break; }
+        }
+        if (!densBase && !names.empty()) densBase = file.readGrid(names[0]);
+
+        // Fire / heat grid (Houdini pyro: shares density's transform & resolution).
+        openvdb::GridBase::Ptr fireBase;
+        const char* fireNames[] = { "flames", "flame", "temperature", "heat", "fuel" };
+        for (const char* fn : fireNames) {
+            for (const std::string& n : names) {
+                if (n == fn) { fireBase = file.readGrid(n); break; }
+            }
+            if (fireBase) break;
+        }
+        file.close();
+
+        openvdb::FloatGrid::Ptr grid = openvdb::gridPtrCast<openvdb::FloatGrid>(densBase);
+        if (!grid) return false;
+        openvdb::FloatGrid::Ptr fireGrid = openvdb::gridPtrCast<openvdb::FloatGrid>(fireBase);
+
+        openvdb::CoordBBox bbox = grid->evalActiveVoxelBoundingBox();
+        if (bbox.empty()) return false;
+        const openvdb::Coord dim = bbox.dim();   // voxels per axis (>= 1)
+        const int mx = std::max(dim.x(), std::max(dim.y(), dim.z()));
+        if (mx < 1) return false;
+
+        const int nx = std::max(2, (int)std::lround((double)targetN * dim.x() / mx));
+        const int ny = std::max(2, (int)std::lround((double)targetN * dim.y() / mx));
+        const int nz = std::max(2, (int)std::lround((double)targetN * dim.z() / mx));
+
+        std::vector<float> dens((size_t)nx * ny * nz, 0.f);
+        std::vector<float> fire;
+        if (fireGrid) fire.assign((size_t)nx * ny * nz, 0.f);
+
+        openvdb::FloatGrid::ConstAccessor acc = grid->getConstAccessor();
+        std::unique_ptr<openvdb::FloatGrid::ConstAccessor> fireAcc;
+        if (fireGrid) fireAcc.reset(new openvdb::FloatGrid::ConstAccessor(fireGrid->getConstAccessor()));
+        const openvdb::Coord bmin = bbox.min();
+        float maxVal = 0.f, fireMax = 0.f;
+        // Trilinear (BoxSampler) at fractional index coords → smoother values than
+        // nearest-voxel, with less blockiness/flicker on a coarse lattice. The 8×
+        // corner lookups only run on a re-sample (cache miss), not per viewport frame.
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    const double fx = (double)bmin.x() + (double)i / (nx - 1) * (dim.x() - 1);
+                    const double fy = (double)bmin.y() + (double)j / (ny - 1) * (dim.y() - 1);
+                    const double fz = (double)bmin.z() + (double)k / (nz - 1) * (dim.z() - 1);
+                    const openvdb::Vec3R p(fx, fy, fz);
+                    float d = openvdb::tools::BoxSampler::sample(acc, p);
+                    if (d < 0.f) d = 0.f;
+                    const size_t idx = ((size_t)k * ny + j) * nx + i;
+                    dens[idx] = d;
+                    if (d > maxVal) maxVal = d;
+                    if (fireAcc) {
+                        float f = openvdb::tools::BoxSampler::sample(*fireAcc, p);
+                        if (f < 0.f) f = 0.f;
+                        fire[idx] = f;
+                        if (f > fireMax) fireMax = f;
+                    }
+                }
+            }
+        }
+        if (maxVal <= 1e-8f) return false;   // empty / all-zero grid
+        const float inv = 1.0f / maxVal;
+        for (size_t s = 0; s < dens.size(); ++s) dens[s] *= inv;   // normalize to [0,1]
+        if (fireGrid && fireMax > 1e-8f) {
+            const float finv = 1.0f / fireMax;
+            for (size_t s = 0; s < fire.size(); ++s) fire[s] *= finv;
+            outFire.swap(fire);                                    // else leave empty
+        }
+
+        outDensity.swap(dens);
+        outNx = nx; outNy = ny; outNz = nz;
+        return true;
+    } catch (...) {
+        return false;
+    }
+#else
+    (void)time; (void)targetN;
     return false;
 #endif
 }

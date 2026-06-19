@@ -488,6 +488,38 @@ ReadAlembicArchive::initializeKnobs()
             "• World Origin — legacy behaviour: pivot around (0,0,0)."));
         xformPage->addKnob(k);
     }
+
+    // --- Display: viewport-only controls for the per-xform locator gizmos ------
+    // An archive can carry many xform (null) entries; each draws a small axis +
+    // diamond locator in the 3D viewport. These let you hide them or resize them.
+    // Read by name in Viewport3D::drawTransformNode (showLocators / locatorSize);
+    // viewport-only (setEvaluateOnChange(false)) so changing them never re-renders.
+    KnobPagePtr dispPage = AppManager::createKnob<KnobPage>(this, tr("Display"));
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Show Locators"));
+        k->setName("showLocators");
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("Draw a small axis + diamond locator at each Alembic xform "
+                             "(null) in the 3D viewport. Turn off to declutter archives "
+                             "with many transform nodes."));
+        dispPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Locator Size"));
+        k->setName("locatorSize");
+        k->setDefaultValue(0.8);
+        k->setMinimum(0.0);
+        k->setDisplayMinimum(0.0);
+        k->setDisplayMaximum(5.0);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("World-space size of the xform locator gizmos in the 3D "
+                             "viewport — a constant on-screen size regardless of any unit "
+                             "scale baked into the archive (e.g. an FBX→Alembic cm→m import)."));
+        dispPage->addKnob(k);
+    }
 }
 
 bool
