@@ -72,6 +72,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/Material3D.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/Project3D.h"
+#include "Engine/Dev/Scene3D/MergeMat.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/TimeLine.h"
 #include "Engine/Dev/Deep/DeepToPoints.h"
@@ -415,8 +416,13 @@ NATRON_NAMESPACE_ENTER
 // 2D viewer instead of reading dark. The cached textures are scene-linear (rendered
 // from the image pipeline); without this the midtones look much darker than the
 // display-transformed 2D viewer. Reuses a scratch buffer (paintGL is single-thread).
+// borderColor (RGBA, optional): when either wrap mode is GL_CLAMP_TO_BORDER, texels
+// sampled outside [0,1] return this colour. Used by Project3D "crop to frame": the
+// plate maps to [0,1], so outside the camera frustum we return an opaque base-grey
+// instead of smearing the plate's edge pixels — the geo keeps its normal shading there.
 static void
-uploadPreviewTextureSRGB(const float* pixels, int w, int h, GLint wrapS, GLint wrapT)
+uploadPreviewTextureSRGB(const float* pixels, int w, int h, GLint wrapS, GLint wrapT,
+                         const float* borderColor = NULL)
 {
     static std::vector<float> tmp;
     const size_t n = (size_t)w * (size_t)h;
@@ -434,6 +440,9 @@ uploadPreviewTextureSRGB(const float* pixels, int w, int h, GLint wrapS, GLint w
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapS);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapT);
+    if ( borderColor && (wrapS == GL_CLAMP_TO_BORDER || wrapT == GL_CLAMP_TO_BORDER) ) {
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+    }
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_FLOAT, tmp.data());
 }
 
@@ -458,27 +467,127 @@ findUVProjectForGeo(GuiAppInstance* app, const NodePtr& geoNode)
     return NULL;
 }
 
-// If the geo's material input is a Project3D, set up viewport projective texturing: the
-// plate as the texture + perspective-correct STW for `localXYZ` (xyz interleaved, geo-local).
-// No-op if texPixels is already set (UVProject takes precedence) or no Project3D is connected.
-// Mirrors the UVProject path; the projector matrix comes from Project3D's camera.
-static void
-applyProject3DToGeo(const EffectInstancePtr& geoEffect,
-                    const std::vector<float>& localXYZ, const float worldMatrix[16], double time,
-                    const float*& texPixels, int& texW, int& texH, bool& texWrapRepeat,
-                    std::vector<float>& projSTW, int& projComp)
+// Borders for the Project3D viewport projection, sampled outside the plate frame [0,1] (and
+// on culled back-faces in front/back mode, where the STW is pushed out of range):
+//   * CROP ON  → fully transparent: the existing alpha blend makes those fragments contribute
+//     nothing, so the geo is cropped away there (background/grid shows through), matching Nuke.
+//   * CROP OFF (project-on cull only) → opaque base-grey: the geo stays visible, just unprojected.
+static const float kProject3DBorderClear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+static const float kProject3DBorderGrey[4]  = { 0.45f, 0.45f, 0.45f, 1.0f };
+
+// True if vertex `idx`'s Project3D projection lands inside the plate frame [0,1] (and in front
+// of the projector). projSTW holds (s*w, t*w, w) per vertex; project-on-culled verts were
+// pushed to a (2,2,1) out-of-range value upstream, so this also rejects them. Used to crop the
+// wireframe to the projected region (only meaningful when Crop is on — see callers).
+static inline bool
+project3DVertVisible(const std::vector<float>& projSTW, int idx)
 {
-    if (texPixels || localXYZ.empty()) return;
-    MaterialProvider* mp = dynamic_cast<MaterialProvider*>(geoEffect.get());
-    Project3D* p3d = mp ? dynamic_cast<Project3D*>(mp->getConnectedMaterial()) : NULL;
-    if (!p3d) return;
+    if ( (idx * 3 + 2) >= (int)projSTW.size() ) return false;
+    const float w = projSTW[idx * 3 + 2];
+    if (w <= 0.f) return false;
+    const float u = projSTW[idx * 3 + 0] / w;
+    const float v = projSTW[idx * 3 + 1] / w;
+    return (u >= 0.f && u <= 1.f && v >= 0.f && v <= 1.f);
+}
+
+// Compute smooth per-vertex normals for a polygon-soup mesh (vertices x,y,z interleaved;
+// faceCounts = per-face vertex count, or empty = faceIndices are triangles). Newell's method
+// per face (robust for n-gons / non-planar), accumulated to each vertex, then normalized.
+// MeshData carries no normals, so this is built on demand only when Project3D "Project On"
+// front/back needs facing info for a mesh. Winding-dependent (relies on consistent outward
+// winding, as Alembic/OBJ normally have).
+static void
+computeMeshVertexNormals(const std::vector<float>& verts,
+                         const std::vector<int>& faceCounts,
+                         const std::vector<int>& faceIndices,
+                         std::vector<float>& outNormals)
+{
+    const int nv = (int)(verts.size() / 3);
+    outNormals.assign((size_t)nv * 3, 0.f);
+    auto addFace = [&](const int* ids, int c) {
+        float nx = 0.f, ny = 0.f, nz = 0.f;
+        for (int i = 0; i < c; ++i) {
+            const int a = ids[i], b = ids[(i + 1) % c];
+            if (a < 0 || a >= nv || b < 0 || b >= nv) return;
+            const float* pa = &verts[a * 3];
+            const float* pb = &verts[b * 3];
+            nx += (pa[1] - pb[1]) * (pa[2] + pb[2]);
+            ny += (pa[2] - pb[2]) * (pa[0] + pb[0]);
+            nz += (pa[0] - pb[0]) * (pa[1] + pb[1]);
+        }
+        for (int i = 0; i < c; ++i) {
+            const int a = ids[i];
+            outNormals[a * 3 + 0] += nx;
+            outNormals[a * 3 + 1] += ny;
+            outNormals[a * 3 + 2] += nz;
+        }
+    };
+    if (!faceCounts.empty()) {
+        size_t off = 0;
+        for (size_t f = 0; f < faceCounts.size(); ++f) {
+            const int c = faceCounts[f];
+            if (c >= 3 && off + (size_t)c <= faceIndices.size())
+                addFace(&faceIndices[off], c);
+            off += (size_t)std::max(0, c);
+        }
+    } else {
+        for (size_t t = 0; t + 2 < faceIndices.size(); t += 3)
+            addFace(&faceIndices[t], 3);
+    }
+    for (int i = 0; i < nv; ++i) {
+        float* n = &outNormals[i * 3];
+        const float len = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+        if (len > 1e-8f) { n[0] /= len; n[1] /= len; n[2] /= len; }
+    }
+}
+
+// Resolve the Project3D previewed in the 3D viewport from a geo's material. A Project3D
+// projects directly; a MergeMat resolves to its FOREGROUND (A, then B) Project3D — the
+// fixed-function viewport can't composite layers like ScanlineRender, so it previews the
+// top projection with full settings (crop/alpha/project-on) instead of breaking. The full
+// layered composite is shown in the render; a multi-pass viewport preview is a future step.
+static Project3D*
+resolveViewportProject3D(MaterialProvider* mat)
+{
+    if (!mat) return NULL;
+    if (Project3D* p = dynamic_cast<Project3D*>(mat)) return p;
+    if (MergeMat* m = dynamic_cast<MergeMat*>(mat)) {
+        if (Project3D* a = resolveViewportProject3D(m->getInputMaterial(0))) return a;  // foreground
+        return resolveViewportProject3D(m->getInputMaterial(1));                         // background
+    }
+    return NULL;
+}
+
+// One viewport projection layer (a single Project3D leaf). A geo carries 1 (lone Project3D)
+// or several (MergeMat tree); the geo draw paints them back-to-front with alpha blending so
+// they composite, mirroring the ScanlineRender shader's per-fragment compositing.
+struct Project3DLayer {
+    const float* texPixels;          // plate pixels (in the Project3D's CachedTexture — kept alive by it)
+    int texW, texH;
+    std::vector<float> projSTW;      // per-vertex (s*w, t*w, w)
+    const float* borderColor;        // clear (crop) / grey (project-on cull, no crop) / NULL (smear)
+    std::vector<unsigned char> vertCulled;  // 1 = facing-culled vertex (per-triangle cull in the draw)
+    int op;                          // MergeMat::Operation compositing this over the layers below
+    float mix;                       // 0..1 opacity
+    Project3DLayer() : texPixels(NULL), texW(0), texH(0), borderColor(NULL), op(2 /*over*/), mix(1.f) {}
+};
+
+// Compute one projection layer for an explicit Project3D over `localXYZ` (geo-local, xyz
+// interleaved). `localNormals` (parallel; may be empty) drives Project-On front/back culling
+// (culled verts get STW pushed out of [0,1] + a per-vertex cull flag). Returns false if the
+// projection is inactive (no plate / no camera). `op`/`mix` are the MergeMat compositing params.
+static bool
+computeProject3DLayer(Project3D* p3d,
+                      const std::vector<float>& localXYZ, const std::vector<float>& localNormals,
+                      const float worldMatrix[16], double time, int op, float mix, Project3DLayer& out)
+{
+    if (!p3d) return false;
     p3d->updateCachedTexture(time);
     const Project3D::CachedTexture& pt = p3d->getCachedTexture();
-    if (pt.width <= 0 || pt.height <= 0 || pt.pixels.empty()) return;
+    if (pt.width <= 0 || pt.height <= 0 || pt.pixels.empty()) return false;
     float vp[16];
-    if (!p3d->getProjectorViewProj(time, vp)) return;
-    // mvp = projVP * worldMatrix (column-major).
-    float mvp[16];
+    if (!p3d->getProjectorViewProj(time, vp)) return false;
+    float mvp[16];   // mvp = projVP * worldMatrix (column-major)
     for (int c = 0; c < 4; ++c)
         for (int r = 0; r < 4; ++r) {
             float s = 0.f;
@@ -486,18 +595,111 @@ applyProject3DToGeo(const EffectInstancePtr& geoEffect,
             mvp[c*4+r] = s;
         }
     const size_t n = localXYZ.size() / 3;
-    projSTW.resize(n * 3);
+    out.projSTW.resize(n * 3);
     for (size_t i = 0; i < n; ++i) {
         const float lx = localXYZ[i*3], ly = localXYZ[i*3+1], lz = localXYZ[i*3+2];
         const float cx = mvp[0]*lx + mvp[4]*ly + mvp[8]*lz  + mvp[12];
         const float cy = mvp[1]*lx + mvp[5]*ly + mvp[9]*lz  + mvp[13];
         const float cw = mvp[3]*lx + mvp[7]*ly + mvp[11]*lz + mvp[15];
-        projSTW[i*3+0] = (cx + cw) * 0.5f;
-        projSTW[i*3+1] = (cy + cw) * 0.5f;
-        projSTW[i*3+2] = cw;
+        out.projSTW[i*3+0] = (cx + cw) * 0.5f;
+        out.projSTW[i*3+1] = (cy + cw) * 0.5f;
+        out.projSTW[i*3+2] = cw;
     }
-    texPixels = pt.pixels.data(); texW = pt.width; texH = pt.height;
+    out.texPixels = pt.pixels.data(); out.texW = pt.width; out.texH = pt.height;
+    out.op = op; out.mix = mix;
+    const bool crop = p3d->getCropToFrame(time);
+    out.borderColor = crop ? kProject3DBorderClear : NULL;
+    out.vertCulled.clear();
+
+    const int onMode = p3d->getProjectOn(time);   // 0 front, 1 back, 2 both
+    if (onMode != Project3D::eProjectBoth && localNormals.size() == localXYZ.size()) {
+        double ptx, pty, ptz, prx, pry, prz, pf, pha, pva;
+        if (p3d->getProjectorCamera(time, ptx, pty, ptz, prx, pry, prz, pf, pha, pva)) {
+            const float projPos[3] = { (float)ptx, (float)pty, (float)ptz };
+            out.vertCulled.assign(n, 0);
+            for (size_t i = 0; i < n; ++i) {
+                const float* pL = &localXYZ[i*3];
+                const float* nL = &localNormals[i*3];
+                const float wx = worldMatrix[0]*pL[0]+worldMatrix[4]*pL[1]+worldMatrix[8]*pL[2] +worldMatrix[12];
+                const float wy = worldMatrix[1]*pL[0]+worldMatrix[5]*pL[1]+worldMatrix[9]*pL[2] +worldMatrix[13];
+                const float wz = worldMatrix[2]*pL[0]+worldMatrix[6]*pL[1]+worldMatrix[10]*pL[2]+worldMatrix[14];
+                const float nx = worldMatrix[0]*nL[0]+worldMatrix[4]*nL[1]+worldMatrix[8]*nL[2];
+                const float ny = worldMatrix[1]*nL[0]+worldMatrix[5]*nL[1]+worldMatrix[9]*nL[2];
+                const float nz = worldMatrix[2]*nL[0]+worldMatrix[6]*nL[1]+worldMatrix[10]*nL[2];
+                const float d = nx*(projPos[0]-wx) + ny*(projPos[1]-wy) + nz*(projPos[2]-wz);
+                const bool receive = (onMode == Project3D::eProjectFront) ? (d > 0.f) : (d < 0.f);
+                if (!receive) {
+                    out.vertCulled[i] = 1;
+                    const float wv = out.projSTW[i*3+2];
+                    out.projSTW[i*3+0] = 2.0f * wv;
+                    out.projSTW[i*3+1] = 2.0f * wv;
+                }
+            }
+            if (!out.borderColor) out.borderColor = kProject3DBorderGrey;
+        }
+    }
+    return true;
+}
+
+// Append projection layers (back-to-front) for a material `mat` to `out` (cap 4, like the
+// renderer). Project3D → one layer; MergeMat → background (B) first, then foreground (A) over
+// it with the MergeMat's operation. Mirrors ScanlineRender's flattenMaterialLayers.
+static void
+buildProject3DLayers(MaterialProvider* mat,
+                     const std::vector<float>& localXYZ, const std::vector<float>& localNormals,
+                     const float worldMatrix[16], double time, int op, float mix,
+                     std::vector<Project3DLayer>& out)
+{
+    if (!mat || (int)out.size() >= 4) return;
+    if (Project3D* p = dynamic_cast<Project3D*>(mat)) {
+        Project3DLayer layer;
+        if (computeProject3DLayer(p, localXYZ, localNormals, worldMatrix, time, op, mix, layer))
+            out.push_back(std::move(layer));
+        return;
+    }
+    if (MergeMat* m = dynamic_cast<MergeMat*>(mat)) {
+        MaterialProvider* A = m->getInputMaterial(0);   // foreground
+        MaterialProvider* B = m->getInputMaterial(1);   // background
+        const int   mop  = m->getOperation(time);
+        const float mmix = (float)m->getMix(time);
+        buildProject3DLayers(B, localXYZ, localNormals, worldMatrix, time, MergeMat::eMergeOver, 1.f, out);
+        buildProject3DLayers(A, localXYZ, localNormals, worldMatrix, time, mop, mmix, out);
+        return;
+    }
+}
+
+// Resolve a geo's material into its projection layers (empty if the material doesn't project).
+static void
+buildGeoProject3DLayers(const EffectInstancePtr& geoEffect,
+                        const std::vector<float>& localXYZ, const std::vector<float>& localNormals,
+                        const float worldMatrix[16], double time, std::vector<Project3DLayer>& out)
+{
+    if (localXYZ.empty()) return;
+    MaterialProvider* mp = dynamic_cast<MaterialProvider*>(geoEffect.get());
+    if (!mp) return;
+    buildProject3DLayers(mp->getConnectedMaterial(), localXYZ, localNormals, worldMatrix, time,
+                         MergeMat::eMergeOver, 1.f, out);
+}
+
+// Single-projection wrapper (back-compat for geo draws not yet converted to multi-pass): fill
+// the legacy out-params from the TOP (foreground) layer only.
+static void
+applyProject3DToGeo(const EffectInstancePtr& geoEffect,
+                    const std::vector<float>& localXYZ, const std::vector<float>& localNormals,
+                    const float worldMatrix[16], double time,
+                    const float*& texPixels, int& texW, int& texH, bool& texWrapRepeat,
+                    std::vector<float>& projSTW, int& projComp, const float*& projBorderColor,
+                    std::vector<unsigned char>& projVertCulled)
+{
+    projVertCulled.clear();
+    if (texPixels || localXYZ.empty()) return;
+    std::vector<Project3DLayer> layers;
+    buildGeoProject3DLayers(geoEffect, localXYZ, localNormals, worldMatrix, time, layers);
+    if (layers.empty()) return;
+    Project3DLayer& top = layers.back();   // foreground
+    texPixels = top.texPixels; texW = top.texW; texH = top.texH;
     texWrapRepeat = false; projComp = 3;
+    projSTW.swap(top.projSTW); projBorderColor = top.borderColor; projVertCulled.swap(top.vertCulled);
 }
 
 // ============================================================================
@@ -2499,6 +2701,9 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
     std::vector<float> projUVs, projSTW;  // per-vertex (UVProject rewriteUVs)
     int projComp = 0;                      // 0 = none, 2 = uv, 3 = stw
     bool useOwnUVs = false;                // material texture mapped by mesh->uvs
+    const float* projBorderColor = NULL;   // Project3D border: clear=crop, grey=project-on cull, NULL=smear
+    std::vector<unsigned char> projVertCulled;  // per-vertex Project3D facing cull (1=culled); empty=none
+    std::vector<Project3DLayer> projLayers;     // Project3D / MergeMat projection layers (multi-pass)
     if (meshSrc) {
         Gui* g = getGui();
         GuiAppInstancePtr a = g ? g->getApp() : GuiAppInstancePtr();
@@ -2517,10 +2722,24 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
             }
         }
         if (!texPixels) {
-            applyProject3DToGeo(meshSrc->getEffectInstance(), mesh->vertices, sn.worldMatrix, meshTime,
-                                texPixels, texW, texH, texWrapRepeat, projSTW, projComp);
+            // MeshData carries no normals; build them on demand ONLY when a projecting material
+            // might use Project On front/back (a MergeMat: any layer could; a Project3D: only if
+            // not Both) — so non-projected / Both-mode meshes pay nothing. Then build the layers.
+            EffectInstancePtr meshEff = meshSrc->getEffectInstance();
+            std::vector<float> meshNormals;
+            {
+                MaterialProvider* mp = dynamic_cast<MaterialProvider*>(meshEff.get());
+                MaterialProvider* mat = mp ? mp->getConnectedMaterial() : NULL;
+                bool needNormals = (dynamic_cast<MergeMat*>(mat) != NULL);
+                if (!needNormals)
+                    if (Project3D* p = dynamic_cast<Project3D*>(mat))
+                        needNormals = (p->getProjectOn(meshTime) != Project3D::eProjectBoth);
+                if (needNormals)
+                    computeMeshVertexNormals(mesh->vertices, mesh->faceCounts, mesh->faceIndices, meshNormals);
+            }
+            buildGeoProject3DLayers(meshEff, mesh->vertices, meshNormals, sn.worldMatrix, meshTime, projLayers);
         }
-        if (!texPixels && mesh->hasUVs && mesh->texCoordComponents == 2 && !mesh->uvs.empty()) {
+        if (!texPixels && projLayers.empty() && mesh->hasUVs && mesh->texCoordComponents == 2 && !mesh->uvs.empty()) {
             // Per-part archive override first, else the geo's connected material.
             Material3D* m3d = NULL;
             if (NodePtr mn = sn.materialNode.lock())
@@ -2554,77 +2773,99 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
         float mvForLit[16];
         if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
 
-        GLuint glTex = 0;
-        if (meshHasTex) {
-            glGenTextures(1, &glTex);
-            glBindTexture(GL_TEXTURE_2D, glTex);
-            uploadPreviewTextureSRGB(texPixels, texW, texH,
-                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE,
-                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-            glEnable(GL_TEXTURE_2D);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        }
-        if (!lit && !meshHasTex) glColor3f(baseGrey, baseGrey, baseGrey);
-
-        // Emit a vertex with the right UV. fv = face-vertex index (for the mesh's
-        // own per-face-vertex UVs); v = vertex index (for UVProject per-vertex UVs).
-        auto emitVtx = [&](int v, size_t fv) {
-            if (projComp == 2)      glTexCoord2f(projUVs[v * 2], projUVs[v * 2 + 1]);
-            else if (projComp == 3) glTexCoord4f(projSTW[v * 3], projSTW[v * 3 + 1], 0.0f, projSTW[v * 3 + 2]);
-            else if (useOwnUVs && (fv * 2 + 1) < mesh->uvs.size())
-                                    glTexCoord2f(mesh->uvs[fv * 2], mesh->uvs[fv * 2 + 1]);
-            const float* p = &mesh->vertices[v * 3];
-            glVertex3f(p[0], p[1], p[2]);
-        };
-        glBegin(GL_TRIANGLES);
-        auto emitTri = [&](int v0, int v1, int v2, size_t f0, size_t f1, size_t f2) {
-            if (lit) {
-                const float* p0 = &mesh->vertices[v0*3];
-                const float* p1 = &mesh->vertices[v1*3];
-                const float* p2 = &mesh->vertices[v2*3];
-                float f = ViewportFaceLitFactor(p0, p1, p2, mvForLit);
-                if (meshHasTex) glColor4f(f, f, f, 0.95f);
-                else            glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
-            } else if (meshHasTex) {
-                glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+        // One fill pass: a single UVProject/material texture, the grey fallback (hasTexPass=false),
+        // or one MergeMat projection layer. Called once normally, or once per layer (blended).
+        auto drawMeshPass = [&](const float* tPix, int tW, int tH, bool wrapRep, const float* border,
+                                int pComp, const std::vector<float>& pUVs, const std::vector<float>& pSTW,
+                                const std::vector<unsigned char>& vCulled, bool hasTexPass, int blendOp) {
+            GLuint glTex = 0;
+            if (hasTexPass) {
+                glGenTextures(1, &glTex);
+                glBindTexture(GL_TEXTURE_2D, glTex);
+                const GLint meshWrap = wrapRep ? GL_REPEAT : (border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE);
+                uploadPreviewTextureSRGB(tPix, tW, tH, meshWrap, meshWrap, border);
+                glEnable(GL_TEXTURE_2D);
+                glEnable(GL_BLEND);
+                if (blendOp == 1) glBlendFunc(GL_ONE, GL_ZERO);
+                else if (blendOp == 5) glBlendFunc(GL_ONE, GL_ONE);
+                else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                if (border) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
             }
-            emitVtx(v0, f0); emitVtx(v1, f1); emitVtx(v2, f2);
-        };
-        if (!mesh->faceCounts.empty()) {
-            size_t off = 0;
-            for (size_t f = 0; f < mesh->faceCounts.size(); ++f) {
-                const int c = mesh->faceCounts[f];
-                if (c < 3 || off + (size_t)c > mesh->faceIndices.size()) {
-                    off += (size_t)std::max(0, c);
-                    continue;
+            if (!lit && !hasTexPass) glColor3f(baseGrey, baseGrey, baseGrey);
+            auto emitVtx = [&](int v, size_t fv, bool culled) {
+                if (pComp == 2)      glTexCoord2f(pUVs[v * 2], pUVs[v * 2 + 1]);
+                else if (pComp == 3) {
+                    if (culled) glTexCoord4f(2.0f, 2.0f, 0.0f, 1.0f);
+                    else        glTexCoord4f(pSTW[v * 3], pSTW[v * 3 + 1], 0.0f, pSTW[v * 3 + 2]);
                 }
-                const int v0 = mesh->faceIndices[off];
-                for (int i = 1; i + 1 < c; ++i) {
-                    const int v1 = mesh->faceIndices[off + i];
-                    const int v2 = mesh->faceIndices[off + i + 1];
+                else if (useOwnUVs && (fv * 2 + 1) < mesh->uvs.size())
+                                     glTexCoord2f(mesh->uvs[fv * 2], mesh->uvs[fv * 2 + 1]);
+                const float* p = &mesh->vertices[v * 3];
+                glVertex3f(p[0], p[1], p[2]);
+            };
+            glBegin(GL_TRIANGLES);
+            auto emitTri = [&](int v0, int v1, int v2, size_t f0, size_t f1, size_t f2) {
+                if (lit) {
+                    const float* p0 = &mesh->vertices[v0*3];
+                    const float* p1 = &mesh->vertices[v1*3];
+                    const float* p2 = &mesh->vertices[v2*3];
+                    float f = ViewportFaceLitFactor(p0, p1, p2, mvForLit);
+                    if (hasTexPass) glColor4f(f, f, f, 0.95f);
+                    else            glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
+                } else if (hasTexPass) {
+                    glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+                }
+                const bool triCulled = !vCulled.empty() &&
+                    ( v0 < (int)vCulled.size() && v1 < (int)vCulled.size() &&
+                      v2 < (int)vCulled.size() ) &&
+                    ( vCulled[v0] || vCulled[v1] || vCulled[v2] );
+                emitVtx(v0, f0, triCulled); emitVtx(v1, f1, triCulled); emitVtx(v2, f2, triCulled);
+            };
+            if (!mesh->faceCounts.empty()) {
+                size_t off = 0;
+                for (size_t f = 0; f < mesh->faceCounts.size(); ++f) {
+                    const int c = mesh->faceCounts[f];
+                    if (c < 3 || off + (size_t)c > mesh->faceIndices.size()) {
+                        off += (size_t)std::max(0, c);
+                        continue;
+                    }
+                    const int v0 = mesh->faceIndices[off];
+                    for (int i = 1; i + 1 < c; ++i) {
+                        const int v1 = mesh->faceIndices[off + i];
+                        const int v2 = mesh->faceIndices[off + i + 1];
+                        if (v0 >= 0 && v0 < nv && v1 >= 0 && v1 < nv && v2 >= 0 && v2 < nv) {
+                            emitTri(v0, v1, v2, off, off + i, off + i + 1);
+                        }
+                    }
+                    off += (size_t)c;
+                }
+            } else {
+                for (size_t i = 0; i + 2 < mesh->faceIndices.size(); i += 3) {
+                    const int v0 = mesh->faceIndices[i];
+                    const int v1 = mesh->faceIndices[i + 1];
+                    const int v2 = mesh->faceIndices[i + 2];
                     if (v0 >= 0 && v0 < nv && v1 >= 0 && v1 < nv && v2 >= 0 && v2 < nv) {
-                        emitTri(v0, v1, v2, off, off + i, off + i + 1);
+                        emitTri(v0, v1, v2, i, i + 1, i + 2);
                     }
                 }
-                off += (size_t)c;
             }
+            glEnd();
+            if (hasTexPass) {
+                glDisable(GL_TEXTURE_2D);
+                if (border) glDisable(GL_ALPHA_TEST);
+                glDisable(GL_BLEND);
+                glDeleteTextures(1, &glTex);
+            }
+        };
+        if (!projLayers.empty()) {
+            glDepthFunc(GL_LEQUAL);
+            for (size_t li = 0; li < projLayers.size(); ++li) {
+                const Project3DLayer& L = projLayers[li];
+                drawMeshPass(L.texPixels, L.texW, L.texH, false, L.borderColor, 3, projUVs, L.projSTW, L.vertCulled, true, L.op);
+            }
+            glDepthFunc(GL_LESS);
         } else {
-            // Already triangulated
-            for (size_t i = 0; i + 2 < mesh->faceIndices.size(); i += 3) {
-                const int v0 = mesh->faceIndices[i];
-                const int v1 = mesh->faceIndices[i + 1];
-                const int v2 = mesh->faceIndices[i + 2];
-                if (v0 >= 0 && v0 < nv && v1 >= 0 && v1 < nv && v2 >= 0 && v2 < nv) {
-                    emitTri(v0, v1, v2, i, i + 1, i + 2);
-                }
-            }
-        }
-        glEnd();
-        if (meshHasTex) {
-            glDisable(GL_TEXTURE_2D);
-            glDisable(GL_BLEND);
-            glDeleteTextures(1, &glTex);
+            drawMeshPass(texPixels, texW, texH, texWrapRepeat, projBorderColor, projComp, projUVs, projSTW, projVertCulled, meshHasTex, 2);
         }
         if (mode == eShadedWire) {
             glDisable(GL_POLYGON_OFFSET_FILL);
@@ -2678,6 +2919,8 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
     bool texWrapRepeat = true;
     std::vector<float> projUVs, projSTW;
     int projComp = 0;
+    const float* projBorderColor = NULL;  // Project3D border: clear=crop, grey=project-on cull, NULL=smear
+    std::vector<unsigned char> projVertCulled;  // per-vertex Project3D facing cull (1=culled); empty=none
     UVProject* uvpCard = findUVProjectForGeo(app.get(), node);
     if (uvpCard) {
         uvpCard->updateCachedTexture(time);
@@ -2690,30 +2933,32 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
         }
     }
 
-    // Project3D material on the card's "mat" input: project the plate onto the card from
-    // the projection camera (same perspective-correct STW path as UVProject).
-    Project3D* p3dCard = NULL;
+    // Project3D / MergeMat material on the card's "mat" input. Resolve the top projection just
+    // to size the card (image aspect); the actual projection layers are built below, once halfW
+    // is known, and painted multi-pass (so a MergeMat stack composites on the card too).
+    std::vector<Project3DLayer> projLayers;
+    bool cardProjects = false;
     if (!texPixels) {
         MaterialProvider* mp = dynamic_cast<MaterialProvider*>(effect.get());
-        if (mp) p3dCard = dynamic_cast<Project3D*>(mp->getConnectedMaterial());
-        if (p3dCard) {
-            p3dCard->updateCachedTexture(time);
-            const Project3D::CachedTexture& pt = p3dCard->getCachedTexture();
+        Project3D* topP3d = mp ? resolveViewportProject3D(mp->getConnectedMaterial()) : NULL;
+        if (topP3d) {
+            topP3d->updateCachedTexture(time);
+            const Project3D::CachedTexture& pt = topP3d->getCachedTexture();
             if (pt.width > 0 && pt.height > 0 && !pt.pixels.empty()) {
-                texPixels = pt.pixels.data(); texW = pt.width; texH = pt.height;
-                texWrapRepeat = false;
-            } else {
-                p3dCard = NULL;
+                texW = pt.width; texH = pt.height;   // for image aspect (halfW); texPixels stays NULL
+                cardProjects = true;
             }
         }
     }
 
-    if (!texPixels && tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
+    if (!texPixels && !cardProjects && tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
         texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
     }
     const bool hasTex = (texPixels != NULL);
 
-    if (texW > 0 && texH > 0) {
+    if (!card3dNew->getImageAspectEnabled()) {
+        halfW = 0.5f;   // image-aspect off -> unit square (matches generateCardMesh)
+    } else if (texW > 0 && texH > 0) {
         halfW = (float)texW / (float)texH * 0.5f;
     } else {
         halfW = 16.0f / 9.0f * 0.5f;
@@ -2731,34 +2976,18 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
         else if (comp == 3) projSTW.swap(newSTW);
     }
 
-    // For Project3D, compute perspective-correct STW for the 4 corners from the projector
-    // camera: clip = (projVP * worldMatrix) * localCorner, encoded as (s,t,w) = ((cx+cw)/2,
-    // (cy+cw)/2, cw) so the GPU does the perspective divide (matches UVProject's STW form).
-    if (p3dCard) {
-        float vp[16];
-        if (p3dCard->getProjectorViewProj(time, vp)) {
-            float mvp[16];
-            const float* M = sn.worldMatrix;
-            for (int c = 0; c < 4; ++c)
-                for (int r = 0; r < 4; ++r) {
-                    float s = 0.f;
-                    for (int k = 0; k < 4; ++k) s += vp[k*4+r] * M[c*4+k];
-                    mvp[c*4+r] = s;
-                }
-            const float corners[12] = { -halfW, -halfH, 0.0f,  halfW, -halfH, 0.0f,
-                                         halfW,  halfH, 0.0f, -halfW,  halfH, 0.0f };
-            projSTW.resize(12);
-            for (int ci = 0; ci < 4; ++ci) {
-                const float lx = corners[ci*3], ly = corners[ci*3+1], lz = corners[ci*3+2];
-                const float cx = mvp[0]*lx + mvp[4]*ly + mvp[8]*lz  + mvp[12];
-                const float cy = mvp[1]*lx + mvp[5]*ly + mvp[9]*lz  + mvp[13];
-                const float cw = mvp[3]*lx + mvp[7]*ly + mvp[11]*lz + mvp[15];
-                projSTW[ci*3+0] = (cx + cw) * 0.5f;
-                projSTW[ci*3+1] = (cy + cw) * 0.5f;
-                projSTW[ci*3+2] = cw;
-            }
-            projComp = 3;
-        }
+    // Build the projection layers (Project3D / MergeMat) from the 4 card corners now that halfW
+    // is known. computeProject3DLayer handles the perspective-correct corner STW + project-on
+    // (the card is flat, normal +Z, so front/back culling is whole-quad / uniform).
+    if (cardProjects) {
+        const float cc[12] = { -halfW, -halfH, 0.0f,  halfW, -halfH, 0.0f,
+                                halfW,  halfH, 0.0f, -halfW,  halfH, 0.0f };
+        std::vector<float> cxyz(cc, cc + 12);
+        std::vector<float> cnrm(12, 0.0f);
+        for (int i = 0; i < 4; ++i) cnrm[i*3+2] = 1.0f;   // card normal +Z (flat)
+        MaterialProvider* mp = dynamic_cast<MaterialProvider*>(effect.get());
+        buildProject3DLayers(mp ? mp->getConnectedMaterial() : NULL, cxyz, cnrm, sn.worldMatrix,
+                             time, MergeMat::eMergeOver, 1.f, projLayers);
     }
 
     const ShadingMode mode = _imp->shadingMode;
@@ -2778,39 +3007,55 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
             const float n0[3] = { 0.0f, 0.0f, 1.0f };
             litF = ViewportLitFromVertexNormals(n0, n0, n0, mvForLit);
         }
-        if (hasTex) {
+        const float quadU[4] = {0.0f, 1.0f, 1.0f, 0.0f};
+        const float quadV[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+        const float quadX[4] = {-halfW,  halfW,  halfW, -halfW};
+        const float quadY[4] = {-halfH, -halfH,  halfH,  halfH};
+        // One textured quad pass (single texture, or one MergeMat layer blended).
+        auto drawCardQuad = [&](const float* tPix, int tW, int tH, bool wrapRep, const float* border,
+                                int pComp, const std::vector<float>& pUVs, const std::vector<float>& pSTW,
+                                const std::vector<unsigned char>& vCulled, int blendOp) {
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
             glBindTexture(GL_TEXTURE_2D, glTex);
-            uploadPreviewTextureSRGB(texPixels, texW, texH,
-                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE,
-                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-
+            const GLint wrap = wrapRep ? GL_REPEAT : (border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE);
+            uploadPreviewTextureSRGB(tPix, tW, tH, wrap, wrap, border);
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            if (blendOp == 1) glBlendFunc(GL_ONE, GL_ZERO);
+            else if (blendOp == 5) glBlendFunc(GL_ONE, GL_ONE);
+            else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            if (border) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
             glColor4f(litF, litF, litF, 0.85f);
-
-            // Corner UVs: projected (UVProject) or the default 0..1 quad mapping.
-            const float quadU[4] = {0.0f, 1.0f, 1.0f, 0.0f};
-            const float quadV[4] = {0.0f, 0.0f, 1.0f, 1.0f};
-            const float quadX[4] = {-halfW,  halfW,  halfW, -halfW};
-            const float quadY[4] = {-halfH, -halfH,  halfH,  halfH};
+            // Flat card: project-on cull is whole-quad (uniform facing).
+            const bool quadCulled = (vCulled.size() >= 4) &&
+                (vCulled[0] || vCulled[1] || vCulled[2] || vCulled[3]);
             glBegin(GL_QUADS);
             for (int ci = 0; ci < 4; ++ci) {
-                if (projComp == 2)
-                    glTexCoord2f(projUVs[ci * 2], projUVs[ci * 2 + 1]);
-                else if (projComp == 3)
-                    glTexCoord4f(projSTW[ci * 3], projSTW[ci * 3 + 1], 0.0f, projSTW[ci * 3 + 2]);
-                else
+                if (pComp == 2)
+                    glTexCoord2f(pUVs[ci * 2], pUVs[ci * 2 + 1]);
+                else if (pComp == 3) {
+                    if (quadCulled) glTexCoord4f(2.0f, 2.0f, 0.0f, 1.0f);
+                    else glTexCoord4f(pSTW[ci * 3], pSTW[ci * 3 + 1], 0.0f, pSTW[ci * 3 + 2]);
+                } else
                     glTexCoord2f(quadU[ci], quadV[ci]);
                 glVertex3f(quadX[ci], quadY[ci], 0.0f);
             }
             glEnd();
-
             glDisable(GL_TEXTURE_2D);
+            if (border) glDisable(GL_ALPHA_TEST);
             glDisable(GL_BLEND);
             glDeleteTextures(1, &glTex);
+        };
+        if (!projLayers.empty()) {
+            glDepthFunc(GL_LEQUAL);
+            for (size_t li = 0; li < projLayers.size(); ++li) {
+                const Project3DLayer& L = projLayers[li];
+                drawCardQuad(L.texPixels, L.texW, L.texH, false, L.borderColor, 3, projUVs, L.projSTW, L.vertCulled, L.op);
+            }
+            glDepthFunc(GL_LESS);
+        } else if (hasTex) {
+            drawCardQuad(texPixels, texW, texH, texWrapRepeat, projBorderColor, projComp, projUVs, projSTW, projVertCulled, 2);
         } else {
             glColor3f(0.45f * litF, 0.45f * litF, 0.45f * litF);
             glBegin(GL_QUADS);
@@ -2970,6 +3215,9 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
     std::vector<float> projUVs;   // 2/vert (standard projection modes)
     std::vector<float> projSTW;   // 3/vert (perspective mode)
     int projComp = 0;
+    const float* projBorderColor = NULL;  // Project3D border: clear=crop, grey=project-on cull, NULL=smear
+    std::vector<unsigned char> projVertCulled;  // per-vertex Project3D facing cull (1=culled); empty=none
+    std::vector<Project3DLayer> projLayers;     // Project3D / MergeMat projection layers (multi-pass)
     {
         UVProject* uvp = findUVProjectForGeo(app.get(), node);
         if (uvp) {
@@ -2993,13 +3241,14 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
         }
         if (!texPixels) {
             std::vector<float> xyz; xyz.reserve(sphereVerts.size() * 3);
+            std::vector<float> nrm; nrm.reserve(sphereVerts.size() * 3);
             for (size_t vi = 0; vi < sphereVerts.size(); ++vi) {
                 xyz.push_back(sphereVerts[vi].x); xyz.push_back(sphereVerts[vi].y); xyz.push_back(sphereVerts[vi].z);
+                nrm.push_back(sphereVerts[vi].nx); nrm.push_back(sphereVerts[vi].ny); nrm.push_back(sphereVerts[vi].nz);
             }
-            applyProject3DToGeo(effect, xyz, sn.worldMatrix, time,
-                                texPixels, texW, texH, texWrapRepeat, projSTW, projComp);
+            buildGeoProject3DLayers(effect, xyz, nrm, sn.worldMatrix, time, projLayers);
         }
-        if (!texPixels) {
+        if (!texPixels && projLayers.empty()) {
             const Sphere3D::CachedTexture& tex = sphere->getCachedTexture();
             if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
                 texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
@@ -3026,19 +3275,25 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
             const float n2[3] = { sphereVerts[i2].nx, sphereVerts[i2].ny, sphereVerts[i2].nz };
             return ViewportLitFromVertexNormals(n0, n1, n2, mvForLit);
         };
-        if (hasTex) {
+        // One textured fill pass for a given plate + projected coords. Called once for a single
+        // texture (UVProject / material), or once per layer for a MergeMat stack (blended so the
+        // layers composite, mirroring the ScanlineRender shader).
+        auto drawTexFill = [&](const float* tPix, int tW, int tH, bool wrapRep, const float* border,
+                               int pComp, const std::vector<float>& pUVs, const std::vector<float>& pSTW,
+                               const std::vector<unsigned char>& vCulled, int blendOp) {
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
             glBindTexture(GL_TEXTURE_2D, glTex);
-            uploadPreviewTextureSRGB(texPixels, texW, texH,
-                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE,
-                                     GL_CLAMP_TO_EDGE);
-
+            const GLint wrap = wrapRep ? GL_REPEAT : (border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE);
+            uploadPreviewTextureSRGB(tPix, tW, tH, wrap, wrap, border);
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            // MergeMat op -> GL blend. 'over' is exact; replace/plus approximated; others -> over.
+            if (blendOp == 1) glBlendFunc(GL_ONE, GL_ZERO);           // replace
+            else if (blendOp == 5) glBlendFunc(GL_ONE, GL_ONE);       // plus
+            else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // over (+ stencil/mask/min/max approx)
+            if (border) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
             if (!lit) glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
-
             glBegin(GL_TRIANGLES);
             for (int t = 0; t < numTris; ++t) {
                 const int i0 = triIndices[t * 3 + 0];
@@ -3047,26 +3302,43 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
                 if (i0 < 0 || i0 >= (int)sphereVerts.size() ||
                     i1 < 0 || i1 >= (int)sphereVerts.size() ||
                     i2 < 0 || i2 >= (int)sphereVerts.size()) continue;
-                if (lit) {
-                    float f = litForTri(i0, i1, i2);
-                    glColor4f(f, f, f, 0.85f);
-                }
+                if (lit) { float f = litForTri(i0, i1, i2); glColor4f(f, f, f, 0.85f); }
+                const bool triCulled = !vCulled.empty() &&
+                    (vCulled[i0] || vCulled[i1] || vCulled[i2]);
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    if (projComp == 2)
-                        glTexCoord2f(projUVs[idx * 2], projUVs[idx * 2 + 1]);
-                    else if (projComp == 3)
-                        glTexCoord4f(projSTW[idx * 3], projSTW[idx * 3 + 1], 0.0f, projSTW[idx * 3 + 2]);
-                    else
+                    if (pComp == 2)
+                        glTexCoord2f(pUVs[idx * 2], pUVs[idx * 2 + 1]);
+                    else if (pComp == 3) {
+                        if (triCulled) glTexCoord4f(2.0f, 2.0f, 0.0f, 1.0f);
+                        else glTexCoord4f(pSTW[idx * 3], pSTW[idx * 3 + 1], 0.0f, pSTW[idx * 3 + 2]);
+                    } else
                         glTexCoord2f(sphereVerts[idx].u, sphereVerts[idx].v);
                     glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
                 }
             }
             glEnd();
-
             glDisable(GL_TEXTURE_2D);
+            if (border) glDisable(GL_ALPHA_TEST);
             glDisable(GL_BLEND);
             glDeleteTextures(1, &glTex);
+        };
+        if (!projLayers.empty()) {
+            // Multi-pass: paint each projection layer back-to-front, blended. LEQUAL lets each
+            // layer draw at the same depth as the one below it (alpha-test drops cropped pixels
+            // so they don't write depth and lower/background layers show through).
+            glDepthFunc(GL_LEQUAL);
+            for (size_t li = 0; li < projLayers.size(); ++li) {
+                const Project3DLayer& L = projLayers[li];
+                drawTexFill(L.texPixels, L.texW, L.texH, false, L.borderColor, 3, projUVs, L.projSTW, L.vertCulled, L.op);
+            }
+            glDepthFunc(GL_LESS);
+            // Crop the wireframe (below) to the top (foreground) layer.
+            const Project3DLayer& top = projLayers.back();
+            projComp = 3; projBorderColor = top.borderColor;
+            projSTW = top.projSTW; projVertCulled = top.vertCulled;
+        } else if (hasTex) {
+            drawTexFill(texPixels, texW, texH, texWrapRepeat, projBorderColor, projComp, projUVs, projSTW, projVertCulled, 2);
         } else {
             // Grey fallback (no texture present)
             const float baseGrey = 0.45f;
@@ -3108,27 +3380,44 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
         int rowStep = std::max(1, rows / 12);
         int colStep = std::max(1, cols / 12);
 
-        for (int row = 0; row <= rows; row += rowStep) {
-            glBegin(GL_LINE_STRIP);
+        // Crop the wireframe to the projected region when a Project3D crop is active, so the
+        // cropped-away part of the geo doesn't leave stray wireframe lines. Only for the clear
+        // (crop) border — a grey/NULL border means the geo stays visible, so the wireframe does
+        // too. A strip is broken whenever a vertex falls outside the projection (per-vertex
+        // granularity, so the cut is at wireframe resolution, not the exact frame edge).
+        const bool cropWire = (projBorderColor == kProject3DBorderClear) && (projComp == 3);
+        // Emit a line-strip over the index sequence, restarting around culled/out-of-frame verts.
+        auto emitWireRow = [&](int row) {
+            bool open = false;
             for (int col = 0; col <= cols; ++col) {
                 int idx = row * vertsPerRow + col;
-                if (idx < (int)sphereVerts.size()) {
-                    glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
+                if ( idx >= (int)sphereVerts.size() ||
+                     (cropWire && !project3DVertVisible(projSTW, idx)) ) {
+                    if (open) { glEnd(); open = false; }
+                    continue;
                 }
+                if (!open) { glBegin(GL_LINE_STRIP); open = true; }
+                glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
             }
-            glEnd();
-        }
-
-        for (int col = 0; col <= cols; col += colStep) {
-            glBegin(GL_LINE_STRIP);
+            if (open) glEnd();
+        };
+        auto emitWireCol = [&](int col) {
+            bool open = false;
             for (int row = 0; row <= rows; ++row) {
                 int idx = row * vertsPerRow + col;
-                if (idx < (int)sphereVerts.size()) {
-                    glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
+                if ( idx >= (int)sphereVerts.size() ||
+                     (cropWire && !project3DVertVisible(projSTW, idx)) ) {
+                    if (open) { glEnd(); open = false; }
+                    continue;
                 }
+                if (!open) { glBegin(GL_LINE_STRIP); open = true; }
+                glVertex3f(sphereVerts[idx].x, sphereVerts[idx].y, sphereVerts[idx].z);
             }
-            glEnd();
-        }
+            if (open) glEnd();
+        };
+
+        for (int row = 0; row <= rows; row += rowStep) emitWireRow(row);
+        for (int col = 0; col <= cols; col += colStep) emitWireCol(col);
 
         glLineWidth(1.0f);
     }
@@ -3166,6 +3455,9 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
     bool texWrapRepeat = true;
     std::vector<float> projUVs, projSTW;
     int projComp = 0;
+    const float* projBorderColor = NULL;  // Project3D border: clear=crop, grey=project-on cull, NULL=smear
+    std::vector<unsigned char> projVertCulled;  // per-vertex Project3D facing cull (1=culled); empty=none
+    std::vector<Project3DLayer> projLayers;     // Project3D / MergeMat projection layers (multi-pass)
     {
         UVProject* uvp = findUVProjectForGeo(app.get(), node);
         if (uvp) {
@@ -3187,13 +3479,14 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
         }
         if (!texPixels) {
             std::vector<float> xyz; xyz.reserve(cubeVerts.size() * 3);
+            std::vector<float> nrm; nrm.reserve(cubeVerts.size() * 3);
             for (size_t vi = 0; vi < cubeVerts.size(); ++vi) {
                 xyz.push_back(cubeVerts[vi].x); xyz.push_back(cubeVerts[vi].y); xyz.push_back(cubeVerts[vi].z);
+                nrm.push_back(cubeVerts[vi].nx); nrm.push_back(cubeVerts[vi].ny); nrm.push_back(cubeVerts[vi].nz);
             }
-            applyProject3DToGeo(effect, xyz, sn.worldMatrix, time,
-                                texPixels, texW, texH, texWrapRepeat, projSTW, projComp);
+            buildGeoProject3DLayers(effect, xyz, nrm, sn.worldMatrix, time, projLayers);
         }
-        if (!texPixels) {
+        if (!texPixels && projLayers.empty()) {
             const Cube3D::CachedTexture& tex = cube->getCachedTexture();
             if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
                 texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
@@ -3218,19 +3511,21 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
             const float n2[3] = { cubeVerts[i2].nx, cubeVerts[i2].ny, cubeVerts[i2].nz };
             return ViewportLitFromVertexNormals(n0, n1, n2, mvForLit);
         };
-        if (hasTex) {
+        auto drawTexFill = [&](const float* tPix, int tW, int tH, bool wrapRep, const float* border,
+                               int pComp, const std::vector<float>& pUVs, const std::vector<float>& pSTW,
+                               const std::vector<unsigned char>& vCulled, int blendOp) {
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
             glBindTexture(GL_TEXTURE_2D, glTex);
-            uploadPreviewTextureSRGB(texPixels, texW, texH,
-                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE,
-                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-
+            const GLint wrap = wrapRep ? GL_REPEAT : (border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE);
+            uploadPreviewTextureSRGB(tPix, tW, tH, wrap, wrap, border);
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            if (blendOp == 1) glBlendFunc(GL_ONE, GL_ZERO);
+            else if (blendOp == 5) glBlendFunc(GL_ONE, GL_ONE);
+            else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            if (border) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
             if (!lit) glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
-
             glBegin(GL_TRIANGLES);
             for (int t = 0; t < numTris; ++t) {
                 const int i0 = triIndices[t * 3 + 0];
@@ -3239,26 +3534,39 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
                 if (i0 < 0 || i0 >= (int)cubeVerts.size() ||
                     i1 < 0 || i1 >= (int)cubeVerts.size() ||
                     i2 < 0 || i2 >= (int)cubeVerts.size()) continue;
-                if (lit) {
-                    float f = litForTri(i0, i1, i2);
-                    glColor4f(f, f, f, 0.85f);
-                }
+                if (lit) { float f = litForTri(i0, i1, i2); glColor4f(f, f, f, 0.85f); }
+                const bool triCulled = !vCulled.empty() &&
+                    (vCulled[i0] || vCulled[i1] || vCulled[i2]);
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    if (projComp == 2)
-                        glTexCoord2f(projUVs[idx * 2], projUVs[idx * 2 + 1]);
-                    else if (projComp == 3)
-                        glTexCoord4f(projSTW[idx * 3], projSTW[idx * 3 + 1], 0.0f, projSTW[idx * 3 + 2]);
-                    else
+                    if (pComp == 2)
+                        glTexCoord2f(pUVs[idx * 2], pUVs[idx * 2 + 1]);
+                    else if (pComp == 3) {
+                        if (triCulled) glTexCoord4f(2.0f, 2.0f, 0.0f, 1.0f);
+                        else glTexCoord4f(pSTW[idx * 3], pSTW[idx * 3 + 1], 0.0f, pSTW[idx * 3 + 2]);
+                    } else
                         glTexCoord2f(cubeVerts[idx].u, cubeVerts[idx].v);
                     glVertex3f(cubeVerts[idx].x, cubeVerts[idx].y, cubeVerts[idx].z);
                 }
             }
             glEnd();
-
             glDisable(GL_TEXTURE_2D);
+            if (border) glDisable(GL_ALPHA_TEST);
             glDisable(GL_BLEND);
             glDeleteTextures(1, &glTex);
+        };
+        if (!projLayers.empty()) {
+            glDepthFunc(GL_LEQUAL);
+            for (size_t li = 0; li < projLayers.size(); ++li) {
+                const Project3DLayer& L = projLayers[li];
+                drawTexFill(L.texPixels, L.texW, L.texH, false, L.borderColor, 3, projUVs, L.projSTW, L.vertCulled, L.op);
+            }
+            glDepthFunc(GL_LESS);
+            const Project3DLayer& top = projLayers.back();
+            projComp = 3; projBorderColor = top.borderColor;
+            projSTW = top.projSTW; projVertCulled = top.vertCulled;
+        } else if (hasTex) {
+            drawTexFill(texPixels, texW, texH, texWrapRepeat, projBorderColor, projComp, projUVs, projSTW, projVertCulled, 2);
         } else {
             const float baseGrey = 0.45f;
             if (!lit) glColor3f(baseGrey, baseGrey, baseGrey);
@@ -3341,6 +3649,9 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
     bool texWrapRepeat = true;
     std::vector<float> projUVs, projSTW;
     int projComp = 0;
+    const float* projBorderColor = NULL;  // Project3D border: clear=crop, grey=project-on cull, NULL=smear
+    std::vector<unsigned char> projVertCulled;  // per-vertex Project3D facing cull (1=culled); empty=none
+    std::vector<Project3DLayer> projLayers;     // Project3D / MergeMat projection layers (multi-pass)
     {
         UVProject* uvp = findUVProjectForGeo(app.get(), node);
         if (uvp) {
@@ -3362,13 +3673,14 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
         }
         if (!texPixels) {
             std::vector<float> xyz; xyz.reserve(cylVerts.size() * 3);
+            std::vector<float> nrm; nrm.reserve(cylVerts.size() * 3);
             for (size_t vi = 0; vi < cylVerts.size(); ++vi) {
                 xyz.push_back(cylVerts[vi].x); xyz.push_back(cylVerts[vi].y); xyz.push_back(cylVerts[vi].z);
+                nrm.push_back(cylVerts[vi].nx); nrm.push_back(cylVerts[vi].ny); nrm.push_back(cylVerts[vi].nz);
             }
-            applyProject3DToGeo(effect, xyz, sn.worldMatrix, time,
-                                texPixels, texW, texH, texWrapRepeat, projSTW, projComp);
+            buildGeoProject3DLayers(effect, xyz, nrm, sn.worldMatrix, time, projLayers);
         }
-        if (!texPixels) {
+        if (!texPixels && projLayers.empty()) {
             const Cylinder3D::CachedTexture& tex = cyl->getCachedTexture();
             if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
                 texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
@@ -3382,22 +3694,31 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
             glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(1.0f, 1.0f);
         }
-        if (hasTex) {
+        const bool lit = (mode == eShaded || mode == eShadedWire);
+        float mvForLit[16];
+        if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
+        auto litForTri = [&](int i0, int i1, int i2) -> float {
+            if (!lit) return 1.0f;
+            const float n0[3] = { cylVerts[i0].nx, cylVerts[i0].ny, cylVerts[i0].nz };
+            const float n1[3] = { cylVerts[i1].nx, cylVerts[i1].ny, cylVerts[i1].nz };
+            const float n2[3] = { cylVerts[i2].nx, cylVerts[i2].ny, cylVerts[i2].nz };
+            return ViewportLitFromVertexNormals(n0, n1, n2, mvForLit);
+        };
+        auto drawTexFill = [&](const float* tPix, int tW, int tH, bool wrapRep, const float* border,
+                               int pComp, const std::vector<float>& pUVs, const std::vector<float>& pSTW,
+                               const std::vector<unsigned char>& vCulled, int blendOp) {
             GLuint glTex = 0;
             glGenTextures(1, &glTex);
             glBindTexture(GL_TEXTURE_2D, glTex);
-            uploadPreviewTextureSRGB(texPixels, texW, texH,
-                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE,
-                                     texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-
+            const GLint wrap = wrapRep ? GL_REPEAT : (border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE);
+            uploadPreviewTextureSRGB(tPix, tW, tH, wrap, wrap, border);
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            const bool lit = (mode == eShaded || mode == eShadedWire);
-            float mvForLit[16];
-            if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
+            if (blendOp == 1) glBlendFunc(GL_ONE, GL_ZERO);
+            else if (blendOp == 5) glBlendFunc(GL_ONE, GL_ONE);
+            else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            if (border) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
             if (!lit) glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
-
             glBegin(GL_TRIANGLES);
             for (int t = 0; t < numTris; ++t) {
                 const int i0 = triIndices[t * 3 + 0];
@@ -3406,33 +3727,40 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
                 if (i0 < 0 || i0 >= (int)cylVerts.size() ||
                     i1 < 0 || i1 >= (int)cylVerts.size() ||
                     i2 < 0 || i2 >= (int)cylVerts.size()) continue;
-                if (lit) {
-                    const float n0[3] = { cylVerts[i0].nx, cylVerts[i0].ny, cylVerts[i0].nz };
-                    const float n1[3] = { cylVerts[i1].nx, cylVerts[i1].ny, cylVerts[i1].nz };
-                    const float n2[3] = { cylVerts[i2].nx, cylVerts[i2].ny, cylVerts[i2].nz };
-                    float f = ViewportLitFromVertexNormals(n0, n1, n2, mvForLit);
-                    glColor4f(f, f, f, 0.85f);
-                }
+                if (lit) { float f = litForTri(i0, i1, i2); glColor4f(f, f, f, 0.85f); }
+                const bool triCulled = !vCulled.empty() &&
+                    (vCulled[i0] || vCulled[i1] || vCulled[i2]);
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
-                    if (projComp == 2)
-                        glTexCoord2f(projUVs[idx * 2], projUVs[idx * 2 + 1]);
-                    else if (projComp == 3)
-                        glTexCoord4f(projSTW[idx * 3], projSTW[idx * 3 + 1], 0.0f, projSTW[idx * 3 + 2]);
-                    else
+                    if (pComp == 2)
+                        glTexCoord2f(pUVs[idx * 2], pUVs[idx * 2 + 1]);
+                    else if (pComp == 3) {
+                        if (triCulled) glTexCoord4f(2.0f, 2.0f, 0.0f, 1.0f);
+                        else glTexCoord4f(pSTW[idx * 3], pSTW[idx * 3 + 1], 0.0f, pSTW[idx * 3 + 2]);
+                    } else
                         glTexCoord2f(cylVerts[idx].u, cylVerts[idx].v);
                     glVertex3f(cylVerts[idx].x, cylVerts[idx].y, cylVerts[idx].z);
                 }
             }
             glEnd();
-
             glDisable(GL_TEXTURE_2D);
+            if (border) glDisable(GL_ALPHA_TEST);
             glDisable(GL_BLEND);
             glDeleteTextures(1, &glTex);
+        };
+        if (!projLayers.empty()) {
+            glDepthFunc(GL_LEQUAL);
+            for (size_t li = 0; li < projLayers.size(); ++li) {
+                const Project3DLayer& L = projLayers[li];
+                drawTexFill(L.texPixels, L.texW, L.texH, false, L.borderColor, 3, projUVs, L.projSTW, L.vertCulled, L.op);
+            }
+            glDepthFunc(GL_LESS);
+            const Project3DLayer& top = projLayers.back();
+            projComp = 3; projBorderColor = top.borderColor;
+            projSTW = top.projSTW; projVertCulled = top.vertCulled;
+        } else if (hasTex) {
+            drawTexFill(texPixels, texW, texH, texWrapRepeat, projBorderColor, projComp, projUVs, projSTW, projVertCulled, 2);
         } else {
-            const bool lit = (mode == eShaded || mode == eShadedWire);
-            float mvForLit[16];
-            if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
             const float baseGrey = 0.45f;
             if (!lit) glColor3f(baseGrey, baseGrey, baseGrey);
             glBegin(GL_TRIANGLES);
@@ -3443,13 +3771,7 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
                 if (i0 < 0 || i0 >= (int)cylVerts.size() ||
                     i1 < 0 || i1 >= (int)cylVerts.size() ||
                     i2 < 0 || i2 >= (int)cylVerts.size()) continue;
-                if (lit) {
-                    const float n0[3] = { cylVerts[i0].nx, cylVerts[i0].ny, cylVerts[i0].nz };
-                    const float n1[3] = { cylVerts[i1].nx, cylVerts[i1].ny, cylVerts[i1].nz };
-                    const float n2[3] = { cylVerts[i2].nx, cylVerts[i2].ny, cylVerts[i2].nz };
-                    float f = ViewportLitFromVertexNormals(n0, n1, n2, mvForLit);
-                    glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
-                }
+                if (lit) { float f = litForTri(i0, i1, i2); glColor3f(baseGrey * f, baseGrey * f, baseGrey * f); }
                 for (int vi = 0; vi < 3; ++vi) {
                     int idx = triIndices[t * 3 + vi];
                     glVertex3f(cylVerts[idx].x, cylVerts[idx].y, cylVerts[idx].z);

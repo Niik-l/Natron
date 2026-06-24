@@ -210,6 +210,7 @@
 #include "Dev/Scene3D/Light3D.h"
 #include "Dev/Scene3D/Material3D.h"
 #include "Dev/Scene3D/Project3D.h"
+#include "Dev/Scene3D/MergeMat.h"
 #include "Dev/Scene3D/UVProject.h"
 #include "Dev/Scene3D/Group3D.h"
 #include "Dev/Scene3D/Volume3D.h"
@@ -1682,6 +1683,10 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     // Project3D (2026-06-16): rebuilt as a camera-projection material shader (Nuke
     // Project3D parity) — plugs into a geo's material input, projected by ScanlineRender.
     registerBuiltInPlugin<Project3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+
+    // MergeMat (2026-06-24): combine two materials (classic-Nuke MergeMat) — layers multiple
+    // Project3D projections onto one geo. Composited per-fragment by ScanlineRender / viewport.
+    registerBuiltInPlugin<MergeMat>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<UVProject>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Group3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Volume3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);

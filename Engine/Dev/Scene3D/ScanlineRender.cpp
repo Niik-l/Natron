@@ -66,6 +66,7 @@
 #include "Sphere3D.h"
 #include "UVProject.h"
 #include "Project3D.h"
+#include "MergeMat.h"
 #include "../../ViewIdx.h"
 
 #ifndef M_PI
@@ -1032,14 +1033,20 @@ static const char* kBeautyFrag =
     "uniform sampler2D u_tex;\n"
     "uniform vec2 u_viewportSize;\n"
     "uniform int u_hasTexture;       // 0=no, 1=regular UV, 2=STW projective\n"
-    "uniform int u_useProjector;     // 1 = Project3D material active on this geo\n"
-    "uniform sampler2D u_projPlate;  // the plate to project (texture unit 1)\n"
-    "uniform int u_projOn;           // 0=front, 1=back, 2=both faces\n"
-    "uniform int u_projCrop;         // 1=transparent outside the plate frame\n"
-    "uniform float u_projNear;       // projector-space near clip (distance)\n"
-    "uniform float u_projFar;        // projector-space far clip (distance)\n"
-    "uniform vec3 u_projForward;     // projector forward direction (world)\n"
-    "uniform int u_occMode;          // 0=none, 1/2 = occlude (depth map on unit 2)\n"
+    "uniform int u_numProj;          // number of active projection layers (0 = none, MergeMat stacks)\n"
+    "uniform sampler2D u_projPlate0; // per-layer plates, texture units 1..4\n"
+    "uniform sampler2D u_projPlate1;\n"
+    "uniform sampler2D u_projPlate2;\n"
+    "uniform sampler2D u_projPlate3;\n"
+    "uniform mat4  u_projVP[4];      // per-layer world -> projector clip\n"
+    "uniform int   u_projOn[4];      // 0=front, 1=back, 2=both\n"
+    "uniform int   u_projCrop[4];    // 1 = transparent outside the plate frame\n"
+    "uniform float u_projNear[4];    // projector-space near clip (distance)\n"
+    "uniform float u_projFar[4];     // projector-space far clip (distance)\n"
+    "uniform vec3  u_projForward[4]; // per-layer projector forward (world)\n"
+    "uniform int   u_projOp[4];      // MergeMat op compositing this layer over those below\n"
+    "uniform float u_projMix[4];     // per-layer opacity\n"
+    "uniform int u_occMode;          // layer-0 occlusion: 0=none, 1/2 = occlude (depth on unit 5)\n"
     "uniform sampler2D u_occDepth;   // projector depth map (nearest-surface distance)\n"
     "uniform int u_shadingMode;      // 0=Shaded, 1=Flat, 2=Wireframe\n"
     "uniform int u_hasLight;         // 1 if Light3D connected, 0 = fallback default\n"
@@ -1058,6 +1065,40 @@ static const char* kBeautyFrag =
     "layout(location = 2) out vec4 out_uv;\n"
     "layout(location = 3) out vec4 out_pref;\n"
     "layout(location = 4) out vec4 out_velocity;\n"
+    "// Sample projection layer i (straight-alpha). Returns (0) where this layer doesn't project\n"
+    "// here; grey base where face/depth/occlusion culled with crop off; smeared edge for off-frame\n"
+    "// with crop off. `plate` is passed explicitly so we never dynamically index a sampler array.\n"
+    "vec4 mm_sampleProj(int i, sampler2D plate) {\n"
+    "    vec4 pclip = u_projVP[i] * vec4(v_worldPos, 1.0);\n"
+    "    if (pclip.w <= 0.0) return vec4(0.0);\n"
+    "    float pd = pclip.w;\n"
+    "    vec2 puv = (pclip.xy / pclip.w) * 0.5 + 0.5;\n"
+    "    float f = dot(normalize(v_worldNormal), normalize(u_projForward[i]));\n"
+    "    bool faceOK  = (u_projOn[i]==2) || (u_projOn[i]==0 && f<0.0) || (u_projOn[i]==1 && f>0.0);\n"
+    "    bool depthOK = (pd >= u_projNear[i] && pd <= u_projFar[i]);\n"
+    "    bool inFrame = (puv.x>=0.0 && puv.x<=1.0 && puv.y>=0.0 && puv.y<=1.0);\n"
+    "    bool occluded = false;\n"
+    "    if (i == 0 && u_occMode != 0 && inFrame) {\n"
+    "        float fragDepth = (pclip.z / pclip.w) * 0.5 + 0.5;\n"
+    "        if (fragDepth > texture(u_occDepth, puv).r + 0.0015) occluded = true;\n"
+    "    }\n"
+    "    if (!faceOK || !depthOK || occluded) return (u_projCrop[i]==1) ? vec4(0.0) : vec4(0.45,0.45,0.45,1.0);\n"
+    "    if (!inFrame) return (u_projCrop[i]==1) ? vec4(0.0) : texture(plate, clamp(puv,0.0,1.0));\n"
+    "    return texture(plate, puv);\n"
+    "}\n"
+    "// Composite straight-alpha foreground `a` over premultiplied accumulation `b` by MergeMat op.\n"
+    "vec4 mm_composite(vec4 a, vec4 b, int op, float mix) {\n"
+    "    float aa = a.a * mix;\n"
+    "    vec3  apm = a.rgb * aa;\n"
+    "    if (op == 0) return b;\n"
+    "    if (op == 1) return vec4(apm, aa);\n"
+    "    if (op == 3) return b * (1.0 - aa);\n"
+    "    if (op == 4) return b * aa;\n"
+    "    if (op == 5) return vec4(apm + b.rgb, min(1.0, aa + b.a));\n"
+    "    if (op == 6) return vec4(max(apm, b.rgb), max(aa, b.a));\n"
+    "    if (op == 7) return vec4(min(apm, b.rgb), min(aa, b.a));\n"
+    "    return vec4(apm + b.rgb*(1.0-aa), aa + b.a*(1.0-aa));\n"
+    "}\n"
     "void main() {\n"
     "    // --- Wireframe: solid white edges, skip texture sampling + lighting ---\n"
     "    if (u_shadingMode == 2) {\n"
@@ -1065,31 +1106,18 @@ static const char* kBeautyFrag =
     "    } else {\n"
     "        // --- Base color from texture / STW / vertex (existing logic) ---\n"
     "        vec4 baseColor;\n"
-    "        if (u_useProjector == 1) {\n"
-    "            // Project3D: project the plate from the projector camera.\n"
-    "            if (v_projClip.w <= 0.0) {\n"
-    "                baseColor = vec4(0.0);            // behind the projector\n"
-    "            } else {\n"
-    "                float pd  = v_projClip.w;         // distance in front of the projector\n"
-    "                vec2 puv  = (v_projClip.xy / v_projClip.w) * 0.5 + 0.5;\n"
-    "                float f   = dot(normalize(v_worldNormal), normalize(u_projForward));\n"
-    "                bool faceOK  = (u_projOn == 2) || (u_projOn == 0 && f < 0.0) || (u_projOn == 1 && f > 0.0);\n"
-    "                bool depthOK = (pd >= u_projNear && pd <= u_projFar);\n"
-    "                bool inFrame = (puv.x >= 0.0 && puv.x <= 1.0 && puv.y >= 0.0 && puv.y <= 1.0);\n"
-    "                bool occluded = false;\n"
-    "                if (u_occMode != 0 && inFrame) {\n"
-    "                    // Shadow-map compare: this fragment's projector-NDC depth vs the\n"
-    "                    // nearest surface the projector sees at this UV. Farther => blocked.\n"
-    "                    float fragDepth = (v_projClip.z / v_projClip.w) * 0.5 + 0.5;\n"
-    "                    float nearest = texture(u_occDepth, puv).r;\n"
-    "                    if (fragDepth > nearest + 0.0015) occluded = true;\n"
-    "                }\n"
-    "                if (!faceOK || !depthOK || occluded || (u_projCrop == 1 && !inFrame)) {\n"
-    "                    baseColor = vec4(0.0);\n"
-    "                } else {\n"
-    "                    baseColor = texture(u_projPlate, clamp(puv, 0.0, 1.0));\n"
-    "                }\n"
-    "            }\n"
+    "        if (u_numProj > 0) {\n"
+    "            // Composite the projection layers (MergeMat) bottom-to-top. A lone Project3D is\n"
+    "            // one layer (op=over), reproducing the single-projection result. acc is premult.\n"
+    "            vec4 acc = vec4(0.0);\n"
+    "            if (0 < u_numProj) acc = mm_composite(mm_sampleProj(0, u_projPlate0), acc, u_projOp[0], u_projMix[0]);\n"
+    "            if (1 < u_numProj) acc = mm_composite(mm_sampleProj(1, u_projPlate1), acc, u_projOp[1], u_projMix[1]);\n"
+    "            if (2 < u_numProj) acc = mm_composite(mm_sampleProj(2, u_projPlate2), acc, u_projOp[2], u_projMix[2]);\n"
+    "            if (3 < u_numProj) acc = mm_composite(mm_sampleProj(3, u_projPlate3), acc, u_projOp[3], u_projMix[3]);\n"
+    "            // Nothing projected here (all layers cropped away) -> transparent, no depth write,\n"
+    "            // so the geo is cropped and whatever's behind shows through.\n"
+    "            if (acc.a < 0.001) discard;\n"
+    "            baseColor = acc;\n"
     "        } else if (u_hasTexture == 2) {\n"
     "            if (v_stw.w <= 0.0) discard;\n"
     "            vec2 uv = v_stw.xy / v_stw.w;\n"
@@ -1523,6 +1551,25 @@ static const char* volumeFragmentShader =
 
 // ==================== Geometry extraction helper ====================
 
+// One camera projection layer applied to a geo (a single Project3D, or one leaf of a
+// MergeMat tree). Multiple layers composite per-fragment in the shader, bottom (index 0)
+// to top, each by its `op` (MergeMat::Operation). A lone Project3D = one layer (op=over).
+struct ProjLayer {
+    float    VP[16];        // world -> projector clip
+    float    forward[3];    // projector forward direction (world), for front/back
+    int      projOn;        // 0 front, 1 back, 2 both
+    int      crop;          // 1 = transparent outside the plate frame
+    float    pNear, pFar;   // projector-space depth crop
+    int      op;            // MergeMat::Operation compositing this over the accumulation below
+    float    mix;           // foreground opacity (0..1)
+    ImagePtr plateImg;      // the plate to project for this layer
+    ProjLayer() : projOn(2), crop(1), pNear(0.1f), pFar(10000.f), op(2 /*over*/), mix(1.f)
+    {
+        for (int i = 0; i < 16; ++i) VP[i] = (i % 5 == 0) ? 1.f : 0.f;
+        forward[0] = 0.f; forward[1] = 0.f; forward[2] = -1.f;
+    }
+};
+
 struct GeoData {
     std::vector<float> verts;    // x,y,z interleaved
     std::vector<float> uvs;      // u,v interleaved (used when stw is empty)
@@ -1553,7 +1600,11 @@ struct GeoData {
     float    projNear, projFar;// projector-space depth crop
     int      occMode;          // 0 none, 1 self, 2 world
     GLuint   occDepthTex;      // projector depth map (0 = not built -> occlusion inactive)
-    ImagePtr projPlateImg;     // the plate to project
+    ImagePtr projPlateImg;     // the plate to project (layer 0 — kept for occlusion build)
+
+    // Layered projections (MergeMat). A lone Project3D fills exactly one layer; a MergeMat
+    // tree flattens (bottom-to-top) into several. The shader composites them per-fragment.
+    std::vector<ProjLayer> projLayers;
 
     GeoData()
         : useProjector(false), projOn(0), projCrop(1), projNear(0.1f), projFar(10000.f),
@@ -1883,48 +1934,96 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
     return false;
 }
 
+// Max number of projection layers a geo can carry (MergeMat depth). One texture unit per
+// plate (units 1..N), so this stays well within the GL texture-unit budget.
+static const int kMaxProjLayers = 4;
+
+// Fill one ProjLayer from a Project3D (camera + plate). Returns false if the projection is
+// inactive (no camera or no plate), in which case the layer should be skipped.
+static bool
+buildProjLayerFromProject3D(Project3D* proj, double time, ViewIdx view, int op, float mix, ProjLayer& out)
+{
+    double tx, ty, tz, rx, ry, rz, focal, hAp, vAp;
+    if (!proj->getProjectorCamera(time, tx, ty, tz, rx, ry, rz, focal, hAp, vAp)) return false;
+
+    const float pNear = (float)proj->getNearClip(time);
+    const float pFar  = (float)proj->getFarClip(time);
+    float pView[16], pProj[16];
+    buildViewMatrix(tx, ty, tz, rx, ry, rz, pView);
+    CameraMath::composeProjectionMatrix(focal, hAp, vAp, (pNear > 1e-4f ? pNear : 0.1f), pFar, pProj);
+    mat4Mul(out.VP, pProj, pView);  // world -> projector clip
+    out.forward[0] = -pView[2];
+    out.forward[1] = -pView[6];
+    out.forward[2] = -pView[10];
+    out.projOn = proj->getProjectOn(time);
+    out.crop   = proj->getCropToFrame(time) ? 1 : 0;
+    out.pNear  = pNear;
+    out.pFar   = pFar;
+    out.op     = op;
+    out.mix    = mix;
+
+    RectI roi;
+    out.plateImg = proj->getImage(0, time, RenderScale(), view, NULL, NULL, false, true, eStorageModeRAM, 0, &roi);
+    return (bool)out.plateImg;  // need a plate to project
+}
+
+// Append projection layers (bottom-to-top) for `mat` to `out`. `op` composites this
+// material's contribution over the accumulation below it; `mix` is its opacity. Recurses
+// through MergeMat trees: background (B) first, then foreground (A) over it with the
+// MergeMat's operation. Only Project3D leaves project; flat materials add no layer.
+static void
+flattenMaterialLayers(MaterialProvider* mat, double time, ViewIdx view, int op, float mix,
+                      std::vector<ProjLayer>& out)
+{
+    if (!mat || (int)out.size() >= kMaxProjLayers) return;
+    if (Project3D* p = dynamic_cast<Project3D*>(mat)) {
+        ProjLayer layer;
+        if (buildProjLayerFromProject3D(p, time, view, op, mix, layer))
+            out.push_back(layer);
+        return;
+    }
+    if (MergeMat* m = dynamic_cast<MergeMat*>(mat)) {
+        MaterialProvider* A = m->getInputMaterial(0);   // foreground
+        MaterialProvider* B = m->getInputMaterial(1);   // background
+        const int   mop  = m->getOperation(time);
+        const float mmix = (float)m->getMix(time);
+        flattenMaterialLayers(B, time, view, MergeMat::eMergeOver, 1.f, out);  // base
+        flattenMaterialLayers(A, time, view, mop, mmix, out);                  // A over B
+        return;
+    }
+    // Material3D / textures: not projected (no layer). Future enhancement.
+}
+
 // Wrapper that handles both single-emit nodes (one GeoData via the existing
 // extractGeometry) and multi-emit nodes (ReadAlembicArchive — one GeoData per
 // visible mesh entry, world transform composed from the archive's parent chain).
 // Appends 0..N entries to `out`.
-// If the geo's material input is a Project3D (with a connected camera + plate), fill the
-// projector fields of `g` so renderGeoObjectGlsl projects the plate onto it.
+// If the geo's material input projects (a Project3D, or a MergeMat tree of Project3Ds),
+// fill the projection layers of `g` so renderGeoObjectGlsl composites them onto it.
 static void
 applyProjectorMaterial(const EffectInstancePtr& geoEffect, double time, ViewIdx view, GeoData& g)
 {
     if (!geoEffect) return;
     MaterialProvider* geoMat = dynamic_cast<MaterialProvider*>(geoEffect.get());
     if (!geoMat || !geoMat->hasMaterialInput()) return;
-    Project3D* proj = dynamic_cast<Project3D*>(geoMat->getConnectedMaterial());
-    if (!proj) return;
+    MaterialProvider* mat = geoMat->getConnectedMaterial();
+    if (!mat) return;
 
-    double tx, ty, tz, rx, ry, rz, focal, hAp, vAp;
-    if (!proj->getProjectorCamera(time, tx, ty, tz, rx, ry, rz, focal, hAp, vAp)) {
-        return;  // no projection camera connected
-    }
+    // The bottom layer composites 'over' a transparent base, so a lone Project3D reproduces
+    // the single-projection behaviour exactly.
+    flattenMaterialLayers(mat, time, view, MergeMat::eMergeOver, 1.f, g.projLayers);
+    if (g.projLayers.empty()) return;
+    g.useProjector = true;
 
-    const float pNear = (float)proj->getNearClip(time);
-    const float pFar  = (float)proj->getFarClip(time);
-
-    float pView[16], pProj[16];
-    buildViewMatrix(tx, ty, tz, rx, ry, rz, pView);
-    CameraMath::composeProjectionMatrix(focal, hAp, vAp, (pNear > 1e-4f ? pNear : 0.1f), pFar, pProj);
-    mat4Mul(g.projectorVP, pProj, pView);  // world -> projector clip
-
-    // Projector forward in world = -(row 2 of the view rotation) = -(pView[2,6,10]).
-    g.projForward[0] = -pView[2];
-    g.projForward[1] = -pView[6];
-    g.projForward[2] = -pView[10];
-
-    g.projOn   = proj->getProjectOn(time);
-    g.projCrop = proj->getCropToFrame(time) ? 1 : 0;
-    g.projNear = pNear;
-    g.projFar  = pFar;
-    g.occMode  = proj->getOcclusionMode(time);
-
-    RectI roi;
-    g.projPlateImg = proj->getImage(0, time, RenderScale(), view, NULL, NULL, false, true, eStorageModeRAM, 0, &roi);
-    g.useProjector = (bool)g.projPlateImg;  // active only if a plate is connected
+    // Mirror layer 0 into the legacy single-projector fields (used by the occlusion depth
+    // build in render()). Occlusion applies to a single Project3D only — a MergeMat defers it.
+    const ProjLayer& l0 = g.projLayers.front();
+    for (int i = 0; i < 16; ++i) g.projectorVP[i] = l0.VP[i];
+    g.projForward[0] = l0.forward[0]; g.projForward[1] = l0.forward[1]; g.projForward[2] = l0.forward[2];
+    g.projOn = l0.projOn; g.projCrop = l0.crop; g.projNear = l0.pNear; g.projFar = l0.pFar;
+    g.projPlateImg = l0.plateImg;
+    if (Project3D* p = dynamic_cast<Project3D*>(mat)) g.occMode = p->getOcclusionMode(time);
+    else g.occMode = 0;
 }
 
 static void
@@ -2089,41 +2188,43 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
         }
     }
 
-    // Project3D: upload the plate to texture unit 1 (the fragment shader projects it
-    // from the projector camera when u_useProjector == 1).
-    GLuint projTex = 0;
-    if (geo.useProjector && geo.projPlateImg) {
-        RectI pb = geo.projPlateImg->getBounds();
+    // Project3D / MergeMat: upload each projection layer's plate to its own texture unit
+    // (layer i -> unit 1+i). The fragment shader composites them when u_numProj > 0.
+    GLuint projTex[4] = { 0, 0, 0, 0 };
+    const int numProjLayers = std::min((int)geo.projLayers.size(), 4);
+    for (int li = 0; li < numProjLayers; ++li) {
+        const ImagePtr& plate = geo.projLayers[li].plateImg;
+        if (!plate) continue;
+        RectI pb = plate->getBounds();
         const int pw = pb.width(), ph = pb.height();
-        if (pw > 0 && ph > 0) {
-            glGenTextures(1, &projTex);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, projTex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            std::vector<float> pData((size_t)pw * ph * 4, 0.0f);
-            {
-                Image::ReadAccess ra(geo.projPlateImg.get());
-                const int nc = geo.projPlateImg->getComponents().getNumComponents();
-                for (int y = pb.y1; y < pb.y2; ++y) {
-                    for (int x = pb.x1; x < pb.x2; ++x) {
-                        const float* pix = (const float*)ra.pixelAt(x, y);
-                        if (!pix) continue;
-                        int idx = ((y - pb.y1) * pw + (x - pb.x1)) * 4;
-                        pData[idx + 0] = pix[0];
-                        pData[idx + 1] = pix[1];
-                        pData[idx + 2] = pix[2];
-                        pData[idx + 3] = (nc >= 4) ? pix[3] : 1.0f;
-                    }
+        if (pw <= 0 || ph <= 0) continue;
+        glGenTextures(1, &projTex[li]);
+        glActiveTexture(GL_TEXTURE1 + li);
+        glBindTexture(GL_TEXTURE_2D, projTex[li]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        std::vector<float> pData((size_t)pw * ph * 4, 0.0f);
+        {
+            Image::ReadAccess ra(plate.get());
+            const int nc = plate->getComponents().getNumComponents();
+            for (int y = pb.y1; y < pb.y2; ++y) {
+                for (int x = pb.x1; x < pb.x2; ++x) {
+                    const float* pix = (const float*)ra.pixelAt(x, y);
+                    if (!pix) continue;
+                    int idx = ((y - pb.y1) * pw + (x - pb.x1)) * 4;
+                    pData[idx + 0] = pix[0];
+                    pData[idx + 1] = pix[1];
+                    pData[idx + 2] = pix[2];
+                    pData[idx + 3] = (nc >= 4) ? pix[3] : 1.0f;
                 }
             }
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F_ARB, pw, ph, 0, GL_RGBA, GL_FLOAT, pData.data());
-            glActiveTexture(GL_TEXTURE0);  // restore the default active unit
         }
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F_ARB, pw, ph, 0, GL_RGBA, GL_FLOAT, pData.data());
     }
-    const int useProjector = (geo.useProjector && projTex) ? 1 : 0;
+    glActiveTexture(GL_TEXTURE0);  // restore the default active unit
+    const int useProjector = (geo.useProjector && numProjLayers > 0 && projTex[0]) ? 1 : 0;
 
     // --- Per-mesh MVP = projView * localMatrix (current + previous) ---
     float mvp[16];
@@ -2251,14 +2352,21 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
     GLint locWriteUV       = glGetUniformLocation(program, "u_writeUV");
     GLint locWritePref     = glGetUniformLocation(program, "u_writePref");
     GLint locWriteVelocity = glGetUniformLocation(program, "u_writeVelocity");
-    GLint locUseProjector  = glGetUniformLocation(program, "u_useProjector");
-    GLint locProjectorVP   = glGetUniformLocation(program, "u_projectorVP");
-    GLint locProjPlate     = glGetUniformLocation(program, "u_projPlate");
+    GLint locUseProjector  = glGetUniformLocation(program, "u_useProjector"); // vertex (layer 0)
+    GLint locProjectorVP   = glGetUniformLocation(program, "u_projectorVP");  // vertex (layer 0)
+    GLint locNumProj       = glGetUniformLocation(program, "u_numProj");
+    GLint locProjPlate0    = glGetUniformLocation(program, "u_projPlate0");
+    GLint locProjPlate1    = glGetUniformLocation(program, "u_projPlate1");
+    GLint locProjPlate2    = glGetUniformLocation(program, "u_projPlate2");
+    GLint locProjPlate3    = glGetUniformLocation(program, "u_projPlate3");
+    GLint locProjVP        = glGetUniformLocation(program, "u_projVP");
     GLint locProjOn        = glGetUniformLocation(program, "u_projOn");
     GLint locProjCrop      = glGetUniformLocation(program, "u_projCrop");
     GLint locProjNear      = glGetUniformLocation(program, "u_projNear");
     GLint locProjFar       = glGetUniformLocation(program, "u_projFar");
     GLint locProjForward   = glGetUniformLocation(program, "u_projForward");
+    GLint locProjOp        = glGetUniformLocation(program, "u_projOp");
+    GLint locProjMix       = glGetUniformLocation(program, "u_projMix");
     GLint locOccMode       = glGetUniformLocation(program, "u_occMode");
     GLint locOccDepth      = glGetUniformLocation(program, "u_occDepth");
     if (locMvp >= 0)            glUniformMatrix4fv(locMvp,         1, GL_FALSE, mvp);
@@ -2284,23 +2392,43 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
     if (locWriteUV >= 0)        glUniform1i(locWriteUV,       writeUV       ? 1 : 0);
     if (locWritePref >= 0)      glUniform1i(locWritePref,     writePref     ? 1 : 0);
     if (locWriteVelocity >= 0)  glUniform1i(locWriteVelocity, writeVelocity ? 1 : 0);
-    if (locUseProjector >= 0)   glUniform1i(locUseProjector, useProjector);
+    if (locUseProjector >= 0)   glUniform1i(locUseProjector, useProjector);              // vertex (layer 0)
     if (locProjectorVP >= 0)    glUniformMatrix4fv(locProjectorVP, 1, GL_FALSE, geo.projectorVP);
-    if (locProjPlate >= 0)      glUniform1i(locProjPlate, 1);   // plate on texture unit 1
-    if (locProjOn >= 0)         glUniform1i(locProjOn, geo.projOn);
-    if (locProjCrop >= 0)       glUniform1i(locProjCrop, geo.projCrop);
-    if (locProjNear >= 0)       glUniform1f(locProjNear, geo.projNear);
-    if (locProjFar >= 0)        glUniform1f(locProjFar, geo.projFar);
-    if (locProjForward >= 0)    glUniform3f(locProjForward, geo.projForward[0], geo.projForward[1], geo.projForward[2]);
-    // Occlusion: active only once the projector depth map exists (built in render()).
+    if (locNumProj >= 0)        glUniform1i(locNumProj, useProjector ? numProjLayers : 0);
+    if (locProjPlate0 >= 0)     glUniform1i(locProjPlate0, 1);   // plates on texture units 1..4
+    if (locProjPlate1 >= 0)     glUniform1i(locProjPlate1, 2);
+    if (locProjPlate2 >= 0)     glUniform1i(locProjPlate2, 3);
+    if (locProjPlate3 >= 0)     glUniform1i(locProjPlate3, 4);
+    {
+        // Pack the per-layer projection params into fixed-size arrays (unused slots padded
+        // with a default ProjLayer — harmless since u_numProj gates the loop).
+        float vp[16 * 4]; int on[4]; int crop[4]; float pn[4]; float pf[4]; float fwd[3 * 4]; int op[4]; float mix[4];
+        for (int li = 0; li < 4; ++li) {
+            ProjLayer L;
+            if (li < numProjLayers) L = geo.projLayers[li];
+            for (int k = 0; k < 16; ++k) vp[li * 16 + k] = L.VP[k];
+            on[li] = L.projOn; crop[li] = L.crop; pn[li] = L.pNear; pf[li] = L.pFar;
+            fwd[li * 3 + 0] = L.forward[0]; fwd[li * 3 + 1] = L.forward[1]; fwd[li * 3 + 2] = L.forward[2];
+            op[li] = L.op; mix[li] = L.mix;
+        }
+        if (locProjVP >= 0)      glUniformMatrix4fv(locProjVP, 4, GL_FALSE, vp);
+        if (locProjOn >= 0)      glUniform1iv(locProjOn, 4, on);
+        if (locProjCrop >= 0)    glUniform1iv(locProjCrop, 4, crop);
+        if (locProjNear >= 0)    glUniform1fv(locProjNear, 4, pn);
+        if (locProjFar >= 0)     glUniform1fv(locProjFar, 4, pf);
+        if (locProjForward >= 0) glUniform3fv(locProjForward, 4, fwd);
+        if (locProjOp >= 0)      glUniform1iv(locProjOp, 4, op);
+        if (locProjMix >= 0)     glUniform1fv(locProjMix, 4, mix);
+    }
+    // Occlusion (layer 0 only): active once the projector depth map exists (built in render()).
     const int occUniform = (geo.occMode != 0 && geo.occDepthTex != 0) ? geo.occMode : 0;
     if (geo.occDepthTex) {
-        glActiveTexture(GL_TEXTURE2);
+        glActiveTexture(GL_TEXTURE5);   // units 1..4 are the projection plates now
         glBindTexture(GL_TEXTURE_2D, geo.occDepthTex);
         glActiveTexture(GL_TEXTURE0);
     }
     if (locOccMode >= 0)        glUniform1i(locOccMode, occUniform);
-    if (locOccDepth >= 0)       glUniform1i(locOccDepth, 2);
+    if (locOccDepth >= 0)       glUniform1i(locOccDepth, 5);
 
     if (shadingMode == 2) {
         glDrawElements(GL_LINES, (GLsizei)wireIndices.size(), GL_UNSIGNED_INT, 0);
@@ -2314,7 +2442,7 @@ renderGeoObjectGlsl(const GeoData& geo, GLuint program,
     glDeleteBuffers(1, &ibo);
     glDeleteVertexArrays(1, &vao);
     if (srcTex) glDeleteTextures(1, &srcTex);
-    if (projTex) glDeleteTextures(1, &projTex);
+    for (int li = 0; li < 4; ++li) if (projTex[li]) glDeleteTextures(1, &projTex[li]);
 }
 
 // ==================== Render ====================
