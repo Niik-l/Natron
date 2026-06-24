@@ -59,6 +59,17 @@ KnobGui::onInternalValueChanged(ViewSpec /*view*/,
             Q_EMIT refreshCurveEditor();
         }
     }
+
+    // Keep the 3D viewport(s) live when a value is adjusted in a property panel. The 3D
+    // viewports render on-demand (no polling) and plain knob edits don't go through
+    // redrawAllViewers(), so without this a transform/look tweak in the panel wouldn't
+    // repaint the 3D view until the user interacted with the 3D widget directly. Fires
+    // for every reason (incl. eValueChangedReasonUserEdited live slider drags); cheap,
+    // and a no-op when no 3D viewport is open or it's paused. Qt coalesces the update().
+    Gui* gui = getGui();
+    if (gui) {
+        gui->redraw3DViewports();
+    }
 }
 
 void

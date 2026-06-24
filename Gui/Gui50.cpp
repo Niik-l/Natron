@@ -828,8 +828,18 @@ Gui::redrawAllViewers()
     }
 
     // On-demand rendering for the 3D viewports: same central trigger the 2D viewers
-    // use, so any knob/graph change that refreshes a 2D viewer also repaints the 3D
-    // view — no 30fps polling. requestRedraw() is a no-op when that viewport is paused.
+    // use, so any UI action that refreshes a 2D viewer also repaints the 3D view — no
+    // 30fps polling. requestRedraw() is a no-op when that viewport is paused.
+    redraw3DViewports();
+}
+
+void
+Gui::redraw3DViewports()
+{
+    // On-demand repaint of the 3D viewport(s) only — does NOT touch the 2D viewers, so
+    // it's cheap enough to call on every property-panel knob edit (those don't route
+    // through redrawAllViewers()). requestRedraw() is a no-op while a viewport is paused,
+    // and getViewport3Ds_mt_safe() is empty when no 3D viewport is open → near-zero cost.
     const std::list<Viewport3DTab*> viewport3Ds = getViewport3Ds_mt_safe();
     for (std::list<Viewport3DTab*>::const_iterator it = viewport3Ds.begin(); it != viewport3Ds.end(); ++it) {
         if ( (*it)->isVisible() && (*it)->getViewport() ) {

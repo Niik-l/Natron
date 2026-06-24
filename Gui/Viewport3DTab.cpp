@@ -83,6 +83,18 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
     // ==================== Top Toolbar ====================
     QWidget* toolbar = new QWidget(this);
     toolbar->setFixedHeight(28);
+    // The toolbar is full of fixed-size buttons + non-eliding text dropdowns, so its
+    // layout minimum width is large (~700px). Without this, that minimum propagates up
+    // as the whole tab's minimum width, and a splitter pane holding the 3D viewport
+    // can't be dragged narrower than it — once it hits the floor the splitter collapses
+    // the pane ("snaps away"). Ignoring the horizontal size hint lets the toolbar be
+    // clipped instead of dictating the tab minimum, matching how the 2D viewer (whose
+    // toolbar widgets shrink/elide on their own) behaves. Vertical policy untouched.
+    {
+        QSizePolicy sp = toolbar->sizePolicy();
+        sp.setHorizontalPolicy(QSizePolicy::Ignored);
+        toolbar->setSizePolicy(sp);
+    }
     QHBoxLayout* toolbarLayout = new QHBoxLayout(toolbar);
     toolbarLayout->setContentsMargins(4, 2, 4, 2);
     toolbarLayout->setSpacing(4);
@@ -246,6 +258,13 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
     {
         QWidget* toolbar2 = new QWidget(this);
         toolbar2->setFixedHeight(26);
+        // Same as the top toolbar: don't let its content dictate the tab's minimum
+        // width (otherwise the splitter pane snaps/collapses when dragged narrow).
+        {
+            QSizePolicy sp = toolbar2->sizePolicy();
+            sp.setHorizontalPolicy(QSizePolicy::Ignored);
+            toolbar2->setSizePolicy(sp);
+        }
         QHBoxLayout* toolbar2Layout = new QHBoxLayout(toolbar2);
         toolbar2Layout->setContentsMargins(4, 2, 4, 2);
         toolbar2Layout->setSpacing(4);

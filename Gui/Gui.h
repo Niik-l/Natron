@@ -446,6 +446,11 @@ public:
 
     void redrawAllViewers();
 
+    /** Request an on-demand repaint of every (non-paused, visible) 3D viewport, without
+     *  touching the 2D viewers. Used to keep the 3D view live on property-panel knob
+     *  edits — those don't go through redrawAllViewers(). */
+    void redraw3DViewports();
+
     void renderAllViewers(bool canAbort);
 
     void abortAllViewers();
