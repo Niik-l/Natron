@@ -17,6 +17,27 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **MergeMat node + Project3D Crop/Project-On in viewport & render (2026-06-24, pushed `79d1fb988`)** —
+  **MergeMat** (`Engine/Dev/Scene3D/MergeMat.{h,cpp}`, new) is classic-Nuke's "Merge Material": a
+  `MaterialProvider` with A (foreground) + B (background) inputs, an Operation knob (none/replace/over/
+  stencil/mask/plus/max/min) + Mix, that layers multiple **Project3D** projections onto one geo and
+  **chains** (MergeMat→MergeMat) for more. The renderer does the per-fragment compositing: ScanlineRender
+  flattens the MergeMat tree into ≤4 projection layers (B first, then A over it) and composites them in
+  the GLSL fragment shader (single-projector path widened to 4-layer arrays — separate samplers
+  `u_projPlate0..3` to dodge dynamic sampler indexing in GLSL 330 — `mm_sampleProj` + `mm_composite`,
+  occlusion stays layer-0-only); a lone Project3D = 1 layer so single-projection renders are unchanged.
+  The fixed-function 3D viewport mirrors it **multi-pass** (one alpha-blended pass per layer, GL_LEQUAL +
+  alpha-test so cropped pixels reveal lower layers), converted across all 5 geo draws (sphere/cube/
+  cylinder/ReadGeo-mesh with on-demand vertex normals/Card3D). Same commit finished **Project3D Crop +
+  Project-On (front/back)** honoring in BOTH viewport and ScanlineRender — the render shader discards
+  culled/cropped fragments (transparent when cropping, grey unprojected geo when not, fixing the Back-mode
+  opaque-black-block); the viewport uses clamp-to-border (clear/grey) + alpha-test + per-triangle facing
+  cull (clean terminator). LIMITS: 4-layer cap; viewport blend ops over-exact / replace+plus approx /
+  rest→over (render does them properly); Cycles falls back to the foreground material (future MixShader).
+  Shipped same day (`4604e6b38`/`3bb76910d`): 3D-viewport **splitter-resize fix** + **live update on
+  property-panel knob edits** (`Gui::redraw3DViewports`), **Uniform Scale** on all 4 primitive geos, and
+  Card3D **Image Aspect** toggle (Nuke parity).
+
 - **FastVolumeRender — real-time GPU VDB volume node (2026-06-18, ingested)** —
   A new built-in node sibling to CyclesRender: a wgpu-native compute ray-marcher that renders
   VDB smoke/fire (and procedural Volume3D) at interactive rates as a stand-in for Cycles
