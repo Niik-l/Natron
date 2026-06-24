@@ -112,6 +112,11 @@ public:
                           std::vector<CardVertex>& outVertices,
                           std::vector<int>& outTriIndices) const;
 
+    // Nuke "image aspect": when true (default) the card's shape matches the img
+    // input's aspect ratio; when false the card is a unit square regardless of the
+    // input, so plugging in a differently-shaped image doesn't resize the geometry.
+    bool getImageAspectEnabled() const;
+
     // Cached texture for viewport preview
     struct CachedTexture {
         std::vector<float> pixels; // RGBA float

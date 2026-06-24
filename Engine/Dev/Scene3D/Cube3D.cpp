@@ -46,6 +46,7 @@ struct Cube3DPrivate
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobDoubleWPtr scaleX, scaleY, scaleZ;
+    KnobDoubleWPtr uniformScale;   // multiplies all three axes together
 
     // Geometry
     KnobDoubleWPtr size;
@@ -170,6 +171,13 @@ Cube3D::initializeKnobs()
         k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
         xformPage->addKnob(k); _imp->scaleZ = k;
     }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Uniform Scale"));
+        k->setName("uniformScale"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
+        k->setHintToolTip(tr("Scales all axes together, multiplied on top of the per-axis Scale values."));
+        xformPage->addKnob(k); _imp->uniformScale = k;
+    }
 
     // Geometry page
     KnobPagePtr geoPage = AppManager::createKnob<KnobPage>(this, tr("Geometry"));
@@ -285,6 +293,8 @@ Cube3D::getCubeTransform(double time,
     sx = _imp->scaleX.lock()->getValueAtTime(time);
     sy = _imp->scaleY.lock()->getValueAtTime(time);
     sz = _imp->scaleZ.lock()->getValueAtTime(time);
+    const double us = _imp->uniformScale.lock()->getValueAtTime(time);
+    sx *= us; sy *= us; sz *= us;
 }
 
 double Cube3D::getSize(double time) const { return _imp->size.lock()->getValueAtTime(time); }

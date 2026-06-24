@@ -46,6 +46,8 @@ struct Card3DPrivate
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobDoubleWPtr scaleX, scaleY;
+    KnobDoubleWPtr uniformScale;   // multiplies both axes together
+    KnobBoolWPtr imageAspect;   // card shape follows img aspect (Nuke "image aspect")
 
     // Material
     KnobColorWPtr baseColor;
@@ -161,6 +163,25 @@ Card3D::initializeKnobs()
         k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
         xformPage->addKnob(k); _imp->scaleY = k;
     }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Uniform Scale"));
+        k->setName("uniformScale"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
+        k->setHintToolTip(tr("Scales both axes together, multiplied on top of the per-axis Scale values."));
+        xformPage->addKnob(k); _imp->uniformScale = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Image Aspect"));
+        k->setName("imageAspect");
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("On (default): the card's shape matches the img input's aspect "
+                             "ratio. Off: the image is fitted onto a unit square card, so "
+                             "feeding in a differently-shaped image (e.g. a square render) "
+                             "doesn't resize the card geometry. Matches Nuke's Card "
+                             "\"image aspect\" toggle."));
+        xformPage->addKnob(k); _imp->imageAspect = k;
+    }
 
     // Material page
     KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));
@@ -265,6 +286,15 @@ Card3D::getCardTransform(double time,
     rz = _imp->rotateZ.lock()->getValueAtTime(time);
     sx = _imp->scaleX.lock()->getValueAtTime(time);
     sy = _imp->scaleY.lock()->getValueAtTime(time);
+    const double us = _imp->uniformScale.lock()->getValueAtTime(time);
+    sx *= us; sy *= us;
+}
+
+bool
+Card3D::getImageAspectEnabled() const
+{
+    KnobBoolPtr k = _imp->imageAspect.lock();
+    return k ? k->getValue() : true;
 }
 
 void
@@ -275,19 +305,25 @@ Card3D::generateCardMesh(double time,
     outVertices.clear();
     outTriIndices.clear();
 
-    // Determine aspect ratio from img input
+    // Determine aspect ratio from img input (Nuke "image aspect"). When the toggle is
+    // off, the card is a unit square regardless of the input shape — so feeding it a
+    // differently-shaped image (e.g. a square render) doesn't resize the geometry.
     float aspect = 16.0f / 9.0f; // default
-    EffectInstancePtr imgInput = getInput(0);
-    if (imgInput) {
-        RectD rod;
-        RenderScale scale;
-        bool isProjectFormat = false;
-        StatusEnum st = imgInput->getRegionOfDefinition_public(0, time, scale, ViewIdx(0), &rod, &isProjectFormat);
-        if (st == eStatusOK) {
-            double w = rod.x2 - rod.x1;
-            double h = rod.y2 - rod.y1;
-            if (h > 0 && w > 0) {
-                aspect = (float)(w / h);
+    if (!getImageAspectEnabled()) {
+        aspect = 1.0f;
+    } else {
+        EffectInstancePtr imgInput = getInput(0);
+        if (imgInput) {
+            RectD rod;
+            RenderScale scale;
+            bool isProjectFormat = false;
+            StatusEnum st = imgInput->getRegionOfDefinition_public(0, time, scale, ViewIdx(0), &rod, &isProjectFormat);
+            if (st == eStatusOK) {
+                double w = rod.x2 - rod.x1;
+                double h = rod.y2 - rod.y1;
+                if (h > 0 && w > 0) {
+                    aspect = (float)(w / h);
+                }
             }
         }
     }
