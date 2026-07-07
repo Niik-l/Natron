@@ -20,6 +20,8 @@
 #ifndef NATRON_ENGINE_POINTCLOUDPROVIDER_H
 #define NATRON_ENGINE_POINTCLOUDPROVIDER_H
 
+#include <vector>
+
 #include "../../../Global/Macros.h"
 #include "PointCloudData.h"
 
@@ -51,6 +53,16 @@ public:
      * Mode 1 selection) can refer to points by their indices.
      */
     virtual PointCloudDataPtr getPointCloud() const = 0;
+
+    /**
+     * @brief Called by the 3D viewport whenever its point selection for this
+     * provider's cloud changes (click-pick, box select, or clear). Indices
+     * refer to the point order of getPointCloud() (stable, see above).
+     * Default is a no-op; providers that offer selection-driven actions
+     * (e.g. CameraTracker's set-origin / set-ground-plane) override this to
+     * store the selection Engine-side.
+     */
+    virtual void setViewportSelection(const std::vector<int>& /*indices*/) {}
 };
 
 NATRON_NAMESPACE_EXIT

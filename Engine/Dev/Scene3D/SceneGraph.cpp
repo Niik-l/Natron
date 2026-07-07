@@ -42,6 +42,7 @@
 #include "Group3D.h"
 #include "../../Node.h"
 #include "../Deep/PointCloudData.h"
+#include "../Deep/PointCloudProvider.h"
 #include "ReadAlembicCamera.h"
 #include "ReadAlembicTransform.h"
 #include "ReadAlembicArchive.h"
@@ -815,8 +816,8 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             continue;
         }
 
-        // --- DeepToPoints ---
-        DeepToPoints* dtp = dynamic_cast<DeepToPoints*>(effect.get());
+        // --- Any point-cloud provider (DeepToPoints, CameraTracker, ...) ---
+        PointCloudProvider* dtp = dynamic_cast<PointCloudProvider*>(effect.get());
         if (dtp) {
             PointCloudDataPtr cloud = dtp->getPointCloud();
             if (!cloud || cloud->numPoints() == 0) continue;

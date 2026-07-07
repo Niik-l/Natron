@@ -62,6 +62,7 @@
 #include "../../NodeMetadata.h"
 #include "../../OSGLContext.h"
 #include "ReadGeo.h"
+#include "../../CameraTrackerNode.h"
 #include "SceneGraph.h"
 #include "Sphere3D.h"
 #include "UVProject.h"
@@ -1928,6 +1929,21 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
             RectI roi;
             out.texImg = readGeo->getImage(1, time, RenderScale(), view, NULL, NULL, false, true, eStorageModeRAM, 0, &roi);
         }
+        return true;
+    }
+
+    // CameraTracker: render the solved 3D points as locator octahedra so track
+    // stick can be verified directly over the plate. Connect the CameraTracker
+    // node into a Scene3D input (or straight into the obj input).
+    CameraTrackerNode* camTracker = dynamic_cast<CameraTrackerNode*>(effect.get());
+    if (camTracker) {
+        MeshDataPtr mesh = camTracker->getLocatorMesh();
+        if (!mesh || mesh->numVertices == 0) return false;
+        out.verts = mesh->vertices;
+        fanTriangulate(mesh->faceIndices, mesh->faceCounts, out.triIndices);
+        computeVertexNormalsFromTris(out.verts, out.triIndices, out.normals);
+        out.uvs.assign((out.verts.size() / 3) * 2, 0.5f);
+        SceneGraph::buildTRS(0, 0, 0, 0, 0, 0, 1, 1, 1, out.localMatrix); // identity
         return true;
     }
 

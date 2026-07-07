@@ -77,6 +77,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/TimeLine.h"
 #include "Engine/Dev/Deep/DeepToPoints.h"
 #include "Engine/Dev/Deep/Blast.h"
+#include "Engine/Dev/Deep/PointCloudProvider.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/SceneGraph.h"
 #include "Engine/Knob.h"
@@ -758,6 +759,7 @@ struct Viewport3DPrivate
     // cloud to display). The right-click context menu uses this to target
     // its Add/Remove/Set/Clear Selection actions.
     NodeWPtr activeBlastNode;
+    NodeWPtr activeProviderNode;   // whichever PointCloudProvider owns the displayed cloud
 
     // Toggle from the Grid button in Viewport3DTab. Default visible.
     bool showGrid;
@@ -1385,39 +1387,58 @@ Viewport3D::paintGL()
                 if (p) {
                     NodesList allNodes;
                     p->getNodes_recursive(allNodes, true);
+
+                    // Which node is selected? Its cloud takes priority so e.g. a
+                    // selected PointCloudGenerator isn't shadowed by the CameraTracker's
+                    // sparse cloud (and vice-versa).
+                    std::string selName;
+                    {
+                        NodeGraph* selGraph = g->getLastSelectedGraph();
+                        if (selGraph) {
+                            const std::list<NodeGuiPtr>& s = selGraph->getSelectedNodes();
+                            if (!s.empty()) selName = s.front()->getNode()->getScriptName();
+                        }
+                    }
+
+                    // Choose the best provider WITHOUT fetching (priority:
+                    // selected = 3 > Blast = 2 > any other provider = 1), then fetch
+                    // its cloud exactly once. (getPointCloud() can be expensive, so we
+                    // never call it for providers we won't display.)
+                    NodePtr chosenNode;
+                    EffectInstance* chosenEff = NULL;
+                    int chosenPrio = -1;
+                    bool chosenIsBlast = false;
                     for (NodesList::const_iterator it = allNodes.begin(); it != allNodes.end(); ++it) {
-                        if (!(*it)->isActivated()) continue;
-                        if ((*it)->isNodeDisabled()) continue;
+                        if (!(*it)->isActivated() || (*it)->isNodeDisabled()) continue;
                         EffectInstancePtr eff = (*it)->getEffectInstance();
                         if (!eff) continue;
-                        // Scan for Blast and DeepToPoints — prefer Blast (filtered) over raw
                         Blast* blast = dynamic_cast<Blast*>(eff.get());
-                        DeepToPoints* dtp = dynamic_cast<DeepToPoints*>(eff.get());
-                        if (blast || dtp) {
-                            // Remember candidates but don't break — keep scanning for Blast
-                            if (blast) {
-                                PointCloudDataPtr cloud = blast->getPointCloud();
-                                if (cloud && cloud->numPoints() > 0) {
-                                    QMutexLocker lock(&_imp->cloudMutex);
-                                    _imp->pointCloud = cloud;
-                                    _imp->pointSize = 2.0f;
-                                    _imp->activeBlastNode = *it; // remember for selection push
-                                }
-                            } else if (dtp && !_imp->pointCloud) {
-                                // Only use DeepToPoints if no Blast cloud found yet
-                                PointCloudDataPtr cloud = dtp->getPointCloud();
-                                if (cloud && cloud->numPoints() > 0) {
-                                    float ptSize = 2.0f;
-                                    KnobIPtr psKnob = eff->getKnobByName("pointSize");
-                                    if (psKnob) {
-                                        KnobDouble* psDbl = dynamic_cast<KnobDouble*>(psKnob.get());
-                                        if (psDbl) ptSize = (float)psDbl->getValue();
-                                    }
-                                    QMutexLocker lock(&_imp->cloudMutex);
-                                    _imp->pointCloud = cloud;
-                                    _imp->pointSize = ptSize;
-                                }
+                        PointCloudProvider* prov = dynamic_cast<PointCloudProvider*>(eff.get());
+                        if (!blast && !prov) continue;
+                        bool sel = !selName.empty() && (*it)->getScriptName() == selName;
+                        int prio = sel ? 3 : (blast ? 2 : 1);
+                        if (prio > chosenPrio) {
+                            chosenPrio = prio;
+                            chosenNode = *it;
+                            chosenEff = eff.get();
+                            chosenIsBlast = (blast != NULL);
+                        }
+                    }
+                    if (chosenEff) {
+                        PointCloudProvider* prov = dynamic_cast<PointCloudProvider*>(chosenEff);
+                        PointCloudDataPtr cloud = prov ? prov->getPointCloud() : PointCloudDataPtr();
+                        if (cloud && cloud->numPoints() > 0) {
+                            float ptSize = 2.0f;
+                            KnobIPtr psKnob = chosenEff->getKnobByName("pointSize");
+                            if (psKnob) {
+                                KnobDouble* psDbl = dynamic_cast<KnobDouble*>(psKnob.get());
+                                if (psDbl) ptSize = (float)psDbl->getValue();
                             }
+                            QMutexLocker lock(&_imp->cloudMutex);
+                            _imp->pointCloud = cloud;
+                            _imp->pointSize = ptSize;
+                            if (chosenIsBlast) _imp->activeBlastNode = chosenNode;
+                            _imp->activeProviderNode = chosenNode;
                         }
                     }
                 }
@@ -2225,6 +2246,7 @@ Viewport3D::pickPointAtPosition(int screenX, int screenY)
         // context menu (see contextMenuEvent).
         _imp->selectedPointIndices.clear();
         _imp->selectedPointIndices.push_back(bestIdx);
+        notifyProviderSelectionChanged();
         update();
         return true;
     }
@@ -2232,7 +2254,24 @@ Viewport3D::pickPointAtPosition(int screenX, int screenY)
     // No hit — clear the multi-selection.
     _imp->selectedPointIndex = -1;
     _imp->selectedPointIndices.clear();
+    notifyProviderSelectionChanged();
     return false;
+}
+
+void
+Viewport3D::notifyProviderSelectionChanged()
+{
+    // Mirror the current selection to the Engine-side provider so nodes can
+    // offer selection-driven actions (CameraTracker set-origin/ground-plane,
+    // snap-to-point). Caller must hold cloudMutex (all selection mutations do).
+    NodePtr prov = _imp->activeProviderNode.lock();
+    if (!prov) return;
+    EffectInstancePtr eff = prov->getEffectInstance();
+    if (!eff) return;
+    PointCloudProvider* pcp = dynamic_cast<PointCloudProvider*>(eff.get());
+    if (pcp) {
+        pcp->setViewportSelection(_imp->selectedPointIndices);
+    }
 }
 
 void
@@ -2420,6 +2459,7 @@ Viewport3D::boxSelectPoints()
     }
     // Note: selection is purely visual now — committing to Blast is explicit
     // via the right-click context menu.
+    notifyProviderSelectionChanged();
 }
 
 void
@@ -4608,7 +4648,7 @@ Viewport3D::refreshPointCloud()
         EffectInstancePtr effect = (*it)->getEffectInstance();
         if (!effect) continue;
 
-        DeepToPoints* dtp = dynamic_cast<DeepToPoints*>(effect.get());
+        PointCloudProvider* dtp = dynamic_cast<PointCloudProvider*>(effect.get());
         if (dtp) {
             PointCloudDataPtr cloud = dtp->getPointCloud();
             if (cloud && cloud->numPoints() > 0) {

@@ -157,6 +157,9 @@ private:
     void drawPointCloud() const;
     bool pickPointAtPosition(int screenX, int screenY);
     void boxSelectPoints();
+    // Mirror the current point selection to the Engine-side PointCloudProvider
+    // (CameraTracker scene-orientation tools etc.). Caller holds cloudMutex.
+    void notifyProviderSelectionChanged();
     void selectObjectAtPosition(int screenX, int screenY);
 
     /** Find the active Blast node (set during the render scan when scanning
