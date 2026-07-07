@@ -17,6 +17,28 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **CameraTracker matchmove suite (2026-07-07)** —
+  The CameraTracker node (in-tree since inception but never built) was revived and developed
+  across ~10 sessions in a separate worktree, then ingested here in one pass. **CameraTracker**
+  (`Engine/CameraTrackerNode.{h,cpp}`): multi-scale bucketed Harris detect → predictive windowed
+  KLT (~15 ms/frame at 4K) with adaptive re-detection → wide-baseline keyframes, RANSAC +
+  dominant-motion moving-object rejection, Huber bundle with optional path-smoothness prior,
+  two-stage solve, global re-triangulation, first-frame re-resect; focal from EXIF / footage
+  self-calibration / bundle trust region; planar quad tracker (points-first homography from the
+  point tracks, coplanar plane groups, manual-pin DOF ladder); manual tracking with drag
+  magnifier, per-track pattern boxes and a native nested track table (**new knob type
+  `KnobTracksTable`** + `KnobGuiTracksTable`/`CameraTrackerPanel`); scene orientation (set
+  origin/ground/scale from picked points); validated at parity against a commercial matchmove
+  ground truth (0.10% of path / 0.0028° rotation). **PointCloudGenerator** (new node): dense
+  cloud from footage + a solved camera (multi-keyframe bidirectional tracking, N-view DLT).
+  **LensWarp** (new node): undistort/redistort with the solve's exact libmv lens model
+  (solve → undistort → pinhole comp → redistort workflow). Solver core: Huber loss +
+  convergence fixes + smoothness prior in `libs/libmv` bundle, robust resection; **ceres
+  un-crippled** (-O2/OpenMP/Schur — solves in seconds). Core fix: null-deref guard for
+  overlay-bearing passthrough groups (`ViewerTabPrivate.cpp`). Viewport: provider-priority
+  point-cloud display + selection push to Engine nodes. Known-open: one hard forward-motion
+  clip collapses at init; planar corners-leaving-frame oscillation (fully-visible quads fine).
+
 - **MergeMat node + Project3D Crop/Project-On in viewport & render (2026-06-24, pushed `79d1fb988`)** —
   **MergeMat** (`Engine/Dev/Scene3D/MergeMat.{h,cpp}`, new) is classic-Nuke's "Merge Material": a
   `MaterialProvider` with A (foreground) + B (background) inputs, an Operation knob (none/replace/over/

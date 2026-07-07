@@ -123,10 +123,11 @@ Updated: 2026-06-24
 |------|-----------|--------|-------------|
 | **DevShuffle** | `fr.inria.built-in.DevShuffle` | Registered | Channel shuffle node |
 
-## Transform (1 node)
+## Transform (2 nodes)
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
+| **LensWarp** | `fr.inria.built-in.LensWarp` | Registered | Undistort / Redistort using the same libmv `PolynomialCameraIntrinsics` lens model the CameraTracker solve optimizes — zero model mismatch by construction. Undistort = closed-form per pixel (normalize by K → apply intrinsics → sample distorted source); Redistort = iterative model inversion → project through K. Bilinear, render-scale aware. Knobs: direction, focal (mm), sensor width, principal point, K1/K2/K3. Workflow: solve with distortion refinement → Undistort the plate → pinhole comp/render (Camera3D/ScanlineRender are exact pinhole) → Redistort the finished comp last. CameraTracker's "Create Undistort/Redistort Node" buttons drop one in preloaded with the solve's lens model. Round-trip validated (undistort→redistort cancels to the original plate). |
 | **SphericalTransform** | `fr.inria.built-in.SphericalTransform` | Registered | 8 projection types (equirect, cubemap, fisheye, etc.), rotation, interpolation. **Faces format** (cubemap mode): 6 per-face inputs in canonical order `-Z, +Z, -X, +X, -Y, +Y` enables split → edit → recombine HDRI workflows (each face is a separate image stream). |
 
 ## Color (3 nodes)
@@ -137,11 +138,12 @@ Updated: 2026-06-24
 | **ColorMatrix** | `fr.inria.built-in.ColorMatrix` | Registered | 3×3 color-channel matrix multiply with Invert toggle. Standard CC-pipeline building block. |
 | **Exposure** | `fr.inria.built-in.Exposure` | Registered | Exposure (stops) + linear multiplier. Operates in scene-linear. |
 
-## Other (1 node)
+## Matchmove / 3D Reconstruction (2 nodes)
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
-| **CameraTracker** | `fr.inria.built-in.CameraTracker` | Disabled (WIP) | 3D camera solve from 2D tracks (uses libmv, excluded from build — GCC 15 Eigen issues) |
+| **CameraTracker** | `fr.inria.built-in.CameraTracker` | Registered | 3D camera solve from 2D feature tracks (libmv `simple_pipeline`). **Track**: multi-scale Harris detect (Feature Scale Normal/Large/Both, bucketed for even coverage; Detection Sensitivity 0–100; Max Features default 1200) → threaded, windowed, **predictive** frame-to-frame KLT (global-shift seed + per-track velocity, small-first search — ~15 ms/frame tracking at 4K) with **adaptive re-detection** replenishing features as the camera moves. **Manual tracks** are first-class: place/select/drag with protected keys, Track Manual Fwd/Bwd, Solve Manual Only, per-track resizable pattern boxes, drag magnifier (5–10× zoom loupe), and a native nested track table (new `KnobTracksTable` knob type). **Planar regions**: draw quads in the viewer, tracked points-first (reference→frame RANSAC homography from the point tracks — drift-free; region matcher as bounded polish), auto-grouped coplanar planes pooling support, manual-pin DOF ladder, NxN grid baking into the track set, Create Cards From Planars. **Solve**: wide-baseline keyframe scan → two-frame init with RANSAC fundamental-matrix rejection (auto-rejects moving objects, no mask needed) + global dominant-motion rejection → complete reconstruction → Huber robust bundle with optional **Path Smoothness** prior (in-bundle constant-velocity prior for weak-parallax shots) → iterative bad-track rejection → **global re-triangulation** + first-frame re-resect + two-stage collapse rescue. **Lens self-knowledge**: Read Focal From EXIF (self-contained TIFF-IFD parser; exact focal + sensor from the 35mm-equivalent tag), Estimate Focal From Footage (multi-pair Mendonça–Cipolla self-calibration with confidence warning), bundle focal trust region (±10% on forward motion); focal refinement defaults OFF. **Interactive cleanup**: track health coloring (pink=unsolved, green→red by error), Refine Solve, Delete Bad Tracks / Delete Tracks in Region. **Scene orientation**: Set Origin / Set Ground Plane from selected points (2D plate viewer or 3D viewport picking), known-distance set-scale, Create Card At Selection. **Outputs**: upright Camera3D (correct filmback from the solve), sparse point cloud (`PointCloudProvider`, displays in the 3D viewport), solved points renderable through ScanlineRender as locator octahedra (direct stick check), Wavefront `.obj` export, per-frame residual `.csv`, generic 2D-track text import (validation), Create Undistort/Redistort (LensWarp) nodes. Validated at parity against a commercial matchmove ground truth on two clips (0.10% of path / 0.0028° rotation at true focal; 0.12% at self-estimated focal). ⚠️ Known-open: one difficult forward-motion clip still collapses at init (thin tracks); planar quads whose corners leave frame can oscillate (fully-visible quads are production-usable). Group `3D`. |
+| **PointCloudGenerator** | `fr.inria.built-in.PointCloudGenerator` | Registered | Dense point cloud from footage (input 0 = Source) + a solved camera (input 1 = Camera, any `CameraProvider`). Pre-renders the range to a grayscale cache, **multi-keyframe** seeds a dense grid every Keyframe Spacing frames (Max Points spread over the whole frame) → **bidirectional** threaded windowed KLT per batch (wide first-to-last baseline) → per-frame projection matrices from the known camera → N-view DLT triangulation (`libmv::NViewTriangulate`) with Min Triangulation Angle / Max Reprojection Error filters. Image output passes Source through (`isIdentity`); cloud via `PointCloudProvider` for the 3D viewport (selected node's cloud takes display priority). Honest limit: forward-motion shots triangulate sparsely near the focus of expansion (geometry, not a bug). Group `3D`. |
 
 ---
 
@@ -150,14 +152,14 @@ Updated: 2026-06-24
 | Category | Registered | Not Registered | Total |
 |----------|-----------|----------------|-------|
 | 3D Geometry | 8 | 0 | 8 |
-| 3D Scene & Render | 6 | 0 | 6 |
+| 3D Scene & Render | 10 | 0 | 10 |
 | Camera & Lighting | 4 | 0 | 4 |
-| Materials | 2 | 0 | 2 |
+| Materials | 3 | 0 | 3 |
 | Deep (Tier 1+2) | 17 | 0 | 17 |
 | Deep (Tier 3) | 0 | 19 | 19 |
 | Particles | 16 | 0 | 16 |
 | Channel | 1 | 0 | 1 |
-| Transform | 1 | 0 | 1 |
+| Transform | 2 | 0 | 2 |
 | Color | 3 | 0 | 3 |
-| Other | 1 | 0 | 1 |
-| **Total** | **59** | **19** | **78** |
+| Matchmove / 3D Reconstruction | 2 | 0 | 2 |
+| **Total** | **66** | **19** | **85** |
