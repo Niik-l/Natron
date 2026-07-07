@@ -128,9 +128,9 @@ endif()
 target_compile_definitions(mv PUBLIC LIBMV_NO_FAST_DETECTOR=)
 target_link_libraries(mv PUBLIC Ceres::ceres)
 set_target_properties(mv PROPERTIES POSITION_INDEPENDENT_CODE ON)
-# GCC 15 breaks Eigen template instantiation at -O2 (undefined references to
-# evaluator_base, triangular_assignment_loop, etc). Drop to -O1 until Eigen
-# upstream has a proper fix. See BUILD_ERRORS_LOG.md for details.
+# GCC 15 broke Eigen template instantiation at -O2 (undefined references to
+# evaluator_base, triangular_assignment_loop, etc). Testing whether GCC16 fixed it,
+# since -O1 makes the bundle/solve several times slower. See BUILD_ERRORS_LOG.md.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15")
-    target_compile_options(mv PRIVATE -O1)
+    target_compile_options(mv PRIVATE -O2)
 endif()

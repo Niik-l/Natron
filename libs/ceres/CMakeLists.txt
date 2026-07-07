@@ -188,7 +188,45 @@ set(ceres_SOURCES
     internal/ceres/dynamic_compressed_row_sparse_matrix.cc
     internal/ceres/evaluator.cc
     internal/ceres/file.cc
+    internal/ceres/generated/partitioned_matrix_view_2_2_2.cc
+    internal/ceres/generated/partitioned_matrix_view_2_2_3.cc
+    internal/ceres/generated/partitioned_matrix_view_2_2_4.cc
+    internal/ceres/generated/partitioned_matrix_view_2_2_d.cc
+    internal/ceres/generated/partitioned_matrix_view_2_3_3.cc
+    internal/ceres/generated/partitioned_matrix_view_2_3_4.cc
+    internal/ceres/generated/partitioned_matrix_view_2_3_6.cc
+    internal/ceres/generated/partitioned_matrix_view_2_3_9.cc
+    internal/ceres/generated/partitioned_matrix_view_2_3_d.cc
+    internal/ceres/generated/partitioned_matrix_view_2_4_3.cc
+    internal/ceres/generated/partitioned_matrix_view_2_4_4.cc
+    internal/ceres/generated/partitioned_matrix_view_2_4_8.cc
+    internal/ceres/generated/partitioned_matrix_view_2_4_9.cc
+    internal/ceres/generated/partitioned_matrix_view_2_4_d.cc
+    internal/ceres/generated/partitioned_matrix_view_2_d_d.cc
+    internal/ceres/generated/partitioned_matrix_view_4_4_2.cc
+    internal/ceres/generated/partitioned_matrix_view_4_4_3.cc
+    internal/ceres/generated/partitioned_matrix_view_4_4_4.cc
+    internal/ceres/generated/partitioned_matrix_view_4_4_d.cc
     internal/ceres/generated/partitioned_matrix_view_d_d_d.cc
+    internal/ceres/generated/schur_eliminator_2_2_2.cc
+    internal/ceres/generated/schur_eliminator_2_2_3.cc
+    internal/ceres/generated/schur_eliminator_2_2_4.cc
+    internal/ceres/generated/schur_eliminator_2_2_d.cc
+    internal/ceres/generated/schur_eliminator_2_3_3.cc
+    internal/ceres/generated/schur_eliminator_2_3_4.cc
+    internal/ceres/generated/schur_eliminator_2_3_6.cc
+    internal/ceres/generated/schur_eliminator_2_3_9.cc
+    internal/ceres/generated/schur_eliminator_2_3_d.cc
+    internal/ceres/generated/schur_eliminator_2_4_3.cc
+    internal/ceres/generated/schur_eliminator_2_4_4.cc
+    internal/ceres/generated/schur_eliminator_2_4_8.cc
+    internal/ceres/generated/schur_eliminator_2_4_9.cc
+    internal/ceres/generated/schur_eliminator_2_4_d.cc
+    internal/ceres/generated/schur_eliminator_2_d_d.cc
+    internal/ceres/generated/schur_eliminator_4_4_2.cc
+    internal/ceres/generated/schur_eliminator_4_4_3.cc
+    internal/ceres/generated/schur_eliminator_4_4_4.cc
+    internal/ceres/generated/schur_eliminator_4_4_d.cc
     internal/ceres/generated/schur_eliminator_d_d_d.cc
     internal/ceres/gradient_checker.cc
     internal/ceres/gradient_checking_cost_function.cc
@@ -247,6 +285,10 @@ set(ceres_SOURCES
 )
 add_library(ceres STATIC ${ceres_HEADERS} ${ceres_SOURCES})
 target_include_directories(ceres PUBLIC ../Eigen3 ../glog/src config include internal)
+# Solver performance: fixed-size Schur specializations enabled (the
+# CERES_RESTRICT_SCHUR_SPECIALIZATION define + d_d_d-only sources forced the slow
+# dynamic path for the 2-residual/3-point SfM problems the CameraTracker solves),
+# and OpenMP threading for jacobian/linear-solver evaluation.
 target_compile_definitions(ceres
     PUBLIC
         CERES_HAVE_PTHREAD
@@ -254,13 +296,20 @@ target_compile_definitions(ceres
         CERES_NO_CXSPARSE
         CERES_HAVE_RWLOCK
         CERES_NO_LAPACK
-        CERES_RESTRICT_SCHUR_SPECIALIZATION
         CERES_STD_UNORDERED_MAP
         CERES_STD_SHARED_PTR
 )
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_compile_definitions(ceres PUBLIC CERES_USE_OPENMP)
+    target_link_libraries(ceres PUBLIC OpenMP::OpenMP_CXX)
+endif()
 target_link_libraries(ceres PUBLIC glog::glog)
 set_target_properties(ceres PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# The GCC>=15 -O1 Eigen workaround is obsolete on GCC16 (the main tree moved back
+# to -O2, see CAMERATRACKER_CHANGES.md §8C.11); keep Ceres at -O2 explicitly since
+# it is the hottest code in the camera solve.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15")
-    target_compile_options(ceres PRIVATE -O1)
+    target_compile_options(ceres PRIVATE -O2)
 endif()
 add_library(Ceres::ceres ALIAS ceres)

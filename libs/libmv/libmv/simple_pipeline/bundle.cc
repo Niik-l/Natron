@@ -20,7 +20,9 @@
 
 #include "libmv/simple_pipeline/bundle.h"
 
+#include <cstdio>
 #include <map>
+#include <set>
 
 #include "ceres/ceres.h"
 #include "ceres/rotation.h"
@@ -161,6 +163,46 @@ struct OpenCVReprojectionError {
   const DistortionModelType distortion_model_;
   const double observed_x_;
   const double observed_y_;
+  const double weight_;
+};
+
+// Trajectory-smoothness prior over three consecutive cameras: penalizes the
+// discrete acceleration of the camera CENTER path,
+//   r = w * (C_prev - 2*C_mid + C_next),   C = -R^T t,
+// pulling the path toward locally constant velocity. Penalizing centers (not
+// the stored t) keeps rotation out of the prior. Lives inside the same LM
+// solve as the reprojection terms, so the result still explains the tracks —
+// this is a regularizer, not a post-filter.
+struct PathSmoothnessError {
+  explicit PathSmoothnessError(double weight) : weight_(weight) {}
+
+  template <typename T>
+  bool operator()(const T* const R_t_prev,
+                  const T* const R_t_mid,
+                  const T* const R_t_next,
+                  T* residuals) const {
+    T C_prev[3], C_mid[3], C_next[3];
+    CameraCenter(R_t_prev, C_prev);
+    CameraCenter(R_t_mid,  C_mid);
+    CameraCenter(R_t_next, C_next);
+    for (int i = 0; i < 3; ++i) {
+      residuals[i] = T(weight_) * (C_prev[i] - T(2.0) * C_mid[i] + C_next[i]);
+    }
+    return true;
+  }
+
+ private:
+  // C = -R^T t: rotate t by the INVERSE rotation (negated angle-axis), negate.
+  template <typename T>
+  static void CameraCenter(const T* const R_t, T* C) {
+    const T neg_axis[3] = { -R_t[0], -R_t[1], -R_t[2] };
+    T Rt_t[3];
+    ceres::AngleAxisRotatePoint(neg_axis, &R_t[3], Rt_t);
+    C[0] = -Rt_t[0];
+    C[1] = -Rt_t[1];
+    C[2] = -Rt_t[2];
+  }
+
   const double weight_;
 };
 
@@ -426,7 +468,12 @@ void EuclideanBundlePointsOnly(const DistortionModelType distortion_model,
   options.linear_solver_type = ceres::ITERATIVE_SCHUR;
   options.use_explicit_schur_complement = true;
   options.use_inner_iterations = true;
-  options.max_num_iterations = 100;
+  // The stock 100-iteration cap terminated EVERY bundle on this pipeline as
+  // NO_CONVERGENCE with the cost still falling (observed on a 120-frame solve) —
+  // the whole reconstruction ran on under-converged bundles. Give real headroom
+  // and let the relative-decrease tolerance stop early once progress stalls.
+  options.max_num_iterations = 300;
+  options.function_tolerance = 1e-5;
 
 #ifdef _OPENMP
   options.num_threads = omp_get_max_threads();
@@ -460,7 +507,10 @@ void EuclideanBundleCommonIntrinsics(
     const int bundle_constraints,
     EuclideanReconstruction *reconstruction,
     CameraIntrinsics *intrinsics,
-    BundleEvaluation *evaluation) {
+    BundleEvaluation *evaluation,
+    double path_smoothness_weight,
+    double focal_length_trust,
+    double huber_scale) {
   LG << "Original intrinsics: " << *intrinsics;
   vector<Marker> markers = tracks.AllMarkers();
 
@@ -500,6 +550,7 @@ void EuclideanBundleCommonIntrinsics(
   ceres::Problem problem(problem_options);
   int num_residuals = 0;
   bool have_locked_camera = false;
+  std::set<int> images_in_problem;   // for the path-smoothness prior triples
   for (int i = 0; i < markers.size(); ++i) {
     const Marker &marker = markers[i];
     EuclideanCamera *camera = reconstruction->CameraForImage(marker.image);
@@ -516,6 +567,12 @@ void EuclideanBundleCommonIntrinsics(
     // no affect on the final solution.
     // This way ceres is not gonna to go crazy.
     if (marker.weight != 0.0) {
+      // Robust (Huber) loss instead of plain least-squares. On weak-parallax /
+      // near-nodal shots, triangulated depths are ill-conditioned so many points
+      // carry large reprojection residuals; with an L2 loss those outliers dominate
+      // and yank the camera path (jitter). Huber grows linearly past ~2px so
+      // outliers are down-weighted rather than allowed to pull the solution, which
+      // is the robustness a plain libmv solve otherwise lacks.
       problem.AddResidualBlock(new ceres::AutoDiffCostFunction<
           OpenCVReprojectionError, 2, OFFSET_MAX, 6, 3>(
               new OpenCVReprojectionError(
@@ -523,7 +580,7 @@ void EuclideanBundleCommonIntrinsics(
                   marker.x,
                   marker.y,
                   marker.weight)),
-          NULL,
+          new ceres::HuberLoss(huber_scale),
           ceres_intrinsics,
           current_camera_R_t,
           &point->X(0));
@@ -540,6 +597,7 @@ void EuclideanBundleCommonIntrinsics(
       }
 
       zero_weight_tracks_flags[marker.track] = false;
+      images_in_problem.insert(marker.image);
       num_residuals++;
     }
   }
@@ -548,6 +606,37 @@ void EuclideanBundleCommonIntrinsics(
   if (!num_residuals) {
     LG << "Skipping running minimizer with zero residuals";
     return;
+  }
+
+  // Path-smoothness prior: one residual block per consecutive-INTEGER-frame
+  // triple whose cameras all take part in the problem. Consecutive frames only
+  // — bridging a resection gap with this term would fabricate motion across it.
+  if (path_smoothness_weight > 0.0) {
+    int num_smoothness = 0;
+    for (std::set<int>::const_iterator it = images_in_problem.begin();
+         it != images_in_problem.end(); ++it) {
+      const int image = *it;
+      if (!images_in_problem.count(image - 1) ||
+          !images_in_problem.count(image + 1)) {
+        continue;
+      }
+      EuclideanCamera *prev = reconstruction->CameraForImage(image - 1);
+      EuclideanCamera *mid  = reconstruction->CameraForImage(image);
+      EuclideanCamera *next = reconstruction->CameraForImage(image + 1);
+      if (!prev || !mid || !next) {
+        continue;
+      }
+      problem.AddResidualBlock(
+          new ceres::AutoDiffCostFunction<PathSmoothnessError, 3, 6, 6, 6>(
+              new PathSmoothnessError(path_smoothness_weight)),
+          NULL,
+          &all_cameras_R_t[prev->image](0),
+          &all_cameras_R_t[mid->image](0),
+          &all_cameras_R_t[next->image](0));
+      num_smoothness++;
+    }
+    LG << "Added " << num_smoothness << " path-smoothness residuals, weight "
+       << path_smoothness_weight;
   }
 
   if (intrinsics->GetDistortionModelType() == DISTORTION_MODEL_DIVISION &&
@@ -587,6 +676,19 @@ void EuclideanBundleCommonIntrinsics(
       new ceres::SubsetParameterization(OFFSET_MAX, constant_intrinsics);
 
     problem.SetParameterization(ceres_intrinsics, subset_parameterization);
+
+    // Bound the focal length when it is being refined. On weak/noisy track sets the
+    // focal can run away (observed 35mm -> 139mm), which corrupts the reconstruction
+    // and can't be undone by a later re-bundle. Keep it within a trust region of the
+    // value it entered this pass with; callers pass a tight band (e.g. 1.1) when the
+    // motion geometry barely constrains focal (forward motion), the default 2.0
+    // is just a runaway guard.
+    if (bundle_intrinsics & BUNDLE_FOCAL_LENGTH) {
+      const double f0 = ceres_intrinsics[OFFSET_FOCAL_LENGTH];
+      const double trust = focal_length_trust > 1.0 ? focal_length_trust : 1.0001;
+      problem.SetParameterLowerBound(ceres_intrinsics, OFFSET_FOCAL_LENGTH, f0 / trust);
+      problem.SetParameterUpperBound(ceres_intrinsics, OFFSET_FOCAL_LENGTH, f0 * trust);
+    }
   }
 
   // Configure the solver.
@@ -596,7 +698,10 @@ void EuclideanBundleCommonIntrinsics(
   options.linear_solver_type = ceres::ITERATIVE_SCHUR;
   options.use_explicit_schur_complement = true;
   options.use_inner_iterations = true;
-  options.max_num_iterations = 100;
+  // See the comment in the points-only bundle above: the 100-iteration cap left
+  // every bundle NO_CONVERGENCE mid-descent. Real headroom + early-stop tolerance.
+  options.max_num_iterations = 300;
+  options.function_tolerance = 1e-5;
 
 #ifdef _OPENMP
   options.num_threads = omp_get_max_threads();
@@ -608,6 +713,16 @@ void EuclideanBundleCommonIntrinsics(
   ceres::Solve(options, &problem, &summary);
 
   LG << "Final report:\n" << summary.FullReport();
+
+  // The LG/glog report above is invisible in the Natron build, so surface a
+  // one-line convergence summary on stderr. NO_CONVERGENCE here means the
+  // camera path may simply be under-converged (hit max_num_iterations), which
+  // masquerades as a solve-quality problem downstream.
+  fprintf(stderr, "libmv bundle: %s, %d iters, cost %.6g -> %.6g, %d residuals\n",
+          ceres::TerminationTypeToString(summary.termination_type),
+          static_cast<int>(summary.iterations.size()),
+          summary.initial_cost, summary.final_cost, num_residuals);
+  fflush(stderr);
 
   // Copy rotations and translations back.
   UnpackCamerasRotationAndTranslation(tracks,

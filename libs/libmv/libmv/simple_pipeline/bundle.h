@@ -120,7 +120,25 @@ void EuclideanBundleCommonIntrinsics(
     const int bundle_constraints,
     EuclideanReconstruction *reconstruction,
     CameraIntrinsics *intrinsics,
-    BundleEvaluation *evaluation = NULL);
+    BundleEvaluation *evaluation = NULL,
+    // Optional trajectory-smoothness prior ("optimize camera path
+    // smoothness"): adds residuals w*(C_{i-1} - 2*C_i + C_{i+1}) on camera
+    // CENTERS over consecutive-frame triples — a constant-velocity prior that
+    // regularizes the weakly-observed per-frame translation without a
+    // post-process filter. 0 disables. The weight is in reprojection-residual
+    // units per scene unit; callers should scale-normalize it (e.g.
+    // lambda * nSteps / pathLength) so behavior is gauge-invariant.
+    double path_smoothness_weight = 0.0,
+    // Multiplicative trust region for focal refinement: when BUNDLE_FOCAL_LENGTH
+    // is set, the focal is bounded to [f0/trust, f0*trust] around its incoming
+    // value. Default 2.0 is a runaway guard; callers refining focal in weakly
+    // constrained geometry (forward motion — reprojection error is nearly flat
+    // in focal there, so the optimizer drifts) should pass a tight band like 1.1.
+    double focal_length_trust = 2.0,
+    // Huber robust-loss scale (px). 2.0 suits a first bundle where residuals
+    // are still large; final polish rounds on a converged solve (residuals
+    // ~0.4-0.8px) should tighten to ~1.2 so stragglers stop pulling the path.
+    double huber_scale = 2.0);
 
 /*!
     Refine camera poses and 3D coordinates using bundle adjustment.
