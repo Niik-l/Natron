@@ -96,6 +96,7 @@ KnobFactory::loadBultinKnobs()
     _loadedKnobs.insert( knobFactoryEntry<KnobPath>() );
     _loadedKnobs.insert( knobFactoryEntry<KnobPage>() );
     _loadedKnobs.insert( knobFactoryEntry<KnobLayers>() );
+    _loadedKnobs.insert( knobFactoryEntry<KnobTracksTable>() );
     _loadedKnobs.insert( knobFactoryEntry<KnobShuffle>() );
     _loadedKnobs.insert( knobFactoryEntry<KnobGradient>() );
     _loadedKnobs.insert( knobFactoryEntry<KnobPassTable>() );

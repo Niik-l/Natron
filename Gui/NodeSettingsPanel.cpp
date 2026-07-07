@@ -34,6 +34,8 @@
 
 #include <QStyle>
 #include <QVBoxLayout>
+#include <QGridLayout>
+#include <QTabWidget>
 
 #include "Global/FStreamsSupport.h"
 
@@ -186,6 +188,9 @@ NodeSettingsPanel::initializeExtraGui(QVBoxLayout* layout)
                 MaterialOverridePickerWidget* picker = new MaterialOverridePickerWidget(ov, this);
                 layout->addWidget(picker);
             }
+            // (CameraTracker's manual-track table is a KNOB now — KnobTracksTable
+            // + KnobGuiTracksTable — nested natively inside the Manual Tracks
+            // group; no panel injection needed.)
         }
     }
 }

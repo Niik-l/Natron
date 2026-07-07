@@ -1220,6 +1220,87 @@ private:
     static const std::string _typeNameStr;
 };
 
+/**
+ * @brief 2D-track list table (CameraTracker manual tracks). A table KNOB so it
+ * nests inside a knob group like any other parameter (indented, collapsing
+ * with the group) — columns: Label | Frames | X | Y | Error. Only X/Y are
+ * editable inline; the owning node keeps the rows in sync with its track data
+ * (the knob is a non-persistent view, not the storage).
+ **/
+class KnobTracksTable
+    : public KnobTable
+{
+    Q_DECLARE_TR_FUNCTIONS(KnobTracksTable)
+
+public:
+
+    static KnobHelper * BuildKnob(KnobHolder* holder,
+                                  const std::string &label,
+                                  int dimension,
+                                  bool declaredByPlugin = true)
+    {
+        return new KnobTracksTable(holder, label, dimension, declaredByPlugin);
+    }
+
+    KnobTracksTable(KnobHolder* holder,
+                    const std::string &description,
+                    int dimension,
+                    bool declaredByPlugin)
+        : KnobTable(holder, description, dimension, declaredByPlugin)
+    {
+    }
+
+    virtual ~KnobTracksTable()
+    {
+    }
+
+    virtual int getColumnsCount() const OVERRIDE FINAL
+    {
+        return 5;
+    }
+
+    virtual std::string getColumnLabel(int col) const OVERRIDE FINAL
+    {
+        switch (col) {
+        case 0: return tr("Label").toStdString();
+        case 1: return tr("Frames").toStdString();
+        case 2: return tr("X").toStdString();
+        case 3: return tr("Y").toStdString();
+        case 4: return tr("Error").toStdString();
+        default: return std::string();
+        }
+    }
+
+    virtual bool isCellEnabled(int /*row*/,
+                               int /*col*/,
+                               const QStringList& /*values*/) const OVERRIDE FINAL WARN_UNUSED_RETURN
+    {
+        return true;
+    }
+
+    virtual bool isColumnEditable(int col) OVERRIDE FINAL WARN_UNUSED_RETURN
+    {
+        // Only the position at the current frame is editable inline.
+        return col == 2 || col == 3;
+    }
+
+    virtual bool useEditButton() const OVERRIDE FINAL
+    {
+        return false;
+    }
+
+    static const std::string & typeNameStatic() WARN_UNUSED_RETURN;
+
+private:
+
+    virtual const std::string & typeName() const OVERRIDE FINAL
+    {
+        return typeNameStatic();
+    }
+
+    static const std::string _typeNameStr;
+};
+
 NATRON_NAMESPACE_EXIT
 
 #endif // NATRON_ENGINE_KNOBTYPES_H

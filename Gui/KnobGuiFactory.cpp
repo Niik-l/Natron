@@ -51,6 +51,7 @@
 #include "Gui/KnobGuiShuffle.h"
 #include "Gui/KnobGuiGradient.h"
 #include "Gui/KnobGuiPassTable.h"
+#include "Gui/KnobGuiTracksTable.h"
 #include "Gui/DockablePanel.h"
 
 NATRON_NAMESPACE_ENTER
@@ -112,6 +113,7 @@ KnobGuiFactory::loadBultinKnobs()
     _loadedKnobs.insert( knobGuiFactoryEntry<KnobShuffle, KnobGuiShuffle>() );
     _loadedKnobs.insert( knobGuiFactoryEntry<KnobGradient, KnobGuiGradient>() );
     _loadedKnobs.insert( knobGuiFactoryEntry<KnobPassTable, KnobGuiPassTable>() );
+    _loadedKnobs.insert( knobGuiFactoryEntry<KnobTracksTable, KnobGuiTracksTable>() );
 }
 
 KnobGui *

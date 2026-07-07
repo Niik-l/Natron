@@ -2582,6 +2582,13 @@ KnobLayers::typeNameStatic()
     return _typeNameStr;
 }
 
+const std::string KnobTracksTable::_typeNameStr("TracksTable");
+const std::string&
+KnobTracksTable::typeNameStatic()
+{
+    return _typeNameStr;
+}
+
 NATRON_NAMESPACE_EXIT
 
 NATRON_NAMESPACE_USING
