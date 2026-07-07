@@ -169,6 +169,11 @@ ViewerTabPrivate::getOverlayTransform(double time,
     NodeGroup* isGroupNode = dynamic_cast<NodeGroup*>(targetNode);
     if (isGroupNode) {
         NodePtr output = isGroupNode->getOutputNodeInput(false);
+        if (!output) {
+            // Passthrough group with nothing feeding its Output (e.g. CameraTracker):
+            // no overlay transform to contribute.
+            return false;
+        }
         return getOverlayTransform(time, view, output, currentNode, transform);
     }
     if ( currentNode == targetNode  ) {
@@ -293,7 +298,12 @@ ViewerTabPrivate::getTimeTransform(double time,
     NodeGroup* isGroupNode = dynamic_cast<NodeGroup*>(targetNode);
     if (isGroupNode) {
         NodePtr output = isGroupNode->getOutputNodeInput(false);
-        EffectInstance* outputNode = output->getEffectInstance().get();
+        if (!output) {
+            // Group's Output has nothing upstream (e.g. a passthrough group whose
+            // Output is fed only by a GroupInput, like CameraTracker). No time
+            // transform contributed by this group.
+            return false;
+        }
         return getTimeTransform(time, view, output, currentNode, newTime);
     }
     if ( currentNode == targetNode  ) {
