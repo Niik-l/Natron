@@ -27,6 +27,8 @@
 #include "Global/Macros.h"
 
 #include "Engine/NodeGroup.h"
+#include "Engine/Dev/Deep/PointCloudProvider.h"
+#include "Engine/Dev/Scene3D/MeshData.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -34,6 +36,7 @@ struct CameraTrackerNodePrivate;
 
 class CameraTrackerNode
     : public NodeGroup
+    , public PointCloudProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -87,8 +90,55 @@ public:
 
     virtual bool hasOverlay() const OVERRIDE FINAL { return true; }
 
+    // PointCloudProvider: expose the solved sparse 3D points to the 3D viewport
+    // as a point cloud, in the same normalized space as the
+    // Create Camera3D output so cloud and camera register.
+    virtual PointCloudDataPtr getPointCloud() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+
+    // Receives the 3D viewport's point selection (indices into getPointCloud()
+    // order == solvedPoints order). Powers the scene-orientation tools
+    // (Set Origin / Set Ground Plane) and snap-to-selection.
+    virtual void setViewportSelection(const std::vector<int>& indices) OVERRIDE FINAL;
+
+    // Solved 3D points as renderable locator geometry (a small octahedron per
+    // point, in the same output gauge as Create Camera3D / the viewport cloud).
+    // Consumed by ScanlineRender so track stick can be verified by rendering
+    // the locators over the plate through the solved camera. Null if unsolved.
+    MeshDataPtr getLocatorMesh() const;
+
+    // ==== Panel API (Gui/CameraTrackerPanel — the Tracker-style track table) ====
+    struct ManualTrackInfo
+    {
+        int id;
+        int nFrames, firstFrame, lastFrame;
+        double x, y;      // marker at (or nearest before) the query time
+        double error;     // mean reprojection px; -1 unsolved, -2 rejected
+        bool selected;
+    };
+    std::vector<ManualTrackInfo> getManualTracksInfo(double time) const;
+    void panelSelectManualTrack(int id);
+    void panelDeleteManualTrack(int id);
+    void panelSetManualTrackPosition(int id, double time, double x, double y);
+    void panelAddManualTrack(double time);
+    // Re-emits manualTracksChanged (signals are protected; the private impl and
+    // the Gui panel trigger refreshes through this).
+    void notifyManualTracksChanged();
+    // Open state of the Manual Tracks group — the settings-panel table shows
+    // and hides with it so group + table read as one section.
+    bool isManualSectionOpen() const;
+
+Q_SIGNALS:
+    // Manual track set / positions / selection / errors changed — the settings
+    // panel's table listens to this.
+    void manualTracksChanged();
+
+public:
+
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual void onKnobsLoaded() OVERRIDE FINAL;
+
+    // Auto-fill the tracking frame range from the connected clip on connect.
+    virtual void onInputChanged(int inputNo) OVERRIDE FINAL;
 
     virtual bool knobChanged(KnobI* k,
                              ValueChangedReasonEnum reason,
@@ -102,6 +152,12 @@ private:
     virtual bool onOverlayPenDown(double time, const RenderScale & renderScale, ViewIdx view,
                                   const QPointF & viewportPos, const QPointF & pos,
                                   double pressure, double timestamp, PenType pen) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual bool onOverlayPenMotion(double time, const RenderScale & renderScale, ViewIdx view,
+                                    const QPointF & viewportPos, const QPointF & pos,
+                                    double pressure, double timestamp) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual bool onOverlayPenUp(double time, const RenderScale & renderScale, ViewIdx view,
+                                const QPointF & viewportPos, const QPointF & pos,
+                                double pressure, double timestamp) OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     std::unique_ptr<CameraTrackerNodePrivate> _imp;
 };

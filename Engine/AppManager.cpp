@@ -132,6 +132,8 @@
 #include "Engine/RotoSmear.h"
 #include "Engine/StandardPaths.h"
 #include "Engine/TrackerNode.h"
+#include "Engine/CameraTrackerNode.h"
+#include "Engine/PointCloudGeneratorNode.h"
 #include "Engine/ThreadPool.h"
 #include "Engine/Utils.h"
 #include "Engine/ViewIdx.h"
@@ -161,6 +163,7 @@
 #include "Dev/Channel/DevShuffle.h"
 
 // Dev nodes — Transform
+#include "Dev/Transform/LensWarp.h"
 #include "Dev/Transform/SphericalTransform.h"
 
 // Dev nodes — Color
@@ -1664,6 +1667,8 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
 
     // Dev nodes — 3D System
     registerBuiltInPlugin<Camera3DNode>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<CameraTrackerNode>(QString::fromUtf8(NATRON_IMAGES_PATH "trackerNodeIcon.png"), false, false);
+    registerBuiltInPlugin<PointCloudGeneratorNode>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Sphere3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Card3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Cube3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
@@ -1721,6 +1726,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<ParticleAttribute>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
     // Dev nodes — Transform
+    registerBuiltInPlugin<LensWarp>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/transform_grouping_2.png"), false, false);
     registerBuiltInPlugin<SphericalTransform>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/transform_grouping_2.png"), false, false);
 
     // Dev nodes — Color

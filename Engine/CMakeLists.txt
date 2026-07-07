@@ -119,21 +119,19 @@ list(APPEND NatronEngine_SOURCES
     ../Global/StrUtils.cpp
     ../libs/SequenceParsing/SequenceParsing.cpp
 )
-# CameraTrackerNode is WIP and depends on libmv Eigen templates that break
-# with GCC 15. Exclude from build until ready.
-list(FILTER NatronEngine_SOURCES EXCLUDE REGEX "CameraTrackerNode\\.cpp$")
-list(FILTER NatronEngine_HEADERS EXCLUDE REGEX "CameraTrackerNode\\.h$")
-
 add_library(NatronEngine STATIC ${NatronEngine_HEADERS} ${NatronEngine_SOURCES})
 
-# GCC 15 breaks Eigen template instantiation at -O2. Apply -O1 to files
-# that include Eigen/libmv headers.
+# GCC 15 broke Eigen template instantiation at -O2; GCC 16 fixed it, and -O1 makes
+# tracking/solving several times slower, so these build at -O2 now. If the final
+# link fails with undefined references to Eigen internals, revert these to -O1.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15")
     set_source_files_properties(
         TrackerContext.cpp
         TrackerContextPrivate.cpp
         TrackerFrameAccessor.cpp
-        PROPERTIES COMPILE_OPTIONS "-O1"
+        CameraTrackerNode.cpp
+        PointCloudGeneratorNode.cpp
+        PROPERTIES COMPILE_OPTIONS "-O2"
     )
 endif()
 
