@@ -170,8 +170,16 @@ private:
     /** Show the Blast context menu at the given global position. Called from
      *  mouseReleaseEvent on right-button release ONLY when the click had no
      *  drag (so right-drag for navigation doesn't trigger the menu).
-     *  No-op when there's no active Blast in the scene. */
+     *  Always shows; actions that need an active Blast or a selection are
+     *  disabled when unavailable. */
     void showBlastContextMenu(const QPoint& globalPos);
+
+    /** Houdini-style point deletion: create a Blast node (Selection mode)
+     *  downstream of the currently displayed point-cloud provider, seeded
+     *  with the current viewport selection. Each call chains a new Blast,
+     *  so every delete is individually undoable/disableable. Bound to the
+     *  Delete key and the context-menu "Create Blast from Selection". */
+    void createBlastFromSelection();
 
     // Per-node draw methods (called from paintGL via SceneGraph traversal)
     void drawMeshNode(const SceneNode& sn) const;

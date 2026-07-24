@@ -100,6 +100,15 @@ public:
     virtual PointCloudDataPtr getPointCloud() const OVERRIDE;
     void computeFilteredCloud(double time);
 
+    /** Deep output: rebuilds the originating DeepToPoints' source deep image
+     *  minus the samples whose points this Blast chain deleted, so a blasted
+     *  cloud can go straight back into deep compositing (DeepRecolor,
+     *  DeepMerge, DeepFlatten, DeepWrite...). Point IDs carried through the
+     *  chain map surviving points onto deep samples; samples that were never
+     *  in the cloud (alpha≈0 skipped, density-thinned) are kept untouched.
+     *  Returns null when the cloud didn't originate from a DeepToPoints. */
+    DeepImagePtr getDeepImage() const;
+
     // Get current blast bounds as an axis-aligned bbox (encloses the rotated
     // OBB when a Cube3D is used as bounds input). Useful for ROI / culling.
     bool getBlastBounds(double time, float outMin[3], float outMax[3]) const;
@@ -141,12 +150,14 @@ public:
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
+    virtual void onInputChanged(int inputNo) OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     std::unique_ptr<BlastPrivate> _imp;
     mutable PointCloudDataPtr _lastOutput;
+    mutable DeepImagePtr _lastDeepImage;
 };
 
 NATRON_NAMESPACE_EXIT

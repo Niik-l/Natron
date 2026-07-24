@@ -146,6 +146,22 @@ DeepToPoints::initializeKnobs()
     _imp->info = info;
 }
 
+void
+DeepToPoints::onInputChanged(int inputNo)
+{
+    // Drop the cached point cloud when the Deep input is disconnected,
+    // otherwise the 3D viewport keeps drawing the last converted cloud.
+    if (inputNo == 0 && !getInput(0)) {
+        _lastPointCloud.reset();
+        KnobStringPtr infoKnob = _imp->info.lock();
+        if (infoKnob) infoKnob->setValue("Connect a deep node to the input.");
+        if (getApp()) {
+            getApp()->redrawAllViewers();
+        }
+    }
+    EffectInstance::onInputChanged(inputNo);
+}
+
 StatusEnum
 DeepToPoints::getRegionOfDefinition(U64 /*hash*/,
                                     double time,
@@ -288,7 +304,10 @@ DeepToPoints::render(const RenderActionArgs& args)
                 g = std::max(0.0f, std::min(1.0f, g));
                 b = std::max(0.0f, std::min(1.0f, b));
 
-                cloud->addPoint(px, py, pz, r, g, b);
+                // The running sample index is the point's source ID — Blast
+                // chains carry it through so the surviving set can be mapped
+                // back onto the deep image (Blast::getDeepImage()).
+                cloud->addPoint(px, py, pz, r, g, b, (unsigned long long)sampleIndex);
 
                 // Update bounding box
                 if (px < bboxMin[0]) bboxMin[0] = px;

@@ -33,8 +33,11 @@
 #include "Engine/Node.h"
 #include "Engine/TimeLine.h"
 #include "Engine/AppInstance.h"
+#include "DeepImage.h"
 #include "DeepToPoints.h"
+#include "DeepUtils.h"
 #include "PointCloudProvider.h"
+#include "../DotUtils.h"
 #include "../Scene3D/Cube3D.h"
 #include "../Scene3D/RotationConventions.h"
 
@@ -287,8 +290,10 @@ Blast::initializeKnobs()
 bool
 Blast::knobChanged(KnobI* /*k*/, ValueChangedReasonEnum /*reason*/, ViewSpec /*view*/, double /*time*/, bool /*originatedFromMainThread*/)
 {
-    // Invalidate cached output — will recompute on next getPointCloud() call.
+    // Invalidate cached outputs — recomputed on next getPointCloud() /
+    // getDeepImage() call.
     _lastOutput.reset();
+    _lastDeepImage.reset();
     return true;
 }
 
@@ -439,6 +444,21 @@ Blast::getRegionOfDefinition(U64 /*hash*/,
     return input->getRegionOfDefinition_public(input->getHash(), time, scale, view, rod, &isProject);
 }
 
+void
+Blast::onInputChanged(int inputNo)
+{
+    // Recompute (or clear) the cached outputs when the points input changes,
+    // otherwise the 3D viewport keeps drawing the previous cloud.
+    if (inputNo == 0) {
+        _lastOutput.reset();
+        _lastDeepImage.reset();
+        if (getApp()) {
+            getApp()->redrawAllViewers();
+        }
+    }
+    EffectInstance::onInputChanged(inputNo);
+}
+
 PointCloudDataPtr
 Blast::getPointCloud() const
 {
@@ -454,18 +474,112 @@ Blast::getPointCloud() const
     return _lastOutput;
 }
 
+DeepImagePtr
+Blast::getDeepImage() const
+{
+    if (_lastDeepImage) return _lastDeepImage;
+
+    // Walk up the (possibly chained) Blast inputs to the originating
+    // DeepToPoints — the deep output is only defined for clouds that came
+    // from deep data.
+    EffectInstancePtr eff = skipDots(getInput(0));
+    while (eff) {
+        Blast* b = dynamic_cast<Blast*>(eff.get());
+        if (!b) break;
+        eff = skipDots(b->getInput(0));
+    }
+    DeepToPoints* dtp = eff ? dynamic_cast<DeepToPoints*>(eff.get()) : nullptr;
+    if (!dtp) return DeepImagePtr();
+
+    DeepImagePtr srcDeep = getDeepImageFromEffect(dtp->getInput(0).get());
+    PointCloudDataPtr origCloud = dtp->getPointCloud();
+    if (!srcDeep || !origCloud || !origCloud->hasIds()) return DeepImagePtr();
+
+    // Deleted = IDs present in the original cloud that did not survive this
+    // chain. Samples that were never in the cloud (alpha≈0 skipped,
+    // density-thinned) are not in the original ID set, so they are kept.
+    std::unordered_set<unsigned long long> deleted;
+    for (std::size_t i = 0; i < origCloud->numPoints(); ++i) {
+        deleted.insert(origCloud->idAt(i));
+    }
+    PointCloudDataPtr myCloud = getPointCloud();
+    if (myCloud && myCloud->hasIds()) {
+        for (std::size_t i = 0; i < myCloud->numPoints(); ++i) {
+            deleted.erase(myCloud->idAt(i));
+        }
+    }
+
+    if (deleted.empty()) {
+        // Nothing removed — share the source deep image.
+        _lastDeepImage = srcDeep;
+        return _lastDeepImage;
+    }
+
+    // Rebuild the deep image minus the deleted samples. Samples are
+    // enumerated in the same order DeepToPoints assigns IDs (row, column,
+    // sample), so the running index matches the point IDs exactly.
+    const RectI& dw = srcDeep->getDataWindow();
+    int nChannels = srcDeep->getNumChannels();
+    DeepImagePtr result = std::make_shared<DeepImage>(dw, nChannels,
+                                                      srcDeep->getChannelNames());
+
+    unsigned long long id = 0;
+    for (int y = dw.y1; y < dw.y2; ++y) {
+        for (int x = dw.x1; x < dw.x2; ++x) {
+            int nSamples = srcDeep->getSampleCount(x, y);
+            int kept = 0;
+            for (int s = 0; s < nSamples; ++s, ++id) {
+                if (!deleted.count(id)) ++kept;
+            }
+            result->setSampleCount(x, y, kept);
+        }
+    }
+    result->allocateFromSampleCounts();
+
+    id = 0;
+    for (int y = dw.y1; y < dw.y2; ++y) {
+        for (int x = dw.x1; x < dw.x2; ++x) {
+            int nSamples = srcDeep->getSampleCount(x, y);
+            if (nSamples == 0) continue;
+            const float* src = srcDeep->getSampleData(x, y);
+            float* dst = result->getSampleData(x, y); // null when kept == 0
+            int k = 0;
+            for (int s = 0; s < nSamples; ++s, ++id) {
+                if (deleted.count(id)) continue;
+                for (int c = 0; c < nChannels; ++c) {
+                    dst[k * nChannels + c] = src[s * nChannels + c];
+                }
+                ++k;
+            }
+        }
+    }
+
+    _lastDeepImage = result;
+    return _lastDeepImage;
+}
+
 void
 Blast::computeFilteredCloud(double time)
 {
+    // The deep output is derived from the filtered cloud — invalidate it
+    // whenever the cloud is recomputed.
+    _lastDeepImage.reset();
+
     EffectInstancePtr input = getInput(0);
-    if (!input) return;
+    if (!input) {
+        _lastOutput.reset();
+        return;
+    }
 
     // Fetch upstream point cloud via the generic provider interface.
     // Works for any node implementing PointCloudProvider (DeepToPoints, an
     // upstream Blast, future Scatter, ParticleInstance-as-cloud, etc.).
     PointCloudProvider* provider = dynamic_cast<PointCloudProvider*>(input.get());
     PointCloudDataPtr srcCloud = provider ? provider->getPointCloud() : PointCloudDataPtr();
-    if (!srcCloud || srcCloud->numPoints() == 0) return;
+    if (!srcCloud || srcCloud->numPoints() == 0) {
+        _lastOutput.reset();
+        return;
+    }
 
     int mode = _imp->mode.lock()->getValue();
     bool invert = _imp->invert.lock()->getValue();
@@ -497,10 +611,18 @@ Blast::computeFilteredCloud(double time)
 
             bool keep = invert ? inside : !inside;
             if (keep) {
-                outCloud->addPoint(px, py, pz,
-                                   srcData[i * stride + 3],
-                                   srcData[i * stride + 4],
-                                   srcData[i * stride + 5]);
+                if (srcCloud->hasIds()) {
+                    outCloud->addPoint(px, py, pz,
+                                       srcData[i * stride + 3],
+                                       srcData[i * stride + 4],
+                                       srcData[i * stride + 5],
+                                       srcCloud->idAt(i));
+                } else {
+                    outCloud->addPoint(px, py, pz,
+                                       srcData[i * stride + 3],
+                                       srcData[i * stride + 4],
+                                       srcData[i * stride + 5]);
+                }
                 if (px < outMin[0]) outMin[0] = px;
                 if (py < outMin[1]) outMin[1] = py;
                 if (pz < outMin[2]) outMin[2] = pz;
@@ -540,10 +662,18 @@ Blast::computeFilteredCloud(double time)
                 float px = srcData[i * stride + 0];
                 float py = srcData[i * stride + 1];
                 float pz = srcData[i * stride + 2];
-                outCloud->addPoint(px, py, pz,
-                                   srcData[i * stride + 3],
-                                   srcData[i * stride + 4],
-                                   srcData[i * stride + 5]);
+                if (srcCloud->hasIds()) {
+                    outCloud->addPoint(px, py, pz,
+                                       srcData[i * stride + 3],
+                                       srcData[i * stride + 4],
+                                       srcData[i * stride + 5],
+                                       srcCloud->idAt(i));
+                } else {
+                    outCloud->addPoint(px, py, pz,
+                                       srcData[i * stride + 3],
+                                       srcData[i * stride + 4],
+                                       srcData[i * stride + 5]);
+                }
                 if (px < outMin[0]) outMin[0] = px;
                 if (py < outMin[1]) outMin[1] = py;
                 if (pz < outMin[2]) outMin[2] = pz;
@@ -576,6 +706,10 @@ Blast::computeFilteredCloud(double time)
 StatusEnum
 Blast::render(const RenderActionArgs& args)
 {
+    // The deep output is derived from the filtered cloud — invalidate it
+    // whenever the cloud is recomputed.
+    _lastDeepImage.reset();
+
     // Get upstream point cloud via the generic provider interface.
     EffectInstancePtr input = getInput(0);
     if (!input) return eStatusFailed;
@@ -633,7 +767,11 @@ Blast::render(const RenderActionArgs& args)
                 float r = srcData[i * stride + 3];
                 float g = srcData[i * stride + 4];
                 float b = srcData[i * stride + 5];
-                outCloud->addPoint(px, py, pz, r, g, b);
+                if (srcCloud->hasIds()) {
+                    outCloud->addPoint(px, py, pz, r, g, b, srcCloud->idAt(i));
+                } else {
+                    outCloud->addPoint(px, py, pz, r, g, b);
+                }
                 ++keptCount;
 
                 // Update bounds
@@ -668,7 +806,11 @@ Blast::render(const RenderActionArgs& args)
                 float r  = srcData[i * stride + 3];
                 float g  = srcData[i * stride + 4];
                 float b  = srcData[i * stride + 5];
-                outCloud->addPoint(px, py, pz, r, g, b);
+                if (srcCloud->hasIds()) {
+                    outCloud->addPoint(px, py, pz, r, g, b, srcCloud->idAt(i));
+                } else {
+                    outCloud->addPoint(px, py, pz, r, g, b);
+                }
                 ++keptCount;
                 if (px < outMin[0]) outMin[0] = px;
                 if (py < outMin[1]) outMin[1] = py;

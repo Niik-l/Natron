@@ -51,6 +51,7 @@ public:
     void clear()
     {
         _data.clear();
+        _ids.clear();
         _numPoints = 0;
     }
 
@@ -69,6 +70,23 @@ public:
         _data.push_back(b);
         ++_numPoints;
     }
+
+    /** Add a point carrying a source ID (e.g. the deep sample index it came
+     *  from). Producers must be consistent: either every point of a cloud has
+     *  an ID or none does — hasIds() relies on the counts matching. */
+    void addPoint(float x, float y, float z, float r, float g, float b,
+                  unsigned long long id)
+    {
+        addPoint(x, y, z, r, g, b);
+        _ids.push_back(id);
+    }
+
+    /** True when every point carries a source ID (see addPoint with id).
+     *  Filters (Blast) propagate IDs so a chain can map surviving points
+     *  back to the original source (e.g. deep samples). */
+    bool hasIds() const { return _numPoints > 0 && _ids.size() == _numPoints; }
+
+    unsigned long long idAt(std::size_t i) const { return _ids[i]; }
 
     std::size_t numPoints() const { return _numPoints; }
 
@@ -109,6 +127,7 @@ public:
 private:
 
     std::vector<float> _data;
+    std::vector<unsigned long long> _ids; // optional per-point source IDs
     std::size_t _numPoints;
     float _bboxMin[3];
     float _bboxMax[3];

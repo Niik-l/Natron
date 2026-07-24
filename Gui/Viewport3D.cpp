@@ -80,6 +80,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Deep/PointCloudProvider.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/SceneGraph.h"
+#include "Engine/CreateNodeArgs.h"
 #include "Engine/Knob.h"
 #include "Engine/KnobTypes.h"
 #include "Engine/Node.h"
@@ -2022,7 +2023,15 @@ Viewport3D::wheelEvent(QWheelEvent* e)
 void
 Viewport3D::keyPressEvent(QKeyEvent* e)
 {
-    if (e->key() == Qt::Key_W) {
+    if (e->key() == Qt::Key_Delete || e->key() == Qt::Key_Backspace) {
+        // Houdini-style: delete the selected points by chaining a Blast node
+        // seeded with the current selection. No-op without a point selection.
+        if (!_imp->selectedPointIndices.empty()) {
+            createBlastFromSelection();
+        } else {
+            QOpenGLWidget::keyPressEvent(e);
+        }
+    } else if (e->key() == Qt::Key_W) {
         _imp->imguizmoOp = ImGuizmo::TRANSLATE;
         update();
     } else if (e->key() == Qt::Key_E) {
@@ -2374,34 +2383,49 @@ void
 Viewport3D::showBlastContextMenu(const QPoint& globalPos)
 {
     Blast* blast = getActiveBlast();
-    if (!blast) return; // no Blast in scene → nothing to do
 
     const std::vector<int> viewportSel = _imp->selectedPointIndices;
     const bool hasSel = !viewportSel.empty();
+    const bool hasCloud = [this]() {
+        QMutexLocker lock(&_imp->cloudMutex);
+        return _imp->pointCloud && _imp->pointCloud->numPoints() > 0;
+    }();
 
     QMenu menu(this);
 
+    // Primary action: Houdini-style delete — chain a new Blast seeded with
+    // the selection. Same code path as the Delete key.
+    QAction* createAct = menu.addAction(QString::fromUtf8("Delete Selected Points (Del)"));
+    createAct->setEnabled(hasSel && hasCloud);
+    createAct->setToolTip(QString::fromUtf8("Create a Blast node from the current selection, chained after the displayed point cloud"));
+
+    menu.addSeparator();
+
+    // Secondary: refine the set of an existing, currently displayed Blast.
     QAction* addAct = menu.addAction(QString::fromUtf8("Blast: Add Selected"));
-    addAct->setEnabled(hasSel);
+    addAct->setEnabled(blast && hasSel);
     addAct->setToolTip(QString::fromUtf8("Add currently selected points to the Blast filter set"));
 
     QAction* removeAct = menu.addAction(QString::fromUtf8("Blast: Remove Selected"));
-    removeAct->setEnabled(hasSel);
+    removeAct->setEnabled(blast && hasSel);
     removeAct->setToolTip(QString::fromUtf8("Remove currently selected points from the Blast filter set"));
 
     QAction* setAct = menu.addAction(QString::fromUtf8("Blast: Set as Selection"));
-    setAct->setEnabled(hasSel);
+    setAct->setEnabled(blast && hasSel);
     setAct->setToolTip(QString::fromUtf8("Replace the Blast filter set with the current viewport selection"));
 
     menu.addSeparator();
 
     QAction* clearAct = menu.addAction(QString::fromUtf8("Blast: Clear Selection"));
+    clearAct->setEnabled(blast != nullptr);
     clearAct->setToolTip(QString::fromUtf8("Empty the Blast filter set"));
 
     QAction* chosen = menu.exec(globalPos);
     if (!chosen) return;
 
-    if (chosen == addAct) {
+    if (chosen == createAct) {
+        createBlastFromSelection();
+    } else if (chosen == addAct) {
         blast->addToSelection(viewportSel);
     } else if (chosen == removeAct) {
         blast->removeFromSelection(viewportSel);
@@ -2410,6 +2434,74 @@ Viewport3D::showBlastContextMenu(const QPoint& globalPos)
     } else if (chosen == clearAct) {
         blast->clearSelection();
     }
+}
+
+void
+Viewport3D::createBlastFromSelection()
+{
+    // Houdini-style: append a Blast (Selection mode) downstream of the
+    // displayed provider, seeded with the current viewport selection. The
+    // new Blast's input cloud IS the displayed cloud, so the viewport
+    // indices are valid input indices by construction — no remapping.
+    std::vector<int> sel;
+    NodePtr provider;
+    {
+        QMutexLocker lock(&_imp->cloudMutex);
+        sel = _imp->selectedPointIndices;
+        provider = _imp->activeProviderNode.lock();
+    }
+    if (sel.empty() || !provider) return;
+
+    Gui* gui = getGui();
+    if (!gui) return;
+    GuiAppInstancePtr app = gui->getApp();
+    if (!app) return;
+
+    NodePtr blastNode;
+    try {
+        CreateNodeArgs cnArgs(PLUGINID_NATRON_BLAST, provider->getGroup());
+        cnArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+        cnArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+        blastNode = app->createNode(cnArgs);
+    } catch (...) {
+        blastNode.reset();
+    }
+    if (!blastNode) return;
+
+    blastNode->connectInput(provider, 0);
+
+    // Place it just below the provider in the node graph
+    double px = 0, py = 0;
+    provider->getPosition(&px, &py);
+    blastNode->setPosition(px, py + 120);
+
+    Blast* newBlast = dynamic_cast<Blast*>(blastNode->getEffectInstance().get());
+    if (newBlast) {
+        KnobChoicePtr modeKnob = std::dynamic_pointer_cast<KnobChoice>(blastNode->getKnobByName("mode"));
+        if (modeKnob) modeKnob->setValue(1); // Selection mode
+        newBlast->setSelectedIndices(sel);
+    }
+
+    // The selected points are deleted now — clear the viewport selection
+    // (mirroring the empty selection to the old provider) and make the new
+    // Blast the displayed provider.
+    {
+        QMutexLocker lock(&_imp->cloudMutex);
+        _imp->selectedPointIndices.clear();
+        _imp->selectedPointIndex = -1;
+        notifyProviderSelectionChanged();
+        _imp->activeBlastNode = blastNode;
+        _imp->activeProviderNode = blastNode;
+    }
+
+    // Select the new node in the graph so the paint-loop provider scan keeps
+    // displaying its (filtered) cloud even on the next full rescan.
+    NodeGuiPtr nodeGui = std::dynamic_pointer_cast<NodeGui>(blastNode->getNodeGui());
+    if (nodeGui) {
+        gui->selectNode(nodeGui);
+    }
+
+    update();
 }
 
 void

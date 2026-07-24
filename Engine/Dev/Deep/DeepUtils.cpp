@@ -51,6 +51,7 @@
 #include "DeepFromFrames.h"
 #include "DeepBlend.h"
 #include "DeepTransform.h"
+#include "Blast.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -93,6 +94,9 @@ getDeepImageFromEffect(EffectInstance* effect)
     if (DeepVelocityMatte* n = dynamic_cast<DeepVelocityMatte*>(effect)) return n->getDeepImage();
     if (DeepFromFrames* n = dynamic_cast<DeepFromFrames*>(effect)) return n->getDeepImage();
     if (DeepBlend* n = dynamic_cast<DeepBlend*>(effect)) return n->getDeepImage();
+    // Blast: deep passthrough minus blasted samples (cloud must originate
+    // from a DeepToPoints — returns null otherwise)
+    if (Blast* n = dynamic_cast<Blast*>(effect)) return n->getDeepImage();
 
     return DeepImagePtr();
 }
