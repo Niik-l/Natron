@@ -137,15 +137,20 @@ DeepRecolor::render(const RenderActionArgs& args)
     int nChannels = srcDeep->getNumChannels();
     const std::vector<std::string>& chanNames = srcDeep->getChannelNames();
 
-    // Find channel indices in the deep image
+    // Find channel indices in the deep image. R/G/B may be absent: deep
+    // camera maps (e.g. Houdini/Karma DCM) often carry only A, Z, ZBack.
+    // In that case we add R/G/B channels to the output — recoloring an
+    // alpha-only deep render is the primary use case of this node.
+    int aIdx = srcDeep->findChannelIndex("A");
+
+    std::vector<std::string> outChanNames = chanNames;
     int rIdx = srcDeep->findChannelIndex("R");
     int gIdx = srcDeep->findChannelIndex("G");
     int bIdx = srcDeep->findChannelIndex("B");
-    int aIdx = srcDeep->findChannelIndex("A");
-
-    if (rIdx < 0 || gIdx < 0 || bIdx < 0 || aIdx < 0) {
-        return eStatusFailed;
-    }
+    if (rIdx < 0) { rIdx = (int)outChanNames.size(); outChanNames.push_back("R"); }
+    if (gIdx < 0) { gIdx = (int)outChanNames.size(); outChanNames.push_back("G"); }
+    if (bIdx < 0) { bIdx = (int)outChanNames.size(); outChanNames.push_back("B"); }
+    int nOutChannels = (int)outChanNames.size();
 
     // Get the flat color image from input 1
     EffectInstancePtr colorInput = getInput(1);
@@ -168,8 +173,8 @@ DeepRecolor::render(const RenderActionArgs& args)
         clearPersistentMessage(false);
     }
 
-    // Create a new deep image with the same structure
-    DeepImagePtr result = std::make_shared<DeepImage>(dw, nChannels, chanNames);
+    // Create a new deep image with the same structure (plus any added R/G/B)
+    DeepImagePtr result = std::make_shared<DeepImage>(dw, nOutChannels, outChanNames);
 
     // Copy sample counts
     for (int y = dw.y1; y < dw.y2; ++y) {
@@ -181,8 +186,10 @@ DeepRecolor::render(const RenderActionArgs& args)
 
     // Get color image bounds for coordinate mapping
     RectI colorBounds;
+    int colorNComps = 0;
     if (colorImg) {
         colorBounds = colorImg->getBounds();
+        colorNComps = colorImg->getComponentsCount();
     }
 
     // Recolor: copy all sample data, replacing RGB with flat image colors
@@ -227,15 +234,21 @@ DeepRecolor::render(const RenderActionArgs& args)
 
                 const float* colorPix = (const float*)colorRA->pixelAt(colorX, colorY);
                 if (colorPix) {
-                    float flatA = colorPix[3];
-                    if (flatA > 0.0001f) {
-                        flatR = colorPix[0] / flatA;
-                        flatG = colorPix[1] / flatA;
-                        flatB = colorPix[2] / flatA;
-                    } else {
+                    if (colorNComps >= 3) {
                         flatR = colorPix[0];
                         flatG = colorPix[1];
                         flatB = colorPix[2];
+                        if (colorNComps >= 4) {
+                            float flatA = colorPix[3];
+                            if (flatA > 0.0001f) {
+                                flatR /= flatA;
+                                flatG /= flatA;
+                                flatB /= flatA;
+                            }
+                        }
+                    } else {
+                        // Single-channel input: use it as luminance
+                        flatR = flatG = flatB = colorPix[0];
                     }
                     hasColor = true;
                 }
@@ -243,16 +256,20 @@ DeepRecolor::render(const RenderActionArgs& args)
 
             for (int s = 0; s < nSamples; ++s) {
                 const float* src = srcData + s * nChannels;
-                float* dst = dstData + s * nChannels;
+                float* dst = dstData + s * nOutChannels;
 
-                // Copy all channels first (preserves Z, ZBack, any extras)
+                // Copy source channels first (preserves Z, ZBack, any extras);
+                // channels added for missing R/G/B start at 0
                 for (int c = 0; c < nChannels; ++c) {
                     dst[c] = src[c];
+                }
+                for (int c = nChannels; c < nOutChannels; ++c) {
+                    dst[c] = 0.0f;
                 }
 
                 // Replace RGB with flat color, premultiplied by sample alpha
                 if (hasColor) {
-                    float sampleA = src[aIdx];
+                    float sampleA = (aIdx >= 0) ? src[aIdx] : 1.0f;
                     dst[rIdx] = flatR * sampleA;
                     dst[gIdx] = flatG * sampleA;
                     dst[bIdx] = flatB * sampleA;
