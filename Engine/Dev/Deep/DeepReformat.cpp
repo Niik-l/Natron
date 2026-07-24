@@ -37,6 +37,7 @@
 #include "../../ChoiceOption.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
+#include "../../NodeMetadata.h"
 #include "../../ViewIdx.h"
 
 NATRON_NAMESPACE_ENTER
@@ -212,6 +213,36 @@ resolveOutputSize(int formatChoice, int customW, int customH, int srcW, int srcH
     }
     if (outW < 1) outW = 1;
     if (outH < 1) outH = 1;
+}
+
+StatusEnum
+DeepReformat::getPreferredMetadata(NodeMetadata& metadata)
+{
+    // Declare the resized dimensions as the output format too — the RoD
+    // alone doesn't change the display window seen by the viewer and
+    // downstream nodes.
+    EffectInstancePtr input = getInput(0);
+    if (!input) return eStatusOK;
+
+    RectI inputFormat = input->getOutputFormat();
+    int srcW = inputFormat.width();
+    int srcH = inputFormat.height();
+
+    int formatChoice = _imp->format.lock()->getValue();
+    int customW = _imp->outputWidth.lock()->getValue();
+    int customH = _imp->outputHeight.lock()->getValue();
+
+    int outW, outH;
+    resolveOutputSize(formatChoice, customW, customH, srcW, srcH, outW, outH);
+
+    RectI outputFormat;
+    outputFormat.x1 = 0;
+    outputFormat.y1 = 0;
+    outputFormat.x2 = outW;
+    outputFormat.y2 = outH;
+    metadata.setOutputFormat(outputFormat);
+
+    return eStatusOK;
 }
 
 StatusEnum
