@@ -2779,10 +2779,18 @@ ScanlineRender::render(const RenderActionArgs& args)
     float motionBlurKnob = _imp->particleMotionBlur.lock() ? (float)_imp->particleMotionBlur.lock()->getValueAtTime(args.time) : 0.0f;
     float motionBlur = (motionSamples == 1) ? (motionBlurKnob * motionShutter) : 0.0f;
 
-    // Save original particle positions for per-sample offsetting
-    // (works for both sprite rendering and instance rendering)
+    // Multi-sample motion blur offsets particle positions per shutter sample.
+    // The provider's ParticleData is a SHARED immutable snapshot (also read by
+    // the 3D viewport and used as the sim's resume state) — never mutate it.
+    // Take a private copy to offset, and keep the sprite path (particleData)
+    // pointing at the same object it did before.
     std::vector<std::array<float, 3>> origParticlePos;
     if (motionSamples > 1 && motionBlurPData) {
+        const bool spritesUseSameData = (particleData == motionBlurPData);
+        motionBlurPData = std::make_shared<ParticleData>(*motionBlurPData);
+        if (spritesUseSameData) {
+            particleData = motionBlurPData;
+        }
         origParticlePos.reserve(motionBlurPData->particles.size());
         for (const Particle& p : motionBlurPData->particles) {
             origParticlePos.push_back({p.px, p.py, p.pz});
@@ -3599,7 +3607,10 @@ ScanlineRender::render(const RenderActionArgs& args)
     const double instanceTime = (motionSamples > 1) ? sampleTime : args.time;
     if (particleInstancer && glslInstanceProg) {
         std::vector<ParticleInstance::GeoInstance> instances;
-        particleInstancer->getInstances(instanceTime, instances);
+        // Build instances from our (privately offset) particle data rather
+        // than letting the instancer re-pull the provider's shared snapshot —
+        // that snapshot no longer carries the per-sample offsets.
+        particleInstancer->getInstancesFromData(motionBlurPData, instanceTime, instances);
 
         if (!instances.empty()) {
             glEnable(GL_DEPTH_TEST);
@@ -4349,15 +4360,8 @@ ScanlineRender::render(const RenderActionArgs& args)
     std::memcpy(projMatrix,     frameProjMatrix,     16 * sizeof(float));
     std::memcpy(projViewMatrix, frameProjViewMatrix, 16 * sizeof(float));
 
-    // Restore original particle positions
-    if (motionSamples > 1 && motionBlurPData) {
-        for (size_t i = 0; i < motionBlurPData->particles.size(); ++i) {
-            Particle& p = motionBlurPData->particles[i];
-            p.px = origParticlePos[i][0];
-            p.py = origParticlePos[i][1];
-            p.pz = origParticlePos[i][2];
-        }
-    }
+    // (No particle-position restore needed: the motion-blur offsets are
+    // applied to a private copy, never to the provider's shared snapshot.)
 
     // Average the accumulator to get final pixels
     std::vector<float> pixels;

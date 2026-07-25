@@ -7,6 +7,12 @@ Tracking known bugs, incomplete features, and planned improvements.
 ## My TODO (user priorities)
 
 - [ ] DeepExpression 2.0 follow-up polish (2026-07-25): iterate on the Nuke-style expression node after first day of use
+- [ ] Particle audit fixes (2026-07-24 audit, details local in PARTICLE_AUDIT_NOTES.md):
+  - [ ] P0 safety: emitter/spawn/ReadAlembic provider locking + immutable snapshots (same fix as solver cc05a8ac2); ScanlineRender motion blur must copy, not mutate the provider's data; solver cache-status labels must not evaluate from render threads
+  - [ ] P1 determinism: per-frame emitter knob eval (fixes animated knobs + transform trail + dead Size Variance / Color From Image / Start Alpha knobs); monotonic IDs + Merge rekey; collided OR-across-substeps; dead-ID tombstones; solver fast-path after hash check
+  - [ ] P2 subframe: forces take (time, dt); solver subframe lerp; ID-matched Cycles shutter samples; sub-frame emission
+  - [ ] P3 perf: collision knob hoist; cache eviction (cacheMaxMB is currently a no-op); persistent viewport VBO; ScanlineRender shader/VBO reuse
+  - [ ] P4 features: instance materials, ParticleExpression (reuse DeepExpression RPN engine), sprite textures, per-particle rotation, KnobGradient ramps in emitter, force falloff/mask framework, viewport force gizmos, Alembic interpolation
 - [ ] Test all deep nodes
 - [ ] Create deep sample picker
 - [ ] Think about material assignment — particles / instances and attributes

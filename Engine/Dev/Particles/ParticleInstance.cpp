@@ -153,12 +153,19 @@ ParticleInstance::getInstances(double time, std::vector<GeoInstance>& outInstanc
 {
     outInstances.clear();
 
-    // Get particle data
+    // Get particle data from the upstream provider, then delegate
     EffectInstancePtr input0 = skipDots(getInput(0));
     if (!input0) return;
     ParticleProvider* provider = dynamic_cast<ParticleProvider*>(input0.get());
     if (!provider) return;
-    ParticleDataPtr pdata = provider->getParticleData(time);
+    getInstancesFromData(provider->getParticleData(time), time, outInstances);
+}
+
+void
+ParticleInstance::getInstancesFromData(const ParticleDataPtr& pdata, double time,
+                                       std::vector<GeoInstance>& outInstances)
+{
+    outInstances.clear();
     if (!pdata || pdata->numParticles() == 0) return;
 
     // Count connected geo inputs

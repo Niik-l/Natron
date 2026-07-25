@@ -27,6 +27,7 @@
 #include "../../../Global/Macros.h"
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "../../EffectInstance.h"
@@ -117,7 +118,13 @@ private:
 
     std::unique_ptr<ParticleEmitterPrivate> _imp;
 
-    // Simulation cache
+    // Simulation cache. CONTRACT: _lastParticleData is an immutable snapshot —
+    // it is never mutated after being stored (each sim step builds a fresh
+    // ParticleData), so returning the shared_ptr directly to concurrent
+    // callers is safe. _computeMutex serialises getParticleData against the
+    // 3D-viewport paint (GUI thread) and render workers — same pattern as
+    // ParticleSolver::computeMutex.
+    mutable std::mutex _computeMutex;
     ParticleDataPtr _lastParticleData;
     double _lastSimFrame;
 };

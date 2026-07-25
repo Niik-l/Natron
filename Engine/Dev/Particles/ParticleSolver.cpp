@@ -433,12 +433,19 @@ ParticleSolver::initializeKnobs()
     {
         KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Cached Frames"));
         k->setName("cacheFramesLabel"); k->setDefaultValue("0"); k->setAsLabel();
+        // Status labels are written from getParticleData on render threads:
+        // they must not trigger evaluation (hash dirty + re-entrant render →
+        // deadlock on computeMutex) and must not be saved with the project.
+        k->setEvaluateOnChange(false);
+        k->setIsPersistent(false);
         k->setHintToolTip(tr("Number of frames currently held in the cache."));
         cachePage->addKnob(k); _imp->cacheFramesLabel = k;
     }
     {
         KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Cache RAM"));
         k->setName("cacheRamLabel"); k->setDefaultValue("0 MB"); k->setAsLabel();
+        k->setEvaluateOnChange(false);
+        k->setIsPersistent(false);
         k->setHintToolTip(tr("Memory used by cached frames."));
         cachePage->addKnob(k); _imp->cacheRamLabel = k;
     }

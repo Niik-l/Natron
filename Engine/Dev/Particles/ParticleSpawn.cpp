@@ -192,6 +192,13 @@ ParticleSpawn::initializeKnobs()
 ParticleDataPtr
 ParticleSpawn::getParticleData(double time)
 {
+    // Serialise against concurrent callers (3D viewport paint on the GUI
+    // thread vs render workers). The published snapshot is never mutated
+    // after storage — all sim work happens on a private copy that replaces
+    // the snapshot on publish — so the cache hit below can hand out the
+    // shared pointer directly.
+    std::lock_guard<std::mutex> computeLk(_computeMutex);
+
     // Return cached result if already simulated to this frame
     if (_cachedData && time == _cachedFrame) {
         return _cachedData;
@@ -206,16 +213,13 @@ ParticleSpawn::getParticleData(double time)
     int endFrame = (int)std::floor(time);
     if (endFrame < 1) endFrame = 1;
 
-    // Determine start frame for incremental sim
+    // Determine start frame for incremental sim, working on a private copy of
+    // the cached children (never mutate the published snapshot in place).
     int startFrame = 1;
+    ParticleDataPtr data = std::make_shared<ParticleData>();
     if (_cachedData && _cachedFrame > 0 && time > _cachedFrame) {
         startFrame = (int)_cachedFrame + 1;
-    } else {
-        _cachedData.reset();
-    }
-
-    if (!_cachedData) {
-        _cachedData = std::make_shared<ParticleData>();
+        data->particles = _cachedData->particles;
     }
 
     // Read knob values
@@ -231,6 +235,7 @@ ParticleSpawn::getParticleData(double time)
     float prob = (float)_imp->probability.lock()->getValueAtTime(time);
 
     if (rateVal <= 0) {
+        _cachedData = data;
         _cachedFrame = time;
         return _cachedData;
     }
@@ -299,14 +304,14 @@ ParticleSpawn::getParticleData(double time)
                 child.mass = 1.0f;
                 child.id = (uint32_t)(frame * 200000 + (int)i * 1000 + j + 99991);
 
-                _cachedData->particles.push_back(child);
+                data->particles.push_back(child);
             }
         }
 
         // Advance ALL children (existing + newly spawned this frame)
         float dt = 1.0f;
-        for (size_t j = 0; j < _cachedData->particles.size(); ++j) {
-            Particle& p = _cachedData->particles[j];
+        for (size_t j = 0; j < data->particles.size(); ++j) {
+            Particle& p = data->particles[j];
             p.px += p.vx * dt;
             p.py += p.vy * dt;
             p.pz += p.vz * dt;
@@ -314,9 +319,11 @@ ParticleSpawn::getParticleData(double time)
         }
 
         // Remove expired children
-        _cachedData->removeExpired();
+        data->removeExpired();
     }
 
+    // Publish the new immutable snapshot
+    _cachedData = data;
     _cachedFrame = time;
     return _cachedData;
 }

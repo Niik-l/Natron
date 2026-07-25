@@ -429,6 +429,12 @@ ParticleEmitter::getPreferredMetadata(NodeMetadata& metadata)
 ParticleDataPtr
 ParticleEmitter::getParticleData(double time)
 {
+    // Serialise against concurrent callers (3D viewport paint on the GUI
+    // thread vs render workers, or two solvers sharing this emitter). The
+    // published snapshot is never mutated after storage, so the cache hit
+    // below can hand out the shared pointer directly.
+    std::lock_guard<std::mutex> computeLk(_computeMutex);
+
     // Return cached result if already simulated to this frame
     if (_lastParticleData && time == _lastSimFrame) {
         return _lastParticleData;

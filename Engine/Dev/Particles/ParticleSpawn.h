@@ -27,6 +27,7 @@
 #include "../../../Global/Macros.h"
 
 #include <memory>
+#include <mutex>
 
 #include "../../EffectInstance.h"
 #include "ParticleData.h"
@@ -109,7 +110,12 @@ private:
 
     std::unique_ptr<ParticleSpawnPrivate> _imp;
 
-    // Simulation cache — stores only child particles
+    // Simulation cache — stores only child particles. CONTRACT: _cachedData
+    // is an immutable snapshot, never mutated after storage (each advance
+    // works on a fresh copy and republishes) — safe to hand to concurrent
+    // callers. _computeMutex serialises getParticleData (GUI paint vs render
+    // workers), same pattern as ParticleSolver/ParticleEmitter.
+    mutable std::mutex _computeMutex;
     ParticleDataPtr _cachedData;
     double _cachedFrame;
 };

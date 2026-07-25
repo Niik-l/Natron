@@ -109,6 +109,13 @@ public:
 
     void getInstances(double time, std::vector<GeoInstance>& outInstances);
 
+    /** Build instances from caller-supplied particle data instead of pulling
+     *  from the upstream provider. Renderers doing multi-sample motion blur
+     *  use this with a private, sub-frame-offset copy — the provider's own
+     *  ParticleData is a shared immutable snapshot and must not be mutated. */
+    void getInstancesFromData(const ParticleDataPtr& pdata, double time,
+                              std::vector<GeoInstance>& outInstances);
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;

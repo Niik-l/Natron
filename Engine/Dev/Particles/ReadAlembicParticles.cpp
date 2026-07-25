@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <vector>
 
@@ -80,7 +81,10 @@ struct ReadAlembicParticlesPrivate
     KnobButtonWPtr reloadBtn;
     KnobStringWPtr infoLabel;
 
-    // Pre-loaded archive state. Cleared on file change.
+    // Pre-loaded archive state. Cleared on file change. Guarded by dataMutex:
+    // loadAlembicFile (GUI thread, via knobChanged) rewrites these vectors
+    // while getParticleData iterates them from render/viewport threads.
+    mutable std::mutex        dataMutex;
     std::vector<LoadedSample> samples;
     TimeSamplingPtr           timeSampling;   // for time -> sample index
     bool                      animated = false; // > 1 sample
@@ -159,6 +163,10 @@ ReadAlembicParticles::initializeKnobs()
 bool
 ReadAlembicParticles::loadAlembicFile(const std::string& path)
 {
+    // Hold the data lock for the whole (re)load — render threads iterating
+    // the old samples must not see them freed mid-walk.
+    std::lock_guard<std::mutex> lk(_imp->dataMutex);
+
     _imp->samples.clear();
     _imp->timeSampling.reset();
     _imp->animated = false;
@@ -220,7 +228,11 @@ ReadAlembicParticles::loadAlembicFile(const std::string& path)
             V3fArraySamplePtr vel = sample.getVelocities();
 
             const size_t n = pos ? pos->size() : 0;
-            dst.positions.assign(pos->get(), pos->get() + n);
+            if (n > 0) {
+                dst.positions.assign(pos->get(), pos->get() + n);
+            } else {
+                dst.positions.clear();
+            }
             if (id && id->size() == n) {
                 dst.ids.assign(id->get(), id->get() + n);
             } else {
@@ -289,6 +301,9 @@ ReadAlembicParticles::loadAlembicFile(const std::string& path)
 ParticleDataPtr
 ReadAlembicParticles::getParticleData(double time)
 {
+    // Guard against a concurrent reload rewriting the sample vectors
+    std::lock_guard<std::mutex> lk(_imp->dataMutex);
+
     if (_imp->samples.empty()) return ParticleDataPtr();
 
     // Time -> Alembic seconds via project FPS. Files written by
