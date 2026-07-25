@@ -389,6 +389,57 @@ ParticleEmitter → Gravity → Wind → ParticleSolver (Cube3D geo)
 
 ---
 
+## Deep Point Blasting (Houdini-style)
+
+Delete regions of a deep render interactively and keep deep compositing:
+
+```
+DeepRead → DeepToPoints → [Blast → Blast → ...] → DeepRecolor / DeepMerge / DeepFlatten / DeepWrite
+```
+
+1. View the DeepToPoints in a 3D Viewport. Set **Density = 1.0** when blasting
+   for edit (thinned points aren't in the cloud and can't be deleted).
+2. Drag-select points, hit **Delete** (or Backspace) — a Blast node in
+   Selection mode is created, wired to the displayed cloud and seeded with the
+   selection. The points vanish immediately.
+3. Each Delete chains another Blast. Disable or delete a Blast to restore that
+   batch; its **Invert** knob flips delete-selected into keep-selected.
+4. Right-click in the viewport for the menu version plus Add/Remove/Set/Clear
+   refinement on an existing Blast.
+5. The last Blast's output IS a deep image: points carry their deep sample
+   index through the chain, and the Blast rebuilds the source deep minus the
+   deleted samples — wire it into any deep node downstream.
+
+Works on any point cloud (DeepToPoints, CameraTracker, PointCloudGenerator).
+Blast stores indices, so re-solve trackers BEFORE blasting.
+
+Karma DCM note: deep camera maps carry only A/Z/ZBack. DeepRecolor appends
+R/G/B from a flat render (its main job); DeepFog after DeepRecolor gets
+colored fog.
+
+---
+
+## DeepExpression (v2.0, Nuke-style)
+
+Per-sample expressions. Empty field = channel unchanged; all expressions read
+the INPUT values (simultaneous assignment).
+
+- **Fields:** four temp-variable rows (`name` = `expression`, evaluated top to
+  bottom, usable below), then `rgba.red/green/blue/alpha`, `deep.front`,
+  `deep.back`. Writing a channel the deep lacks appends it.
+- **Variables:** `rgba.red`… / `deep.front` / `deep.back` with aliases
+  (`red`/`r`, `front`/`z`, `back`/`zback`), `x`, `y` (bottom-up), `frame`.
+- **Language:** `+ - * / % ^`, comparisons, `&& || !`, ternary `?:`,
+  `abs floor ceil round sqrt exp log log10 sin cos tan asin acos atan atan2
+  pow fmod min max step clamp lerp mix smoothstep`, constants `pi`, `e`.
+- **Examples:** thickness setup — temp `th = 0.1`, `deep.front: front - th/2`,
+  `deep.back: back + th/2`. Depth fade — `rgba.alpha: alpha *
+  smoothstep(20, 10, front)`.
+
+Not supported vs Nuke: TCL `[value knob]` substitution, chans0-3 layer pickers.
+
+---
+
 ## Volume Rendering
 
 > **Scope note:** this wiki started as the particle-system reference; the volume nodes below

@@ -67,10 +67,10 @@ Updated: 2026-06-24
 | **DeepCrop** | `fr.inria.built-in.DeepCrop` | Registered | Crop deep images |
 | **DeepToPoints** | `fr.inria.built-in.DeepToPoints` | Registered | Convert deep to point cloud. Optional Camera3D input unprojects pixels+depth into world space. |
 | **DeepTransform** | `fr.inria.built-in.DeepTransform` | Registered | Transform deep images |
-| **DeepExpression** | `fr.inria.built-in.DeepExpression` | Registered | Expression-based deep processing |
+| **DeepExpression** | `fr.inria.built-in.DeepExpression` | Registered | Nuke-style per-sample expressions (v2.0): temp-variable rows + rgba.red/green/blue/alpha and deep.front/deep.back fields; operators/ternary/math functions, x/y/frame variables; writing a channel the deep lacks appends it |
 | **DeepColorCorrect** | `fr.inria.built-in.DeepColorCorrect` | Registered | Color correct deep samples |
 | **DeepDefocus** | `fr.inria.built-in.DeepDefocus` | Registered | Defocus deep images |
-| **Blast** | `fr.inria.built-in.Blast` | Registered | Point-cloud filter. Bounding-box mode (delete inside/outside a Cube3D bounds input) and Selection mode (right-click in 3D viewport). Invert toggle, info display, lazy computation. |
+| **Blast** | `fr.inria.built-in.Blast` | Registered | Point-cloud filter. Bounding-box mode (delete inside/outside a Cube3D bounds input) and Selection mode — drag-select points in the 3D viewport and hit Delete to chain a seeded Blast (Houdini-style; right-click menu for add/remove/set/clear). Carries per-point source IDs, so getDeepImage() rebuilds the originating deep minus blasted samples for deep comping downstream. Invert toggle, info display, lazy computation. |
 
 ## Deep Compositing — Tier 3 (19 nodes, code exists but NOT registered)
 

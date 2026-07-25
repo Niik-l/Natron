@@ -17,6 +17,37 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Deep workflow + stability sweep (2026-07-24/25)** —
+  **Deep suite:** DeepRecolor now recolors RGB-less deep inputs (Karma DCMs carry only
+  A/Z/ZBack — missing R/G/B channels are appended and filled from the flat Color input);
+  DeepReformat declares its resized size as output format metadata (viewer display window
+  follows the knob). **Houdini-style point blasting:** drag-select points in the 3D viewport
+  and hit Delete — a Blast (Selection mode) is chained onto the displayed provider, seeded
+  with the selection; each Delete chains another Blast (disable/delete one to restore that
+  batch, Invert flips to keep-selected). Point clouds carry per-point source IDs (the deep
+  sample index), so **`Blast::getDeepImage()` rebuilds the originating deep image minus the
+  blasted samples** — a blasted cloud plugs straight back into DeepRecolor/DeepMerge/
+  DeepFlatten/DeepWrite (use DeepToPoints Density 1.0 when blasting for edit).
+  **DeepExpression 2.0:** Nuke-style per-channel expression node (temp-variable rows,
+  rgba.red/…/deep.front/deep.back fields, RPN engine — operators, ternary, math functions,
+  x/y/frame variables; writing a channel the deep lacks appends it). DeepFog registered.
+  Memory-safety fixes: DeepMerge remaps merge inputs by channel NAME with a union output
+  layout (previously strided input B with input A's channel count — heap over-read);
+  DeepExpression/DeepFog count-pass/fill-pass mismatches (heap overflow) fixed.
+  **Particles:** P0 thread-safety — Emitter/Spawn/ReadAlembicParticles gained the solver's
+  mutex + immutable-snapshot contract; ScanlineRender multi-sample motion blur offsets a
+  private copy instead of mutating the provider's shared snapshot (aborted renders could
+  permanently offset the sim); viewport draws particles after opaque geometry (correct
+  per-pixel occlusion). **Scene3D provider hardening:** geometry caches (ReadGeo /
+  ReadAlembicArchive / Volume3D / ReadVDB) locked against reload-during-render; the seven
+  texture-cache nodes (Card/Cube/Cylinder/Sphere3D, Material3D, Project3D, UVProject) now
+  publish immutable `shared_ptr<const CachedTexture>` snapshots; Material3D bake paths
+  locked. Fixes: Group3D→Dot→child now parents; ReadAlembicTransform FPS defaults to the
+  project rate (matches Archive/Camera); ReadVDB loads after project reload; ReadGeo drops
+  stale geometry on cleared path. Full audits (deep suite, particle system, provider sweep)
+  ran across these sessions; remaining findings + fix tiers tracked in `Engine/Dev/TODO.md`
+  and local notes.
+
 - **CameraTracker matchmove suite (2026-07-07)** —
   The CameraTracker node (in-tree since inception but never built) was revived and developed
   across ~10 sessions in a separate worktree, then ingested here in one pass. **CameraTracker**
