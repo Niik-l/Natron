@@ -1482,7 +1482,12 @@ Viewport3D::paintGL()
     }
 
     // 6. Render scene nodes using ImGuizmo::RecomposeMatrixFromComponents for transforms
+    // Particles are DEFERRED to a second pass after all opaque geometry:
+    // they blend with depth-write off, so they must be drawn last for the
+    // depth buffer to occlude them per pixel — drawn inline, any opaque mesh
+    // later in the node list paints over the whole cloud regardless of Z.
     const std::vector<SceneNode>& sceneNodes = _imp->sceneGraph.nodes();
+    std::vector<size_t> deferredParticleNodes;
     for (size_t i = 0; i < sceneNodes.size(); ++i) {
         const SceneNode& sn = sceneNodes[i];
         if (!sn.visible) continue;
@@ -1543,9 +1548,9 @@ Viewport3D::paintGL()
                                 break;
                             }
                         }
-                        if (isLast) drawParticlesNode(sn);
+                        if (isLast) deferredParticleNodes.push_back(i);
                     } else {
-                        drawParticlesNode(sn);
+                        deferredParticleNodes.push_back(i);
                     }
                 }
                 break;
@@ -1560,6 +1565,17 @@ Viewport3D::paintGL()
 
     // Draw point cloud
     drawPointCloud();
+
+    // Second pass: particles, after all depth-writing geometry. Depth test
+    // stays on (drawParticlesNode enables it) so particles inside/behind geo
+    // are occluded per pixel; depth write stays off so they blend correctly.
+    for (size_t idx : deferredParticleNodes) {
+        const SceneNode& sn = sceneNodes[idx];
+        glPushMatrix();
+        glMultMatrixf(sn.worldMatrix);
+        drawParticlesNode(sn);
+        glPopMatrix();
+    }
 
     // Restore full-pane viewport before ImGui overlay (gate only applies to
     // the 3D draw; gizmos & UI use the full pane in pixel coords).
