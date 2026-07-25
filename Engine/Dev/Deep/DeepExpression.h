@@ -59,7 +59,8 @@ public:
     DeepExpression(NodePtr node);
     virtual ~DeepExpression();
 
-    virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
+    // 2.0: Nuke-style per-channel expressions (replaces the multiply/add knobs)
+    virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 2; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
     virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }

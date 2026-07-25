@@ -6,6 +6,7 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ## My TODO (user priorities)
 
+- [ ] DeepExpression 2.0 follow-up polish (2026-07-25): iterate on the Nuke-style expression node after first day of use
 - [ ] Test all deep nodes
 - [ ] Create deep sample picker
 - [ ] Think about material assignment — particles / instances and attributes
