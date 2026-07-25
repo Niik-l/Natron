@@ -139,16 +139,22 @@ ParticleKillBox::applyForce(ParticleDataPtr data, double time)
 {
     if (!data) return;
 
-    float bMinX = (float)_imp->minX.lock()->getValueAtTime(time);
-    float bMinY = (float)_imp->minY.lock()->getValueAtTime(time);
-    float bMinZ = (float)_imp->minZ.lock()->getValueAtTime(time);
-    float bMaxX = (float)_imp->maxX.lock()->getValueAtTime(time);
-    float bMaxY = (float)_imp->maxY.lock()->getValueAtTime(time);
-    float bMaxZ = (float)_imp->maxZ.lock()->getValueAtTime(time);
-    int modeVal = _imp->mode.lock()->getValueAtTime(time);
-    float cx = (float)_imp->centerX.lock()->getValueAtTime(time);
-    float cy = (float)_imp->centerY.lock()->getValueAtTime(time);
-    float cz = (float)_imp->centerZ.lock()->getValueAtTime(time);
+    // Guarded .lock() reads — this runs on render threads; a null knob must
+    // not deref (matches the ternary pattern used by the other force nodes).
+    auto dval = [&](const KnobDoubleWPtr& w, double def) -> float {
+        KnobDoublePtr k = w.lock();
+        return k ? (float)k->getValueAtTime(time) : (float)def;
+    };
+    float bMinX = dval(_imp->minX, -1.0);
+    float bMinY = dval(_imp->minY, -1.0);
+    float bMinZ = dval(_imp->minZ, -1.0);
+    float bMaxX = dval(_imp->maxX, 1.0);
+    float bMaxY = dval(_imp->maxY, 1.0);
+    float bMaxZ = dval(_imp->maxZ, 1.0);
+    int modeVal = _imp->mode.lock() ? _imp->mode.lock()->getValueAtTime(time) : 0;
+    float cx = dval(_imp->centerX, 0.0);
+    float cy = dval(_imp->centerY, 0.0);
+    float cz = dval(_imp->centerZ, 0.0);
 
     // Offset bounds by center
     bMinX += cx; bMaxX += cx;

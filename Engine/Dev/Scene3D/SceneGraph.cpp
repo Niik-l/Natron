@@ -851,7 +851,10 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         if (!group) continue;
 
         for (int inp = 0; inp < GROUP3D_MAX_INPUTS; ++inp) {
-            EffectInstancePtr inputEffect = group->getInput(inp);
+            // skipDots: Group3D → Dot → child must parent the CHILD, not try to
+            // match the Dot's script name (which matches no SceneNode — the
+            // child silently never parented and the group transform was lost).
+            EffectInstancePtr inputEffect = skipDots(group->getInput(inp));
             if (!inputEffect) continue;
 
             std::string inputName = inputEffect->getNode()->getScriptName();

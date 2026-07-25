@@ -178,10 +178,13 @@ ReadAlembicTransform::initializeKnobs()
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("FPS"));
         k->setName("fps");
-        k->setDefaultValue(24.0);
-        k->setMinimum(1.0);
-        k->setDisplayMinimum(1.0); k->setDisplayMaximum(120.0);
-        k->setHintToolTip(tr("Frames per second used for Time-based time mode. Ignored in Frame-by-frame mode."));
+        k->setDefaultValue(0.0);
+        k->setMinimum(0.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(120.0);
+        k->setHintToolTip(tr("Frames per second used for Time-based time mode. "
+                             "0 = use the project frame rate (matches ReadAlembicArchive/Camera, "
+                             "so the transform stays in sync with them). "
+                             "Ignored in Frame-by-frame mode."));
         page->addKnob(k);
         _imp->fpsKnob = k;
     }
@@ -360,8 +363,15 @@ ReadAlembicTransform::loadAlembicFile(const std::string& path)
         IXformSchema xSchema = xform.getSchema();
         size_t numSamples = xSchema.getNumSamples();
         const int frameOffset = _imp->frameOffset.lock()->getValue();
+        // FPS knob 0 (new default) = follow the PROJECT frame rate, matching
+        // ReadAlembicArchive/ReadAlembicCamera — previously this defaulted to a
+        // hardcoded 24 and silently drifted against them in 25/30fps projects.
+        // Projects saved with an explicit fps keep their value.
         double fps = _imp->fpsKnob.lock()->getValue();
-        if (fps < 1.0) fps = 24.0;
+        if (fps < 1.0) {
+            fps = getApp() ? getApp()->getProjectFrameRate() : 24.0;
+            if (fps < 1.0) fps = 24.0;
+        }
         const int timeMode = _imp->timeMode.lock()->getValue(); // 0=frame-by-frame, 1=time-based
 
         Alembic::AbcCoreAbstract::TimeSamplingPtr timeSampling = xSchema.getTimeSampling();
