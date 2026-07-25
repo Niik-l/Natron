@@ -397,6 +397,28 @@ ParticleEmitter → Gravity → Wind → ParticleSolver (Cube3D geo)
 
 ---
 
+## Templates Menu
+
+The **Templates** menubar builds ready-to-play example graphs, organised by
+category: **3D** (Basic 3D Scene, VDB Fire/Smoke), **Particles** (below), and
+**Project3D / Deep / HDRI** (placeholders, templates to come). Each template is
+a starting point — refine knobs to taste.
+
+Particle templates:
+
+| Template | What it builds |
+|----------|----------------|
+| Basic Particle System | Emitter → Gravity → Solver → Scene → ScanlineRender |
+| Sparks | Emitter raining onto a Cube3D floor; Spawn On-Collision fires hot orange sparks, merged with the main stream |
+| Jet Exhaust | Hot fast core + slow gray smoke trail — two emitter/force/solver chains merged (forces upstream of a Merge don't reach a shared solver, so each branch owns its chain); additive discs + stretch motion blur |
+| Heat Distortion (ST Distort) | Red/green turbulent particle branches rendered additive → Blur → IDistort UV input, distorting the plate (Checkerboard placeholder — swap in footage). Production heat-haze rig |
+| Rain + Splashes | Wide disc emitter, Max Bounces=1 kills drops on floor impact, Spawn On-Collision splash droplets, full stretch motion blur for streaks |
+
+Adding a template (dev): a slot in `Gui.h`, a menu action in `Gui.cpp`
+(Templates block), and a `runTemplatePython` block in `Gui50.cpp`.
+
+---
+
 ## Deep Point Blasting (Houdini-style)
 
 Delete regions of a deep render interactively and keep deep compositing:

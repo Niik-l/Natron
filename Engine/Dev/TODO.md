@@ -7,6 +7,8 @@ Tracking known bugs, incomplete features, and planned improvements.
 ## My TODO (user priorities)
 
 - [ ] DeepExpression 2.0 follow-up polish (2026-07-25): iterate on the Nuke-style expression node after first day of use
+- [ ] Refine the particle template presets (Sparks / Jet Exhaust / Heat Distortion / Rain — values are a first pass, 2026-07-25)
+- [ ] Fill the Project3D / Deep / HDRI template categories (placeholders in the menu; candidate list in session notes — projection patch rig, DCM comp starter, Blast cleanup rig, look-dev spheres, HDRI backplate starter)
 - [ ] Particle audit fixes (2026-07-24 audit, details local in PARTICLE_AUDIT_NOTES.md):
   - [ ] P0 safety: emitter/spawn/ReadAlembic provider locking + immutable snapshots (same fix as solver cc05a8ac2); ScanlineRender motion blur must copy, not mutate the provider's data; solver cache-status labels must not evaluate from render threads
   - [ ] P1 determinism — batch A DONE 2026-07-25 (collided OR-across-substeps; dead-ID tombstones; solver fast-path after hash check + live-slot reset). REMAINING: per-frame emitter knob eval (fixes animated knobs + transform trail + dead Size Variance / Color From Image / Start Alpha knobs); monotonic IDs + Merge rekey; force physics (drag exp, gravity mass, attract softening, wind hash-by-id); forces-through-Merge (needs branch-scoping decision, see P2)

@@ -47,6 +47,17 @@ Recent milestones:
   stale geometry on cleared path. Full audits (deep suite, particle system, provider sweep)
   ran across these sessions; remaining findings + fix tiers tracked in `Engine/Dev/TODO.md`
   and local notes.
+  **Particle P1 batch A:** solver knob edits apply while parked on a frame (hash check
+  before the fast path + live-slot reset); collision flags accumulate across substeps
+  (Spawn On-Collision was missing ~75% of impacts); dead-ID tombstones stop solver-killed
+  particles respawning at the emitter. **KillBox bounds volume:** optional Cube3D bounds
+  input (full transform, rotated OBBs, gizmo-movable); OBB extents fixed to match the
+  drawn wireframe exactly in KillBox AND Blast (both were 2×; Blast also ignored Uniform
+  Scale/Size); Cube3D "Viewport Display" knob (Auto/Solid/Wireframe — Auto shows wireframe
+  when feeding a KillBox/Blast bounds input). **Templates menu** reorganised into category
+  submenus (3D / Particles / Project3D / Deep / HDRI placeholders) with a particle template
+  pack: Sparks, Jet Exhaust, Heat Distortion (ST-distort heat-haze rig via IDistort), and
+  Rain + Splashes.
 
 - **CameraTracker matchmove suite (2026-07-07)** —
   The CameraTracker node (in-tree since inception but never built) was revived and developed

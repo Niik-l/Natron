@@ -1076,6 +1076,344 @@ camera.getParam("translateZ").setValue(8.0)
 }
 
 void
+Gui::createTemplateParticleSparks()
+{
+    // Collision sparks — the WIKI "Sparks on collision" pipeline:
+    // Emitter → Gravity → Solver (Cube3D floor) → Spawn (On Collision) →
+    // Merge (solver + sparks) → Scene → ScanlineRender → Viewer
+    runTemplatePython(this, R"PY(
+app = app1
+emitter = app.createNode("fr.inria.built-in.ParticleEmitter")
+gravity = app.createNode("fr.inria.built-in.ParticleGravity")
+solver = app.createNode("fr.inria.built-in.ParticleSolver")
+floor = app.createNode("fr.inria.built-in.Cube3D")
+spawn = app.createNode("fr.inria.built-in.ParticleSpawn")
+merge = app.createNode("fr.inria.built-in.ParticleMerge")
+scene = app.createNode("fr.inria.built-in.Scene3D")
+camera = app.createNode("fr.inria.built-in.Camera3D")
+scanline = app.createNode("fr.inria.built-in.ScanlineRender")
+viewer = app.createNode("fr.inria.built-in.Viewer")
+
+gravity.connectInput(0, emitter)
+solver.connectInput(0, gravity)
+solver.connectInput(1, floor)
+spawn.connectInput(0, solver)
+merge.connectInput(0, solver)
+merge.connectInput(1, spawn)
+scene.connectInput(0, merge)
+scanline.connectInput(1, scene)
+scanline.connectInput(2, camera)
+viewer.connectInput(0, scanline)
+
+emitter.setPosition(0, -500)
+gravity.setPosition(0, -350)
+floor.setPosition(-200, -200)
+solver.setPosition(0, -200)
+spawn.setPosition(200, -50)
+merge.setPosition(0, 100)
+scene.setPosition(0, 250)
+camera.setPosition(-200, 400)
+scanline.setPosition(0, 400)
+viewer.setPosition(0, 550)
+
+# Emitter: a stream of hot particles falling onto the floor
+emitter.getParam("translateY").setValue(4.0)
+emitter.getParam("velocity").setValue(1.0)
+emitter.getParam("spread").setValue(20.0)
+emitter.getParam("startSize").setValue(0.06)
+emitter.getParam("lifetime").setValue(80.0)
+emitter.getParam("startColorR").setValue(1.0)
+emitter.getParam("startColorG").setValue(0.75)
+emitter.getParam("startColorB").setValue(0.35)
+
+# Floor: a flat cube to collide with
+floor.getParam("scaleX").setValue(8.0)
+floor.getParam("scaleY").setValue(0.1)
+floor.getParam("scaleZ").setValue(8.0)
+floor.getParam("translateY").setValue(-1.0)
+
+# Solver: lively bounces
+solver.getParam("elasticity").setValue(0.45)
+solver.getParam("friction").setValue(0.3)
+
+# Spawn: short-lived hot sparks on every impact
+spawn.getParam("trigger").set(3)
+spawn.getParam("rate").setValue(6)
+spawn.getParam("inheritVelocity").setValue(0.3)
+spawn.getParam("extraSpeed").setValue(1.2)
+spawn.getParam("childLifetime").setValue(12.0)
+spawn.getParam("childSize").setValue(0.025)
+spawn.getParam("childColorR").setValue(1.0)
+spawn.getParam("childColorG").setValue(0.55)
+spawn.getParam("childColorB").setValue(0.12)
+
+camera.getParam("translateZ").setValue(10.0)
+camera.getParam("translateY").setValue(1.0)
+)PY");
+}
+
+void
+Gui::createTemplateParticleJetExhaust()
+{
+    // Hot fast core + slow lingering smoke, each with its OWN force/solver
+    // chain (forces upstream of a ParticleMerge don't reach a shared solver),
+    // merged for display. Additive discs + stretch motion blur.
+    runTemplatePython(this, R"PY(
+app = app1
+core = app.createNode("fr.inria.built-in.ParticleEmitter")
+coreDrag = app.createNode("fr.inria.built-in.ParticleDrag")
+coreTurb = app.createNode("fr.inria.built-in.ParticleTurbulence")
+coreSolver = app.createNode("fr.inria.built-in.ParticleSolver")
+smoke = app.createNode("fr.inria.built-in.ParticleEmitter")
+smokeDrag = app.createNode("fr.inria.built-in.ParticleDrag")
+smokeTurb = app.createNode("fr.inria.built-in.ParticleTurbulence")
+smokeSolver = app.createNode("fr.inria.built-in.ParticleSolver")
+merge = app.createNode("fr.inria.built-in.ParticleMerge")
+scene = app.createNode("fr.inria.built-in.Scene3D")
+camera = app.createNode("fr.inria.built-in.Camera3D")
+scanline = app.createNode("fr.inria.built-in.ScanlineRender")
+viewer = app.createNode("fr.inria.built-in.Viewer")
+
+coreDrag.connectInput(0, core)
+coreTurb.connectInput(0, coreDrag)
+coreSolver.connectInput(0, coreTurb)
+smokeDrag.connectInput(0, smoke)
+smokeTurb.connectInput(0, smokeDrag)
+smokeSolver.connectInput(0, smokeTurb)
+merge.connectInput(0, coreSolver)
+merge.connectInput(1, smokeSolver)
+scene.connectInput(0, merge)
+scanline.connectInput(1, scene)
+scanline.connectInput(2, camera)
+viewer.connectInput(0, scanline)
+
+core.setPosition(-150, -500); coreDrag.setPosition(-150, -350)
+coreTurb.setPosition(-150, -200); coreSolver.setPosition(-150, -50)
+smoke.setPosition(150, -500); smokeDrag.setPosition(150, -350)
+smokeTurb.setPosition(150, -200); smokeSolver.setPosition(150, -50)
+merge.setPosition(0, 100); scene.setPosition(0, 250)
+camera.setPosition(-200, 400); scanline.setPosition(0, 400)
+viewer.setPosition(0, 550)
+
+# Core: hot, fast, short-lived
+core.getParam("translateX").setValue(-3.0)
+core.getParam("emitDirX").setValue(1.0)
+core.getParam("emitDirY").setValue(0.0)
+core.getParam("rate").setValue(400)
+core.getParam("lifetime").setValue(25.0)
+core.getParam("velocity").setValue(3.0)
+core.getParam("velocityVariance").setValue(0.6)
+core.getParam("spread").setValue(6.0)
+core.getParam("startSize").setValue(0.08)
+core.getParam("endSize").setValue(0.02)
+core.getParam("startColorR").setValue(1.0)
+core.getParam("startColorG").setValue(0.92)
+core.getParam("startColorB").setValue(0.6)
+core.getParam("endColorR").setValue(1.0)
+core.getParam("endColorG").setValue(0.35)
+core.getParam("endColorB").setValue(0.05)
+core.getParam("fadeIn").setValue(0.02)
+core.getParam("fadeOut").setValue(0.4)
+coreDrag.getParam("drag").setValue(0.03)
+coreTurb.getParam("strength").setValue(0.6)
+coreTurb.getParam("scale").setValue(0.8)
+
+# Smoke: slow, wide, long-lived, grows over life
+smoke.getParam("translateX").setValue(-3.0)
+smoke.getParam("emitDirX").setValue(1.0)
+smoke.getParam("emitDirY").setValue(0.0)
+smoke.getParam("seed").setValue(7)
+smoke.getParam("rate").setValue(60)
+smoke.getParam("lifetime").setValue(70.0)
+smoke.getParam("velocity").setValue(1.2)
+smoke.getParam("spread").setValue(12.0)
+smoke.getParam("startSize").setValue(0.15)
+smoke.getParam("endSize").setValue(0.6)
+smoke.getParam("startColorR").setValue(0.35)
+smoke.getParam("startColorG").setValue(0.35)
+smoke.getParam("startColorB").setValue(0.35)
+smoke.getParam("endColorR").setValue(0.22)
+smoke.getParam("endColorG").setValue(0.22)
+smoke.getParam("endColorB").setValue(0.22)
+smoke.getParam("fadeIn").setValue(0.25)
+smoke.getParam("fadeOut").setValue(0.5)
+smokeDrag.getParam("drag").setValue(0.06)
+smokeTurb.getParam("strength").setValue(0.4)
+
+scanline.getParam("particleMode").set(1)      # Disc
+scanline.getParam("particleBlend").set(0)     # Additive
+scanline.getParam("particleMotionBlur").setValue(0.5)
+camera.getParam("translateZ").setValue(9.0)
+)PY");
+}
+
+void
+Gui::createTemplateParticleHeatDistort()
+{
+    // Red/green turbulent particles rendered as a UV displacement pass:
+    // ScanlineRender (additive discs) -> Blur -> IDistort.UV, distorting the
+    // plate input (Checkerboard placeholder — replace with footage).
+    runTemplatePython(this, R"PY(
+app = app1
+emR = app.createNode("fr.inria.built-in.ParticleEmitter")
+turbR = app.createNode("fr.inria.built-in.ParticleTurbulence")
+solverR = app.createNode("fr.inria.built-in.ParticleSolver")
+emG = app.createNode("fr.inria.built-in.ParticleEmitter")
+turbG = app.createNode("fr.inria.built-in.ParticleTurbulence")
+solverG = app.createNode("fr.inria.built-in.ParticleSolver")
+merge = app.createNode("fr.inria.built-in.ParticleMerge")
+scene = app.createNode("fr.inria.built-in.Scene3D")
+camera = app.createNode("fr.inria.built-in.Camera3D")
+scanline = app.createNode("fr.inria.built-in.ScanlineRender")
+blur = app.createNode("net.sf.cimg.CImgBlur")
+checker = app.createNode("net.sf.openfx.CheckerBoardPlugin")
+idistort = app.createNode("net.sf.openfx.IDistort")
+viewer = app.createNode("fr.inria.built-in.Viewer")
+
+turbR.connectInput(0, emR)
+solverR.connectInput(0, turbR)
+turbG.connectInput(0, emG)
+solverG.connectInput(0, turbG)
+merge.connectInput(0, solverR)
+merge.connectInput(1, solverG)
+scene.connectInput(0, merge)
+scanline.connectInput(1, scene)
+scanline.connectInput(2, camera)
+blur.connectInput(0, scanline)
+
+# IDistort input names differ by index — resolve by label
+for i in range(idistort.getMaxInputCount()):
+    lbl = idistort.getInputLabel(i)
+    if lbl == "UV":
+        idistort.connectInput(i, blur)
+    elif lbl == "Source":
+        idistort.connectInput(i, checker)
+viewer.connectInput(0, idistort)
+
+emR.setPosition(-150, -500); turbR.setPosition(-150, -350); solverR.setPosition(-150, -200)
+emG.setPosition(150, -500); turbG.setPosition(150, -350); solverG.setPosition(150, -200)
+merge.setPosition(0, -50); scene.setPosition(0, 100)
+camera.setPosition(-200, 250); scanline.setPosition(0, 250)
+blur.setPosition(0, 400); checker.setPosition(300, 400)
+idistort.setPosition(0, 550); viewer.setPosition(0, 700)
+
+def setupHeatEmitter(em, r, g, b, seed):
+    em.getParam("translateY").setValue(-1.5)
+    em.getParam("rate").setValue(150)
+    em.getParam("lifetime").setValue(40.0)
+    em.getParam("velocity").setValue(0.8)
+    em.getParam("spread").setValue(25.0)
+    em.getParam("startSize").setValue(0.25)
+    em.getParam("endSize").setValue(0.45)
+    em.getParam("startColorR").setValue(r)
+    em.getParam("startColorG").setValue(g)
+    em.getParam("startColorB").setValue(b)
+    em.getParam("endColorR").setValue(r)
+    em.getParam("endColorG").setValue(g)
+    em.getParam("endColorB").setValue(b)
+    em.getParam("fadeIn").setValue(0.3)
+    em.getParam("fadeOut").setValue(0.4)
+    em.getParam("seed").setValue(seed)
+
+setupHeatEmitter(emR, 1.0, 0.0, 0.0, 0)
+setupHeatEmitter(emG, 0.0, 1.0, 0.0, 11)
+turbR.getParam("strength").setValue(1.2)
+turbR.getParam("scale").setValue(0.6)
+turbG.getParam("strength").setValue(1.2)
+turbG.getParam("scale").setValue(0.6)
+
+scanline.getParam("particleMode").set(1)   # Disc
+scanline.getParam("particleBlend").set(0)  # Additive
+blur.getParam("size").setValue(8, 0)
+blur.getParam("size").setValue(8, 1)
+idistort.getParam("uvScale").setValue(30, 0)
+idistort.getParam("uvScale").setValue(30, 1)
+camera.getParam("translateZ").setValue(8.0)
+)PY");
+}
+
+void
+Gui::createTemplateParticleRain()
+{
+    // Rain from a disc emitter, killed on floor impact (Max Bounces 1) with
+    // Spawn On-Collision splash droplets; stretch motion blur for streaks.
+    runTemplatePython(this, R"PY(
+app = app1
+emitter = app.createNode("fr.inria.built-in.ParticleEmitter")
+gravity = app.createNode("fr.inria.built-in.ParticleGravity")
+solver = app.createNode("fr.inria.built-in.ParticleSolver")
+floor = app.createNode("fr.inria.built-in.Cube3D")
+spawn = app.createNode("fr.inria.built-in.ParticleSpawn")
+merge = app.createNode("fr.inria.built-in.ParticleMerge")
+scene = app.createNode("fr.inria.built-in.Scene3D")
+camera = app.createNode("fr.inria.built-in.Camera3D")
+scanline = app.createNode("fr.inria.built-in.ScanlineRender")
+viewer = app.createNode("fr.inria.built-in.Viewer")
+
+gravity.connectInput(0, emitter)
+solver.connectInput(0, gravity)
+solver.connectInput(1, floor)
+spawn.connectInput(0, solver)
+merge.connectInput(0, solver)
+merge.connectInput(1, spawn)
+scene.connectInput(0, merge)
+scanline.connectInput(1, scene)
+scanline.connectInput(2, camera)
+viewer.connectInput(0, scanline)
+
+emitter.setPosition(0, -500); gravity.setPosition(0, -350)
+floor.setPosition(-200, -200); solver.setPosition(0, -200)
+spawn.setPosition(200, -50); merge.setPosition(0, 100)
+scene.setPosition(0, 250); camera.setPosition(-200, 400)
+scanline.setPosition(0, 400); viewer.setPosition(0, 550)
+
+# Emitter: wide disc raining straight down
+emitter.getParam("emitterShape").set(3)     # Disc (XZ plane)
+emitter.getParam("shapeSize").setValue(5.0)
+emitter.getParam("translateY").setValue(6.0)
+emitter.getParam("emitDirY").setValue(-1.0)
+emitter.getParam("rate").setValue(500)
+emitter.getParam("lifetime").setValue(60.0)
+emitter.getParam("velocity").setValue(5.0)
+emitter.getParam("velocityVariance").setValue(0.5)
+emitter.getParam("spread").setValue(2.0)
+emitter.getParam("startSize").setValue(0.03)
+emitter.getParam("endSize").setValue(0.03)
+emitter.getParam("startColorR").setValue(0.7)
+emitter.getParam("startColorG").setValue(0.8)
+emitter.getParam("startColorB").setValue(0.95)
+emitter.getParam("fadeIn").setValue(0.0)
+emitter.getParam("fadeOut").setValue(0.1)
+
+# Floor + kill-on-impact
+floor.getParam("scaleX").setValue(8.0)
+floor.getParam("scaleY").setValue(0.1)
+floor.getParam("scaleZ").setValue(8.0)
+floor.getParam("translateY").setValue(-1.0)
+solver.getParam("elasticity").setValue(0.05)
+solver.getParam("friction").setValue(0.9)
+solver.getParam("maxBounces").setValue(1)
+
+# Splash droplets on impact
+spawn.getParam("trigger").set(3)
+spawn.getParam("rate").setValue(4)
+spawn.getParam("inheritVelocity").setValue(0.05)
+spawn.getParam("extraSpeed").setValue(0.6)
+spawn.getParam("childLifetime").setValue(8.0)
+spawn.getParam("childSize").setValue(0.02)
+spawn.getParam("childColorR").setValue(0.8)
+spawn.getParam("childColorG").setValue(0.85)
+spawn.getParam("childColorB").setValue(0.95)
+
+scanline.getParam("particleMode").set(1)      # Disc
+scanline.getParam("particleBlend").set(0)     # Additive
+scanline.getParam("particleMotionBlur").setValue(1.0)  # streaks
+camera.getParam("translateZ").setValue(10.0)
+camera.getParam("translateY").setValue(1.0)
+)PY");
+}
+
+void
 Gui::onUserCommandTriggered()
 {
     QAction* action = qobject_cast<QAction*>( sender() );
