@@ -317,6 +317,10 @@ struct ParticleSolverPrivate
     ParticleDataPtr cachedData;
     double cachedFrame;
     std::unordered_set<uint32_t> knownIDs;
+    // Tombstones: IDs the SOLVER killed (settle, maxBounces, KillBox) whose
+    // emitter-side lifetime hasn't expired yet. Without these, step 2 re-adds
+    // the killed particle at the emitter position every frame ("resurrection").
+    std::unordered_set<uint32_t> deadIDs;
 
     // Multi-frame RAM cache (Phase A skeleton — declared, not yet wired into
     // the render path). The existing cachedData/cachedFrame above is the
@@ -326,6 +330,7 @@ struct ParticleSolverPrivate
     struct CachedFrame {
         ParticleDataPtr              state;
         std::unordered_set<uint32_t> knownIDs;       // restored alongside state
+        std::unordered_set<uint32_t> deadIDs;        // tombstones, restored too
         std::int64_t                 lastAccessUs = 0;   // for LRU eviction (Phase C)
         std::size_t                  memoryBytes  = 0;
     };
@@ -539,14 +544,6 @@ ParticleSolver::getParticleData(double time)
     // viewport paint vs Cycles / ScanlineRender worker threads) — see computeMutex.
     std::lock_guard<std::mutex> computeLk(_imp->computeMutex);
 
-    // Single-slot fast path — same frame as the previous call. Return a COPY: the
-    // caller must never alias _imp->cachedData, which a later call re-simulates in
-    // place (the live slot is mutated across frames). Copying hands back an
-    // immutable snapshot so paint + render threads can't trample each other's data.
-    if (_imp->cachedData && time == _imp->cachedFrame) {
-        return std::make_shared<ParticleData>(*_imp->cachedData);
-    }
-
     const bool cacheEnabled = _imp->cacheEnabled.lock()
                               ? _imp->cacheEnabled.lock()->getValue()
                               : true;
@@ -559,15 +556,32 @@ ParticleSolver::getParticleData(double time)
                    std::chrono::steady_clock::now().time_since_epoch()).count();
     };
 
-    // 1. Hash-based invalidation — wipe the cache if any upstream input changed.
-    if (cacheEnabled) {
+    // 1. Hash-based invalidation — MUST run before the same-frame fast path,
+    //    so a knob edit while parked on a frame takes effect immediately (it
+    //    used to return the stale pre-edit sim until the user scrubbed). Also
+    //    resets the live resume slot: resuming the sim from pre-edit state
+    //    would bake the stale result into the freshly wiped cache.
+    {
         const U64 currentHash = computeUpstreamHash();
         std::lock_guard<std::mutex> lk(_imp->frameCacheMutex);
         if (currentHash != _imp->frameCacheHash) {
             _imp->frameCache.clear();
             _imp->frameCacheBytes = 0;
             _imp->frameCacheHash  = currentHash;
+            _imp->cachedData.reset();
+            _imp->cachedFrame = -1e9;
+            _imp->knownIDs.clear();
+            _imp->deadIDs.clear();
         }
+    }
+
+    // Single-slot fast path — same frame as the previous call (checked AFTER
+    // invalidation). Return a COPY: the caller must never alias
+    // _imp->cachedData, which a later call re-simulates in place (the live
+    // slot is mutated across frames). Copying hands back an immutable
+    // snapshot so paint + render threads can't trample each other's data.
+    if (_imp->cachedData && time == _imp->cachedFrame) {
+        return std::make_shared<ParticleData>(*_imp->cachedData);
     }
 
     // 2. Exact-frame cache hit — return the cached snapshot DIRECTLY, no copy.
@@ -630,6 +644,7 @@ ParticleSolver::getParticleData(double time)
                 --it; // largest ≤ endFrame
                 _imp->cachedData       = std::make_shared<ParticleData>(*it->second.state);
                 _imp->knownIDs         = it->second.knownIDs;
+                _imp->deadIDs          = it->second.deadIDs;
                 it->second.lastAccessUs = nowUs();
                 startFrame             = it->first + 1;
             }
@@ -641,6 +656,7 @@ ParticleSolver::getParticleData(double time)
         } else {
             _imp->cachedData.reset();
             _imp->knownIDs.clear();
+            _imp->deadIDs.clear();
         }
     }
 
@@ -653,10 +669,13 @@ ParticleSolver::getParticleData(double time)
         ParticleDataPtr emitterData = emitter->getParticleData((double)frame);
         if (!emitterData) continue;
 
-        // 2. Add NEW particles from emitter
+        // 2. Add NEW particles from emitter (skip tombstoned IDs — the solver
+        //    killed those and they must not respawn while the emitter still
+        //    reports them)
         for (size_t i = 0; i < emitterData->particles.size(); ++i) {
             const Particle& up = emitterData->particles[i];
-            if (_imp->knownIDs.find(up.id) == _imp->knownIDs.end()) {
+            if (_imp->knownIDs.find(up.id) == _imp->knownIDs.end()
+                && _imp->deadIDs.find(up.id) == _imp->deadIDs.end()) {
                 Particle p = up;
                 // Undo emitter's integration — we integrate ourselves
                 p.px -= p.vx;
@@ -676,6 +695,13 @@ ParticleSolver::getParticleData(double time)
         int numSubsteps = _imp->substeps.lock() ? _imp->substeps.lock()->getValue() : 4;
         if (numSubsteps < 1) numSubsteps = 1;
         float dt = 1.0f / (float)numSubsteps;
+
+        // Reset collision flags once per FRAME and OR across substeps —
+        // resetting per substep dropped every hit except the last substep's,
+        // so Spawn "On Collision" missed ~75% of impacts at Substeps=4.
+        for (size_t j = 0; j < _imp->cachedData->particles.size(); ++j) {
+            _imp->cachedData->particles[j].collided = false;
+        }
 
         for (int sub = 0; sub < numSubsteps; ++sub) {
             // 3. Apply all upstream forces (scaled by dt)
@@ -712,10 +738,10 @@ ParticleSolver::getParticleData(double time)
 
             // 5. Apply collision AFTER integration. Pass dt so the
             //    post-bounce continuation displacement is scaled to one
-            //    substep, not one full frame.
+            //    substep, not one full frame. (collided is NOT reset here —
+            //    it accumulates across the frame's substeps, see above.)
             for (size_t j = 0; j < _imp->cachedData->particles.size(); ++j) {
                 Particle& p = _imp->cachedData->particles[j];
-                p.collided = false;
                 applyCollision(p, (double)frame, dt);
             }
         }
@@ -760,9 +786,26 @@ ParticleSolver::getParticleData(double time)
                 alive.push_back(p);
             } else {
                 _imp->knownIDs.erase(p.id);
+                // Solver-killed early (settle / maxBounces / KillBox) while the
+                // emitter still reports the ID → tombstone it so step 2 doesn't
+                // respawn it at the emitter position next frame.
+                if (emitterIDs.count(p.id) > 0) {
+                    _imp->deadIDs.insert(p.id);
+                }
             }
         }
         _imp->cachedData->particles.swap(alive);
+
+        // Purge tombstones the emitter no longer reports — those IDs can never
+        // be offered again, so this keeps deadIDs bounded by the emitter's
+        // live count.
+        for (auto it = _imp->deadIDs.begin(); it != _imp->deadIDs.end(); ) {
+            if (emitterIDs.count(*it) == 0) {
+                it = _imp->deadIDs.erase(it);
+            } else {
+                ++it;
+            }
+        }
 
         // 8. Write this frame's integrated state into the multi-frame cache
         //    (uncolored — debug coloring is applied after the loop).
@@ -772,9 +815,10 @@ ParticleSolver::getParticleData(double time)
             _imp->frameCacheBytes -= entry.memoryBytes;
             entry.state        = std::make_shared<ParticleData>(*_imp->cachedData);
             entry.knownIDs     = _imp->knownIDs;
+            entry.deadIDs      = _imp->deadIDs;
             entry.lastAccessUs = nowUs();
             entry.memoryBytes  = sizeof(Particle) * _imp->cachedData->particles.size()
-                               + sizeof(uint32_t) * _imp->knownIDs.size() + 128;
+                               + sizeof(uint32_t) * (_imp->knownIDs.size() + _imp->deadIDs.size()) + 128;
             _imp->frameCacheBytes += entry.memoryBytes;
         }
     }
@@ -891,6 +935,14 @@ ParticleSolver::applyCollision(Particle& p, double time, float dt)
     readDouble("scaleY",     sy);
     readDouble("scaleZ",     sz);
     readDouble("size",       geoSize);
+    // Uniform Scale multiplies all axes on top of the per-axis Scale (matches
+    // the drawn wireframe; previously ignored here, so a uniformly-scaled
+    // collision shape bounced at the wrong surface).
+    float uniformScale = 1.0f;
+    readDouble("uniformScale", uniformScale);
+    sx *= uniformScale;
+    sy *= uniformScale;
+    sz *= uniformScale;
 
     std::string pluginID = geoEffect->getPluginID();
     bool isSphere = (pluginID.find("Sphere") != std::string::npos);
