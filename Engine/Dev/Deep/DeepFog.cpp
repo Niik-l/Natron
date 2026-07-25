@@ -335,17 +335,22 @@ DeepFog::render(const RenderActionArgs& args)
                 }
             }
 
-            // Check gap after last sample
+            // Check gap after last sample.
+            // MUST mirror the fill pass exactly (same gapEnd computation) — a
+            // count/fill mismatch here overflows the allocation in pass 2.
             {
                 int si = sortedSamples[nSamples - 1].second;
                 float lastZBack = (zbIdx >= 0) ? srcData[si * nChannels + zbIdx] : sortedSamples[nSamples - 1].first;
                 if (lastZBack < farDepthVal && farDepthVal > nearDepthVal) {
                     float gapStart = std::max(lastZBack, (float)nearDepthVal);
-                    float gapEnd = (float)farDepthVal;
-                    if (gapEnd > gapStart && gapEnd < std::numeric_limits<float>::max()) {
-                        ++fogCount;
-                    } else if (gapEnd > gapStart && farDepthVal >= std::numeric_limits<double>::max() / 2.0) {
-                        // Unlimited far: create fog sample with a large but finite extent
+                    float gapEnd;
+                    if (farDepthVal >= std::numeric_limits<double>::max() / 2.0) {
+                        // Unlimited far: fill pass uses a large but finite extent
+                        gapEnd = gapStart + 1000.0f;
+                    } else {
+                        gapEnd = (float)farDepthVal;
+                    }
+                    if (gapEnd > gapStart) {
                         ++fogCount;
                     }
                 }

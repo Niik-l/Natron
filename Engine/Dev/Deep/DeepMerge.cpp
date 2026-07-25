@@ -189,12 +189,51 @@ DeepMerge::render(const RenderActionArgs& args)
         mergedWindow.x2 = std::max(windowA.x2, windowB.x2);
         mergedWindow.y2 = std::max(windowA.y2, windowB.y2);
 
-        // Use the channel layout from input A (both must match for proper merge)
-        const std::vector<std::string>& chNames = deepA->getChannelNames();
-        int numCh = deepA->getNumChannels();
+        // The two inputs may have different channel sets/orders (e.g. a raw
+        // DCM's A/Z/ZBack merged with a recolored branch's R/G/B/A/Z/ZBack).
+        // Output layout = union of the channel sets (A's order first, then any
+        // B-only channels); each input's samples are remapped into it by
+        // channel NAME — never by raw stride, which reads out of bounds when
+        // the counts differ and scrambles channels when the order differs.
+        const int numChA = deepA->getNumChannels();
+        const int numChB = deepB->getNumChannels();
+        std::vector<std::string> chNames = deepA->getChannelNames();
+        {
+            const std::vector<std::string>& namesB = deepB->getChannelNames();
+            for (int c = 0; c < numChB; ++c) {
+                if (std::find(chNames.begin(), chNames.end(), namesB[c]) == chNames.end()) {
+                    chNames.push_back(namesB[c]);
+                }
+            }
+        }
+        const int numCh = (int)chNames.size();
 
-        // Find Z channel index for depth sorting
-        int zIdx = deepA->findChannelIndex("Z");
+        // Output channel c -> source index in A / B (-1 = absent, filled with 0)
+        std::vector<int> aMap(numCh), bMap(numCh);
+        bool aIdentity = (numCh == numChA);
+        bool bIdentity = (numCh == numChB);
+        for (int c = 0; c < numCh; ++c) {
+            aMap[c] = deepA->findChannelIndex(chNames[c]);
+            bMap[c] = deepB->findChannelIndex(chNames[c]);
+            if (aMap[c] != c) aIdentity = false;
+            if (bMap[c] != c) bIdentity = false;
+        }
+
+        // Copy one source sample into the output layout
+        auto copySample = [numCh](const float* smp, const std::vector<int>& map,
+                                  bool identity, float* dst) {
+            if (identity) {
+                std::copy(smp, smp + numCh, dst);
+            } else {
+                for (int c = 0; c < numCh; ++c) {
+                    dst[c] = (map[c] >= 0) ? smp[map[c]] : 0.0f;
+                }
+            }
+        };
+
+        // Find Z channel index for depth sorting, per input layout
+        int zIdxA = deepA->findChannelIndex("Z");
+        int zIdxB = deepB->findChannelIndex("Z");
 
         DeepImagePtr merged = std::make_shared<DeepImage>(mergedWindow, numCh, chNames);
 
@@ -224,51 +263,46 @@ DeepMerge::render(const RenderActionArgs& args)
                 const float* srcA = deepA->getSampleData(x, y);
                 const float* srcB = deepB->getSampleData(x, y);
 
-                if (zIdx >= 0 && srcA && srcB) {
-                    // Merge-sort by Z
+                if (zIdxA >= 0 && zIdxB >= 0 && srcA && srcB) {
+                    // Merge-sort by Z (each input read with its OWN stride/Z index)
                     int iA = 0, iB = 0, iOut = 0;
                     while (iA < countA && iB < countB) {
-                        float zA = srcA[iA * numCh + zIdx];
-                        float zB = srcB[iB * numCh + zIdx];
+                        float zA = srcA[iA * numChA + zIdxA];
+                        float zB = srcB[iB * numChB + zIdxB];
 
                         if (zA <= zB) {
-                            std::copy(srcA + iA * numCh,
-                                      srcA + (iA + 1) * numCh,
-                                      dest + iOut * numCh);
+                            copySample(srcA + iA * numChA, aMap, aIdentity, dest + iOut * numCh);
                             ++iA;
                         } else {
-                            std::copy(srcB + iB * numCh,
-                                      srcB + (iB + 1) * numCh,
-                                      dest + iOut * numCh);
+                            copySample(srcB + iB * numChB, bMap, bIdentity, dest + iOut * numCh);
                             ++iB;
                         }
                         ++iOut;
                     }
                     // Copy remaining from A
                     while (iA < countA) {
-                        std::copy(srcA + iA * numCh,
-                                  srcA + (iA + 1) * numCh,
-                                  dest + iOut * numCh);
+                        copySample(srcA + iA * numChA, aMap, aIdentity, dest + iOut * numCh);
                         ++iA;
                         ++iOut;
                     }
                     // Copy remaining from B
                     while (iB < countB) {
-                        std::copy(srcB + iB * numCh,
-                                  srcB + (iB + 1) * numCh,
-                                  dest + iOut * numCh);
+                        copySample(srcB + iB * numChB, bMap, bIdentity, dest + iOut * numCh);
                         ++iB;
                         ++iOut;
                     }
                 } else {
-                    // No Z channel or missing data — just concatenate
-                    int offset = 0;
+                    // No Z channel on one side or missing data — just concatenate
+                    int iOut = 0;
                     if (srcA) {
-                        std::copy(srcA, srcA + countA * numCh, dest);
-                        offset = countA * numCh;
+                        for (int iA = 0; iA < countA; ++iA, ++iOut) {
+                            copySample(srcA + iA * numChA, aMap, aIdentity, dest + iOut * numCh);
+                        }
                     }
                     if (srcB) {
-                        std::copy(srcB, srcB + countB * numCh, dest + offset);
+                        for (int iB = 0; iB < countB; ++iB, ++iOut) {
+                            copySample(srcB + iB * numChB, bMap, bIdentity, dest + iOut * numCh);
+                        }
                     }
                 }
             }
