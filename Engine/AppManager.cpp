@@ -157,6 +157,7 @@
 #include "Dev/Deep/DeepExpression.h"
 #include "Dev/Deep/DeepColorCorrect.h"
 #include "Dev/Deep/DeepDefocus.h"
+#include "Dev/Deep/DeepFog.h"
 #include "Dev/Deep/Blast.h"
 
 // Dev nodes — Channel
@@ -1663,6 +1664,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<DeepExpression>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
     registerBuiltInPlugin<DeepColorCorrect>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
     registerBuiltInPlugin<DeepDefocus>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
+    registerBuiltInPlugin<DeepFog>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/deep_grouping_3.png"), false, false);
     registerBuiltInPlugin<Blast>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
     // Dev nodes — 3D System

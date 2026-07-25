@@ -83,7 +83,7 @@ Updated: 2026-06-24
 | **DeepContactShadow** | `fr.inria.built-in.DeepContactShadow` | Not registered | Contact shadows from deep |
 | **DeepDepthWarp** | `fr.inria.built-in.DeepDepthWarp` | Not registered | Depth-based warping |
 | **DeepDifference** | `fr.inria.built-in.DeepDifference` | Not registered | Deep difference matte |
-| **DeepFog** | `fr.inria.built-in.DeepFog` | Not registered | Atmospheric fog from deep |
+| **DeepFog** | `fr.inria.built-in.DeepFog` | Registered | Atmospheric fog from deep |
 | **DeepFromFrames** | `fr.inria.built-in.DeepFromFrames` | Not registered | Build deep from frame sequence |
 | **DeepGodRays** | `fr.inria.built-in.DeepGodRays` | Not registered | Volumetric god rays |
 | **DeepLayerBreak** | `fr.inria.built-in.DeepLayerBreak` | Not registered | Break deep into layers |
