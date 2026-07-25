@@ -748,10 +748,17 @@ Volume3D::generateVolumeData(double time, std::vector<float>& outData, int& res)
         conv.d = vp.noiseOffY; paramHash = hc(paramHash, conv.u);
         conv.d = vp.noiseOffZ; paramHash = hc(paramHash, conv.u);
     }
-    if (paramHash == _cachedVolHash && _cachedVolRes > 0 && !_cachedVolData.empty()) {
-        outData = _cachedVolData;
-        res = _cachedVolRes;
-        return;
+    // Cache accesses are guarded: GUI paint (Viewport3D) and render workers
+    // (ScanlineRender / FastVolumeRender) call this concurrently, and copying
+    // out of _cachedVolData while another thread reassigns it is a race.
+    // The compute below runs unlocked (fills a local buffer).
+    {
+        std::lock_guard<std::mutex> lk(_volCacheMutex);
+        if (paramHash == _cachedVolHash && _cachedVolRes > 0 && !_cachedVolData.empty()) {
+            outData = _cachedVolData;
+            res = _cachedVolRes;
+            return;
+        }
     }
     res = std::max(8, std::min(128, vp.resolution));
 
@@ -794,10 +801,13 @@ Volume3D::generateVolumeData(double time, std::vector<float>& outData, int& res)
     }
 
     // Cache
-    _cachedVolData = outData;
-    _cachedVolRes = res;
-    _cachedVolTime = time;
-    _cachedVolHash = paramHash;
+    {
+        std::lock_guard<std::mutex> lk(_volCacheMutex);
+        _cachedVolData = outData;
+        _cachedVolRes = res;
+        _cachedVolTime = time;
+        _cachedVolHash = paramHash;
+    }
 }
 
 StatusEnum

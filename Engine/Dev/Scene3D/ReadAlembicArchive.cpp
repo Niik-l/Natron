@@ -24,6 +24,7 @@
 #include <cstring>
 #include <set>
 #include <sstream>
+#include <mutex>
 #include <vector>
 
 #include "../../AppInstance.h"
@@ -278,7 +279,11 @@ struct ReadAlembicArchivePrivate
     KnobStringWPtr excludedPaths;  // one excluded archive path per line (driven by AlembicTreeWidget)
     KnobStringWPtr info;
 
-    // Parsed archive
+    // Parsed archive. Guarded by archiveMutex: loadAlembicFile (GUI thread via
+    // knobChanged/onKnobsLoaded) clears and refills these while the SceneGraph
+    // accessors (getMeshDataAt / getEntryWorldMatrix / getSceneNodeAt / ...)
+    // read them from render workers and the 3D-viewport paint.
+    mutable std::mutex archiveMutex;
     std::vector<ArchiveEntry> entries;
     // Filtered indices into `entries` — what we currently expose to SceneGraph.
     std::vector<int> visible;
@@ -586,6 +591,11 @@ ReadAlembicArchive::loadAlembicFile(const std::string& path)
     using namespace Alembic::AbcGeom;
     using namespace Alembic::Abc;
 
+    // Hold the archive lock for the whole (re)load — render threads holding
+    // ArchiveEntry references or indexing `visible` must not see the vectors
+    // freed/refilled mid-walk.
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+
     _imp->entries.clear();
     _imp->visible.clear();
     _imp->sourceFps = 0.0;
@@ -691,12 +701,14 @@ ReadAlembicArchive::loadAlembicFile(const std::string& path)
 int
 ReadAlembicArchive::getSceneNodeCount() const
 {
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
     return (int)_imp->visible.size();
 }
 
 std::vector<ArchiveTreeEntry>
 ReadAlembicArchive::getEntryTree() const
 {
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
     std::vector<ArchiveTreeEntry> out;
     out.reserve(_imp->entries.size());
     for (size_t i = 0; i < _imp->entries.size(); ++i) {
@@ -716,6 +728,12 @@ ReadAlembicArchive::getEntryTree() const
 MeshDataPtr
 ReadAlembicArchive::getMeshDataAt(int idx, double time) const
 {
+    // Guards against a concurrent reload freeing `entries` under us. NOTE: the
+    // in-place vertex mutation documented below is still the G1 copy-on-read
+    // issue (wrong-render across concurrent consumers at different times) —
+    // this lock only removes the crash class.
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+
     if (idx < 0 || idx >= (int)_imp->visible.size()) return MeshDataPtr();
     ArchiveEntry& e = _imp->entries[_imp->visible[idx]];
     if (!e.isMesh) return MeshDataPtr();
@@ -801,6 +819,7 @@ ReadAlembicArchive::getMeshDataAt(int idx, double time) const
 bool
 ReadAlembicArchive::getEntryWorldMatrix(int idx, double time, float outWorld[16]) const
 {
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
     if (idx < 0 || idx >= (int)_imp->visible.size()) return false;
 
     // Identity to start.
@@ -905,6 +924,7 @@ ReadAlembicArchive::getSceneNodeAt(int idx, double time,
                                    bool& outIsMesh,
                                    float outLocalMatrix[16]) const
 {
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
     if (idx < 0 || idx >= (int)_imp->visible.size()) return false;
     const int srcIdx = _imp->visible[idx];
     const ArchiveEntry& e = _imp->entries[srcIdx];
@@ -987,6 +1007,7 @@ ReadAlembicArchive::getPreferredMetadata(NodeMetadata& metadata)
     // problem; the 3D viewport reads getMeshDataAt(idx, time) directly each
     // paintGL so it bypasses the cache entirely.
     bool anyAnimated = false;
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
     for (const ArchiveEntry& e : _imp->entries) {
         if (e.isMesh) {
             if (e.hasAnimatedVerts) { anyAnimated = true; break; }

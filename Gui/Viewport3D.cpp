@@ -585,7 +585,8 @@ computeProject3DLayer(Project3D* p3d,
 {
     if (!p3d) return false;
     p3d->updateCachedTexture(time);
-    const Project3D::CachedTexture& pt = p3d->getCachedTexture();
+    Project3D::CachedTexturePtr ptSnapPtr = p3d->getCachedTexture();
+    const Project3D::CachedTexture& pt = *ptSnapPtr;
     if (pt.width <= 0 || pt.height <= 0 || pt.pixels.empty()) return false;
     float vp[16];
     if (!p3d->getProjectorViewProj(time, vp)) return false;
@@ -2858,7 +2859,8 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
         UVProject* uvp = a ? findUVProjectForGeo(a.get(), meshSrc) : NULL;
         if (uvp) {
             uvp->updateCachedTexture(meshTime);
-            const UVProject::CachedTexture& ut = uvp->getCachedTexture();
+            UVProject::CachedTexturePtr utSnapPtr = uvp->getCachedTexture();
+            const UVProject::CachedTexture& ut = *utSnapPtr;
             if (ut.width > 0 && ut.height > 0 && !ut.pixels.empty()) {
                 std::vector<float> newUVs, newSTW; int comp = 0;
                 uvp->rewriteUVs(mesh->vertices, sn.worldMatrix, meshTime, newUVs, newSTW, comp);
@@ -2898,7 +2900,8 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
             }
             if (m3d) {
                 m3d->updateCachedTexture(meshTime);
-                const Material3D::CachedTexture& mt = m3d->getCachedTexture();
+                Material3D::CachedTexturePtr mtSnapPtr = m3d->getCachedTexture();
+                const Material3D::CachedTexture& mt = *mtSnapPtr;
                 if (mt.width > 0 && mt.height > 0 && !mt.pixels.empty()) {
                     texPixels = mt.pixels.data(); texW = mt.width; texH = mt.height;
                     useOwnUVs = true;
@@ -3058,7 +3061,8 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
     if (!card3dNew) return;
 
     card3dNew->updateCachedTexture(time);
-    const Card3D::CachedTexture& tex = card3dNew->getCachedTexture();
+    Card3D::CachedTexturePtr texSnapPtr = card3dNew->getCachedTexture();
+    const Card3D::CachedTexture& tex = *texSnapPtr;
 
     // Texture + UVs — prefer a downstream UVProject (projects its img onto the card
     // with rewritten UVs), else the card's own cached texture.
@@ -3072,7 +3076,8 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
     UVProject* uvpCard = findUVProjectForGeo(app.get(), node);
     if (uvpCard) {
         uvpCard->updateCachedTexture(time);
-        const UVProject::CachedTexture& ut = uvpCard->getCachedTexture();
+        UVProject::CachedTexturePtr utSnapPtr = uvpCard->getCachedTexture();
+        const UVProject::CachedTexture& ut = *utSnapPtr;
         if (ut.width > 0 && ut.height > 0 && !ut.pixels.empty()) {
             texPixels = ut.pixels.data(); texW = ut.width; texH = ut.height;
             texWrapRepeat = false;
@@ -3091,7 +3096,8 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
         Project3D* topP3d = mp ? resolveViewportProject3D(mp->getConnectedMaterial()) : NULL;
         if (topP3d) {
             topP3d->updateCachedTexture(time);
-            const Project3D::CachedTexture& pt = topP3d->getCachedTexture();
+            Project3D::CachedTexturePtr ptSnapPtr = topP3d->getCachedTexture();
+            const Project3D::CachedTexture& pt = *ptSnapPtr;
             if (pt.width > 0 && pt.height > 0 && !pt.pixels.empty()) {
                 texW = pt.width; texH = pt.height;   // for image aspect (halfW); texPixels stays NULL
                 cardProjects = true;
@@ -3370,7 +3376,8 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
         UVProject* uvp = findUVProjectForGeo(app.get(), node);
         if (uvp) {
             uvp->updateCachedTexture(time);
-            const UVProject::CachedTexture& ut = uvp->getCachedTexture();
+            UVProject::CachedTexturePtr utSnapPtr = uvp->getCachedTexture();
+            const UVProject::CachedTexture& ut = *utSnapPtr;
             if (ut.width > 0 && ut.height > 0 && !ut.pixels.empty()) {
                 std::vector<float> xyz; xyz.reserve(sphereVerts.size() * 3);
                 for (size_t vi = 0; vi < sphereVerts.size(); ++vi) {
@@ -3397,7 +3404,8 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
             buildGeoProject3DLayers(effect, xyz, nrm, sn.worldMatrix, time, projLayers);
         }
         if (!texPixels && projLayers.empty()) {
-            const Sphere3D::CachedTexture& tex = sphere->getCachedTexture();
+            Sphere3D::CachedTexturePtr texSnapPtr = sphere->getCachedTexture();
+            const Sphere3D::CachedTexture& tex = *texSnapPtr;
             if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
                 texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
             }
@@ -3610,7 +3618,8 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
         UVProject* uvp = findUVProjectForGeo(app.get(), node);
         if (uvp) {
             uvp->updateCachedTexture(time);
-            const UVProject::CachedTexture& ut = uvp->getCachedTexture();
+            UVProject::CachedTexturePtr utSnapPtr = uvp->getCachedTexture();
+            const UVProject::CachedTexture& ut = *utSnapPtr;
             if (ut.width > 0 && ut.height > 0 && !ut.pixels.empty()) {
                 std::vector<float> xyz; xyz.reserve(cubeVerts.size() * 3);
                 for (size_t vi = 0; vi < cubeVerts.size(); ++vi) {
@@ -3635,7 +3644,8 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
             buildGeoProject3DLayers(effect, xyz, nrm, sn.worldMatrix, time, projLayers);
         }
         if (!texPixels && projLayers.empty()) {
-            const Cube3D::CachedTexture& tex = cube->getCachedTexture();
+            Cube3D::CachedTexturePtr texSnapPtr = cube->getCachedTexture();
+            const Cube3D::CachedTexture& tex = *texSnapPtr;
             if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
                 texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
             }
@@ -3804,7 +3814,8 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
         UVProject* uvp = findUVProjectForGeo(app.get(), node);
         if (uvp) {
             uvp->updateCachedTexture(time);
-            const UVProject::CachedTexture& ut = uvp->getCachedTexture();
+            UVProject::CachedTexturePtr utSnapPtr = uvp->getCachedTexture();
+            const UVProject::CachedTexture& ut = *utSnapPtr;
             if (ut.width > 0 && ut.height > 0 && !ut.pixels.empty()) {
                 std::vector<float> xyz; xyz.reserve(cylVerts.size() * 3);
                 for (size_t vi = 0; vi < cylVerts.size(); ++vi) {
@@ -3829,7 +3840,8 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
             buildGeoProject3DLayers(effect, xyz, nrm, sn.worldMatrix, time, projLayers);
         }
         if (!texPixels && projLayers.empty()) {
-            const Cylinder3D::CachedTexture& tex = cyl->getCachedTexture();
+            Cylinder3D::CachedTexturePtr texSnapPtr = cyl->getCachedTexture();
+            const Cylinder3D::CachedTexture& tex = *texSnapPtr;
             if (tex.width > 0 && tex.height > 0 && !tex.pixels.empty()) {
                 texPixels = tex.pixels.data(); texW = tex.width; texH = tex.height;
             }

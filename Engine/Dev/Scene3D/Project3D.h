@@ -24,6 +24,8 @@
 #include <Python.h>
 // ***** END PYTHON BLOCK *****
 
+#include <memory>
+#include <mutex>
 #include <vector>
 
 #include "../../../Global/Macros.h"
@@ -131,7 +133,15 @@ public:
         int width, height;
         CachedTexture() : width(0), height(0) {}
     };
-    const CachedTexture& getCachedTexture() const { return _cachedTexture; }
+    typedef std::shared_ptr<const CachedTexture> CachedTexturePtr;
+    /** Published immutable snapshot — never null, never mutated after publish.
+     *  Hold the returned shared_ptr for as long as you read it: GUI paint and
+     *  render workers call this concurrently and a republish must not free a
+     *  buffer under a live reader. */
+    CachedTexturePtr getCachedTexture() const {
+        std::lock_guard<std::mutex> lk(_texMutex);
+        return _cachedTexture;
+    }
     /** Render the plate (input 0) to a small preview texture for the 3D viewport. */
     void updateCachedTexture(double time);
     /** Build the projector view*projection matrix from the camera (input 1), column-major
@@ -146,7 +156,8 @@ private:
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     std::unique_ptr<Project3DPrivate> _imp;
-    mutable CachedTexture _cachedTexture;
+    mutable std::mutex _texMutex;
+    CachedTexturePtr _cachedTexture = std::make_shared<CachedTexture>();
 };
 
 NATRON_NAMESPACE_EXIT

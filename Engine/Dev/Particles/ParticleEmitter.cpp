@@ -543,6 +543,8 @@ ParticleEmitter::getParticleData(double time)
     // emerging from. Replaces the legacy XY/YZ/XZ plane projection and the
     // emitter's own translateXYZ for the Card3D case.
     Card3D* card3dMask = nullptr;
+    // Holds the snapshot alive for the whole sim — card3dTex points into it.
+    Card3D::CachedTexturePtr card3dTexSnap;
     const Card3D::CachedTexture* card3dTex = nullptr;
     float card3dT[3] = { 0.f, 0.f, 0.f };
     double card3dRot[3][3] = { {1,0,0}, {0,1,0}, {0,0,1} };
@@ -564,7 +566,8 @@ ParticleEmitter::getParticleData(double time)
         if (card3dMask) {
             // Card3D mask source — pull its cached texture + transform.
             card3dMask->updateCachedTexture(time);
-            card3dTex = &card3dMask->getCachedTexture();
+            card3dTexSnap = card3dMask->getCachedTexture();
+            card3dTex = card3dTexSnap.get();
 
             auto readDouble = [&](const char* name, float& out) {
                 KnobIPtr k = card3dMask->getKnobByName(name);

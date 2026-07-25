@@ -504,7 +504,15 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
 void
 ReadGeo::loadGeoFromFile(const std::string& path)
 {
+    // Serialise (re)loads against getMeshData readers on render threads.
+    std::lock_guard<std::mutex> lk(_meshMutex);
+
+    // Drop the previous geometry FIRST — clearing the path or a failed load
+    // must not keep serving the old mesh (stale-render class).
+    _lastMeshData.reset();
+
     if (path.empty()) {
+        refreshMetadata_public(true);
         return;
     }
 
@@ -1039,6 +1047,12 @@ ReadGeo::loadObjGeo(const std::string& path)
 MeshDataPtr
 ReadGeo::getMeshData(double time) const
 {
+    // Serialise against a concurrent reload swapping/clearing _lastMeshData.
+    // NOTE: the per-time vertex/transform update below still mutates the
+    // shared mesh in place (wrong-render across concurrent consumers at
+    // different times) — that is the G1 copy-on-read fix, tracked separately.
+    std::lock_guard<std::mutex> lk(_meshMutex);
+
     if (_lastMeshData && time >= 0 && _imp) {
         if (_imp->hasAnimatedXform && _imp->numXformSamples > 0 &&
             !_imp->xformMatrices.empty()) {

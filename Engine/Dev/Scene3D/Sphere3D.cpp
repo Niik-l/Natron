@@ -394,25 +394,34 @@ Sphere3D::generateSphereMesh(double time,
 void
 Sphere3D::updateCachedTexture(double time)
 {
-    _cachedTexture.pixels.clear();
-    _cachedTexture.width = 0;
-    _cachedTexture.height = 0;
+    // Build into a local and publish an immutable snapshot on every exit path
+    // — the previously published texture is shared with concurrent readers
+    // (GUI paint / render workers) and must never be mutated in place.
+    std::shared_ptr<CachedTexture> tex = std::make_shared<CachedTexture>();
+    auto publish = [&]() {
+        std::lock_guard<std::mutex> lk(_texMutex);
+        _cachedTexture = tex;
+    };
+    tex->pixels.clear();
+    tex->width = 0;
+    tex->height = 0;
 
     // Prefer a connected Material3D's diffuse texture so a textured material shows
     // on this shape in the 3D viewport (not only in the Cycles render).
     if (Material3D* m3d = dynamic_cast<Material3D*>(getConnectedMaterial())) {
         m3d->updateCachedTexture(time);
-        const Material3D::CachedTexture& mt = m3d->getCachedTexture();
+        Material3D::CachedTexturePtr mtPtr = m3d->getCachedTexture();
+        const Material3D::CachedTexture& mt = *mtPtr;
         if (mt.width > 0 && mt.height > 0 && !mt.pixels.empty()) {
-            _cachedTexture.width = mt.width;
-            _cachedTexture.height = mt.height;
-            _cachedTexture.pixels = mt.pixels;
-            return;
+            tex->width = mt.width;
+            tex->height = mt.height;
+            tex->pixels = mt.pixels;
+            { publish(); return; }
         }
     }
 
     EffectInstancePtr imgInput = getInput(0);
-    if (!imgInput) return;
+    if (!imgInput) { publish(); return; }
 
     // Render the input at a preview size for viewport display
     int maxSize = 512;
@@ -420,12 +429,12 @@ Sphere3D::updateCachedTexture(double time)
     ImagePtr img = getImage(0, time, RenderScale(), ViewIdx(0),
                             NULL, NULL, false, true,
                             eStorageModeRAM, 0, &roiPixel);
-    if (!img) return;
+    if (!img) { publish(); return; }
 
     RectI bounds = img->getBounds();
     int w = bounds.width();
     int h = bounds.height();
-    if (w <= 0 || h <= 0) return;
+    if (w <= 0 || h <= 0) { publish(); return; }
 
     // Downscale if needed
     int dstW = w, dstH = h;
@@ -435,9 +444,9 @@ Sphere3D::updateCachedTexture(double time)
         dstH = std::max(1, (int)(h * scale));
     }
 
-    _cachedTexture.width = dstW;
-    _cachedTexture.height = dstH;
-    _cachedTexture.pixels.resize(dstW * dstH * 4, 0.0f);
+    tex->width = dstW;
+    tex->height = dstH;
+    tex->pixels.resize(dstW * dstH * 4, 0.0f);
 
     Image::ReadAccess ra(img.get());
     for (int dy = 0; dy < dstH; ++dy) {
@@ -447,13 +456,14 @@ Sphere3D::updateCachedTexture(double time)
             const float* pix = (const float*)ra.pixelAt(sx, sy);
             if (pix) {
                 int idx = (dy * dstW + dx) * 4;
-                _cachedTexture.pixels[idx + 0] = pix[0];
-                _cachedTexture.pixels[idx + 1] = pix[1];
-                _cachedTexture.pixels[idx + 2] = pix[2];
-                _cachedTexture.pixels[idx + 3] = (img->getComponents().getNumComponents() >= 4) ? pix[3] : 1.0f;
+                tex->pixels[idx + 0] = pix[0];
+                tex->pixels[idx + 1] = pix[1];
+                tex->pixels[idx + 2] = pix[2];
+                tex->pixels[idx + 3] = (img->getComponents().getNumComponents() >= 4) ? pix[3] : 1.0f;
             }
         }
     }
+    publish();
 }
 
 // ==================== RoD / Render ====================

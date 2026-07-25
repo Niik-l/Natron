@@ -27,6 +27,7 @@
 #include "../../../Global/Macros.h"
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "../../EffectInstance.h"
@@ -123,7 +124,15 @@ public:
         int width, height;
         CachedTexture() : width(0), height(0) {}
     };
-    const CachedTexture& getCachedTexture() const { return _cachedTexture; }
+    typedef std::shared_ptr<const CachedTexture> CachedTexturePtr;
+    /** Published immutable snapshot — never null, never mutated after publish.
+     *  Hold the returned shared_ptr for as long as you read it: GUI paint and
+     *  render workers call this concurrently and a republish must not free a
+     *  buffer under a live reader. */
+    CachedTexturePtr getCachedTexture() const {
+        std::lock_guard<std::mutex> lk(_texMutex);
+        return _cachedTexture;
+    }
     void updateCachedTexture(double time);
 
     // MaterialProvider interface
@@ -146,7 +155,8 @@ private:
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     std::unique_ptr<Card3DPrivate> _imp;
-    mutable CachedTexture _cachedTexture;
+    mutable std::mutex _texMutex;
+    CachedTexturePtr _cachedTexture = std::make_shared<CachedTexture>();
 };
 
 NATRON_NAMESPACE_EXIT

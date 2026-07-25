@@ -27,6 +27,7 @@
 #include "../../../Global/Macros.h"
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "../../EffectInstance.h"
@@ -140,6 +141,10 @@ private:
     void loadGeoFromFile(const std::string& path);
 
     std::unique_ptr<ReadGeoPrivate> _imp;
+    // Guards _lastMeshData and the loaded animation-sample state: file (re)load
+    // runs on the GUI thread (knobChanged/onKnobsLoaded) while getMeshData is
+    // called from render workers and the 3D-viewport paint.
+    mutable std::mutex _meshMutex;
     mutable MeshDataPtr _lastMeshData;
 };
 

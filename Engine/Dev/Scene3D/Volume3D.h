@@ -26,6 +26,7 @@
 
 #include "../../../Global/Macros.h"
 
+#include <mutex>
 #include <vector>
 
 #include "../../EffectInstance.h"
@@ -138,6 +139,9 @@ private:
     void applyPreset(int idx);
 
     std::unique_ptr<Volume3DPrivate> _imp;
+    // Guards the volume cache below — generateVolumeData is called from GUI
+    // paint and render workers concurrently.
+    mutable std::mutex _volCacheMutex;
     mutable std::vector<float> _cachedVolData;
     mutable int _cachedVolRes;
     mutable double _cachedVolTime;

@@ -313,24 +313,32 @@ Project3D::getProjectorViewProj(double time, float outVP[16]) const
 void
 Project3D::updateCachedTexture(double time)
 {
+    // Build into a local and publish an immutable snapshot on every exit path
+    // — the previously published texture is shared with concurrent readers
+    // (GUI paint / render workers) and must never be mutated in place.
+    std::shared_ptr<CachedTexture> tex = std::make_shared<CachedTexture>();
+    auto publish = [&]() {
+        std::lock_guard<std::mutex> lk(_texMutex);
+        _cachedTexture = tex;
+    };
     // Render the plate (input 0) at a preview size so a geo this material is on can show
     // the projection live in the 3D viewport. Mirrors Material3D::updateCachedTexture.
-    _cachedTexture.pixels.clear();
-    _cachedTexture.width = 0;
-    _cachedTexture.height = 0;
+    tex->pixels.clear();
+    tex->width = 0;
+    tex->height = 0;
 
-    if (!getInput(0)) return;
+    if (!getInput(0)) { publish(); return; }
 
     const int maxSize = 512;
     RectI roiPixel;
     ImagePtr img = getImage(0, time, RenderScale(), ViewIdx(0),
                             NULL, NULL, false, true, eStorageModeRAM, 0, &roiPixel);
-    if (!img) return;
+    if (!img) { publish(); return; }
 
     RectI bounds = img->getBounds();
     int w = bounds.width();
     int h = bounds.height();
-    if (w <= 0 || h <= 0) return;
+    if (w <= 0 || h <= 0) { publish(); return; }
 
     int dstW = w, dstH = h;
     if (w > maxSize || h > maxSize) {
@@ -339,9 +347,9 @@ Project3D::updateCachedTexture(double time)
         dstH = std::max(1, (int)(h * scale));
     }
 
-    _cachedTexture.width = dstW;
-    _cachedTexture.height = dstH;
-    _cachedTexture.pixels.resize((size_t)dstW * dstH * 4, 0.0f);
+    tex->width = dstW;
+    tex->height = dstH;
+    tex->pixels.resize((size_t)dstW * dstH * 4, 0.0f);
 
     Image::ReadAccess ra(img.get());
     const int nComp = img->getComponents().getNumComponents();
@@ -352,13 +360,14 @@ Project3D::updateCachedTexture(double time)
             const float* pix = (const float*)ra.pixelAt(sx, sy);
             if (pix) {
                 int idx = (dy * dstW + dx) * 4;
-                _cachedTexture.pixels[idx + 0] = pix[0];
-                _cachedTexture.pixels[idx + 1] = (nComp >= 2) ? pix[1] : pix[0];
-                _cachedTexture.pixels[idx + 2] = (nComp >= 3) ? pix[2] : pix[0];
-                _cachedTexture.pixels[idx + 3] = (nComp >= 4) ? pix[3] : 1.0f;
+                tex->pixels[idx + 0] = pix[0];
+                tex->pixels[idx + 1] = (nComp >= 2) ? pix[1] : pix[0];
+                tex->pixels[idx + 2] = (nComp >= 3) ? pix[2] : pix[0];
+                tex->pixels[idx + 3] = (nComp >= 4) ? pix[3] : 1.0f;
             }
         }
     }
+    publish();
 }
 
 // ---- Effect plumbing: this is a material/data node, not an image producer ----

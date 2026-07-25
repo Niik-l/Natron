@@ -108,6 +108,10 @@ struct Material3DPrivate
     KnobChoiceWPtr emissionColorspace;
 
     // Baked input texture temp file paths (from connected 2D nodes)
+    // Guards the six baked paths: bakeInputTextures writes them from the
+    // Cycles render path while the getMaterial*File getters are read from the
+    // scene-hash / shader-build threads — a torn std::string read is UB.
+    std::mutex bakePathMutex;
     std::string bakedDiffusePath;
     std::string bakedMetallicPath;
     std::string bakedRoughnessPath;
@@ -319,27 +323,35 @@ Material3D::getMaterialBaseColor(double time, double& r, double& g, double& b) c
 void
 Material3D::updateCachedTexture(double time)
 {
+    // Build into a local and publish an immutable snapshot on every exit path
+    // — the previously published texture is shared with concurrent readers
+    // (GUI paint / render workers) and must never be mutated in place.
+    std::shared_ptr<CachedTexture> tex = std::make_shared<CachedTexture>();
+    auto publish = [&]() {
+        std::lock_guard<std::mutex> lk(_texMutex);
+        _cachedTexture = tex;
+    };
     // Render the Diffuse input (input 0) at a preview size, so a geo shape this
     // material is connected to can display the texture in the 3D viewport. Mirrors
     // Card3D::updateCachedTexture. Empty cache => no diffuse texture connected.
-    _cachedTexture.pixels.clear();
-    _cachedTexture.width = 0;
-    _cachedTexture.height = 0;
+    tex->pixels.clear();
+    tex->width = 0;
+    tex->height = 0;
 
     EffectInstancePtr diffuseInput = getInput(0);
-    if (!diffuseInput) return;
+    if (!diffuseInput) { publish(); return; }
 
     const int maxSize = 512;
     RectI roiPixel;
     ImagePtr img = getImage(0, time, RenderScale(), ViewIdx(0),
                             NULL, NULL, false, true,
                             eStorageModeRAM, 0, &roiPixel);
-    if (!img) return;
+    if (!img) { publish(); return; }
 
     RectI bounds = img->getBounds();
     int w = bounds.width();
     int h = bounds.height();
-    if (w <= 0 || h <= 0) return;
+    if (w <= 0 || h <= 0) { publish(); return; }
 
     int dstW = w, dstH = h;
     if (w > maxSize || h > maxSize) {
@@ -348,9 +360,9 @@ Material3D::updateCachedTexture(double time)
         dstH = std::max(1, (int)(h * scale));
     }
 
-    _cachedTexture.width = dstW;
-    _cachedTexture.height = dstH;
-    _cachedTexture.pixels.resize(dstW * dstH * 4, 0.0f);
+    tex->width = dstW;
+    tex->height = dstH;
+    tex->pixels.resize(dstW * dstH * 4, 0.0f);
 
     Image::ReadAccess ra(img.get());
     const int nComp = img->getComponents().getNumComponents();
@@ -361,13 +373,14 @@ Material3D::updateCachedTexture(double time)
             const float* pix = (const float*)ra.pixelAt(sx, sy);
             if (pix) {
                 int idx = (dy * dstW + dx) * 4;
-                _cachedTexture.pixels[idx + 0] = pix[0];
-                _cachedTexture.pixels[idx + 1] = (nComp >= 2) ? pix[1] : pix[0];
-                _cachedTexture.pixels[idx + 2] = (nComp >= 3) ? pix[2] : pix[0];
-                _cachedTexture.pixels[idx + 3] = (nComp >= 4) ? pix[3] : 1.0f;
+                tex->pixels[idx + 0] = pix[0];
+                tex->pixels[idx + 1] = (nComp >= 2) ? pix[1] : pix[0];
+                tex->pixels[idx + 2] = (nComp >= 3) ? pix[2] : pix[0];
+                tex->pixels[idx + 3] = (nComp >= 4) ? pix[3] : 1.0f;
             }
         }
     }
+    publish();
 }
 
 double Material3D::getMaterialRoughness(double time) const
@@ -397,13 +410,19 @@ double Material3D::getMaterialIOR(double time) const
 
 std::string Material3D::getMaterialTextureFile() const
 {
-    if (!_imp->bakedDiffusePath.empty()) return _imp->bakedDiffusePath;
+    {
+        std::lock_guard<std::mutex> lk(_imp->bakePathMutex);
+        if (!_imp->bakedDiffusePath.empty()) return _imp->bakedDiffusePath;
+    }
     KnobFilePtr k = _imp->textureFile.lock(); return k ? k->getValue() : std::string();
 }
 
 std::string Material3D::getMaterialNormalMapFile() const
 {
-    if (!_imp->bakedNormalPath.empty()) return _imp->bakedNormalPath;
+    {
+        std::lock_guard<std::mutex> lk(_imp->bakePathMutex);
+        if (!_imp->bakedNormalPath.empty()) return _imp->bakedNormalPath;
+    }
     KnobFilePtr k = _imp->normalMapFile.lock(); return k ? k->getValue() : std::string();
 }
 
@@ -412,25 +431,37 @@ double Material3D::getMaterialNormalStrength(double time) const
 
 std::string Material3D::getMaterialRoughnessMapFile() const
 {
-    if (!_imp->bakedRoughnessPath.empty()) return _imp->bakedRoughnessPath;
+    {
+        std::lock_guard<std::mutex> lk(_imp->bakePathMutex);
+        if (!_imp->bakedRoughnessPath.empty()) return _imp->bakedRoughnessPath;
+    }
     KnobFilePtr k = _imp->roughnessMapFile.lock(); return k ? k->getValue() : std::string();
 }
 
 std::string Material3D::getMaterialMetallicMapFile() const
 {
-    if (!_imp->bakedMetallicPath.empty()) return _imp->bakedMetallicPath;
+    {
+        std::lock_guard<std::mutex> lk(_imp->bakePathMutex);
+        if (!_imp->bakedMetallicPath.empty()) return _imp->bakedMetallicPath;
+    }
     KnobFilePtr k = _imp->metallicMapFile.lock(); return k ? k->getValue() : std::string();
 }
 
 std::string Material3D::getMaterialTransmissionMapFile() const
 {
-    if (!_imp->bakedTransmissionPath.empty()) return _imp->bakedTransmissionPath;
+    {
+        std::lock_guard<std::mutex> lk(_imp->bakePathMutex);
+        if (!_imp->bakedTransmissionPath.empty()) return _imp->bakedTransmissionPath;
+    }
     KnobFilePtr k = _imp->transmissionMapFile.lock(); return k ? k->getValue() : std::string();
 }
 
 std::string Material3D::getMaterialEmissionMapFile() const
 {
-    if (!_imp->bakedEmissionPath.empty()) return _imp->bakedEmissionPath;
+    {
+        std::lock_guard<std::mutex> lk(_imp->bakePathMutex);
+        if (!_imp->bakedEmissionPath.empty()) return _imp->bakedEmissionPath;
+    }
     KnobFilePtr k = _imp->emissionMapFile.lock(); return k ? k->getValue() : std::string();
 }
 
@@ -557,15 +588,13 @@ Material3D::bakeInputTextures(double time)
 {
     // Input mapping: 0=Diffuse, 1=Metallic, 2=Roughness, 3=Emission, 4=Normal,
     // 5=Transmission
-    std::string* paths[6] = {
-        &_imp->bakedDiffusePath, &_imp->bakedMetallicPath,
-        &_imp->bakedRoughnessPath, &_imp->bakedEmissionPath,
-        &_imp->bakedNormalPath, &_imp->bakedTransmissionPath
-    };
+    // Bake into locals first, publish under the lock at the end — holding the
+    // lock across renderInputToFile (a full render pull) would stall readers,
+    // and writing the strings unlocked tears them under concurrent getters.
+    std::string local[6];
     const char* names[6] = {"diffuse", "metallic", "roughness", "emission", "normal", "transmission"};
 
     for (int i = 0; i < 6; ++i) {
-        paths[i]->clear();
         EffectInstancePtr input = getInput(i);
         if (!input) continue;
 
@@ -576,8 +605,18 @@ Material3D::bakeInputTextures(double time)
                  names[i], (void*)this);
 
         if (renderInputToFile(input.get(), time, tmpPath)) {
-            *paths[i] = tmpPath;
+            local[i] = tmpPath;
         }
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(_imp->bakePathMutex);
+        _imp->bakedDiffusePath      = local[0];
+        _imp->bakedMetallicPath     = local[1];
+        _imp->bakedRoughnessPath    = local[2];
+        _imp->bakedEmissionPath     = local[3];
+        _imp->bakedNormalPath       = local[4];
+        _imp->bakedTransmissionPath = local[5];
     }
 }
 

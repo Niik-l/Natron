@@ -25,6 +25,7 @@
 #include <cmath>
 #include <algorithm>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <fstream>
 #include <memory>
@@ -50,6 +51,13 @@ NATRON_NAMESPACE_ENTER
 
 struct ReadVDBPrivate
 {
+    // Guards all cached state below (gridNames, cachedData, bounds cache):
+    // loadVDBFile runs on the GUI thread while getVolumeData/getVDBBounds are
+    // called from render workers and the 3D-viewport paint. Held across the
+    // whole load/query so two threads can't double-load or copy a vector
+    // another thread is refilling.
+    std::mutex vdbMutex;
+
     KnobFileWPtr filePath;
     KnobChoiceWPtr gridName;
     KnobIntWPtr maxResolution;
@@ -467,9 +475,26 @@ ReadVDB::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /*vie
 }
 
 void
+ReadVDB::onKnobsLoaded()
+{
+    // After a project load the file-path knob is restored but no knobChanged
+    // fires, so the grid list was never enumerated and the node served nothing
+    // until the user re-picked the file. Same pattern as ReadGeo /
+    // ReadAlembicArchive / ReadAlembicCamera / ReadAlembicTransform.
+    KnobFilePtr fileKnob = _imp->filePath.lock();
+    if (fileKnob) {
+        const std::string path = fileKnob->getValue();
+        if (!path.empty()) {
+            loadVDBFile(path);
+        }
+    }
+}
+
+void
 ReadVDB::loadVDBFile(const std::string& path)
 {
 #ifdef NATRON_HAVE_OPENVDB
+    std::lock_guard<std::mutex> lk(_imp->vdbMutex);
     try {
         openvdb::initialize();
         std::cerr << "[ReadVDB] Opening file: " << path << std::endl;
@@ -531,6 +556,7 @@ ReadVDB::getVDBBounds(double time,
                       float& outMaxX, float& outMaxY, float& outMaxZ)
 {
 #ifdef NATRON_HAVE_OPENVDB
+    std::lock_guard<std::mutex> lk(_imp->vdbMutex);
     KnobFilePtr fileKnob = _imp->filePath.lock();
     if (!fileKnob) return false;
     std::string templatePath = fileKnob->getValue();
@@ -730,6 +756,7 @@ ReadVDB::getVDBDirect(double time, VDBDirectData& outData)
     // Direct VDB grid access for Cycles — no dense conversion.
     // Reads the OpenVDB grid directly from the file and returns it.
     // REVERT: if issues, switch CyclesRenderer back to getVolumeData() (dense path).
+    std::lock_guard<std::mutex> lk(_imp->vdbMutex);
     KnobFilePtr fileKnob = _imp->filePath.lock();
     std::string templatePath = fileKnob->getValue();
     if (templatePath.empty()) return false;
@@ -815,6 +842,7 @@ bool
 ReadVDB::getVolumeData(double time, VDBVolumeData& outData)
 {
 #ifdef NATRON_HAVE_OPENVDB
+    std::lock_guard<std::mutex> lk(_imp->vdbMutex);
     KnobFilePtr fileKnob = _imp->filePath.lock();
     std::string templatePath = fileKnob->getValue();
     if (templatePath.empty()) return false;
