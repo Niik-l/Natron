@@ -188,6 +188,23 @@ Cube3D::initializeKnobs()
         k->setMinimum(0.001); k->setDisplayMinimum(0.1); k->setDisplayMaximum(100.0);
         geoPage->addKnob(k); _imp->size = k;
     }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Viewport Display"));
+        k->setName("viewportDisplay");
+        k->setHintToolTip(tr("How the cube draws in the 3D viewport. Auto shows wireframe "
+                             "when the cube feeds a bounds input (ParticleKillBox, Blast) "
+                             "so the particles/geometry inside stay visible, and solid "
+                             "otherwise. Renders (ScanlineRender / Cycles) are unaffected."));
+        {
+            std::vector<ChoiceOption> opts;
+            opts.push_back(ChoiceOption("Auto", "", "Wireframe when used as a bounds volume, solid otherwise"));
+            opts.push_back(ChoiceOption("Solid", "", "Shaded faces + wire overlay"));
+            opts.push_back(ChoiceOption("Wireframe", "", "Edges only"));
+            k->populateChoices(opts);
+        }
+        k->setDefaultValue(0);
+        geoPage->addKnob(k);
+    }
 
     // Material page
     KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));

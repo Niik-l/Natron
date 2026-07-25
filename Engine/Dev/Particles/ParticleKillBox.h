@@ -66,6 +66,16 @@ public:
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
+    // Input 0 = particles (chain), input 1 = optional Cube3D bounds. When a
+    // Cube3D is connected its full transform (translate/rotate/scale, OBB)
+    // defines the kill volume — visible and movable in the 3D viewport with
+    // the standard gizmo, same pattern as Blast's bounds input.
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 2; }
+    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN
+    { return (inputNb == 0) ? "particles" : "bounds"; }
+    virtual bool isInputOptional(int /*inputNb*/) const OVERRIDE FINAL WARN_UNUSED_RETURN
+    { return true; }
+
     virtual void applyForce(ParticleDataPtr data, double time) OVERRIDE FINAL;
 
 private:

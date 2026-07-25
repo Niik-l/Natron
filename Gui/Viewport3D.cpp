@@ -77,6 +77,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/TimeLine.h"
 #include "Engine/Dev/Deep/DeepToPoints.h"
 #include "Engine/Dev/Deep/Blast.h"
+#include "Engine/Dev/Particles/ParticleKillBox.h"
 #include "Engine/Dev/Deep/PointCloudProvider.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/SceneGraph.h"
@@ -3594,6 +3595,65 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
     GuiAppInstancePtr app = gui->getApp();
     if (!app) return;
     double time = app->getTimeLine()->currentFrame();
+
+    // Wireframe-only display (Viewport Display knob): draw just the edges and
+    // skip the shaded/textured pass — used when the cube is a bounds/kill
+    // volume and the particles/geometry inside must stay visible. Also skips
+    // the cached-texture pull (nothing to texture).
+    // Auto (default): wireframe when this cube feeds a bounds input
+    // (ParticleKillBox / Blast, possibly through Dots), solid otherwise.
+    {
+        auto feedsBoundsInput = [](const NodePtr& n, int depth, auto&& self) -> bool {
+            if (!n || depth > 4) return false;
+            std::map<NodePtr, int> outputs;
+            n->getOutputsConnectedToThisNode(&outputs);
+            for (const auto& o : outputs) {
+                EffectInstancePtr oEff = o.first->getEffectInstance();
+                if (!oEff) continue;
+                if (isGraphPassthrough(oEff->getPluginID())) {
+                    if (self(o.first, depth + 1, self)) return true;
+                    continue;
+                }
+                if (o.second == 1) {   // input 1 = "bounds" on both nodes
+                    if (dynamic_cast<ParticleKillBox*>(oEff.get())) return true;
+                    if (dynamic_cast<Blast*>(oEff.get())) return true;
+                }
+            }
+            return false;
+        };
+
+        KnobIPtr dispKnob = effect->getKnobByName("viewportDisplay");
+        KnobChoice* dispChoice = dispKnob ? dynamic_cast<KnobChoice*>(dispKnob.get()) : NULL;
+        const int dispMode = dispChoice ? dispChoice->getValue() : 0;  // 0=Auto, 1=Solid, 2=Wireframe
+        const bool drawWire = (dispMode == 2)
+                           || (dispMode == 0 && feedsBoundsInput(node, 0, feedsBoundsInput));
+        if (drawWire) {
+            std::vector<Cube3D::CubeVertex> wireVerts;
+            std::vector<int> wireTris;
+            cube->generateCubeMesh(time, wireVerts, wireTris);
+
+            const bool isSelected = (sn.name == _imp->selectedNodeName);
+            glPushAttrib(GL_ENABLE_BIT | GL_LINE_BIT | GL_CURRENT_BIT);
+            glDisable(GL_LIGHTING);
+            glDisable(GL_TEXTURE_2D);
+            glEnable(GL_DEPTH_TEST);
+            glLineWidth(isSelected ? 2.0f : 1.5f);
+            if (isSelected) glColor4f(1.0f, 0.85f, 0.2f, 1.0f);
+            else            glColor4f(0.8f, 0.8f, 0.8f, 1.0f);
+            // 4 consecutive verts per face (generateCubeMesh layout) — one
+            // line loop per face gives clean quad outlines, no diagonals.
+            for (size_t f = 0; f + 3 < wireVerts.size(); f += 4) {
+                glBegin(GL_LINE_LOOP);
+                for (int c = 0; c < 4; ++c) {
+                    const Cube3D::CubeVertex& v = wireVerts[f + c];
+                    glVertex3f(v.x, v.y, v.z);
+                }
+                glEnd();
+            }
+            glPopAttrib();
+            return;
+        }
+    }
 
     cube->updateCachedTexture(time);
 

@@ -87,6 +87,7 @@ getBlastOBBInternal(EffectInstancePtr boundsInput,
         double tx = 0, ty = 0, tz = 0;
         double rx = 0, ry = 0, rz = 0;
         double sx = 1, sy = 1, sz = 1;
+        double us = 1, size3 = 1;
         KnobIPtr k;
         EffectInstancePtr eff = boundsInput;
         k = eff->getKnobByName("translateX"); if (k) tx = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
@@ -98,13 +99,19 @@ getBlastOBBInternal(EffectInstancePtr boundsInput,
         k = eff->getKnobByName("scaleX"); if (k) sx = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
         k = eff->getKnobByName("scaleY"); if (k) sy = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
         k = eff->getKnobByName("scaleZ"); if (k) sz = dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+        k = eff->getKnobByName("uniformScale"); if (k) { KnobDouble* kd = dynamic_cast<KnobDouble*>(k.get()); if (kd) us = kd->getValueAtTime(time); }
+        k = eff->getKnobByName("size"); if (k) { KnobDouble* kd = dynamic_cast<KnobDouble*>(k.get()); if (kd) size3 = kd->getValueAtTime(time); }
 
         center[0] = (float)tx;
         center[1] = (float)ty;
         center[2] = (float)tz;
-        extent[0] = (float)std::abs(sx);
-        extent[1] = (float)std::abs(sy);
-        extent[2] = (float)std::abs(sz);
+        // Cube3D's mesh spans ±(size * 0.5) in local space, scaled by
+        // scaleXYZ * uniformScale in the world transform — the half-extent
+        // must match, or the volume is 2x the wireframe (and ignores the
+        // Uniform Scale / Size knobs).
+        extent[0] = (float)std::abs(sx * us * size3 * 0.5);
+        extent[1] = (float)std::abs(sy * us * size3 * 0.5);
+        extent[2] = (float)std::abs(sz * us * size3 * 0.5);
 
         // Extrinsic XYZ rotation — matches SceneGraph::buildTRS, so the OBB
         // aligns with the Cube3D's yellow wireframe in the 3D viewport.

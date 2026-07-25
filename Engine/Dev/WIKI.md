@@ -180,15 +180,23 @@ Same knobs as ParticleTurbulence.
 ---
 
 ### ParticleKillBox
-**Group:** Particles | **Inputs:** 1 (particles) | **Stateless**
+**Group:** Particles | **Inputs:** 2 (particles, bounds) | **Stateless**
 
 Removes particles inside or outside a bounding box.
 
+**Bounds input (recommended):** connect a Cube3D — its full transform
+(translate/rotate/scale/uniform scale/size, rotated boxes supported) defines the
+kill volume, visible and movable with the gizmo in the 3D viewport. The volume
+matches the wireframe exactly. A Cube3D feeding a bounds input auto-displays as
+wireframe (its **Viewport Display** knob: Auto/Solid/Wireframe) so the particles
+inside stay visible. Without a bounds input, the knobs below define an
+axis-aligned box.
+
 | Knob | Type | Default | Description |
 |------|------|---------|-------------|
-| Min X/Y/Z | Double | -5,-5,-5 | Box minimum corner |
-| Max X/Y/Z | Double | 5,5,5 | Box maximum corner |
-| Center X/Y/Z | Double | 0,0,0 | Offset for the box |
+| Min X/Y/Z | Double | -5,-5,-5 | Box minimum corner (no bounds input) |
+| Max X/Y/Z | Double | 5,5,5 | Box maximum corner (no bounds input) |
+| Center X/Y/Z | Double | 0,0,0 | Offset for the box (no bounds input) |
 | Mode | Choice | Kill Inside | Kill Inside, Kill Outside |
 
 ---
