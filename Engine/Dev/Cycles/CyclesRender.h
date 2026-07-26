@@ -100,6 +100,14 @@ public:
     virtual PassThroughEnum isPassThroughForNonRenderedPlanes() const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return ePassThroughPassThroughNonRenderedPlanes; }
 
+    /**
+     * @brief Deep output side channel: the last render's deep samples as a
+     * DeepImage (published immutable snapshot; null when Deep Output is off).
+     * Registered in DeepUtils::getDeepImageFromEffect so this node plugs
+     * straight into the deep suite (DeepMerge/DeepRecolor/DeepFlatten/...).
+     */
+    DeepImagePtr getDeepImage() const { return _lastDeepImage; }
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
@@ -110,6 +118,8 @@ private:
                                                  double* passThroughTime, int* passThroughView,
                                                  int* passThroughInput) OVERRIDE FINAL;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
+
+    mutable DeepImagePtr _lastDeepImage;
 
     std::unique_ptr<CyclesRenderPrivate> _imp;
 };

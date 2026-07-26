@@ -52,6 +52,9 @@
 #include "DeepBlend.h"
 #include "DeepTransform.h"
 #include "Blast.h"
+#ifdef NATRON_CYCLES
+#include "../Cycles/CyclesRender.h"
+#endif
 
 NATRON_NAMESPACE_ENTER
 
@@ -97,6 +100,10 @@ getDeepImageFromEffect(EffectInstance* effect)
     // Blast: deep passthrough minus blasted samples (cloud must originate
     // from a DeepToPoints — returns null otherwise)
     if (Blast* n = dynamic_cast<Blast*>(effect)) return n->getDeepImage();
+#ifdef NATRON_CYCLES
+    // CyclesRender: native deep render output (Deep Output knob)
+    if (CyclesRender* n = dynamic_cast<CyclesRender*>(effect)) return n->getDeepImage();
+#endif
 
     return DeepImagePtr();
 }

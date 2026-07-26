@@ -93,6 +93,14 @@ struct CyclesPassRequest
     // clay-render / shadow-pass pattern. Particles, volumes, and other
     // renderables with their own shader paths are unaffected.
     MaterialProvider*                              materialOverride = nullptr;
+
+    // Deep output. When outDeep is non-null the render also accumulates
+    // per-pixel deep samples in the kernel (surfaces at primary hits,
+    // volumes per ray segment) and returns the recolored sample lists
+    // here (Cycles orientation, bottom-up rows). deepMaxSamples caps the
+    // kernel-side fixed per-pixel buffers.
+    CyclesRenderer::DeepPixelData* outDeep = nullptr;
+    int deepMaxSamples = 32;
 };
 
 // Resolved inputs ready for Cycles execution. Filled by

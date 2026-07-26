@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "CyclesRenderer.h"
+#include "../Deep/DeepImage.h"
 #include "CyclesRenderSettings.h"
 #include "CyclesPassRender.h"
 
@@ -68,6 +69,8 @@ struct CyclesRenderPrivate
     KnobIntWPtr glossyBounces;
     KnobIntWPtr transmissionBounces;
     KnobBoolWPtr denoise;
+    KnobBoolWPtr deepOutput;
+    KnobIntWPtr  deepMaxSamples;
     KnobBoolWPtr previewMode; // half-res render, upscaled to full
 
     // Explicit output size — does NOT come from upstream input format.
@@ -228,6 +231,24 @@ CyclesRender::initializeKnobs()
         k->setName("denoise"); k->setDefaultValue(false);
         k->setHintToolTip(tr("Apply OpenImageDenoise after rendering."));
         page->addKnob(k); _imp->denoise = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Deep Output"));
+        k->setName("deepOutput"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Accumulate per-pixel deep samples during the render "
+                             "(surfaces at primary hits, volumes per ray segment) and "
+                             "publish them as a deep image — connect this node to any "
+                             "Deep node (DeepMerge, DeepRecolor, DeepFlatten, DeepWrite...). "
+                             "Costs kernel time and memory (width x height x Max Samples)."));
+        page->addKnob(k); _imp->deepOutput = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Deep Max Samples"));
+        k->setName("deepMaxSamples"); k->setDefaultValue(32);
+        k->setMinimum(1); k->setDisplayMinimum(4); k->setDisplayMaximum(128);
+        k->setHintToolTip(tr("Kernel-side cap on deep samples per pixel (fixed-size buffers). "
+                             "Raise for dense volumes; lower to save memory."));
+        page->addKnob(k); _imp->deepMaxSamples = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Preview (half res)"));
@@ -765,6 +786,16 @@ CyclesRender::render(const RenderActionArgs& args)
     if (mbParams.enabled)  req.mb  = &mbParams;
     req.integrator = &integParams;
 
+    // Deep output (kernel deep samples -> published DeepImage, see below)
+    const bool deepEnabled = _imp->deepOutput.lock() && _imp->deepOutput.lock()->getValue();
+    const int  deepMaxSamplesVal = _imp->deepMaxSamples.lock()
+                                   ? std::max(1, _imp->deepMaxSamples.lock()->getValue()) : 32;
+    CyclesRenderer::DeepPixelData deepRaw;
+    if (deepEnabled) {
+        req.outDeep = &deepRaw;
+        req.deepMaxSamples = deepMaxSamplesVal;
+    }
+
     CyclesPassPrepared prepared;
     {
         std::string prepErr;
@@ -805,6 +836,8 @@ CyclesRender::render(const RenderActionArgs& args)
         sceneHash = hashCombine(sceneHash, (U64)renderH);
         sceneHash = hashCombine(sceneHash, (U64)renderSamples);
         sceneHash = hashCombine(sceneHash, isPreview ? 1ULL : 0ULL);
+        sceneHash = hashCombine(sceneHash, deepEnabled ? 1ULL : 0ULL);
+        sceneHash = hashCombine(sceneHash, (U64)deepMaxSamplesVal);
 
         // Hash enabled AOV passes so changing checkboxes triggers re-render
         sceneHash = hashCombine(sceneHash, (U64)requestedPasses.size());
@@ -1015,6 +1048,47 @@ CyclesRender::render(const RenderActionArgs& args)
         _imp->cachedHash = sceneHash;
         _imp->cachedWidth = renderW;
         _imp->cachedHeight = renderH;
+
+        // Convert the harvested deep samples into a DeepImage and publish it
+        // for the deep suite (getDeepImage side channel). Cycles rows are
+        // bottom-up; DeepImage is top-down — flip rows here. Published as a
+        // fresh immutable snapshot (provider contract). On a cache hit above
+        // this block is skipped and the previous snapshot (same hash — same
+        // render) stays published.
+        if (deepEnabled && (int)deepRaw.size() == renderW * renderH) {
+            RectI dw;
+            dw.x1 = 0; dw.y1 = 0; dw.x2 = renderW; dw.y2 = renderH;
+            std::vector<std::string> chans = {"R", "G", "B", "A", "Z", "ZBack"};
+            DeepImagePtr deep = std::make_shared<DeepImage>(dw, (int)chans.size(), chans);
+            for (int y = 0; y < renderH; ++y) {
+                const int srcRow = renderH - 1 - y; // flip to top-down
+                for (int x = 0; x < renderW; ++x) {
+                    deep->setSampleCount(x, y, (int)deepRaw[srcRow * renderW + x].size());
+                }
+            }
+            deep->allocateFromSampleCounts();
+            for (int y = 0; y < renderH; ++y) {
+                const int srcRow = renderH - 1 - y;
+                for (int x = 0; x < renderW; ++x) {
+                    const std::vector<CyclesRenderer::DeepPixelSample>& srcPix =
+                        deepRaw[srcRow * renderW + x];
+                    if (srcPix.empty()) continue;
+                    float* dst = deep->getSampleData(x, y);
+                    for (std::size_t si = 0; si < srcPix.size(); ++si) {
+                        float* d = dst + si * 6;
+                        d[0] = srcPix[si].r;
+                        d[1] = srcPix[si].g;
+                        d[2] = srcPix[si].b;
+                        d[3] = srcPix[si].a;
+                        d[4] = srcPix[si].z;
+                        d[5] = srcPix[si].zback;
+                    }
+                }
+            }
+            _lastDeepImage = deep;
+        } else if (!deepEnabled) {
+            _lastDeepImage.reset();
+        }
     }
 
     int srcW = _imp->cachedWidth;
