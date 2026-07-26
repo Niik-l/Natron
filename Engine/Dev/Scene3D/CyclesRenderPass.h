@@ -172,6 +172,17 @@ private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
+
+public:
+    /**
+     * @brief Deep output side channel (Deep Output on the AOV tab): the last
+     * preview render's deep samples as a DeepImage. Null when disabled.
+     * Registered in DeepUtils::getDeepImageFromEffect.
+     */
+    DeepImagePtr getDeepImage() const { return _lastDeepImage; }
+
+private:
+    mutable DeepImagePtr _lastDeepImage;
     virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL;
     virtual void getComponentsNeededAndProduced(double time, ViewIdx view,
                                                 EffectInstance::ComponentsNeededMap* comps,

@@ -2353,7 +2353,9 @@ CyclesRenderer::renderToBufferWithCamera(const SceneGraph& sg,
                                           int width, int height, int samples,
                                           double time,
                                           DeepPixelData* outDeep,
-                                          int deepMaxSamples)
+                                          int deepMaxSamples,
+                                          float deepMergeThreshold,
+                                          float deepAlphaMergeThreshold)
 {
     initialize(width, height, samples);
     syncSceneWithCamera(sg, camTX, camTY, camTZ, camRX, camRY, camRZ, focalLength, hAperture, vAperture, time);
@@ -2368,6 +2370,8 @@ CyclesRenderer::renderToBufferWithCamera(const SceneGraph& sg,
 
         auto deepDriver = ccl::make_unique<ccl::DeepOutputDriver>(_impl->session->device.get());
         deepDriver->set_enabled(true);
+        deepDriver->set_merge_threshold(deepMergeThreshold);
+        deepDriver->set_alpha_merge_threshold(deepAlphaMergeThreshold);
         deepDriver->reset(width, height, deepMaxSamples);
         _impl->session->set_deep_output_driver(std::move(deepDriver));
     } else if (_impl->session->scene->film->get_use_deep_output()) {
@@ -2436,7 +2440,9 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
                                                    MaterialProvider* materialOverride,
                                                    const std::set<std::string>* holdoutObjects,
                                                    DeepPixelData* outDeep,
-                                                   int deepMaxSamples)
+                                                   int deepMaxSamples,
+                                                   float deepMergeThreshold,
+                                                   float deepAlphaMergeThreshold)
 {
     initialize(width, height, samples);
 
@@ -2572,6 +2578,8 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
         _impl->session->scene->film->tag_modified();
         auto deepDriver = ccl::make_unique<ccl::DeepOutputDriver>(_impl->session->device.get());
         deepDriver->set_enabled(true);
+        deepDriver->set_merge_threshold(deepMergeThreshold);
+        deepDriver->set_alpha_merge_threshold(deepAlphaMergeThreshold);
         deepDriver->reset(width, height, deepMaxSamples);
         _impl->session->set_deep_output_driver(std::move(deepDriver));
     } else if (_impl->session->scene->film->get_use_deep_output()) {

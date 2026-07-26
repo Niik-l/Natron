@@ -177,7 +177,9 @@ public:
                                    int width, int height, int samples = 64,
                                    double time = 0,
                                    DeepPixelData* outDeep = nullptr,
-                                   int deepMaxSamples = 32);
+                                   int deepMaxSamples = 32,
+                                   float deepMergeThreshold = 0.001f,
+                                   float deepAlphaMergeThreshold = 0.01f);
 
     /**
      * @brief Render to memory buffers (blocking) with multiple AOV passes and light groups.
@@ -203,7 +205,9 @@ public:
                                             MaterialProvider* materialOverride = nullptr,
                                             const std::set<std::string>* holdoutObjects = nullptr,
                                             DeepPixelData* outDeep = nullptr,
-                                            int deepMaxSamples = 32);
+                                            int deepMaxSamples = 32,
+                                            float deepMergeThreshold = 0.001f,
+                                            float deepAlphaMergeThreshold = 0.01f);
 
     /**
      * @brief Set the number of samples for the next render.

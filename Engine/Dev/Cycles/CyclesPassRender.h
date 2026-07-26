@@ -101,7 +101,21 @@ struct CyclesPassRequest
     // kernel-side fixed per-pixel buffers.
     CyclesRenderer::DeepPixelData* outDeep = nullptr;
     int deepMaxSamples = 32;
+    // Sample-merge tolerances (kernel-side sample compression): nearby
+    // samples within depth/alpha tolerance are merged, cutting file size
+    // and memory.
+    float deepMergeThreshold = 0.001f;
+    float deepAlphaMergeThreshold = 0.01f;
 };
+
+/**
+ * @brief Convert harvested Cycles deep samples (bottom-up rows) into a
+ * top-down DeepImage. alphaOnly builds DCM-style A/Z/ZBack channels
+ * (recolor later with DeepRecolor, the Karma-DCM workflow); otherwise
+ * full R,G,B,A,Z,ZBack. Returns null when data is empty/mis-sized.
+ */
+DeepImagePtr deepImageFromCyclesDeepData(const CyclesRenderer::DeepPixelData& data,
+                                         int width, int height, bool alphaOnly);
 
 // Resolved inputs ready for Cycles execution. Filled by
 // prepareCyclesPasses() so callers that need to inspect the resolved

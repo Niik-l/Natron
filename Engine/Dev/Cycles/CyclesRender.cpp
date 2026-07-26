@@ -30,6 +30,8 @@
 
 #include "CyclesRenderer.h"
 #include "../Deep/DeepImage.h"
+#include "../Deep/DeepUtils.h"
+#include "../../KnobFile.h"
 #include "CyclesRenderSettings.h"
 #include "CyclesPassRender.h"
 
@@ -71,6 +73,12 @@ struct CyclesRenderPrivate
     KnobBoolWPtr denoise;
     KnobBoolWPtr deepOutput;
     KnobIntWPtr  deepMaxSamples;
+    KnobFileWPtr deepExrPath;
+    KnobButtonWPtr deepWriteBtn;
+    KnobChoiceWPtr deepChannels;
+    KnobDoubleWPtr deepMergeThreshold;
+    KnobDoubleWPtr deepAlphaMergeThreshold;
+    KnobChoiceWPtr deepCompression;
     KnobBoolWPtr previewMode; // half-res render, upscaled to full
 
     // Explicit output size — does NOT come from upstream input format.
@@ -233,24 +241,6 @@ CyclesRender::initializeKnobs()
         page->addKnob(k); _imp->denoise = k;
     }
     {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Deep Output"));
-        k->setName("deepOutput"); k->setDefaultValue(false);
-        k->setHintToolTip(tr("Accumulate per-pixel deep samples during the render "
-                             "(surfaces at primary hits, volumes per ray segment) and "
-                             "publish them as a deep image — connect this node to any "
-                             "Deep node (DeepMerge, DeepRecolor, DeepFlatten, DeepWrite...). "
-                             "Costs kernel time and memory (width x height x Max Samples)."));
-        page->addKnob(k); _imp->deepOutput = k;
-    }
-    {
-        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Deep Max Samples"));
-        k->setName("deepMaxSamples"); k->setDefaultValue(32);
-        k->setMinimum(1); k->setDisplayMinimum(4); k->setDisplayMaximum(128);
-        k->setHintToolTip(tr("Kernel-side cap on deep samples per pixel (fixed-size buffers). "
-                             "Raise for dense volumes; lower to save memory."));
-        page->addKnob(k); _imp->deepMaxSamples = k;
-    }
-    {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Preview (half res)"));
         k->setName("previewMode"); k->setDefaultValue(true);
         k->setHintToolTip(tr("Render at half resolution and upscale. Faster for interactive work."));
@@ -369,6 +359,17 @@ CyclesRender::initializeKnobs()
             "Falloff knobs later if tuning is needed."));
         aovPage->addKnob(k); _imp->aovMist = k;
     }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Deep"));
+        k->setName("deepOutput"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Accumulate per-pixel deep samples during the render "
+                             "(surfaces at primary hits, volumes per ray segment) and "
+                             "publish them as a deep image — connect this node to any "
+                             "Deep node (DeepMerge, DeepRecolor, DeepFlatten, DeepWrite...). "
+                             "Costs kernel time and memory (width x height x Max Samples). "
+                             "Save to disk from the Output tab (Write Deep EXR)."));
+        aovPage->addKnob(k); _imp->deepOutput = k;
+    }
 
     // --- Depth of Field tab ---
     KnobPagePtr dofPage = AppManager::createKnob<KnobPage>(this, tr("Depth of Field"));
@@ -465,6 +466,75 @@ CyclesRender::initializeKnobs()
         k->setName("saveExr");
         k->setHintToolTip(tr("Render and save all enabled passes to a multi-layer EXR file."));
         outPage->addKnob(k); _imp->saveExrBtn = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Deep Max Samples"));
+        k->setName("deepMaxSamples"); k->setDefaultValue(32);
+        k->setMinimum(1); k->setDisplayMinimum(4); k->setDisplayMaximum(128);
+        k->setHintToolTip(tr("Kernel-side cap on deep samples per pixel (fixed-size buffers). "
+                             "Raise for dense volumes; lower to save memory."));
+        outPage->addKnob(k); _imp->deepMaxSamples = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Deep Channels"));
+        k->setName("deepChannels");
+        k->setHintToolTip(tr("RGBA: full recolored deep (R,G,B,A,Z,ZBack). "
+                             "Alpha + Depth: DCM-style A/Z/ZBack only — smaller files, "
+                             "recolor in comp with DeepRecolor (the Karma-DCM workflow)."));
+        {
+            std::vector<ChoiceOption> opts;
+            opts.push_back(ChoiceOption("RGBA", "", "Full recolored deep samples"));
+            opts.push_back(ChoiceOption("Alpha + Depth (DCM)", "", "A/Z/ZBack only, recolor in comp"));
+            k->populateChoices(opts);
+        }
+        k->setDefaultValue(0);
+        outPage->addKnob(k); _imp->deepChannels = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Deep Merge Threshold"));
+        k->setName("deepMergeThreshold"); k->setDefaultValue(0.001);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Depth tolerance for merging nearby deep samples (sample "
+                             "compression). Larger = fewer samples, smaller files, less "
+                             "depth precision. 0 keeps every sample."));
+        outPage->addKnob(k); _imp->deepMergeThreshold = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Deep Alpha Merge Threshold"));
+        k->setName("deepAlphaMergeThreshold"); k->setDefaultValue(0.01);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Alpha tolerance for merging nearby deep samples. Larger = "
+                             "fewer samples at soft edges/volumes."));
+        outPage->addKnob(k); _imp->deepAlphaMergeThreshold = k;
+    }
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Deep EXR Path"));
+        k->setName("deepExrPath");
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Output path for Write Deep EXR (e.g. D:/renders/beauty_deep.exr)."));
+        outPage->addKnob(k); _imp->deepExrPath = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Write Deep EXR"));
+        k->setName("deepWriteExr");
+        k->setHintToolTip(tr("Write the last render's deep samples to the Deep EXR Path. "
+                             "Enable Deep Output (AOV Passes tab) and render once first."));
+        outPage->addKnob(k); _imp->deepWriteBtn = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Deep Compression"));
+        k->setName("deepCompression");
+        k->setHintToolTip(tr("EXR compression for Write Deep EXR. Deep EXR supports "
+                             "Zips (default, best), RLE, or None."));
+        {
+            std::vector<ChoiceOption> opts;
+            opts.push_back(ChoiceOption("Zips", "", "zip per scanline (recommended)"));
+            opts.push_back(ChoiceOption("RLE", "", "run-length encoding"));
+            opts.push_back(ChoiceOption("None", "", "uncompressed"));
+            k->populateChoices(opts);
+        }
+        k->setDefaultValue(0);
+        outPage->addKnob(k); _imp->deepCompression = k;
     }
 
     {
@@ -790,10 +860,18 @@ CyclesRender::render(const RenderActionArgs& args)
     const bool deepEnabled = _imp->deepOutput.lock() && _imp->deepOutput.lock()->getValue();
     const int  deepMaxSamplesVal = _imp->deepMaxSamples.lock()
                                    ? std::max(1, _imp->deepMaxSamples.lock()->getValue()) : 32;
+    const bool deepAlphaOnly = _imp->deepChannels.lock()
+                               && _imp->deepChannels.lock()->getValue() == 1;
+    const float deepMergeVal = _imp->deepMergeThreshold.lock()
+                               ? (float)_imp->deepMergeThreshold.lock()->getValue() : 0.001f;
+    const float deepAlphaMergeVal = _imp->deepAlphaMergeThreshold.lock()
+                               ? (float)_imp->deepAlphaMergeThreshold.lock()->getValue() : 0.01f;
     CyclesRenderer::DeepPixelData deepRaw;
     if (deepEnabled) {
         req.outDeep = &deepRaw;
         req.deepMaxSamples = deepMaxSamplesVal;
+        req.deepMergeThreshold = deepMergeVal;
+        req.deepAlphaMergeThreshold = deepAlphaMergeVal;
     }
 
     CyclesPassPrepared prepared;
@@ -838,6 +916,9 @@ CyclesRender::render(const RenderActionArgs& args)
         sceneHash = hashCombine(sceneHash, isPreview ? 1ULL : 0ULL);
         sceneHash = hashCombine(sceneHash, deepEnabled ? 1ULL : 0ULL);
         sceneHash = hashCombine(sceneHash, (U64)deepMaxSamplesVal);
+        sceneHash = hashCombine(sceneHash, deepAlphaOnly ? 1ULL : 0ULL);
+        sceneHash = hashCombine(sceneHash, (U64)(deepMergeVal * 1e6f));
+        sceneHash = hashCombine(sceneHash, (U64)(deepAlphaMergeVal * 1e6f));
 
         // Hash enabled AOV passes so changing checkboxes triggers re-render
         sceneHash = hashCombine(sceneHash, (U64)requestedPasses.size());
@@ -1055,38 +1136,28 @@ CyclesRender::render(const RenderActionArgs& args)
         // fresh immutable snapshot (provider contract). On a cache hit above
         // this block is skipped and the previous snapshot (same hash — same
         // render) stays published.
-        if (deepEnabled && (int)deepRaw.size() == renderW * renderH) {
-            RectI dw;
-            dw.x1 = 0; dw.y1 = 0; dw.x2 = renderW; dw.y2 = renderH;
-            std::vector<std::string> chans = {"R", "G", "B", "A", "Z", "ZBack"};
-            DeepImagePtr deep = std::make_shared<DeepImage>(dw, (int)chans.size(), chans);
-            for (int y = 0; y < renderH; ++y) {
-                const int srcRow = renderH - 1 - y; // flip to top-down
-                for (int x = 0; x < renderW; ++x) {
-                    deep->setSampleCount(x, y, (int)deepRaw[srcRow * renderW + x].size());
+        if (deepEnabled) {
+            DeepImagePtr deep = deepImageFromCyclesDeepData(deepRaw, renderW, renderH,
+                                                            deepAlphaOnly);
+            if (deep) {
+                _lastDeepImage = deep;
+                fprintf(stderr, "[CyclesDeep] published %zu deep samples (%dx%d%s)\n",
+                        (size_t)deep->totalSamples(), renderW, renderH,
+                        deepAlphaOnly ? ", A/Z/ZBack" : "");
+                if (deep->totalSamples() == 0) {
+                    setPersistentMessage(eMessageTypeWarning,
+                        tr("Deep Output produced 0 samples — the kernel deep path "
+                           "returned no data for this scene.").toStdString());
                 }
+            } else {
+                fprintf(stderr, "[CyclesDeep] deep enabled but driver returned %zu pixels "
+                        "(expected %d)\n", deepRaw.size(), renderW * renderH);
+                setPersistentMessage(eMessageTypeWarning,
+                    tr("Deep Output enabled but no deep data came back from Cycles — "
+                       "see console for details.").toStdString());
+                _lastDeepImage.reset();
             }
-            deep->allocateFromSampleCounts();
-            for (int y = 0; y < renderH; ++y) {
-                const int srcRow = renderH - 1 - y;
-                for (int x = 0; x < renderW; ++x) {
-                    const std::vector<CyclesRenderer::DeepPixelSample>& srcPix =
-                        deepRaw[srcRow * renderW + x];
-                    if (srcPix.empty()) continue;
-                    float* dst = deep->getSampleData(x, y);
-                    for (std::size_t si = 0; si < srcPix.size(); ++si) {
-                        float* d = dst + si * 6;
-                        d[0] = srcPix[si].r;
-                        d[1] = srcPix[si].g;
-                        d[2] = srcPix[si].b;
-                        d[3] = srcPix[si].a;
-                        d[4] = srcPix[si].z;
-                        d[5] = srcPix[si].zback;
-                    }
-                }
-            }
-            _lastDeepImage = deep;
-        } else if (!deepEnabled) {
+        } else {
             _lastDeepImage.reset();
         }
     }
@@ -1251,6 +1322,32 @@ bool
 CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
                            ViewSpec /*view*/, double time, bool /*originatedFromMainThread*/)
 {
+    // Write Deep EXR button — writes the last render's published deep snapshot.
+    if (k && _imp->deepWriteBtn.lock() && k == _imp->deepWriteBtn.lock().get()) {
+        if (!_lastDeepImage) {
+            setPersistentMessage(eMessageTypeError,
+                tr("No deep data available — enable Deep Output and render once "
+                   "(view the node) before writing.").toStdString());
+            return true;
+        }
+        const std::string path = _imp->deepExrPath.lock()
+                                 ? _imp->deepExrPath.lock()->getValue() : std::string();
+        std::string compression = "zips";
+        if (_imp->deepCompression.lock()) {
+            const int ci = _imp->deepCompression.lock()->getValue();
+            compression = (ci == 1) ? "rle" : (ci == 2) ? "none" : "zips";
+        }
+        std::string err;
+        if (!writeDeepImageEXR(_lastDeepImage, path, &err, compression)) {
+            setPersistentMessage(eMessageTypeError, "Write Deep EXR failed: " + err);
+            return true;
+        }
+        clearPersistentMessage(false);
+        fprintf(stderr, "[CyclesDeep] deep EXR written: %s (%zu samples)\n",
+                path.c_str(), (size_t)_lastDeepImage->totalSamples());
+        return true;
+    }
+
     // --- Sync to Project — copy project default format → width/height ---
     KnobButtonPtr syncBtn = _imp->syncToProject.lock();
     if (syncBtn && k == syncBtn.get()) {

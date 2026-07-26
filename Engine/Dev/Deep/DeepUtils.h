@@ -41,6 +41,16 @@ class EffectInstance;
  */
 DeepImagePtr getDeepImageFromEffect(EffectInstance* effect);
 
+/**
+ * @brief Write a DeepImage to a deep EXR file via OIIO's deep scanline API
+ * (float channels, zips compression). Returns false and fills *errOut on
+ * failure (also when OpenImageIO support isn't built in). Shared by
+ * DeepWrite and the integrated writers (CyclesRender's Write Deep EXR).
+ */
+bool writeDeepImageEXR(const DeepImagePtr& deep, const std::string& path,
+                       std::string* errOut,
+                       const std::string& compression = std::string("zips"));
+
 NATRON_NAMESPACE_EXIT
 
 #endif // NATRON_ENGINE_DEEPUTILS_H
