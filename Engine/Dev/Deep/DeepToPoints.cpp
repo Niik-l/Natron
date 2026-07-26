@@ -37,6 +37,7 @@
 #include "../../Node.h"
 #include "../../ViewIdx.h"
 #include "../Scene3D/Camera3DNode.h"
+#include "../Scene3D/RotationConventions.h"
 #include "../DotUtils.h"
 
 NATRON_NAMESPACE_ENTER
@@ -218,11 +219,13 @@ DeepToPoints::render(const RenderActionArgs& args)
     double camRx = 0, camRy = 0, camRz = 0;
     float hAperture = 24.576f, vAperture = 18.672f, focalLength = 50.0f;
     float imgW = (float)dw.width(), imgH = (float)dw.height();
+    double camRot[3][3] = { {1, 0, 0}, {0, 1, 0}, {0, 0, 1} };
     if (hasCamera) {
         camera->getCameraPosition(args.time, camTx, camTy, camTz, camRx, camRy, camRz);
         focalLength = (float)camera->getCameraFocalLength(args.time);
         hAperture = (float)camera->getCameraHAperture(args.time);
         vAperture = (float)camera->getCameraVAperture(args.time);
+        RotationConventions::compose(camRx, camRy, camRz, camRot);
     }
 
     // Density threshold: use deterministic hash-based thinning
@@ -278,11 +281,10 @@ DeepToPoints::render(const RenderActionArgs& args)
                     float camX = ndcX * (hAperture * 0.5f) * (depth / focalLength);
                     float camY = ndcY * (vAperture * 0.5f) * (depth / focalLength);
                     float camZ = -depth; // camera looks down -Z
-                    // World space: translate by camera position
-                    // (simplified — no camera rotation for now)
-                    px = camX + (float)camTx;
-                    py = camY + (float)camTy;
-                    pz = camZ + (float)camTz;
+                    // World space: rotate by camera orientation, then translate
+                    px = (float)(camRot[0][0] * camX + camRot[0][1] * camY + camRot[0][2] * camZ + camTx);
+                    py = (float)(camRot[1][0] * camX + camRot[1][1] * camY + camRot[1][2] * camZ + camTy);
+                    pz = (float)(camRot[2][0] * camX + camRot[2][1] * camY + camRot[2][2] * camZ + camTz);
                 } else {
                     // Fallback: screen-projected space (original behavior)
                     px = (x - centerX) * imageScale;
