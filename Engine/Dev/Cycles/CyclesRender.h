@@ -27,6 +27,8 @@
 
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
+#include <mutex>
+
 #include "../../EngineFwd.h"
 
 NATRON_NAMESPACE_ENTER
@@ -106,7 +108,10 @@ public:
      * Registered in DeepUtils::getDeepImageFromEffect so this node plugs
      * straight into the deep suite (DeepMerge/DeepRecolor/DeepFlatten/...).
      */
-    DeepImagePtr getDeepImage() const { return _lastDeepImage; }
+    DeepImagePtr getDeepImage() const {
+        std::lock_guard<std::mutex> l(_deepMutex);
+        return _lastDeepImage;
+    }
 
 private:
 
@@ -119,6 +124,11 @@ private:
                                                  int* passThroughInput) OVERRIDE FINAL;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
+    // Guards _lastDeepImage: published from render worker threads while
+    // downstream deep nodes read getDeepImage() concurrently — a torn
+    // shared_ptr assignment is a crash (same class as the P0 provider
+    // hardening; Cycles renders hold the race window open for seconds).
+    mutable std::mutex _deepMutex;
     mutable DeepImagePtr _lastDeepImage;
 
     std::unique_ptr<CyclesRenderPrivate> _imp;

@@ -93,8 +93,6 @@ struct RenderPassPrivate
     KnobChoiceWPtr deepChannels;
     KnobDoubleWPtr deepMergeThreshold;
     KnobDoubleWPtr deepAlphaMergeThreshold;
-    KnobFileWPtr   deepExrPath;
-    KnobButtonWPtr deepWriteBtn;
     KnobChoiceWPtr deepCompression;
     KnobStringWPtr infoKnob;
 
@@ -673,23 +671,9 @@ CyclesRenderPass::initializeKnobs()
             outPage->addKnob(k); _imp->deepAlphaMergeThreshold = k;
         }
         {
-            KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Deep EXR Path"));
-            k->setName("deepExrPath");
-            k->setAnimationEnabled(false);
-            k->setHintToolTip(tr("Output path for Write Deep EXR."));
-            outPage->addKnob(k); _imp->deepExrPath = k;
-        }
-        {
-            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Write Deep EXR"));
-            k->setName("deepWriteExr");
-            k->setHintToolTip(tr("Write the last preview render's deep samples to the Deep "
-                                 "EXR Path. Enable Deep Output (AOV tab) and render first."));
-            outPage->addKnob(k); _imp->deepWriteBtn = k;
-        }
-        {
             KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Deep Compression"));
             k->setName("deepCompression");
-            k->setHintToolTip(tr("EXR compression for Write Deep EXR (Zips/RLE/None)."));
+            k->setHintToolTip(tr("EXR compression for the deep sequence files written by Render to Disk (<pass>_deep.####.exr). Deep EXR supports Zips/RLE/None."));
             {
                 std::vector<ChoiceOption> opts;
                 opts.push_back(ChoiceOption("Zips", "", "zip per scanline (recommended)"));
@@ -710,32 +694,6 @@ CyclesRenderPass::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     KnobButtonPtr refreshBtn = _imp->refreshBtn.lock();
     if (refreshBtn && k == refreshBtn.get()) {
         refreshObjectLists();
-        return true;
-    }
-
-    // Write Deep EXR (Output tab) — writes the last preview's deep snapshot.
-    if (_imp->deepWriteBtn.lock() && k == _imp->deepWriteBtn.lock().get()) {
-        if (!_lastDeepImage) {
-            setPersistentMessage(eMessageTypeError,
-                tr("No deep data available — enable Deep Output (AOV tab) and render "
-                   "the preview once before writing.").toStdString());
-            return true;
-        }
-        const std::string path = _imp->deepExrPath.lock()
-                                 ? _imp->deepExrPath.lock()->getValue() : std::string();
-        std::string compression = "zips";
-        if (_imp->deepCompression.lock()) {
-            const int ci = _imp->deepCompression.lock()->getValue();
-            compression = (ci == 1) ? "rle" : (ci == 2) ? "none" : "zips";
-        }
-        std::string err;
-        if (!writeDeepImageEXR(_lastDeepImage, path, &err, compression)) {
-            setPersistentMessage(eMessageTypeError, "Write Deep EXR failed: " + err);
-            return true;
-        }
-        clearPersistentMessage(false);
-        fprintf(stderr, "[CyclesDeep] deep EXR written: %s (%zu samples)\n",
-                path.c_str(), (size_t)_lastDeepImage->totalSamples());
         return true;
     }
 
@@ -1259,7 +1217,10 @@ CyclesRenderPass::render(const RenderActionArgs& args)
         DeepImagePtr deep = deepImageFromCyclesDeepData(deepRaw, renderW, renderH,
                                                         deepAlphaOnly);
         if (deep) {
-            _lastDeepImage = deep;
+            {
+                std::lock_guard<std::mutex> l(_deepMutex);
+                _lastDeepImage = deep;
+            }
             fprintf(stderr, "[CyclesDeep] pass published %zu deep samples (%dx%d%s)\n",
                     (size_t)deep->totalSamples(), renderW, renderH,
                     deepAlphaOnly ? ", A/Z/ZBack" : "");
@@ -1267,10 +1228,10 @@ CyclesRenderPass::render(const RenderActionArgs& args)
             setPersistentMessage(eMessageTypeWarning,
                 tr("Deep Output enabled but no deep data came back from Cycles — "
                    "see console for details.").toStdString());
-            _lastDeepImage.reset();
+            { std::lock_guard<std::mutex> l(_deepMutex); _lastDeepImage.reset(); }
         }
     } else {
-        _lastDeepImage.reset();
+        { std::lock_guard<std::mutex> l(_deepMutex); _lastDeepImage.reset(); }
     }
 
     const int srcW = renderW;
@@ -1413,7 +1374,11 @@ renderPassFrameToBuffers(CyclesRenderPass* self,
                          double time, int w, int h, int fallbackSamples,
                          const std::vector<std::string>& requestedPasses, bool denoise,
                          std::map<std::string, std::vector<float>>& outBuffers,
-                         std::string& errOut)
+                         std::string& errOut,
+                         CyclesRenderer::DeepPixelData* outDeep = nullptr,
+                         int deepMaxSamples = 32,
+                         float deepMergeThreshold = 0.001f,
+                         float deepAlphaMergeThreshold = 0.01f)
 {
     const CyclesRenderSettings* settings = nullptr;
     if (EffectInstancePtr se = skipDots(self->getInput(2)))
@@ -1462,6 +1427,13 @@ renderPassFrameToBuffers(CyclesRenderPass* self,
     if (dof.enabled) req.dof = &dof;
     if (mb.enabled)  req.mb  = &mb;
     req.cameraOverride  = cam;
+
+    if (outDeep) {
+        req.outDeep = outDeep;
+        req.deepMaxSamples = deepMaxSamples;
+        req.deepMergeThreshold = deepMergeThreshold;
+        req.deepAlphaMergeThreshold = deepAlphaMergeThreshold;
+    }
 
     CyclesPassPrepared prepared;
     if (!prepareCyclesPasses(self, req, prepared, errOut, /*sceneInputSlot=*/0))
@@ -1552,13 +1524,34 @@ CyclesRenderPass::renderToDisk()
             std::string());
     }
 
+    // Deep sequence output (Deep on the AOV tab): each frame also writes
+    // <passName>_deep.####.exr into the same version folder.
+    const bool seqDeep = _imp->deepOutput.lock() && _imp->deepOutput.lock()->getValue();
+    const bool seqDeepAlphaOnly = _imp->deepChannels.lock()
+                                  && _imp->deepChannels.lock()->getValue() == 1;
+    const int seqDeepMax = _imp->deepMaxSamples.lock()
+                           ? std::max(1, _imp->deepMaxSamples.lock()->getValue()) : 32;
+    const float seqDeepMerge = _imp->deepMergeThreshold.lock()
+                           ? (float)_imp->deepMergeThreshold.lock()->getValue() : 0.001f;
+    const float seqDeepAlphaMerge = _imp->deepAlphaMergeThreshold.lock()
+                           ? (float)_imp->deepAlphaMergeThreshold.lock()->getValue() : 0.01f;
+    std::string seqDeepCompression = "zips";
+    if (_imp->deepCompression.lock()) {
+        const int ci = _imp->deepCompression.lock()->getValue();
+        seqDeepCompression = (ci == 1) ? "rle" : (ci == 2) ? "none" : "zips";
+    }
+    int nDeepOk = 0;
+
     bool canceled = false;
     for (int f = fStart; f <= fEnd && !canceled; f += fInc) {
         ++nframes;
         std::map<std::string, std::vector<float>> buffers;
         std::string err;
+        CyclesRenderer::DeepPixelData deepRaw;
         if (renderPassFrameToBuffers(this, renderer, (double)f, outW, outH,
-                                     fallbackSamples, passes, denoise, buffers, err)) {
+                                     fallbackSamples, passes, denoise, buffers, err,
+                                     seqDeep ? &deepRaw : nullptr,
+                                     seqDeepMax, seqDeepMerge, seqDeepAlphaMerge)) {
             const QString fname = QString::fromUtf8("%1.%2.exr")
                 .arg(QString::fromStdString(passName)).arg(f, 4, 10, QLatin1Char('0'));
             const std::string filepath = versionDir.absoluteFilePath(fname).toStdString();
@@ -1567,6 +1560,22 @@ CyclesRenderPass::renderToDisk()
                 fprintf(stderr, "[CyclesRenderPass]   frame %d -> %s\n", f, filepath.c_str());
             } else {
                 fprintf(stderr, "[CyclesRenderPass]   frame %d: EXR write FAILED: %s\n", f, filepath.c_str());
+            }
+            if (seqDeep) {
+                DeepImagePtr deep = deepImageFromCyclesDeepData(deepRaw, outW, outH,
+                                                                seqDeepAlphaOnly);
+                const QString dname = QString::fromUtf8("%1_deep.%2.exr")
+                    .arg(QString::fromStdString(passName)).arg(f, 4, 10, QLatin1Char('0'));
+                const std::string dpath = versionDir.absoluteFilePath(dname).toStdString();
+                std::string derr;
+                if (deep && writeDeepImageEXR(deep, dpath, &derr, seqDeepCompression)) {
+                    ++nDeepOk;
+                    fprintf(stderr, "[CyclesRenderPass]   frame %d deep -> %s (%zu samples)\n",
+                            f, dpath.c_str(), (size_t)deep->totalSamples());
+                } else {
+                    fprintf(stderr, "[CyclesRenderPass]   frame %d deep write FAILED: %s\n",
+                            f, derr.empty() ? "no deep data" : derr.c_str());
+                }
             }
         } else {
             fprintf(stderr, "[CyclesRenderPass]   frame %d FAILED: %s\n", f, err.c_str());
@@ -1580,6 +1589,9 @@ CyclesRenderPass::renderToDisk()
 
     std::string summary = "Render to Disk: wrote " + std::to_string(nok) + "/" +
         std::to_string(total) + " frame(s) to " + versionDir.absolutePath().toStdString();
+    if (seqDeep) {
+        summary += "  (+" + std::to_string(nDeepOk) + " deep)";
+    }
     if (canceled) summary += "  (canceled)";
     fprintf(stderr, "[CyclesRenderPass] %s\n", summary.c_str());
     if (canceled || nok != total) {

@@ -1140,7 +1140,10 @@ CyclesRender::render(const RenderActionArgs& args)
             DeepImagePtr deep = deepImageFromCyclesDeepData(deepRaw, renderW, renderH,
                                                             deepAlphaOnly);
             if (deep) {
+                {
+                std::lock_guard<std::mutex> l(_deepMutex);
                 _lastDeepImage = deep;
+            }
                 fprintf(stderr, "[CyclesDeep] published %zu deep samples (%dx%d%s)\n",
                         (size_t)deep->totalSamples(), renderW, renderH,
                         deepAlphaOnly ? ", A/Z/ZBack" : "");
@@ -1155,10 +1158,10 @@ CyclesRender::render(const RenderActionArgs& args)
                 setPersistentMessage(eMessageTypeWarning,
                     tr("Deep Output enabled but no deep data came back from Cycles — "
                        "see console for details.").toStdString());
-                _lastDeepImage.reset();
+                { std::lock_guard<std::mutex> l(_deepMutex); _lastDeepImage.reset(); }
             }
         } else {
-            _lastDeepImage.reset();
+            { std::lock_guard<std::mutex> l(_deepMutex); _lastDeepImage.reset(); }
         }
     }
 
@@ -1324,7 +1327,12 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
 {
     // Write Deep EXR button — writes the last render's published deep snapshot.
     if (k && _imp->deepWriteBtn.lock() && k == _imp->deepWriteBtn.lock().get()) {
-        if (!_lastDeepImage) {
+        DeepImagePtr deepSnap;
+        {
+            std::lock_guard<std::mutex> l(_deepMutex);
+            deepSnap = _lastDeepImage;
+        }
+        if (!deepSnap) {
             setPersistentMessage(eMessageTypeError,
                 tr("No deep data available — enable Deep Output and render once "
                    "(view the node) before writing.").toStdString());
@@ -1338,13 +1346,13 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
             compression = (ci == 1) ? "rle" : (ci == 2) ? "none" : "zips";
         }
         std::string err;
-        if (!writeDeepImageEXR(_lastDeepImage, path, &err, compression)) {
+        if (!writeDeepImageEXR(deepSnap, path, &err, compression)) {
             setPersistentMessage(eMessageTypeError, "Write Deep EXR failed: " + err);
             return true;
         }
         clearPersistentMessage(false);
         fprintf(stderr, "[CyclesDeep] deep EXR written: %s (%zu samples)\n",
-                path.c_str(), (size_t)_lastDeepImage->totalSamples());
+                path.c_str(), (size_t)deepSnap->totalSamples());
         return true;
     }
 
