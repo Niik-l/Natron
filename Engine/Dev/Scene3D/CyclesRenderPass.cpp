@@ -542,6 +542,13 @@ CyclesRenderPass::initializeKnobs()
     {
         KnobPagePtr outPage = AppManager::createKnob<KnobPage>(this, tr("Output"));
 
+        // Layout per docs/output-tab spec: RENDER / DEEP / (actions) / RV REVIEW.
+        {
+            KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Render"));
+            sep->setName("sepRender");
+            outPage->addKnob(sep);
+        }
+
         // Auto-fill the frame range from the project on creation.
         double pf = 1.0, pl = 1.0;
         if (getApp() && getApp()->getProject()) {
@@ -568,58 +575,6 @@ CyclesRenderPass::initializeKnobs()
             outPage->addKnob(k); _imp->frameInc = k;
         }
         {
-            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Render to Disk"));
-            k->setName("renderToDisk");
-            k->setHintToolTip(tr(
-                "Render this pass over the frame range to multi-layer EXRs:\n"
-                "    <Output Path>/<Pass Name>/v###/<Pass Name>.####.exr\n\n"
-                "Output Path is read from a connected CyclesRenderSettings node (input 2); "
-                "if none is connected it falls back to the project folder. Each render "
-                "auto-increments the version (v001, v002, ...). The beauty (Combined) plus "
-                "every AOV you enabled on the AOV Passes tab are written as named layers in "
-                "one EXR per frame.\n\n"
-                "Note: this blocks the UI while the range renders — progress prints to the "
-                "terminal."));
-            outPage->addKnob(k); _imp->renderToDiskBtn = k;
-        }
-
-        // --- Review / import the written sequence ---
-        {
-            KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("RV Executable"));
-            k->setName("rvPath");
-            k->setAnimationEnabled(false);
-            k->setEvaluateOnChange(false);
-            k->setHintToolTip(tr("Path to the RV / OpenRV executable (rv.exe on Windows). Used by "
-                                 "'Open in RV'. Defaults to the NATRON_RV_PATH environment variable if set."));
-            if (const char* envRv = std::getenv("NATRON_RV_PATH")) {
-                if (envRv[0] != '\0') k->setDefaultValue(envRv);
-            }
-            outPage->addKnob(k); _imp->rvPathKnob = k;
-        }
-        {
-            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Open in RV"));
-            k->setName("openInRv"); k->setAddNewLine(false);
-            k->setHintToolTip(tr("Launch RV / OpenRV on the latest rendered version's sequence. "
-                                 "Requires the RV Executable path (or NATRON_RV_PATH)."));
-            outPage->addKnob(k); _imp->openInRvBtn = k;
-        }
-        {
-            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Import Render"));
-            k->setName("importRender"); k->setAddNewLine(false);
-            k->setHintToolTip(tr("Create a Read node reading the latest rendered version of this pass, "
-                                 "linked to this node. If a linked Read already exists it is re-pointed "
-                                 "to the latest version. The link survives save/reload."));
-            outPage->addKnob(k); _imp->importRenderBtn = k;
-        }
-        {
-            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Update Render"));
-            k->setName("updateRender");
-            k->setHintToolTip(tr("Re-point the linked Read to the latest version on disk and clear its "
-                                 "outdated flag. Use this after a re-render when you're happy with the new "
-                                 "version (nothing changes automatically, so a broken re-render can't sneak in)."));
-            outPage->addKnob(k); _imp->updateRenderBtn = k;
-        }
-        {
             KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Linked Read"));
             k->setName("linkStatus");
             k->setAsLabel();   // read-only status line
@@ -627,18 +582,16 @@ CyclesRenderPass::initializeKnobs()
             k->setDefaultValue("No linked Read (use Import Render).");
             outPage->addKnob(k); _imp->linkStatus = k;
         }
+
         {
-            // Hidden + persistent: remembers the linked Read across save/reload.
-            KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Linked Read Name"));
-            k->setName("linkedReadName");
-            k->setSecretByDefault(true);
-            k->setEvaluateOnChange(false);
-            outPage->addKnob(k); _imp->linkedReadName = k;
+            KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Deep"));
+            sep->setName("sepDeep");
+            outPage->addKnob(sep);
         }
         {
             KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Deep Max Samples"));
             k->setName("deepMaxSamples"); k->setDefaultValue(32);
-            k->setMinimum(1); k->setDisplayMinimum(4); k->setDisplayMaximum(128);
+            k->setMinimum(1); k->setDisplayMinimum(1); k->setDisplayMaximum(100);
             k->setHintToolTip(tr("Kernel-side cap on deep samples per pixel."));
             outPage->addKnob(k); _imp->deepMaxSamples = k;
         }
@@ -683,6 +636,79 @@ CyclesRenderPass::initializeKnobs()
             }
             k->setDefaultValue(0);
             outPage->addKnob(k); _imp->deepCompression = k;
+        }
+
+        {
+            // Untitled rule between settings and the action row
+            KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr(""));
+            sep->setName("sepActions");
+            outPage->addKnob(sep);
+        }
+        {
+            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Render to Disk"));
+            k->setName("renderToDisk");
+            k->setAddNewLine(false);
+            k->setHintToolTip(tr(
+                "Render this pass over the frame range to multi-layer EXRs:\n"
+                "    <Output Path>/<Pass Name>/v###/<Pass Name>.####.exr\n\n"
+                "Output Path is read from a connected CyclesRenderSettings node (input 2); "
+                "if none is connected it falls back to the project folder. Each render "
+                "auto-increments the version (v001, v002, ...). The beauty (Combined) plus "
+                "every AOV you enabled on the AOV Passes tab are written as named layers in "
+                "one EXR per frame. With 'Deep' enabled (AOV tab), a deep EXR sequence "
+                "<Pass Name>_deep.####.exr is written alongside.\n\n"
+                "Note: this blocks the UI while the range renders — progress prints to the "
+                "terminal."));
+            outPage->addKnob(k); _imp->renderToDiskBtn = k;
+        }
+        {
+            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Import Render"));
+            k->setName("importRender"); k->setAddNewLine(false);
+            k->setHintToolTip(tr("Create a Read node reading the latest rendered version of this pass, "
+                                 "linked to this node. If a linked Read already exists it is re-pointed "
+                                 "to the latest version. The link survives save/reload."));
+            outPage->addKnob(k); _imp->importRenderBtn = k;
+        }
+        {
+            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Update Render"));
+            k->setName("updateRender");
+            k->setHintToolTip(tr("Re-point the linked Read to the latest version on disk and clear its "
+                                 "outdated flag. Use this after a re-render when you're happy with the new "
+                                 "version (nothing changes automatically, so a broken re-render can't sneak in)."));
+            outPage->addKnob(k); _imp->updateRenderBtn = k;
+        }
+
+        {
+            KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("RV Review"));
+            sep->setName("sepRvReview");
+            outPage->addKnob(sep);
+        }
+        {
+            KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("RV Executable"));
+            k->setName("rvPath");
+            k->setAnimationEnabled(false);
+            k->setEvaluateOnChange(false);
+            k->setHintToolTip(tr("Path to the RV / OpenRV executable (rv.exe on Windows). Used by "
+                                 "'Open in RV'. Defaults to the NATRON_RV_PATH environment variable if set."));
+            if (const char* envRv = std::getenv("NATRON_RV_PATH")) {
+                if (envRv[0] != '\0') k->setDefaultValue(envRv);
+            }
+            outPage->addKnob(k); _imp->rvPathKnob = k;
+        }
+        {
+            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Open in RV"));
+            k->setName("openInRv");
+            k->setHintToolTip(tr("Launch RV / OpenRV on the latest rendered version's sequence. "
+                                 "Requires the RV Executable path (or NATRON_RV_PATH)."));
+            outPage->addKnob(k); _imp->openInRvBtn = k;
+        }
+        {
+            // Hidden + persistent: remembers the linked Read across save/reload.
+            KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Linked Read Name"));
+            k->setName("linkedReadName");
+            k->setSecretByDefault(true);
+            k->setEvaluateOnChange(false);
+            outPage->addKnob(k); _imp->linkedReadName = k;
         }
     }
 }
