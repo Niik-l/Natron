@@ -52,6 +52,7 @@
 #include "scene/film.h"
 #include "scene/pass.h"
 #include "session/buffers.h"
+#include "session/deep_output_driver.h"
 #include "session/output_driver.h"
 #include "session/session.h"
 
@@ -290,6 +291,19 @@ scDebugEnabled()
     return on;
 }
 
+// Cycles session lifecycle diagnostics. Set env NATRON_DEBUG_CYCLES_SESSIONS=1 to
+// log every CyclesRenderer + ccl::Session create/destroy with running live counts.
+// One live session per actively-previewing node (CyclesRenderPass / CyclesRender) is
+// expected; a count that climbs as you scrub / edit is a leak. Off by default.
+static bool
+cyclesSessionDebugEnabled()
+{
+    static const bool on = (std::getenv("NATRON_DEBUG_CYCLES_SESSIONS") != NULL);
+    return on;
+}
+static std::atomic<int> g_liveCyclesRenderers{0};
+static std::atomic<int> g_liveCyclesSessions{0};
+
 // ============================================================================
 // Helper: map Light3D::LightType to ccl::LightType
 // ============================================================================
@@ -337,6 +351,10 @@ struct CyclesRenderer::Impl
         if (session) {
             session->cancel();
             session.reset();
+            if (cyclesSessionDebugEnabled()) {
+                int s = --g_liveCyclesSessions;
+                fprintf(stderr, "[Cycles Session] ~Impl freed session -> live sessions=%d\n", s);
+            }
         }
     }
 };
@@ -716,11 +734,22 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
 CyclesRenderer::CyclesRenderer()
     : _impl(new Impl())
 {
+    if (cyclesSessionDebugEnabled()) {
+        int n = ++g_liveCyclesRenderers;
+        fprintf(stderr, "[Cycles Session] CyclesRenderer ctor this=%p -> live renderers=%d (sessions=%d)\n",
+                (void*)this, n, g_liveCyclesSessions.load());
+    }
 }
 
 CyclesRenderer::~CyclesRenderer()
 {
-    // _impl (and the ccl::Session it owns) is freed after this body via ~Impl.
+    // _impl (and the ccl::Session it owns) is freed after this body via ~Impl,
+    // which emits its own "[Cycles Session] ~Impl freed session" line.
+    if (cyclesSessionDebugEnabled()) {
+        int n = --g_liveCyclesRenderers;
+        fprintf(stderr, "[Cycles Session] CyclesRenderer dtor this=%p -> live renderers=%d (sessions=%d)\n",
+                (void*)this, n, g_liveCyclesSessions.load());
+    }
 }
 
 void
@@ -831,6 +860,11 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     if (_impl->session) {
         _impl->session->cancel();
         _impl->session.reset();
+        if (cyclesSessionDebugEnabled()) {
+            int s = --g_liveCyclesSessions;
+            fprintf(stderr, "[Cycles Session] reset prior session (this=%p) -> live sessions=%d\n",
+                    (void*)this, s);
+        }
     }
 
     ccl::SessionParams sessionParams;
@@ -850,6 +884,11 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
     ccl::SceneParams sceneParams;
     _impl->session = ccl::make_unique<ccl::Session>(sessionParams, sceneParams);
+    if (cyclesSessionDebugEnabled()) {
+        int s = ++g_liveCyclesSessions;
+        fprintf(stderr, "[Cycles Session] created session (this=%p) -> live sessions=%d (renderers=%d)\n",
+                (void*)this, s, g_liveCyclesRenderers.load());
+    }
     ccl::Scene* scene = _impl->session->scene.get();
 
     // --- Default material ---
@@ -2312,16 +2351,74 @@ CyclesRenderer::renderToBufferWithCamera(const SceneGraph& sg,
                                           double focalLength, double hAperture, double vAperture,
                                           std::vector<float>& outPixels,
                                           int width, int height, int samples,
-                                          double time)
+                                          double time,
+                                          DeepPixelData* outDeep,
+                                          int deepMaxSamples,
+                                          float deepMergeThreshold,
+                                          float deepAlphaMergeThreshold)
 {
     initialize(width, height, samples);
     syncSceneWithCamera(sg, camTX, camTY, camTZ, camRX, camRY, camRZ, focalLength, hAperture, vAperture, time);
+
+    // Deep output: enable the film-side kernel feature and install the deep
+    // driver BEFORE the render starts — PathTrace::render() syncs the deep
+    // device buffers and kernel pointers automatically each render.
+    if (outDeep) {
+        _impl->session->scene->film->set_use_deep_output(true);
+        _impl->session->scene->film->set_deep_max_samples(deepMaxSamples);
+        _impl->session->scene->film->tag_modified();
+
+        auto deepDriver = ccl::make_unique<ccl::DeepOutputDriver>(_impl->session->device.get());
+        deepDriver->set_enabled(true);
+        deepDriver->set_merge_threshold(deepMergeThreshold);
+        deepDriver->set_alpha_merge_threshold(deepAlphaMergeThreshold);
+        deepDriver->reset(width, height, deepMaxSamples);
+        _impl->session->set_deep_output_driver(std::move(deepDriver));
+    } else if (_impl->session->scene->film->get_use_deep_output()) {
+        // A previous deep render on this reused session must not keep paying
+        // the kernel-side accumulation cost.
+        _impl->session->scene->film->set_use_deep_output(false);
+        _impl->session->scene->film->tag_modified();
+        _impl->session->set_deep_output_driver(nullptr);
+    }
 
     _impl->session->set_output_driver(
         ccl::make_unique<ccl::NatronBufferOutputDriver>(&outPixels, width, height));
 
     startRender();
     waitForRender();
+
+    // Harvest deep samples: hand the Combined pass to the driver as the
+    // beauty buffer (Deep Recolor distributes its RGB into the samples via
+    // log-domain alpha scaling), then copy out the processed per-pixel lists.
+    // NatronBufferOutputDriver stores Cycles-native bottom-up rows, which is
+    // what the driver's global pixel indexing expects — no flip here (the
+    // DeepImage conversion in the caller flips to top-down).
+    if (outDeep) {
+        outDeep->clear();
+        ccl::DeepOutputDriver* d = _impl->session->get_deep_output_driver();
+        if (d && !outPixels.empty()) {
+            d->set_beauty_buffer(outPixels.data(), width, height);
+            std::unique_ptr<std::vector<std::vector<blender::DeepSample>>> processed(
+                d->get_processed_deep_data());
+            if (processed && (int)processed->size() == width * height) {
+                outDeep->resize(processed->size());
+                for (std::size_t i = 0; i < processed->size(); ++i) {
+                    const std::vector<blender::DeepSample>& src = (*processed)[i];
+                    std::vector<DeepPixelSample>& dst = (*outDeep)[i];
+                    dst.resize(src.size());
+                    for (std::size_t s = 0; s < src.size(); ++s) {
+                        dst[s].r = src[s].r;
+                        dst[s].g = src[s].g;
+                        dst[s].b = src[s].b;
+                        dst[s].a = src[s].a;
+                        dst[s].z = src[s].z;
+                        dst[s].zback = src[s].z_back;
+                    }
+                }
+            }
+        }
+    }
 
     return !outPixels.empty();
 }
@@ -2341,7 +2438,11 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
                                                    const MotionBlurParams* motionBlur,
                                                    const IntegratorParams* integrator,
                                                    MaterialProvider* materialOverride,
-                                                   const std::set<std::string>* holdoutObjects)
+                                                   const std::set<std::string>* holdoutObjects,
+                                                   DeepPixelData* outDeep,
+                                                   int deepMaxSamples,
+                                                   float deepMergeThreshold,
+                                                   float deepAlphaMergeThreshold)
 {
     initialize(width, height, samples);
 
@@ -2469,11 +2570,58 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
         allPassNames.push_back("Combined_" + grp);
     }
 
+    // Deep output: enable the kernel feature + install the deep driver before
+    // the render; PathTrace syncs the deep device buffers automatically.
+    if (outDeep) {
+        _impl->session->scene->film->set_use_deep_output(true);
+        _impl->session->scene->film->set_deep_max_samples(deepMaxSamples);
+        _impl->session->scene->film->tag_modified();
+        auto deepDriver = ccl::make_unique<ccl::DeepOutputDriver>(_impl->session->device.get());
+        deepDriver->set_enabled(true);
+        deepDriver->set_merge_threshold(deepMergeThreshold);
+        deepDriver->set_alpha_merge_threshold(deepAlphaMergeThreshold);
+        deepDriver->reset(width, height, deepMaxSamples);
+        _impl->session->set_deep_output_driver(std::move(deepDriver));
+    } else if (_impl->session->scene->film->get_use_deep_output()) {
+        _impl->session->scene->film->set_use_deep_output(false);
+        _impl->session->scene->film->tag_modified();
+        _impl->session->set_deep_output_driver(nullptr);
+    }
+
     _impl->session->set_output_driver(
         ccl::make_unique<ccl::NatronMultiPassOutputDriver>(&outPassBuffers, allPassNames, width, height));
 
     startRender();
     waitForRender();
+
+    // Harvest deep samples BEFORE any host-side composite mutates Combined —
+    // Deep Recolor must distribute the kernel's own beauty into the samples.
+    if (outDeep) {
+        outDeep->clear();
+        ccl::DeepOutputDriver* d = _impl->session->get_deep_output_driver();
+        auto itBeauty = outPassBuffers.find("Combined");
+        if (d && itBeauty != outPassBuffers.end() && !itBeauty->second.empty()) {
+            d->set_beauty_buffer(itBeauty->second.data(), width, height);
+            std::unique_ptr<std::vector<std::vector<blender::DeepSample>>> processed(
+                d->get_processed_deep_data());
+            if (processed && (int)processed->size() == width * height) {
+                outDeep->resize(processed->size());
+                for (std::size_t i = 0; i < processed->size(); ++i) {
+                    const std::vector<blender::DeepSample>& srcPix = (*processed)[i];
+                    std::vector<DeepPixelSample>& dstPix = (*outDeep)[i];
+                    dstPix.resize(srcPix.size());
+                    for (std::size_t sIdx = 0; sIdx < srcPix.size(); ++sIdx) {
+                        dstPix[sIdx].r = srcPix[sIdx].r;
+                        dstPix[sIdx].g = srcPix[sIdx].g;
+                        dstPix[sIdx].b = srcPix[sIdx].b;
+                        dstPix[sIdx].a = srcPix[sIdx].a;
+                        dstPix[sIdx].z = srcPix[sIdx].z;
+                        dstPix[sIdx].zback = srcPix[sIdx].z_back;
+                    }
+                }
+            }
+        }
+    }
 
     // Render-time shadow-catcher composite. With approximate mode on,
     // Cycles' PASS_SHADOW_CATCHER_MATTE accessor encodes:

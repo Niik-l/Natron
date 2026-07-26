@@ -21,6 +21,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "CyclesPassRender.h"
+#include "../Deep/DeepImage.h"
 
 #include <memory>
 #include <set>
@@ -234,7 +235,11 @@ executeCyclesPasses(CyclesRenderer&            renderer,
         req.mb,
         req.integrator,
         req.materialOverride,
-        prepared.holdoutNames.empty() ? nullptr : &prepared.holdoutNames);
+        prepared.holdoutNames.empty() ? nullptr : &prepared.holdoutNames,
+        req.outDeep,
+        req.deepMaxSamples,
+        req.deepMergeThreshold,
+        req.deepAlphaMergeThreshold);
 
     if (!ok || outBuffers.empty()) {
         errOut = "renderToBufferWithCameraMultiPass returned no buffers";
@@ -337,6 +342,58 @@ enumerateSceneGeo(EffectInstance*            effect,
         info.scriptName = n->getScriptName_mt_safe();
         out.push_back(std::move(info));
     }
+}
+
+DeepImagePtr
+deepImageFromCyclesDeepData(const CyclesRenderer::DeepPixelData& data,
+                            int width, int height, bool alphaOnly)
+{
+    if (width <= 0 || height <= 0 || (int)data.size() != width * height) {
+        return DeepImagePtr();
+    }
+    RectI dw;
+    dw.x1 = 0; dw.y1 = 0; dw.x2 = width; dw.y2 = height;
+    std::vector<std::string> chans;
+    if (alphaOnly) {
+        chans.push_back("A"); chans.push_back("Z"); chans.push_back("ZBack");
+    } else {
+        chans.push_back("R"); chans.push_back("G"); chans.push_back("B");
+        chans.push_back("A"); chans.push_back("Z"); chans.push_back("ZBack");
+    }
+    const int nc = (int)chans.size();
+    DeepImagePtr deep = std::make_shared<DeepImage>(dw, nc, chans);
+    for (int y = 0; y < height; ++y) {
+        const int srcRow = height - 1 - y;  // Cycles bottom-up -> DeepImage top-down
+        for (int x = 0; x < width; ++x) {
+            deep->setSampleCount(x, y, (int)data[srcRow * width + x].size());
+        }
+    }
+    deep->allocateFromSampleCounts();
+    for (int y = 0; y < height; ++y) {
+        const int srcRow = height - 1 - y;
+        for (int x = 0; x < width; ++x) {
+            const std::vector<CyclesRenderer::DeepPixelSample>& srcPix =
+                data[srcRow * width + x];
+            if (srcPix.empty()) continue;
+            float* dst = deep->getSampleData(x, y);
+            for (std::size_t si = 0; si < srcPix.size(); ++si) {
+                float* d = dst + si * nc;
+                if (alphaOnly) {
+                    d[0] = srcPix[si].a;
+                    d[1] = srcPix[si].z;
+                    d[2] = srcPix[si].zback;
+                } else {
+                    d[0] = srcPix[si].r;
+                    d[1] = srcPix[si].g;
+                    d[2] = srcPix[si].b;
+                    d[3] = srcPix[si].a;
+                    d[4] = srcPix[si].z;
+                    d[5] = srcPix[si].zback;
+                }
+            }
+        }
+    }
+    return deep;
 }
 
 NATRON_NAMESPACE_EXIT

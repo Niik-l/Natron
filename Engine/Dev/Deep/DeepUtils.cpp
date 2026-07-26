@@ -23,6 +23,12 @@
 
 #include "DeepUtils.h"
 
+#include "DeepImage.h"
+#ifdef NATRON_HAVE_OPENIMAGEIO
+#include <OpenImageIO/imageio.h>
+#include <OpenImageIO/deepdata.h>
+#endif
+
 #include "DeepColorCorrect.h"
 #include "DeepCrop.h"
 #include "DeepExpression.h"
@@ -52,6 +58,10 @@
 #include "DeepBlend.h"
 #include "DeepTransform.h"
 #include "Blast.h"
+#ifdef NATRON_CYCLES
+#include "../Cycles/CyclesRender.h"
+#include "../Scene3D/CyclesRenderPass.h"
+#endif
 
 NATRON_NAMESPACE_ENTER
 
@@ -97,8 +107,91 @@ getDeepImageFromEffect(EffectInstance* effect)
     // Blast: deep passthrough minus blasted samples (cloud must originate
     // from a DeepToPoints — returns null otherwise)
     if (Blast* n = dynamic_cast<Blast*>(effect)) return n->getDeepImage();
+#ifdef NATRON_CYCLES
+    // CyclesRender: native deep render output (Deep Output knob)
+    if (CyclesRender* n = dynamic_cast<CyclesRender*>(effect)) return n->getDeepImage();
+    if (CyclesRenderPass* n = dynamic_cast<CyclesRenderPass*>(effect)) return n->getDeepImage();
+#endif
 
     return DeepImagePtr();
+}
+
+bool
+writeDeepImageEXR(const DeepImagePtr& deep, const std::string& path,
+                  std::string* errOut,
+                  const std::string& compression)
+{
+#ifdef NATRON_HAVE_OPENIMAGEIO
+    if (!deep) {
+        if (errOut) *errOut = "No deep image to write.";
+        return false;
+    }
+    if (path.empty()) {
+        if (errOut) *errOut = "No output file path set.";
+        return false;
+    }
+
+    const RectI& dw = deep->getDataWindow();
+    const int nChannels = deep->getNumChannels();
+    const std::vector<std::string>& chanNames = deep->getChannelNames();
+
+    OIIO::ImageSpec spec(dw.width(), dw.height(), nChannels);
+    spec.deep = true;
+    spec.x = dw.x1;
+    spec.y = dw.y1;
+    spec.channelnames.clear();
+    spec.channelformats.clear();
+    for (int c = 0; c < nChannels; ++c) {
+        spec.channelnames.push_back(chanNames[c]);
+        spec.channelformats.push_back(OIIO::TypeDesc::FLOAT);
+    }
+    spec.attribute("compression", compression.empty() ? "zips" : compression.c_str());
+
+    auto out = OIIO::ImageOutput::create(path);
+    if (!out) {
+        if (errOut) *errOut = std::string("Could not create output: ") + OIIO::geterror();
+        return false;
+    }
+    if (!out->open(path, spec)) {
+        if (errOut) *errOut = std::string("Could not open: ") + out->geterror();
+        return false;
+    }
+
+    OIIO::DeepData deepdata;
+    deepdata.init(spec);
+
+    for (int y = dw.y1; y < dw.y2; ++y) {
+        for (int x = dw.x1; x < dw.x2; ++x) {
+            const int pixel = (y - dw.y1) * dw.width() + (x - dw.x1);
+            deepdata.set_samples(pixel, deep->getSampleCount(x, y));
+        }
+    }
+    for (int y = dw.y1; y < dw.y2; ++y) {
+        for (int x = dw.x1; x < dw.x2; ++x) {
+            const int pixel = (y - dw.y1) * dw.width() + (x - dw.x1);
+            const int nSamples = deep->getSampleCount(x, y);
+            if (nSamples == 0) continue;
+            const float* srcData = deep->getSampleData(x, y);
+            for (int s = 0; s < nSamples; ++s) {
+                for (int c = 0; c < nChannels; ++c) {
+                    deepdata.set_deep_value(pixel, c, s, srcData[s * nChannels + c]);
+                }
+            }
+        }
+    }
+
+    if (!out->write_deep_scanlines(0, dw.height(), 0, deepdata)) {
+        if (errOut) *errOut = std::string("Error writing: ") + out->geterror();
+        out->close();
+        return false;
+    }
+    out->close();
+    return true;
+#else
+    (void)deep; (void)path;
+    if (errOut) *errOut = "Deep EXR writing requires OpenImageIO.";
+    return false;
+#endif
 }
 
 NATRON_NAMESPACE_EXIT

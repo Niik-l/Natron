@@ -34,6 +34,8 @@
 
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
+#include <mutex>
+
 #include "../../EngineFwd.h"
 
 NATRON_NAMESPACE_ENTER
@@ -172,6 +174,25 @@ private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
+
+public:
+    /**
+     * @brief Deep output side channel (Deep Output on the AOV tab): the last
+     * preview render's deep samples as a DeepImage. Null when disabled.
+     * Registered in DeepUtils::getDeepImageFromEffect.
+     */
+    DeepImagePtr getDeepImage() const {
+        std::lock_guard<std::mutex> l(_deepMutex);
+        return _lastDeepImage;
+    }
+
+private:
+    // Guards _lastDeepImage: published from render worker threads while
+    // downstream deep nodes read getDeepImage() concurrently — a torn
+    // shared_ptr assignment is a crash (same class as the P0 provider
+    // hardening; Cycles renders hold the race window open for seconds).
+    mutable std::mutex _deepMutex;
+    mutable DeepImagePtr _lastDeepImage;
     virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL;
     virtual void getComponentsNeededAndProduced(double time, ViewIdx view,
                                                 EffectInstance::ComponentsNeededMap* comps,

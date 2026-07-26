@@ -147,7 +147,27 @@ public:
     bool getPixels(float* rgba, int width, int height) const;
 
     /**
+     * @brief One deep sample: premultiplied RGBA + front/back depth.
+     * Matches the layout produced by Cycles' DeepOutputDriver after its
+     * Deep Recolor post-process (Combined RGB distributed into samples).
+     */
+    struct DeepPixelSample {
+        float r, g, b, a;
+        float z, zback;
+    };
+    /** Per-pixel deep sample lists, row-major in CYCLES orientation
+     *  (bottom-up rows), size width*height. */
+    typedef std::vector<std::vector<DeepPixelSample>> DeepPixelData;
+
+    /**
      * @brief Render to a memory buffer (blocking) using raw camera parameters.
+     *
+     * @param outDeep         Optional: when non-null, deep output is enabled
+     *                        (kernel accumulates per-pixel alpha+depth samples;
+     *                        surfaces at primary hits, volumes per ray segment)
+     *                        and the recolored deep samples are returned here.
+     * @param deepMaxSamples  Kernel-side per-pixel sample cap (fixed-size
+     *                        buffers; memory = W*H*cap*sizeof(sample)).
      */
     bool renderToBufferWithCamera(const SceneGraph& sg,
                                    double camTX, double camTY, double camTZ,
@@ -155,7 +175,11 @@ public:
                                    double focalLength, double hAperture, double vAperture,
                                    std::vector<float>& outPixels,
                                    int width, int height, int samples = 64,
-                                   double time = 0);
+                                   double time = 0,
+                                   DeepPixelData* outDeep = nullptr,
+                                   int deepMaxSamples = 32,
+                                   float deepMergeThreshold = 0.001f,
+                                   float deepAlphaMergeThreshold = 0.01f);
 
     /**
      * @brief Render to memory buffers (blocking) with multiple AOV passes and light groups.
@@ -179,7 +203,11 @@ public:
                                             const MotionBlurParams* motionBlur = nullptr,
                                             const IntegratorParams* integrator = nullptr,
                                             MaterialProvider* materialOverride = nullptr,
-                                            const std::set<std::string>* holdoutObjects = nullptr);
+                                            const std::set<std::string>* holdoutObjects = nullptr,
+                                            DeepPixelData* outDeep = nullptr,
+                                            int deepMaxSamples = 32,
+                                            float deepMergeThreshold = 0.001f,
+                                            float deepAlphaMergeThreshold = 0.01f);
 
     /**
      * @brief Set the number of samples for the next render.

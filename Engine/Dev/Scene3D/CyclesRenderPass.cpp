@@ -57,6 +57,8 @@
 #include "CameraProvider.h"
 #include "../DotUtils.h"
 #include "../Cycles/CyclesPassRender.h"
+#include "../Deep/DeepImage.h"
+#include "../Deep/DeepUtils.h"
 #include "../Cycles/CyclesRenderer.h"
 #include "../Cycles/CyclesRenderSettings.h"
 #include "../../CreateNodeArgs.h"
@@ -85,6 +87,13 @@ struct RenderPassPrivate
 {
     KnobStringWPtr passName;
     KnobButtonWPtr refreshBtn;
+    // Deep output (AOV tab) + deep write (Output tab)
+    KnobBoolWPtr   deepOutput;
+    KnobIntWPtr    deepMaxSamples;
+    KnobChoiceWPtr deepChannels;
+    KnobDoubleWPtr deepMergeThreshold;
+    KnobDoubleWPtr deepAlphaMergeThreshold;
+    KnobChoiceWPtr deepCompression;
     KnobStringWPtr infoKnob;
 
     // Object category checkboxes (pre-allocated, hidden when unused)
@@ -516,6 +525,14 @@ CyclesRenderPass::initializeKnobs()
                            "are re-rendered as pure white emitters, so they read as a matte both directly and "
                            "in reflections. This adds a second render pass (roughly doubles render time)."));
       aovPage->addKnob(k); _imp->aovReflMatte = k; }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Deep"));
+        k->setName("deepOutput"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Accumulate per-pixel deep samples during this pass's preview "
+                             "render and publish them as a deep image — connect this node to "
+                             "any Deep node. Save from the Output tab (Write Deep EXR)."));
+        aovPage->addKnob(k); _imp->deepOutput = k;
+    }
 
     // --- Output page: write this pass to disk over a frame range ---
     // Path = <Output Path>/<Pass Name>/v###/<Pass Name>.####.exr, where Output Path
@@ -524,6 +541,13 @@ CyclesRenderPass::initializeKnobs()
     // every enabled AOV as layers).
     {
         KnobPagePtr outPage = AppManager::createKnob<KnobPage>(this, tr("Output"));
+
+        // Layout per docs/output-tab spec: RENDER / DEEP / (actions) / RV REVIEW.
+        {
+            KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Render"));
+            sep->setName("sepRender");
+            outPage->addKnob(sep);
+        }
 
         // Auto-fill the frame range from the project on creation.
         double pf = 1.0, pl = 1.0;
@@ -551,8 +575,79 @@ CyclesRenderPass::initializeKnobs()
             outPage->addKnob(k); _imp->frameInc = k;
         }
         {
+            KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Linked Read"));
+            k->setName("linkStatus");
+            k->setAsLabel();   // read-only status line
+            k->setHintToolTip(tr("Status of the imported Read: up to date, outdated, or none."));
+            k->setDefaultValue("No linked Read (use Import Render).");
+            outPage->addKnob(k); _imp->linkStatus = k;
+        }
+
+        {
+            KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Deep"));
+            sep->setName("sepDeep");
+            outPage->addKnob(sep);
+        }
+        {
+            KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Deep Max Samples"));
+            k->setName("deepMaxSamples"); k->setDefaultValue(32);
+            k->setMinimum(1); k->setDisplayMinimum(1); k->setDisplayMaximum(100);
+            k->setHintToolTip(tr("Kernel-side cap on deep samples per pixel."));
+            outPage->addKnob(k); _imp->deepMaxSamples = k;
+        }
+        {
+            KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Deep Channels"));
+            k->setName("deepChannels");
+            k->setHintToolTip(tr("RGBA: full recolored deep. Alpha + Depth: DCM-style A/Z/ZBack "
+                                 "only — smaller, recolor in comp with DeepRecolor."));
+            {
+                std::vector<ChoiceOption> opts;
+                opts.push_back(ChoiceOption("RGBA", "", "Full recolored deep samples"));
+                opts.push_back(ChoiceOption("Alpha + Depth (DCM)", "", "A/Z/ZBack only"));
+                k->populateChoices(opts);
+            }
+            k->setDefaultValue(0);
+            outPage->addKnob(k); _imp->deepChannels = k;
+        }
+        {
+            KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Deep Merge Threshold"));
+            k->setName("deepMergeThreshold"); k->setDefaultValue(0.001);
+            k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+            k->setHintToolTip(tr("Depth tolerance for merging nearby samples (sample compression)."));
+            outPage->addKnob(k); _imp->deepMergeThreshold = k;
+        }
+        {
+            KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Deep Alpha Merge Threshold"));
+            k->setName("deepAlphaMergeThreshold"); k->setDefaultValue(0.01);
+            k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+            k->setHintToolTip(tr("Alpha tolerance for merging nearby samples."));
+            outPage->addKnob(k); _imp->deepAlphaMergeThreshold = k;
+        }
+        {
+            KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Deep Compression"));
+            k->setName("deepCompression");
+            k->setHintToolTip(tr("EXR compression for the deep sequence files written by Render to Disk (<pass>_deep.####.exr). Deep EXR supports Zips/RLE/None."));
+            {
+                std::vector<ChoiceOption> opts;
+                opts.push_back(ChoiceOption("Zips", "", "zip per scanline (recommended)"));
+                opts.push_back(ChoiceOption("RLE", "", "run-length encoding"));
+                opts.push_back(ChoiceOption("None", "", "uncompressed"));
+                k->populateChoices(opts);
+            }
+            k->setDefaultValue(0);
+            outPage->addKnob(k); _imp->deepCompression = k;
+        }
+
+        {
+            // Untitled rule between settings and the action row
+            KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr(""));
+            sep->setName("sepActions");
+            outPage->addKnob(sep);
+        }
+        {
             KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Render to Disk"));
             k->setName("renderToDisk");
+            k->setAddNewLine(false);
             k->setHintToolTip(tr(
                 "Render this pass over the frame range to multi-layer EXRs:\n"
                 "    <Output Path>/<Pass Name>/v###/<Pass Name>.####.exr\n\n"
@@ -560,31 +655,11 @@ CyclesRenderPass::initializeKnobs()
                 "if none is connected it falls back to the project folder. Each render "
                 "auto-increments the version (v001, v002, ...). The beauty (Combined) plus "
                 "every AOV you enabled on the AOV Passes tab are written as named layers in "
-                "one EXR per frame.\n\n"
+                "one EXR per frame. With 'Deep' enabled (AOV tab), a deep EXR sequence "
+                "<Pass Name>_deep.####.exr is written alongside.\n\n"
                 "Note: this blocks the UI while the range renders — progress prints to the "
                 "terminal."));
             outPage->addKnob(k); _imp->renderToDiskBtn = k;
-        }
-
-        // --- Review / import the written sequence ---
-        {
-            KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("RV Executable"));
-            k->setName("rvPath");
-            k->setAnimationEnabled(false);
-            k->setEvaluateOnChange(false);
-            k->setHintToolTip(tr("Path to the RV / OpenRV executable (rv.exe on Windows). Used by "
-                                 "'Open in RV'. Defaults to the NATRON_RV_PATH environment variable if set."));
-            if (const char* envRv = std::getenv("NATRON_RV_PATH")) {
-                if (envRv[0] != '\0') k->setDefaultValue(envRv);
-            }
-            outPage->addKnob(k); _imp->rvPathKnob = k;
-        }
-        {
-            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Open in RV"));
-            k->setName("openInRv"); k->setAddNewLine(false);
-            k->setHintToolTip(tr("Launch RV / OpenRV on the latest rendered version's sequence. "
-                                 "Requires the RV Executable path (or NATRON_RV_PATH)."));
-            outPage->addKnob(k); _imp->openInRvBtn = k;
         }
         {
             KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Import Render"));
@@ -602,13 +677,30 @@ CyclesRenderPass::initializeKnobs()
                                  "version (nothing changes automatically, so a broken re-render can't sneak in)."));
             outPage->addKnob(k); _imp->updateRenderBtn = k;
         }
+
         {
-            KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Linked Read"));
-            k->setName("linkStatus");
-            k->setAsLabel();   // read-only status line
-            k->setHintToolTip(tr("Status of the imported Read: up to date, outdated, or none."));
-            k->setDefaultValue("No linked Read (use Import Render).");
-            outPage->addKnob(k); _imp->linkStatus = k;
+            KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("RV Review"));
+            sep->setName("sepRvReview");
+            outPage->addKnob(sep);
+        }
+        {
+            KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("RV Executable"));
+            k->setName("rvPath");
+            k->setAnimationEnabled(false);
+            k->setEvaluateOnChange(false);
+            k->setHintToolTip(tr("Path to the RV / OpenRV executable (rv.exe on Windows). Used by "
+                                 "'Open in RV'. Defaults to the NATRON_RV_PATH environment variable if set."));
+            if (const char* envRv = std::getenv("NATRON_RV_PATH")) {
+                if (envRv[0] != '\0') k->setDefaultValue(envRv);
+            }
+            outPage->addKnob(k); _imp->rvPathKnob = k;
+        }
+        {
+            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Open in RV"));
+            k->setName("openInRv");
+            k->setHintToolTip(tr("Launch RV / OpenRV on the latest rendered version's sequence. "
+                                 "Requires the RV Executable path (or NATRON_RV_PATH)."));
+            outPage->addKnob(k); _imp->openInRvBtn = k;
         }
         {
             // Hidden + persistent: remembers the linked Read across save/reload.
@@ -1099,6 +1191,21 @@ CyclesRenderPass::render(const RenderActionArgs& args)
     if (mbParams.enabled)  req.mb  = &mbParams;
     req.cameraOverride  = cam;
 
+    // Deep output (AOV tab)
+    const bool deepEnabled = _imp->deepOutput.lock() && _imp->deepOutput.lock()->getValue();
+    const bool deepAlphaOnly = _imp->deepChannels.lock()
+                               && _imp->deepChannels.lock()->getValue() == 1;
+    CyclesRenderer::DeepPixelData deepRaw;
+    if (deepEnabled) {
+        req.outDeep = &deepRaw;
+        req.deepMaxSamples = _imp->deepMaxSamples.lock()
+                             ? std::max(1, _imp->deepMaxSamples.lock()->getValue()) : 32;
+        req.deepMergeThreshold = _imp->deepMergeThreshold.lock()
+                             ? (float)_imp->deepMergeThreshold.lock()->getValue() : 0.001f;
+        req.deepAlphaMergeThreshold = _imp->deepAlphaMergeThreshold.lock()
+                             ? (float)_imp->deepAlphaMergeThreshold.lock()->getValue() : 0.01f;
+    }
+
     CyclesPassPrepared prepared;
     {
         std::string prepErr;
@@ -1129,6 +1236,28 @@ CyclesRenderPass::render(const RenderActionArgs& args)
             _imp->activeRenderer.reset();
             return eStatusFailed;
         }
+    }
+
+    // Publish the deep snapshot for the deep suite (immutable, provider contract)
+    if (deepEnabled) {
+        DeepImagePtr deep = deepImageFromCyclesDeepData(deepRaw, renderW, renderH,
+                                                        deepAlphaOnly);
+        if (deep) {
+            {
+                std::lock_guard<std::mutex> l(_deepMutex);
+                _lastDeepImage = deep;
+            }
+            fprintf(stderr, "[CyclesDeep] pass published %zu deep samples (%dx%d%s)\n",
+                    (size_t)deep->totalSamples(), renderW, renderH,
+                    deepAlphaOnly ? ", A/Z/ZBack" : "");
+        } else {
+            setPersistentMessage(eMessageTypeWarning,
+                tr("Deep Output enabled but no deep data came back from Cycles — "
+                   "see console for details.").toStdString());
+            { std::lock_guard<std::mutex> l(_deepMutex); _lastDeepImage.reset(); }
+        }
+    } else {
+        { std::lock_guard<std::mutex> l(_deepMutex); _lastDeepImage.reset(); }
     }
 
     const int srcW = renderW;
@@ -1271,7 +1400,11 @@ renderPassFrameToBuffers(CyclesRenderPass* self,
                          double time, int w, int h, int fallbackSamples,
                          const std::vector<std::string>& requestedPasses, bool denoise,
                          std::map<std::string, std::vector<float>>& outBuffers,
-                         std::string& errOut)
+                         std::string& errOut,
+                         CyclesRenderer::DeepPixelData* outDeep = nullptr,
+                         int deepMaxSamples = 32,
+                         float deepMergeThreshold = 0.001f,
+                         float deepAlphaMergeThreshold = 0.01f)
 {
     const CyclesRenderSettings* settings = nullptr;
     if (EffectInstancePtr se = skipDots(self->getInput(2)))
@@ -1320,6 +1453,13 @@ renderPassFrameToBuffers(CyclesRenderPass* self,
     if (dof.enabled) req.dof = &dof;
     if (mb.enabled)  req.mb  = &mb;
     req.cameraOverride  = cam;
+
+    if (outDeep) {
+        req.outDeep = outDeep;
+        req.deepMaxSamples = deepMaxSamples;
+        req.deepMergeThreshold = deepMergeThreshold;
+        req.deepAlphaMergeThreshold = deepAlphaMergeThreshold;
+    }
 
     CyclesPassPrepared prepared;
     if (!prepareCyclesPasses(self, req, prepared, errOut, /*sceneInputSlot=*/0))
@@ -1410,13 +1550,34 @@ CyclesRenderPass::renderToDisk()
             std::string());
     }
 
+    // Deep sequence output (Deep on the AOV tab): each frame also writes
+    // <passName>_deep.####.exr into the same version folder.
+    const bool seqDeep = _imp->deepOutput.lock() && _imp->deepOutput.lock()->getValue();
+    const bool seqDeepAlphaOnly = _imp->deepChannels.lock()
+                                  && _imp->deepChannels.lock()->getValue() == 1;
+    const int seqDeepMax = _imp->deepMaxSamples.lock()
+                           ? std::max(1, _imp->deepMaxSamples.lock()->getValue()) : 32;
+    const float seqDeepMerge = _imp->deepMergeThreshold.lock()
+                           ? (float)_imp->deepMergeThreshold.lock()->getValue() : 0.001f;
+    const float seqDeepAlphaMerge = _imp->deepAlphaMergeThreshold.lock()
+                           ? (float)_imp->deepAlphaMergeThreshold.lock()->getValue() : 0.01f;
+    std::string seqDeepCompression = "zips";
+    if (_imp->deepCompression.lock()) {
+        const int ci = _imp->deepCompression.lock()->getValue();
+        seqDeepCompression = (ci == 1) ? "rle" : (ci == 2) ? "none" : "zips";
+    }
+    int nDeepOk = 0;
+
     bool canceled = false;
     for (int f = fStart; f <= fEnd && !canceled; f += fInc) {
         ++nframes;
         std::map<std::string, std::vector<float>> buffers;
         std::string err;
+        CyclesRenderer::DeepPixelData deepRaw;
         if (renderPassFrameToBuffers(this, renderer, (double)f, outW, outH,
-                                     fallbackSamples, passes, denoise, buffers, err)) {
+                                     fallbackSamples, passes, denoise, buffers, err,
+                                     seqDeep ? &deepRaw : nullptr,
+                                     seqDeepMax, seqDeepMerge, seqDeepAlphaMerge)) {
             const QString fname = QString::fromUtf8("%1.%2.exr")
                 .arg(QString::fromStdString(passName)).arg(f, 4, 10, QLatin1Char('0'));
             const std::string filepath = versionDir.absoluteFilePath(fname).toStdString();
@@ -1425,6 +1586,22 @@ CyclesRenderPass::renderToDisk()
                 fprintf(stderr, "[CyclesRenderPass]   frame %d -> %s\n", f, filepath.c_str());
             } else {
                 fprintf(stderr, "[CyclesRenderPass]   frame %d: EXR write FAILED: %s\n", f, filepath.c_str());
+            }
+            if (seqDeep) {
+                DeepImagePtr deep = deepImageFromCyclesDeepData(deepRaw, outW, outH,
+                                                                seqDeepAlphaOnly);
+                const QString dname = QString::fromUtf8("%1_deep.%2.exr")
+                    .arg(QString::fromStdString(passName)).arg(f, 4, 10, QLatin1Char('0'));
+                const std::string dpath = versionDir.absoluteFilePath(dname).toStdString();
+                std::string derr;
+                if (deep && writeDeepImageEXR(deep, dpath, &derr, seqDeepCompression)) {
+                    ++nDeepOk;
+                    fprintf(stderr, "[CyclesRenderPass]   frame %d deep -> %s (%zu samples)\n",
+                            f, dpath.c_str(), (size_t)deep->totalSamples());
+                } else {
+                    fprintf(stderr, "[CyclesRenderPass]   frame %d deep write FAILED: %s\n",
+                            f, derr.empty() ? "no deep data" : derr.c_str());
+                }
             }
         } else {
             fprintf(stderr, "[CyclesRenderPass]   frame %d FAILED: %s\n", f, err.c_str());
@@ -1438,6 +1615,9 @@ CyclesRenderPass::renderToDisk()
 
     std::string summary = "Render to Disk: wrote " + std::to_string(nok) + "/" +
         std::to_string(total) + " frame(s) to " + versionDir.absolutePath().toStdString();
+    if (seqDeep) {
+        summary += "  (+" + std::to_string(nDeepOk) + " deep)";
+    }
     if (canceled) summary += "  (canceled)";
     fprintf(stderr, "[CyclesRenderPass] %s\n", summary.c_str());
     if (canceled || nok != total) {
