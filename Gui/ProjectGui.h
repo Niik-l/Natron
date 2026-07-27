@@ -133,6 +133,9 @@ public:
 
     Format getFormat() const;
 
+    // Pre-fill the dialog from an existing format (Edit Format mode).
+    void setFormat(const Format& f);
+
 public Q_SLOTS:
 
     void onCopyFromViewer();

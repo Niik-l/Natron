@@ -88,6 +88,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Gui/Menu.h"
 #include "Gui/NodeClipBoard.h"
 #include "Gui/NodeGraph.h"
+#include "Gui/ProjectGui.h" // AddFormatDialog
 #include "Gui/NodeGraphUndoRedo.h"
 #include "Gui/NodeGuiSerialization.h"
 #include "Gui/NodeGraphTextItem.h"
@@ -244,6 +245,7 @@ NodeGui::initialize(NodeGraph* dag,
     QObject::connect( internalNode.get(), SIGNAL(hideInputsKnobChanged(bool)), this, SLOT(onHideInputsKnobValueChanged(bool)) );
     QObject::connect( internalNode.get(), SIGNAL(availableViewsChanged()), this, SLOT(onAvailableViewsChanged()) );
     QObject::connect( internalNode.get(), SIGNAL(rightClickMenuKnobPopulated()), this, SLOT(onRightClickMenuKnobPopulated()) );
+    QObject::connect( internalNode.get(), SIGNAL(s_formatActionRequested(int)), this, SLOT(onFormatActionRequested(int)) );
     QObject::connect( internalNode.get(), SIGNAL(inputEdgeLabelChanged(int, QString)), this, SLOT(onInputLabelChanged(int,QString)) );
     QObject::connect( internalNode.get(), SIGNAL(inputVisibilityChanged(int)), this, SLOT(onInputVisibilityChanged(int)) );
     QObject::connect( this, SIGNAL(previewImageComputed()), this, SLOT(onPreviewImageComputed()) );
@@ -4121,6 +4123,63 @@ NodeGui::showGroupKnobAsDialog(KnobGroup* group)
         _activeNodeCustomModalDialog->close();
         _activeNodeCustomModalDialog->deleteLater();
         _activeNodeCustomModalDialog = 0;
+    }
+}
+
+void
+NodeGui::onFormatActionRequested(int action)
+{
+    // Nuke-style New/Edit/Delete Format picked in this node's format dropdown.
+    NodePtr node = getNode();
+
+    if (!node || !getDagGui()) {
+        return;
+    }
+    Gui* gui = getDagGui()->getGui();
+    if (!gui || !gui->getApp()) {
+        return;
+    }
+    ProjectPtr project = gui->getApp()->getProject();
+    if (!project) {
+        return;
+    }
+    KnobChoicePtr choice = std::dynamic_pointer_cast<KnobChoice>( node->getKnobByName(kNatronParamFormatChoice) );
+    if (!choice) {
+        return;
+    }
+    const int curIdx = choice->getValue();
+    const int nBuiltin = project->getBuiltinFormatsCount();
+
+    if (action == 0) { // New Format...
+        AddFormatDialog dialog(project.get(), gui);
+        if ( dialog.exec() ) {
+            const int newIdx = project->addProjectFormat( dialog.getFormat() );
+            if (newIdx >= 0) {
+                choice->setValue(newIdx);
+            }
+        }
+    } else if (action == 1) { // Edit Format...
+        if (curIdx < nBuiltin) {
+            Dialogs::warningDialog( tr("Edit Format").toStdString(),
+                                    tr("Built-in formats cannot be edited — use \"New Format...\" to create a custom one.").toStdString() );
+            return;
+        }
+        Format f;
+        if ( !project->getProjectFormatAtIndex(curIdx, &f) ) {
+            return;
+        }
+        AddFormatDialog dialog(project.get(), gui);
+        dialog.setFormat(f);
+        if ( dialog.exec() ) {
+            project->editProjectFormatAtIndex( curIdx, dialog.getFormat() );
+        }
+    } else if (action == 2) { // Delete Format
+        if (curIdx < nBuiltin) {
+            Dialogs::warningDialog( tr("Delete Format").toStdString(),
+                                    tr("Built-in formats cannot be deleted.").toStdString() );
+            return;
+        }
+        project->removeProjectFormatAtIndex(curIdx);
     }
 }
 

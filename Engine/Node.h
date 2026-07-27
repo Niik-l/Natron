@@ -1415,6 +1415,10 @@ Q_SIGNALS:
 
     void rightClickMenuKnobPopulated();
 
+    // User picked New (0) / Edit (1) / Delete (2) Format in this node's
+    // format dropdown — the Gui opens the dialog and drives the Project.
+    void s_formatActionRequested(int action);
+
     void s_refreshPreviewsAfterProjectLoadRequested();
 
     void hideInputsKnobChanged(bool hidden);

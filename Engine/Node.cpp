@@ -114,6 +114,12 @@
 ///at most every...
 #define NATRON_RENDER_GRAPHS_HINTS_REFRESH_RATE_SECONDS 1
 
+// Ids of the Nuke-style format-management entries appended to every hijacked
+// format dropdown (see refreshFormatParamChoice / handleFormatKnob).
+#define kNatronFormatActionNewID "NatronFormatActionNew"
+#define kNatronFormatActionEditID "NatronFormatActionEdit"
+#define kNatronFormatActionDeleteID "NatronFormatActionDelete"
+
 NATRON_NAMESPACE_ENTER
 
 using std::make_pair;
@@ -2546,9 +2552,51 @@ Node::handleFormatKnob(KnobI* knob)
     int curIndex = choice->getValue();
     Format f;
     if ( !getApp()->getProject()->getProjectFormatAtIndex(curIndex, &f) ) {
-        assert(false);
+        // One of the appended New/Edit/Delete Format action entries (they sit
+        // past the real formats). Restore the previous valid selection so the
+        // action never sticks in the dropdown, then ask the Gui to act.
+        ChoiceOption active = choice->getActiveEntry();
+        int restore = (_imp->lastFormatKnobIndex >= 0) ? _imp->lastFormatKnobIndex : 0;
+        choice->setValue(restore); // recurses once into handleFormatKnob with a valid index
+
+        // setValue(int) does not refresh the stored active entry, so without
+        // this the ACTION's label would serialize as the choice's active
+        // entry — and label-based restoration would re-select the action on
+        // project load (popping the dialog).
+        {
+            std::vector<ChoiceOption> ents = choice->getEntries_mt_safe();
+            if ( restore >= 0 && restore < (int)ents.size() ) {
+                choice->setActiveEntry(ents[restore]);
+            }
+        }
+
+        // Never fire the dialog while a project restores a (stale) selection.
+        if ( getApp()->getProject()->isLoadingProject() ) {
+            return true;
+        }
+
+        int action = -1;
+        if (active.id == kNatronFormatActionNewID) {
+            action = 0;
+        } else if (active.id == kNatronFormatActionEditID) {
+            action = 1;
+        } else if (active.id == kNatronFormatActionDeleteID) {
+            action = 2;
+        }
+        if (action != -1) {
+            Q_EMIT s_formatActionRequested(action);
+        }
 
         return true;
+    }
+    _imp->lastFormatKnobIndex = curIndex;
+    // Keep the stored active entry in sync with programmatic index changes
+    // (e.g. the New-Format flow selecting the freshly added format).
+    {
+        std::vector<ChoiceOption> ents = choice->getEntries_mt_safe();
+        if ( curIndex < (int)ents.size() ) {
+            choice->setActiveEntry(ents[curIndex]);
+        }
     }
 
     KnobIntPtr size = _imp->pluginFormatKnobs.size.lock();
@@ -2579,15 +2627,51 @@ Node::refreshFormatParamChoice(const std::vector<ChoiceOption>& entries,
         return;
     }
     int curIndex = choice->getValue();
-    choice->populateChoices(entries);
+
+    // Remember what was selected so an edit/delete of another format (which
+    // shifts the list) restores the SAME format by id, not by index.
+    ChoiceOption prevActive("");
+    {
+        std::vector<ChoiceOption> curEntries = choice->getEntries_mt_safe();
+        if ( curIndex >= 0 && curIndex < (int)curEntries.size() ) {
+            prevActive = curEntries[curIndex];
+        }
+    }
+
+    // Nuke-style format management, appended after the real formats. They are
+    // intercepted in handleFormatKnob (getProjectFormatAtIndex fails past the
+    // real list) and never stick as a selection.
+    std::vector<ChoiceOption> entriesWithActions = entries;
+    entriesWithActions.push_back( ChoiceOption(kNatronFormatActionNewID, "New Format...",
+                                               "Create a new custom project format and select it.") );
+    entriesWithActions.push_back( ChoiceOption(kNatronFormatActionEditID, "Edit Format...",
+                                               "Edit the selected custom format (built-in formats cannot be edited).") );
+    entriesWithActions.push_back( ChoiceOption(kNatronFormatActionDeleteID, "Delete Format",
+                                               "Delete the selected custom format (built-in formats cannot be deleted).") );
+
+    choice->populateChoices(entriesWithActions);
     choice->beginChanges();
     choice->setDefaultValueWithoutApplying(defValue);
     if (!loadingProject) {
-        //changedKnob was not called because we are initializing knobs
-        handleFormatKnob( choice.get() );
+        int restoreIdx = curIndex;
+        if ( !prevActive.id.empty() ) {
+            for (std::size_t i = 0; i < entries.size(); ++i) {
+                if (entries[i].id == prevActive.id) {
+                    restoreIdx = (int)i;
+                    break;
+                }
+            }
+        }
+        if ( restoreIdx != curIndex && restoreIdx < (int)entries.size() ) {
+            choice->setValue(restoreIdx);
+        } else {
+            //changedKnob was not called because we are initializing knobs
+            handleFormatKnob( choice.get() );
+        }
     } else {
         if ( curIndex < (int)entries.size() ) {
             choice->setValue(curIndex);
+            _imp->lastFormatKnobIndex = curIndex;
         }
     }
 

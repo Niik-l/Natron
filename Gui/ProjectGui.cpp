@@ -233,6 +233,16 @@ AddFormatDialog::AddFormatDialog(Project *project,
 }
 
 void
+AddFormatDialog::setFormat(const Format& f)
+{
+    setWindowTitle( tr("Edit Format") );
+    _widthSpinBox->setValue( f.width() );
+    _heightSpinBox->setValue( f.height() );
+    _pixelAspectSpinBox->setValue( f.getPixelAspectRatio() );
+    _nameLineEdit->setText( QString::fromUtf8( f.getName().c_str() ) );
+}
+
+void
 AddFormatDialog::onCopyFromViewer()
 {
     QString activeText = _copyFromViewerCombo->itemText( _copyFromViewerCombo->activeIndex() );

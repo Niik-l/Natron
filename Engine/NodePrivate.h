@@ -401,6 +401,9 @@ public:
     KnobDoubleWPtr mixWithSource;
     KnobButtonWPtr renderButton; //< render button for writers
     FormatKnob pluginFormatKnobs;
+    // Last valid selection of the hijacked format dropdown — restored when the
+    // user picks one of the appended New/Edit/Delete Format action entries.
+    int lastFormatKnobIndex = -1;
     KnobBoolWPtr processAllLayersKnob;
     std::map<int, ChannelSelector> channelsSelectors;
     std::map<int, MaskSelector> maskSelectors;

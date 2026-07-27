@@ -2900,6 +2900,118 @@ Project::addFormat(const std::string& formatSpec)
     }
 }
 
+// Rebuild the format dropdown entry list from the builtin + additional format
+// lists (same encoding as tryAddProjectFormat).
+static void
+makeFormatEntries(const std::list<Format>& builtinFormats,
+                  const std::list<Format>& additionalFormats,
+                  std::vector<ChoiceOption>* entries)
+{
+    for (std::list<Format>::const_iterator it = builtinFormats.begin(); it != builtinFormats.end(); ++it) {
+        const Format & f = *it;
+        QString formatStr = ProjectPrivate::generateStringFromFormat(f);
+        if ( !f.getName().empty() ) {
+            entries->push_back( ChoiceOption(f.getName(), formatStr.toStdString(), "") );
+        } else {
+            entries->push_back( ChoiceOption( formatStr.toStdString() ) );
+        }
+    }
+    for (std::list<Format>::const_iterator it = additionalFormats.begin(); it != additionalFormats.end(); ++it) {
+        const Format & f = *it;
+        QString formatStr = ProjectPrivate::generateStringFromFormat(f);
+        if ( !f.getName().empty() ) {
+            entries->push_back( ChoiceOption(f.getName(), formatStr.toStdString(), "") );
+        } else {
+            entries->push_back( ChoiceOption( formatStr.toStdString() ) );
+        }
+    }
+}
+
+int
+Project::getBuiltinFormatsCount() const
+{
+    QMutexLocker k(&_imp->formatMutex);
+
+    return (int)_imp->builtinFormats.size();
+}
+
+int
+Project::addProjectFormat(const Format& f)
+{
+    QMutexLocker k(&_imp->formatMutex);
+    bool existed = false;
+
+    return tryAddProjectFormat(f, &existed);
+}
+
+bool
+Project::editProjectFormatAtIndex(int index,
+                                  const Format& f)
+{
+    if ( ( f.left() >= f.right() ) || ( f.bottom() >= f.top() ) ) {
+        return false;
+    }
+    {
+        QMutexLocker k(&_imp->formatMutex);
+        const int nBuiltin = (int)_imp->builtinFormats.size();
+        const int customIdx = index - nBuiltin;
+        if ( customIdx < 0 || customIdx >= (int)_imp->additionalFormats.size() ) {
+            return false; // built-in or out of range
+        }
+        std::list<Format>::iterator it = _imp->additionalFormats.begin();
+        std::advance(it, customIdx);
+        *it = f;
+
+        std::vector<ChoiceOption> entries;
+        makeFormatEntries(_imp->builtinFormats, _imp->additionalFormats, &entries);
+        // populated() -> onProjectFormatPopulated -> every node's dropdown refreshes
+        _imp->formatKnob->populateChoices(entries);
+    }
+
+    // If the edited format IS the current project format, propagate the
+    // size/PAR change like a project-format switch would.
+    if (_imp->formatKnob->getValue() == index) {
+        forceComputeInputDependentDataOnAllTrees();
+        Q_EMIT formatChanged(f);
+    }
+
+    return true;
+}
+
+bool
+Project::removeProjectFormatAtIndex(int index)
+{
+    int curSel;
+    {
+        QMutexLocker k(&_imp->formatMutex);
+        const int nBuiltin = (int)_imp->builtinFormats.size();
+        const int customIdx = index - nBuiltin;
+        if ( customIdx < 0 || customIdx >= (int)_imp->additionalFormats.size() ) {
+            return false; // built-in or out of range
+        }
+        std::list<Format>::iterator it = _imp->additionalFormats.begin();
+        std::advance(it, customIdx);
+        _imp->additionalFormats.erase(it);
+
+        curSel = _imp->formatKnob->getValue();
+        std::vector<ChoiceOption> entries;
+        makeFormatEntries(_imp->builtinFormats, _imp->additionalFormats, &entries);
+        _imp->formatKnob->populateChoices(entries);
+    }
+
+    // Keep the project format stable: fall back to the first format if the
+    // removed one was selected, shift down by one if a later one was.
+    if (curSel == index) {
+        _imp->formatKnob->setValue(0);
+    } else if (curSel > index) {
+        _imp->formatKnob->blockValueChanges();
+        _imp->formatKnob->setValue(curSel - 1);
+        _imp->formatKnob->unblockValueChanges();
+    }
+
+    return true;
+}
+
 void
 Project::onProjectFormatPopulated()
 {

@@ -336,6 +336,16 @@ public:
 
     bool addFormat(const std::string& formatSpec);
 
+    /**
+     * @brief Nuke-style custom-format management, driven from any node's
+     * format dropdown (New/Edit/Delete Format entries). Built-in formats can
+     * never be edited or removed — only formats the user added.
+     **/
+    int getBuiltinFormatsCount() const;
+    int addProjectFormat(const Format& f); // returns the format's index, -1 on failure
+    bool editProjectFormatAtIndex(int index, const Format& f);
+    bool removeProjectFormatAtIndex(int index);
+
     void setTimeLine(const TimeLinePtr& timeline);
 
 
