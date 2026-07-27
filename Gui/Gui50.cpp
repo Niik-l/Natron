@@ -1414,6 +1414,92 @@ camera.getParam("translateY").setValue(1.0)
 }
 
 void
+Gui::createTemplateHDRIBasic()
+{
+    // 1:1 reproduction of the reference HDRI face-edit rig (hdri.ntp):
+    // source -> Reformat (custom LatLong4K 4096x2048 format) -> Dot ->
+    // 6x [Grade (face-ID tint) -> SphericalTransform (LatLong -> one cube
+    // face) -> RotoPaint (copy blend)] -> SphericalTransform Faces-input
+    // reassembly -> Viewer. Face branches left->right: -X, -Z, +X, +Z, +Y, -Y.
+    runTemplatePython(this, R"PY(
+app = app1
+
+# Custom lat-long format, created project-wide (shows up in every format
+# dropdown; Reformat below selects it).
+app.addFormat("LatLong4K 4096 x 2048 1")
+
+checker = app.createNode("net.sf.openfx.CheckerBoardPlugin")
+reformat = app.createNode("net.sf.openfx.Reformat")
+dot = app.createNode("fr.inria.built-in.Dot")
+viewer = app.createNode("fr.inria.built-in.Viewer")
+
+# Reassembly: Faces-input SphericalTransform (cube faces on inputs 1-6).
+# NOTE: its projection knobs are set at the END, after all connections —
+# the knobChanged metadata refresh needs the inputs wired to take hold.
+assemble = app.createNode("fr.inria.built-in.SphericalTransform")
+assemble.setLabel("AssembleLatLong")
+
+# Per-face branches. (face label, cubemapFaceOutput index, grade multiply RGB,
+# x position, assemble input slot [1=-Z 2=+Z 3=-X 4=+X 5=-Y 6=+Y])
+faces = [
+    ("negX", 1, (0.0,    0.0128, 1.0),    230, 3),
+    ("negZ", 5, (0.0056, 1.0,    0.0),    482, 1),
+    ("posX", 0, (0.0,    0.4926, 0.9911), 724, 4),
+    ("posZ", 4, (0.5225, 0.0,    1.0),    927, 2),
+    ("posY", 2, (0.9259, 1.0,    0.0),   1146, 6),
+    ("negY", 3, (1.0,    0.0,    0.0),   1393, 5),
+]
+
+for (name, faceIdx, mult, xpos, slot) in faces:
+    grade = app.createNode("net.sf.openfx.GradePlugin")
+    st = app.createNode("fr.inria.built-in.SphericalTransform")
+    roto = app.createNode("fr.inria.built-in.RotoPaint")
+    grade.setLabel("Grade_" + name)
+    st.setLabel("ToFace_" + name)
+    roto.setLabel("Paint_" + name)
+
+    grade.connectInput(0, dot)
+    st.connectInput(0, grade)
+    roto.connectInput(0, st)
+    assemble.connectInput(slot, roto)
+
+    grade.getParam("multiply").set(mult[0], mult[1], mult[2], 1.0)
+    grade.getParam("premult").set(True)
+
+    st.getParam("outputProjection").set(1)     # Cubemap
+    st.getParam("cubemapFormatOutput").set(2)  # Faces (single face out)
+    st.getParam("cubemapFaceOutput").set(faceIdx)
+
+    roto.getParam("blendingModeButton").set(6) # copy
+
+    grade.setPosition(xpos + 16, 395)
+    st.setPosition(xpos, 468)
+    roto.setPosition(xpos, 736)
+
+reformat.connectInput(0, checker)
+dot.connectInput(0, reformat)
+viewer.connectInput(0, assemble)
+
+checker.setPosition(841, 46)
+reformat.setPosition(841, 116)
+dot.setPosition(886, 201)
+assemble.setPosition(806, 1055)
+viewer.setPosition(806, 1151)
+
+# Source placeholder at HD, output conformed to the custom lat-long format.
+# Swap the CheckerBoard for your HDRI Read.
+checker.getParam("NatronParamFormatChoice").set("PC_Video")
+reformat.getParam("reformatType").set(0)  # to format
+reformat.getParam("NatronParamFormatChoice").set("LatLong4K")
+
+# Reassembly mode LAST (inputs are all wired now, so the metadata refresh
+# in knobChanged sees the faces).
+assemble.getParam("inputProjection").set(1)      # Cubemap
+assemble.getParam("cubemapFormatInput").set(2)   # Faces (separate inputs)
+)PY");
+}
+
+void
 Gui::onUserCommandTriggered()
 {
     QAction* action = qobject_cast<QAction*>( sender() );

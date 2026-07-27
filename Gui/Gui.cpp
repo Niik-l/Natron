@@ -725,9 +725,15 @@ Gui::createMenuActions()
             placeholder = new QAction(tr("(templates coming soon)"), this);
             placeholder->setEnabled(false);
             menuDeep->addAction(placeholder);
-            placeholder = new QAction(tr("(templates coming soon)"), this);
-            placeholder->setEnabled(false);
-            menuHDRI->addAction(placeholder);
+        }
+
+        {
+            QAction* a = new QAction(tr("Basic HDRI"), this);
+            a->setStatusTip(tr("Lat-long HDRI face-edit rig: source -> LatLong4K Reformat -> 6 cube faces "
+                               "(SphericalTransform Faces mode), RotoPaint + Grade per face, reassembled "
+                               "back to lat-long"));
+            QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateHDRIBasic()));
+            menuHDRI->addAction(a);
         }
 
         QAction* a;
