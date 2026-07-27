@@ -590,12 +590,20 @@ ParticleEmitter::getParticleData(double time)
             readDouble("scaleY", card3dScale[1]);
             readDouble("scaleZ", card3dScale[2]);
 
+            // Uniform Scale multiplies both axes on top of the per-axis Scale
+            // (matches the drawn card; previously ignored here, so emission
+            // from a uniformly-scaled card came out at the unscaled size).
+            float card3dUniform = 1.f;
+            readDouble("uniformScale", card3dUniform);
+            card3dScale[0] *= card3dUniform;
+            card3dScale[1] *= card3dUniform;
+
             // Card3D local plane spans (-halfW, -halfH, 0) to (+halfW, +halfH, 0).
-            // halfW carries the texture aspect, halfH = 0.5 (same convention
-            // drawCardNode uses in Viewport3D).
-            if (card3dTex->width > 0 && card3dTex->height > 0) {
-                card3dHalfW = (float)card3dTex->width / (float)card3dTex->height * 0.5f;
-            }
+            // halfW comes from the card's GEOMETRY aspect (getCardAspect — img
+            // input aspect, honoring the Image Aspect toggle), matching
+            // generateCardMesh exactly. The cached texture's resolution can
+            // differ from the geometry aspect, so it is only used for sampling.
+            card3dHalfW = card3dMask->getCardAspect(time) * 0.5f;
             card3dHalfH = 0.5f;
 
             // If the Card3D has no texture loaded, fall back to Point shape.
