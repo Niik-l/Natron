@@ -86,6 +86,7 @@ struct ReadAlembicTransformPrivate
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobDoubleWPtr scaleX, scaleY, scaleZ;
+    KnobBoolWPtr lockTransform;
     KnobStringWPtr info;
 
     // Cached paths
@@ -255,11 +256,40 @@ ReadAlembicTransform::initializeKnobs()
         xformPage->addKnob(k); _imp->scaleZ = k;
     }
     {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Lock Transform"));
+        k->setName("lockTransform");
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("Lock the imported Translate/Rotate/Scale keyframes against "
+                             "accidental edits. On by default — the animation comes from the "
+                             "Alembic cache and is rebaked on Reload. Untick to deliberately "
+                             "offset the transform by hand."));
+        xformPage->addKnob(k); _imp->lockTransform = k;
+    }
+    {
         KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Info"));
         k->setName("info"); k->setAnimationEnabled(false);
         k->setEvaluateOnChange(false); k->setIsPersistent(false);
         k->setDefaultValue("Set file path to an .abc file.");
         xformPage->addKnob(k); _imp->info = k;
+    }
+    applyTransformLock();
+}
+
+void
+ReadAlembicTransform::applyTransformLock()
+{
+    KnobBoolPtr lk = _imp->lockTransform.lock();
+    const bool locked = lk && lk->getValue();
+    // GUI-level gate only — loadAlembicFile's setValueAtTime bake still writes.
+    KnobDoubleWPtr knobs[9] = { _imp->translateX, _imp->translateY, _imp->translateZ,
+                                _imp->rotateX, _imp->rotateY, _imp->rotateZ,
+                                _imp->scaleX, _imp->scaleY, _imp->scaleZ };
+    for (int i = 0; i < 9; ++i) {
+        if (KnobDoublePtr kk = knobs[i].lock()) {
+            kk->setAllDimensionsEnabled(!locked);
+        }
     }
 }
 
@@ -270,6 +300,13 @@ ReadAlembicTransform::knobChanged(KnobI* k,
                                   double /*time*/,
                                   bool /*originatedFromMainThread*/)
 {
+    if (KnobBoolPtr lockK = _imp->lockTransform.lock()) {
+        if (k == lockK.get()) {
+            applyTransformLock();
+            return true;
+        }
+    }
+
     if (_imp->filePath.lock().get() == k || _imp->reloadBtn.lock().get() == k) {
         std::string path = _imp->filePath.lock()->getValue();
         if (!path.empty()) {
@@ -301,6 +338,8 @@ ReadAlembicTransform::onKnobsLoaded()
             loadAlembicFile(path);
         }
     }
+    // Re-apply the saved lock state to the knob enabled flags.
+    applyTransformLock();
 }
 
 void

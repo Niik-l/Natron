@@ -15,6 +15,7 @@ Tracking known bugs, incomplete features, and planned improvements.
   - [ ] P2 subframe: forces take (time, dt); solver subframe lerp; ID-matched Cycles shutter samples; sub-frame emission
   - [ ] P3 perf: collision knob hoist; cache eviction (cacheMaxMB is currently a no-op); persistent viewport VBO; ScanlineRender shader/VBO reuse
   - [ ] P4 features: instance materials, ParticleExpression (reuse DeepExpression RPN engine), sprite textures, per-particle rotation, KnobGradient ramps in emitter, force falloff/mask framework, viewport force gizmos, Alembic interpolation
+- [ ] **Generic per-knob lock (right-click → Lock Parameter)** — Maya/Houdini-style: lock ANY knob against user edits from the knob context menu. Needs a new persistent "user locked" flag on KnobHelper (SEPARATE from `enabled` — nodes drive enabled programmatically and would fight a user-lock), serialization (backward-compatible new field), the KnobGui context-menu entry, and an edit-path audit (panel, curve editor / dope sheet key drags, paste, links). Once in, the node-level Lock Transform (Camera3D / ReadAlembicCamera / ReadAlembicTransform, 2026-07-26) should set the generic lock on its 6-9 knobs so the two unify.
 - [ ] Test all deep nodes
 - [ ] Create deep sample picker
 - [ ] Think about material assignment — particles / instances and attributes

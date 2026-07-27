@@ -6979,8 +6979,17 @@ CameraTrackerNodePrivate::createCamera3DNode()
                 sensorW, sensorW * aspect, focalLengthMm.lock()->getValue());
     }
 
+    // Lock the baked transform so the solve can't be accidentally moved
+    // (panel, viewport gizmo, look-through navigation). User can untick
+    // Lock Transform on the camera to edit deliberately.
+    if (KnobIPtr lockKnob = camNode->getKnobByName("lockTransform")) {
+        if (KnobBoolPtr lockB = std::dynamic_pointer_cast<KnobBool>(lockKnob)) {
+            lockB->setValue(true);
+        }
+    }
+
     std::stringstream ss;
-    ss << "Created Camera3D with " << solvedCameras.size() << " keyframes";
+    ss << "Created Camera3D with " << solvedCameras.size() << " keyframes (transform locked)";
     solveStatusDisplay.lock()->setValue(ss.str());
 }
 

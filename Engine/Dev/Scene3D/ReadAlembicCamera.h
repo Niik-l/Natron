@@ -131,6 +131,10 @@ private:
     // and once after loading the Alembic file.
     void refreshAspectInfo();
 
+    // Enable/disable the imported Translate/Rotate knobs from the Lock
+    // Transform state (default locked — the animation comes from the cache).
+    void applyTransformLock();
+
     std::unique_ptr<ReadAlembicCameraPrivate> _imp;
 };
 

@@ -85,6 +85,7 @@ struct ReadAlembicCameraPrivate
     // Output knobs (animated)
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
+    KnobBoolWPtr lockTransform;
     KnobDoubleWPtr focalLength;
     KnobDoubleWPtr hAperture, vAperture;
     KnobDoubleWPtr nearClipKnob, farClipKnob;
@@ -219,6 +220,17 @@ ReadAlembicCamera::initializeKnobs()
     rz->setName("rotateZ"); rz->setAnimationEnabled(true); rz->setEvaluateOnChange(false);
     camPage->addKnob(rz); _imp->rotateZ = rz;
 
+    KnobBoolPtr lock = AppManager::createKnob<KnobBool>(this, tr("Lock Transform"));
+    lock->setName("lockTransform");
+    lock->setDefaultValue(true);
+    lock->setAnimationEnabled(false);
+    lock->setEvaluateOnChange(false);
+    lock->setHintToolTip(tr("Lock the imported Translate/Rotate keyframes against accidental "
+                            "edits (panel + viewport). On by default — the animation comes "
+                            "from the Alembic cache and is rebaked on Reload. Untick to "
+                            "deliberately offset the camera by hand."));
+    camPage->addKnob(lock); _imp->lockTransform = lock;
+
     KnobDoublePtr fl = AppManager::createKnob<KnobDouble>(this, tr("Focal Length"));
     fl->setName("focalLength"); fl->setAnimationEnabled(true); fl->setEvaluateOnChange(false);
     fl->setDefaultValue(50.0);
@@ -270,6 +282,23 @@ ReadAlembicCamera::initializeKnobs()
         camPage->addKnob(k); _imp->matchAspectButton = k;
     }
     refreshAspectInfo();
+    applyTransformLock();
+}
+
+void
+ReadAlembicCamera::applyTransformLock()
+{
+    KnobBoolPtr lk = _imp->lockTransform.lock();
+    const bool locked = lk && lk->getValue();
+    // Only the GUI edit paths are disabled — loadAlembicFile's setValueAtTime
+    // bake still writes (enabled state is a GUI-level gate).
+    KnobDoubleWPtr knobs[6] = { _imp->translateX, _imp->translateY, _imp->translateZ,
+                                _imp->rotateX, _imp->rotateY, _imp->rotateZ };
+    for (int i = 0; i < 6; ++i) {
+        if (KnobDoublePtr kk = knobs[i].lock()) {
+            kk->setAllDimensionsEnabled(!locked);
+        }
+    }
 }
 
 bool
@@ -279,6 +308,13 @@ ReadAlembicCamera::knobChanged(KnobI* k,
                                double /*time*/,
                                bool /*originatedFromMainThread*/)
 {
+    if (KnobBoolPtr lockK = _imp->lockTransform.lock()) {
+        if (k == lockK.get()) {
+            applyTransformLock();
+            return true;
+        }
+    }
+
     if (_imp->filePath.lock().get() == k || _imp->reloadBtn.lock().get() == k) {
         std::string path = _imp->filePath.lock()->getValue();
         if (!path.empty()) {
@@ -377,6 +413,8 @@ ReadAlembicCamera::onKnobsLoaded()
             loadAlembicFile(path);
         }
     }
+    // Re-apply the saved lock state to the knob enabled flags.
+    applyTransformLock();
 }
 
 void

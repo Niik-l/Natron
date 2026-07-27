@@ -101,6 +101,10 @@ private:
 
     void loadAlembicFile(const std::string& path);
 
+    // Enable/disable the imported T/R/S knobs from the Lock Transform state
+    // (default locked — the animation comes from the cache).
+    void applyTransformLock();
+
     std::unique_ptr<ReadAlembicTransformPrivate> _imp;
 };
 

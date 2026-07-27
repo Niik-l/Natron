@@ -104,9 +104,15 @@ public:
     // Depth of Field (F-Stop only — other DOF params on CyclesRender)
     virtual double getCameraFStop(double time) const OVERRIDE;
 
+    /** True when the Lock Transform knob is on: Translate/Rotate must not be
+     *  edited (panel knobs disabled; viewport gizmo + look-through navigation
+     *  check this). Protects imported/tracked animation. */
+    bool isTransformLocked() const;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
+    virtual void onKnobsLoaded() OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
@@ -115,6 +121,10 @@ private:
     // + the project format. Called from knobChanged on aperture-knob changes,
     // and once at the end of initializeKnobs.
     void refreshAspectInfo();
+
+    // Enable/disable the Translate/Rotate knobs from the Lock Transform state.
+    // Called from knobChanged and re-applied on project load (onKnobsLoaded).
+    void applyTransformLock();
 
     std::unique_ptr<Camera3DNodePrivate> _imp;
 };

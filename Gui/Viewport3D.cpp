@@ -1091,7 +1091,23 @@ getEditableCamera3D(const NodeWPtr& weakNode)
     if (!node) return nullptr;
     EffectInstancePtr eff = node->getEffectInstance();
     if (!eff) return nullptr;
-    return dynamic_cast<Camera3DNode*>(eff.get());
+    Camera3DNode* cam = dynamic_cast<Camera3DNode*>(eff.get());
+    // A locked camera (imported/tracked animation) is view-only: look-through
+    // navigation must not write its knobs.
+    if (cam && cam->isTransformLocked()) return nullptr;
+    return cam;
+}
+
+// True when a node's transform is locked via a "lockTransform" bool knob
+// (Camera3D Lock Transform, and any future node using the same convention).
+static bool
+isNodeTransformLocked(const EffectInstancePtr& effect)
+{
+    if (!effect) return false;
+    KnobIPtr lockK = effect->getKnobByName("lockTransform");
+    if (!lockK) return false;
+    KnobBoolPtr lockB = std::dynamic_pointer_cast<KnobBool>(lockK);
+    return lockB && lockB->getValue();
 }
 
 static void
@@ -1695,6 +1711,9 @@ Viewport3D::paintGL()
 
                 // Skip ImGuizmo for read-only transform nodes (Alembic imports)
                 if (sn.type == eSceneNodeTransform) break;
+
+                // Skip ImGuizmo for locked transforms (tracked/imported cameras etc.)
+                if (isNodeTransformLocked(effect)) break;
 
                 // Read T/R/S from knobs, build matrix using ImGuizmo's Recompose.
                 float translation[3], rotation[3], scale[3];

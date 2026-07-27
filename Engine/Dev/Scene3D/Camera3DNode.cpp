@@ -47,6 +47,7 @@ struct Camera3DNodePrivate
     // Transform
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
+    KnobBoolWPtr lockTransform;
 
     // Lens
     KnobDoubleWPtr focalLength;
@@ -156,6 +157,20 @@ Camera3DNode::initializeKnobs()
         k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
         xformPage->addKnob(k); _imp->rotateZ = k;
     }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Lock Transform"));
+        k->setName("lockTransform");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("Lock Translate/Rotate against edits — the panel knobs, the "
+                             "viewport gizmo AND look-through navigation (orbit/pan/dolly "
+                             "while viewing through this camera). Protects imported or "
+                             "tracked animation (Alembic cameras, CameraTracker solves) "
+                             "from being accidentally moved. Set automatically by "
+                             "CameraTracker's Create Camera3D."));
+        xformPage->addKnob(k); _imp->lockTransform = k;
+    }
 
     // --- Lens page ---
     KnobPagePtr lensPage = AppManager::createKnob<KnobPage>(this, tr("Lens"));
@@ -263,11 +278,45 @@ Camera3DNode::initializeKnobs()
 // ==================== Aspect info + Match Project Aspect button ====================
 
 bool
+Camera3DNode::isTransformLocked() const
+{
+    KnobBoolPtr lk = _imp->lockTransform.lock();
+    return lk && lk->getValue();
+}
+
+void
+Camera3DNode::applyTransformLock()
+{
+    const bool locked = isTransformLocked();
+    KnobDoubleWPtr knobs[6] = { _imp->translateX, _imp->translateY, _imp->translateZ,
+                                _imp->rotateX, _imp->rotateY, _imp->rotateZ };
+    for (int i = 0; i < 6; ++i) {
+        if (KnobDoublePtr kk = knobs[i].lock()) {
+            kk->setAllDimensionsEnabled(!locked);
+        }
+    }
+}
+
+void
+Camera3DNode::onKnobsLoaded()
+{
+    // Re-apply the lock's enabled/disabled state after project load.
+    applyTransformLock();
+}
+
+bool
 Camera3DNode::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
                           ViewSpec /*view*/, double /*time*/,
                           bool /*originatedFromMainThread*/)
 {
     if (!k) return false;
+
+    if (KnobBoolPtr lockK = _imp->lockTransform.lock()) {
+        if (k == lockK.get()) {
+            applyTransformLock();
+            return true;
+        }
+    }
 
     KnobIPtr hapKnob = _imp->hAperture.lock();
     KnobIPtr vapKnob = _imp->vAperture.lock();
