@@ -25,7 +25,7 @@ Tracking known bugs, incomplete features, and planned improvements.
 - [ ] Shader updates for volumes (WIP — PrincipledVolume path works, remap curves in, needs more iteration)
 - [x] Fully test VDBs (basic fire/smoke rendering verified with EmberGen + Houdini VDBs via Cycles)
 - [ ] Use backplate in Cycles renders
-- [ ] Blender deep?
+- [x] Blender deep? — DONE 2026-07-26: Blender PR #154410 ported into our standalone Cycles (fork feature/cycles-deep) + wired into CyclesRender/CyclesRenderPass (Deep toggle, DCM mode, merge thresholds, versioned `<pass>_deep.####.exr` sequences, Deep Merge comp-tree button). REMAINING validation gates: DeepFlatten-vs-Combined parity, VDB volumetric deep, Karma DCM comparison
 - [ ] Denoise
 
 ---
@@ -77,7 +77,8 @@ Remaining:
 
 ### Known Issues
 
-- None currently — basic deep pipeline (DeepRead, DeepFlatten, DeepMerge, DeepToPoints, etc.) tested and working.
+- Basic deep pipeline (DeepRead, DeepFlatten, DeepMerge, DeepToPoints, etc.) tested and working. DeepRead reads `####` sequences (2026-07-26); Dots/DevStamps on deep wires resolve centrally in `getDeepImageFromEffect`.
+- 2026-07-24 full-suite audit (details local in DEEP_AUDIT_NOTES.md): crash-class trio FIXED+pushed; remaining tier-2 items — ~25 nodes keep stale deep output on input disconnect (blanket onInputChanged sweep), DCM (A/Z/ZBack-only) no-ops in Relight/ContactShadow/Normalize/Grade.
 
 ### Tier 1 Nodes — Needs Testing
 

@@ -229,6 +229,29 @@ Combines up to 4 particle streams into one. No knobs.
 
 ---
 
+### PointsToParticles
+**Group:** Particles | **Inputs:** 1 (points) | **Output:** static particles
+
+Adapter: converts any point cloud (DeepToPoints, Blast, CameraTracker,
+PointCloudGenerator) into static particles, unlocking the particle ecosystem
+for point clouds — ScanlineRender's particle modes (point/disc/sphere/sprite,
+additive/over), CyclesRender's native point rendering, and ParticleInstance.
+
+| Knob | Type | Default | Description |
+|------|------|---------|-------------|
+| Particle Size | Double | 0.05 | Size for every particle (points carry none). World units. |
+
+Particles are static (infinite life, zero velocity); colors come from the
+cloud, IDs are preserved when the cloud carries them. Conversion is cached on
+the upstream cloud, so re-renders are free until the cloud changes.
+
+**2.5D re-projection pipeline:**
+```
+DeepRecolor → DeepToPoints (camera input) → PointsToParticles → Scene3D → ScanlineRender (offset camera)
+```
+
+---
+
 ### ParticleInstance
 **Group:** Particles | **Inputs:** 5 (particles, geo A-D) | **Output:** particles (pass-through)
 
@@ -446,6 +469,13 @@ Blast stores indices, so re-solve trackers BEFORE blasting.
 Karma DCM note: deep camera maps carry only A/Z/ZBack. DeepRecolor appends
 R/G/B from a flat render (its main job); DeepFog after DeepRecolor gets
 colored fog.
+
+Dots (and DevStamps) are transparent to deep data: the deep side-channel
+resolves through routing nodes centrally, so a Dot on any deep wire is safe.
+
+To re-render a deep image from a new camera (2.5D), append
+**PointsToParticles** after DeepToPoints and render the particles with
+ScanlineRender — see the PointsToParticles node above.
 
 ---
 

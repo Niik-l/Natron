@@ -1145,3 +1145,10 @@ in `Engine/Dev/TODO.md` per subsystem.
 | 2026-05-23 | Phase 3E: particles migrated to GLSL, fixed-function path retired, AOVs on particles |
 | 2026-05-23 | Shading Modes (Shaded/Flat/Wireframe) for ScanlineRender + viewport, headlight fallback |
 | 2026-05-24 | Animated Alembic vertex meshes (ReadGeo + Archive), ReadGeo user TRS honored, viewport two-sided imported-mesh lighting, Camera3D V aperture project-aware by default |
+| 2026-06-06/07 | Viewer native OCIO display/view (CPU then GPU float path); CyclesRenderPass live preview + AOV tab |
+| 2026-06-15 | ColorChartMatch overhaul, Camera3D frustum display, 3D viewport on-demand rendering (Pause/Refresh, no 30fps timer) |
+| 2026-06-17/24 | Project3D rebuilt as camera-projection material (Crop/Project-On in render + viewport); MergeMat (classic-Nuke material layering, ≤4 layers) |
+| 2026-07-07 | CameraTracker matchmove suite ingested (detect/track/solve, PointCloudGenerator, LensWarp, KnobTracksTable, libmv/ceres core) |
+| 2026-07-24 | Karma DCM fixes (DeepRecolor/DeepReformat), Houdini-style Delete-to-Blast point deletion + blasted-cloud→deep round trip; deep-suite audit + crash-trio fixes; DeepExpression 2.0; DeepFog registered |
+| 2026-07-25 | Particle audit P0 thread-safety + viewport particle depth-ordering; provider sweep G0+G2; KillBox Cube3D bounds + Cube3D wireframe display; Templates menu + particle template pack |
+| 2026-07-26 | **Cycles native deep EXR output** (Blender PR #154410 ported to standalone Cycles + full Natron wiring: Deep toggle, DCM alpha-only mode, merge thresholds, versioned `<pass>_deep.####.exr` sequences, CyclesRenderPass Output tab redesign, Deep Merge comp-tree button); PointsToParticles adapter node; DeepToPoints camera-rotation unprojection; DeepRead `####` sequence support; deep side-channel resolves through Dots |
