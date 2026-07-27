@@ -23,6 +23,8 @@
 #include "SphericalTransform.h"
 
 #include <cassert>
+
+#include <QtConcurrentMap> // QtCore on Qt4, QtConcurrent on Qt5+
 #include <cmath>
 #include <algorithm>
 #include <chrono>
@@ -1162,8 +1164,16 @@ SphericalTransform::getRegionOfDefinition(U64 /*hash*/,
     } else {
         double sensorW = _imp->sensorOutputW.lock()->getValue();
         double sensorH = _imp->sensorOutputH.lock()->getValue();
-        outH = outW * sensorH / sensorW;
+        outH = (sensorW > 0) ? outW * sensorH / sensorW : outW;
     }
+
+    // Guard against degenerate knob combos (zero/negative scale, zero sensor)
+    // producing NaN/inf/absurd sizes — those turn into garbage-size image
+    // allocations downstream.
+    if ( !(outW >= 1.0) ) outW = 1.0;       // catches NaN too
+    if ( !(outH >= 1.0) ) outH = 1.0;
+    outW = std::min(outW, 32768.0);
+    outH = std::min(outH, 32768.0);
 
     rod->x1 = inputRod.x1;
     rod->y1 = inputRod.y1;
@@ -1222,8 +1232,14 @@ SphericalTransform::getPreferredMetadata(NodeMetadata& metadata)
     } else {
         double sensorW = _imp->sensorOutputW.lock()->getValue();
         double sensorH = _imp->sensorOutputH.lock()->getValue();
-        outH = outW * sensorH / sensorW;
+        outH = (sensorW > 0) ? outW * sensorH / sensorW : outW;
     }
+
+    // Same degenerate-size guard as getRegionOfDefinition.
+    if ( !(outW >= 1.0) ) outW = 1.0;
+    if ( !(outH >= 1.0) ) outH = 1.0;
+    outW = std::min(outW, 32768.0);
+    outH = std::min(outH, 32768.0);
 
     RectI outputFormat;
     outputFormat.x1 = 0;
@@ -1410,30 +1426,32 @@ SphericalTransform::render(const RenderActionArgs& args)
 
     static const float zero[4] = {0, 0, 0, 0};
 
-    // Per-pixel sampling state — overridden each pixel in Separate Inputs
-    // mode to point at the cube face the current direction hits. In
-    // single-image mode these hold slot-0 state and are never reseated.
-    Image::ReadAccess* curRa     = srcRaPtr.get();
-    RectI              curBounds = srcBounds;
-    int                curW      = srcW;
-    int                curH      = srcH;
-
-    // Helper: fetch pixel with bounds check, returns zero if out of bounds.
-    auto safePixel = [&](int cx, int cy) -> const float* {
-        if (!curRa) return zero;
-        if (cx < curBounds.x1 || cx >= curBounds.x2 ||
-            cy < curBounds.y1 || cy >= curBounds.y2) {
-            return zero;
-        }
-        const float* p = (const float*)curRa->pixelAt(cx, cy);
-        return p ? p : zero;
-    };
-
-    // Process output pixels
+    // Process output pixels — rows in parallel (QtConcurrent). All shared
+    // state below is read-only; the per-pixel face-sampling state lives in
+    // row-locals so Separate Inputs mode stays thread-safe.
     {
         Image::WriteAccess wa(outImg.get());
 
-        for (int y = outBounds.y1; y < outBounds.y2; ++y) {
+        auto processRow = [&](int y) {
+            // Per-pixel sampling state — overridden each pixel in Separate
+            // Inputs mode to point at the cube face the current direction
+            // hits. In single-image mode these hold slot-0 state untouched.
+            Image::ReadAccess* curRa     = srcRaPtr.get();
+            RectI              curBounds = srcBounds;
+            int                curW      = srcW;
+            int                curH      = srcH;
+
+            // Fetch pixel with bounds check, zero if out of bounds.
+            auto safePixel = [&](int cx, int cy) -> const float* {
+                if (!curRa) return zero;
+                if (cx < curBounds.x1 || cx >= curBounds.x2 ||
+                    cy < curBounds.y1 || cy >= curBounds.y2) {
+                    return zero;
+                }
+                const float* p = (const float*)curRa->pixelAt(cx, cy);
+                return p ? p : zero;
+            };
+
             for (int x = outBounds.x1; x < outBounds.x2; ++x) {
                 float* dst = (float*)wa.pixelAt(x, y);
                 if (!dst) continue;
@@ -1574,6 +1592,25 @@ SphericalTransform::render(const RenderActionArgs& args)
                     }
                 }
             }
+        };
+
+        // Batched parallel rows: QtConcurrent workers can't see this render's
+        // abort state (it lives in the render thread's TLS), so the abort
+        // check runs HERE between batches. These renders take seconds at 4K+
+        // — bailing early keeps stale renders from piling up (CPU + hundreds
+        // of MB each).
+        const int kBatchRows = 64;
+        for (int y0 = outBounds.y1; y0 < outBounds.y2; y0 += kBatchRows) {
+            if ( aborted() ) {
+                return eStatusOK;
+            }
+            const int yEnd = std::min(y0 + kBatchRows, outBounds.y2);
+            std::vector<int> rows;
+            rows.reserve(yEnd - y0);
+            for (int y = y0; y < yEnd; ++y) {
+                rows.push_back(y);
+            }
+            QtConcurrent::blockingMap(rows, processRow);
         }
     }
 
