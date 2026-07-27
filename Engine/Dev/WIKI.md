@@ -229,6 +229,44 @@ Combines up to 4 particle streams into one. No knobs.
 
 ---
 
+### ParticleAttribute (v2)
+**Group:** Particles | **Inputs:** 1 | **Output:** particles with modified attributes
+
+Per-particle look editor — four tabbed sections: **Color** (gradient), **Pscale**,
+**Alpha**, and **Emission** (curves; Emission ships disabled — enable it for
+per-particle glow in Cycles and brighter additive particles in ScanlineRender).
+
+Each section: Enable / Isolate (solo), **Source** (Age, Age/Lifetime, Speed,
+Velocity/Position, Bounce Count, Spawn Index, **Random (per ID)**, **Flicker
+(noise)** — smooth per-particle time noise, node-level Flicker Speed),
+**Range** dropdown (0–1 normalized · Auto fit-every-frame · Fit Now · Custom),
+**Shape** presets (Linear / Cooling Decay / Bell / Grow-Fade / Ease Out /
+Constant) with an **Edit Curve** toggle for free point remapping (hand edits
+flip Shape to "Custom" and keep your points), Mix, and a **Variation** row:
+stable per-ID breakup — hue jitter on Color, a biased multiplier on scalars
+(Bias **Few High Outliers** = "some sparks are much hotter"). All randomness is
+seeded ID hashing: deterministic across frames, scrubs, and re-sims.
+
+**Spark recipe:** Emission on (default Cooling Decay), Variation ≈ 0.7 + Few
+High Outliers, Color Hue Variation ≈ 0.1, then chain a second ParticleAttribute
+with Emission Source = Flicker for twinkle. Layering = chaining.
+
+---
+
+### ParticleMaterial
+**Group:** Particles | **Inputs:** 2 (particles, mat) | **Output:** particles (pass-through)
+
+Particle shading override for CyclesRender. Connect a material (Material3D,
+MergeMat, …) to **mat** → particles render with the full PBR material; **Tint
+With Particle Color** (default on) multiplies per-particle color into the base
+color and drives alpha by age-fade, so ParticleAttribute ramps show through.
+Without a material: the default per-particle color shader with **Emission
+Strength / Roughness / Metallic** knobs — emission 0 = purely scene-lit
+(a chain *without* this node keeps the historic always-glowing look). With a
+material connected, Emission Strength > 0 overrides the material's emission.
+
+---
+
 ### PointsToParticles
 **Group:** Particles | **Inputs:** 1 (points) | **Output:** static particles
 

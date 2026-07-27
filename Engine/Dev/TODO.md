@@ -12,13 +12,13 @@ Tracking known bugs, incomplete features, and planned improvements.
 - [ ] Particle audit fixes (2026-07-24 audit, details local in PARTICLE_AUDIT_NOTES.md):
   - [ ] P0 safety: emitter/spawn/ReadAlembic provider locking + immutable snapshots (same fix as solver cc05a8ac2); ScanlineRender motion blur must copy, not mutate the provider's data; solver cache-status labels must not evaluate from render threads
   - [ ] P1 determinism — batch A DONE 2026-07-25 (collided OR-across-substeps; dead-ID tombstones; solver fast-path after hash check + live-slot reset). REMAINING: per-frame emitter knob eval (fixes animated knobs + transform trail + dead Size Variance / Color From Image / Start Alpha knobs); monotonic IDs + Merge rekey; force physics (drag exp, gravity mass, attract softening, wind hash-by-id); forces-through-Merge (needs branch-scoping decision, see P2)
-  - [ ] P2 subframe: forces take (time, dt); solver subframe lerp; ID-matched Cycles shutter samples; sub-frame emission
+  - [ ] P2 subframe: forces take (time, dt); solver subframe lerp; sub-frame emission. (Cycles shutter samples: SUPERSEDED 2026-07-27 — velocity-based motion steps from the center frame, no re-sim, no ID matching needed)
   - [ ] P3 perf: collision knob hoist; cache eviction (cacheMaxMB is currently a no-op); persistent viewport VBO; ScanlineRender shader/VBO reuse
   - [ ] P4 features: instance materials, ParticleExpression (reuse DeepExpression RPN engine), sprite textures, per-particle rotation, KnobGradient ramps in emitter, force falloff/mask framework, viewport force gizmos, Alembic interpolation
 - [ ] **Generic per-knob lock (right-click → Lock Parameter)** — Maya/Houdini-style: lock ANY knob against user edits from the knob context menu. Needs a new persistent "user locked" flag on KnobHelper (SEPARATE from `enabled` — nodes drive enabled programmatically and would fight a user-lock), serialization (backward-compatible new field), the KnobGui context-menu entry, and an edit-path audit (panel, curve editor / dope sheet key drags, paste, links). Once in, the node-level Lock Transform (Camera3D / ReadAlembicCamera / ReadAlembicTransform, 2026-07-26) should set the generic lock on its 6-9 knobs so the two unify.
 - [ ] Test all deep nodes
 - [ ] Create deep sample picker
-- [ ] Think about material assignment — particles / instances and attributes
+- [x] Think about material assignment — particles: DONE 2026-07-27 (ParticleMaterial node: PBR material + tint + emission overrides; ParticleAttribute v2 Emission/Variation). REMAINING: instance materials (P4), Phase 2 temperature/blackbody mode on ParticleMaterial (design in session notes)
 - [ ] Point clouds
 - [ ] Scatter node
 - [ ] ParticleInstance works on scatter / point clouds
