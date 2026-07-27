@@ -95,6 +95,7 @@ private:
     void stampColorDefaults();
     void stampPscaleDefaults();
     void stampAlphaDefaults();
+    void stampEmissionDefaults();
 
     // When the user turns ON Isolate in one section, turn off Isolate
     // in the other two so it's effectively a radio selection.
@@ -105,11 +106,20 @@ private:
     void fitColorRange(double time);
     void fitPscaleRange(double time);
     void fitAlphaRange(double time);
+    void fitEmissionRange(double time);
 
     // Reset All — stamps every section back to defaults and clears
     // Source/Range/Mix/Enable/Isolate overrides. Single click vs. three
     // Reset clicks across the sections.
     void resetAll();
+
+    // v2 layout pass: refresh all conditional knob visibility/enabled states
+    // (Range Custom fields, curve editor toggle, Flicker Speed, Variation
+    // grey-outs, disabled-section collapse).
+    void refreshDynamicUI();
+
+    // Legacy-project fixups (Range mode inference) + visibility refresh.
+    virtual void onKnobsLoaded() OVERRIDE FINAL;
 
     // Refresh the three sections' read-only summary labels. Called after
     // any knob change that affects what the labels display.
