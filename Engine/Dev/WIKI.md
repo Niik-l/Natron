@@ -399,7 +399,7 @@ Particles always use their own additive/over blend and are not affected by Shadi
 
 CyclesRender natively supports particles and ParticleInstance:
 
-- **Particles** (ParticleSolver output) → rendered as `ccl::PointCloud` with per-particle vertex color, Principled BSDF emission, and motion blur (3-step motion attribute evaluated at shutter open/close times).
+- **Particles** (ParticleSolver output) → rendered as `ccl::PointCloud` with per-particle color (`particle_color` attribute — NOT `vertex_color`, which is a reserved Cycles standard-attribute name that silently reads black) and per-particle emission (`particle_emission` × ParticleMaterial's Emission Strength). Shading is controlled by a **ParticleMaterial** node in the chain: full PBR material on the `mat` input (with per-particle color tint + age-fade alpha) or the default color shader with Emission/Roughness/Metallic knobs. Motion blur uses 3 motion steps extrapolated from each particle's **velocity** at the center frame — exact per particle, correctly shutter-scaled (re-simulating at shutter times index-mismatched particles as they spawn/die).
 - **ParticleInstance** (instanced geo) → rendered via **native Cycles instancing**. Each connected geo source (Cube3D, Sphere3D) becomes a prototype `ccl::Mesh`, and each particle instance becomes a `ccl::Object` sharing that mesh. Extremely efficient — thousands of instances share just 1-4 meshes.
 - **Motion blur on instances** → velocity-based extrapolation. Each `ccl::Object` gets a 3-element `set_motion()` array (shutter open / center / close), computed as `position + velocity * sampleDt`.
 
