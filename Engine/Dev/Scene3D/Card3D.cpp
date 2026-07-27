@@ -297,14 +297,9 @@ Card3D::getImageAspectEnabled() const
     return k ? k->getValue() : true;
 }
 
-void
-Card3D::generateCardMesh(double time,
-                         std::vector<CardVertex>& outVertices,
-                         std::vector<int>& outTriIndices) const
+float
+Card3D::getCardAspect(double time) const
 {
-    outVertices.clear();
-    outTriIndices.clear();
-
     // Determine aspect ratio from img input (Nuke "image aspect"). When the toggle is
     // off, the card is a unit square regardless of the input shape — so feeding it a
     // differently-shaped image (e.g. a square render) doesn't resize the geometry.
@@ -312,7 +307,7 @@ Card3D::generateCardMesh(double time,
     if (!getImageAspectEnabled()) {
         aspect = 1.0f;
     } else {
-        EffectInstancePtr imgInput = getInput(0);
+        EffectInstancePtr imgInput = const_cast<Card3D*>(this)->getInput(0);
         if (imgInput) {
             RectD rod;
             RenderScale scale;
@@ -327,6 +322,18 @@ Card3D::generateCardMesh(double time,
             }
         }
     }
+    return aspect;
+}
+
+void
+Card3D::generateCardMesh(double time,
+                         std::vector<CardVertex>& outVertices,
+                         std::vector<int>& outTriIndices) const
+{
+    outVertices.clear();
+    outTriIndices.clear();
+
+    float aspect = getCardAspect(time);
 
     float halfW = aspect * 0.5f;
     float halfH = 0.5f;

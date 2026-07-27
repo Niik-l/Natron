@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "../Scene3D/RotationConventions.h"
+#include "../Scene3D/Card3D.h"
 
 #include "../../AppManager.h"
 #include "../../KnobTypes.h"
@@ -304,6 +305,11 @@ struct ParticleSolverPrivate
     KnobIntWPtr maxBounces;
     KnobIntWPtr substeps;
     KnobBoolWPtr showCollisions;
+
+    // Per-frame cache for Card3D collision aspect (getCardAspect hits the img
+    // input's RoD — far too expensive per particle; the sim loop is serial).
+    double cardAspectCacheTime = -1e300;
+    float cardAspectCache = 1.0f;
 
     // Cache page knobs (Phase A skeleton).
     KnobBoolWPtr   cacheEnabled;
@@ -946,6 +952,7 @@ ParticleSolver::applyCollision(Particle& p, double time, float dt)
 
     std::string pluginID = geoEffect->getPluginID();
     bool isSphere = (pluginID.find("Sphere") != std::string::npos);
+    Card3D* isCard = dynamic_cast<Card3D*>(geoEffect.get());
 
     if (isSphere) {
         // Sphere is rotation-invariant — no need for OBB
@@ -955,9 +962,25 @@ ParticleSolver::applyCollision(Particle& p, double time, float dt)
     } else {
         // OBB collision: transform particle into the cube's local space,
         // do AABB test, transform back.
-        float hx = geoSize * 0.5f * sx;
-        float hy = geoSize * 0.5f * sy;
-        float hz = geoSize * 0.5f * sz;
+        float hx, hy, hz;
+        if (isCard) {
+            // Card3D is a FLAT quad in the XY plane (halfW = aspect*0.5,
+            // halfH = 0.5, no depth) — collide as a thin slab with the card's
+            // real extents. Without this it collided as a size^3 BOX, so
+            // particles bounced off an invisible half-unit-deep volume.
+            // The swept ray-AABB test keeps thin slabs tunnel-proof.
+            if (_imp->cardAspectCacheTime != time) {
+                _imp->cardAspectCache = isCard->getCardAspect(time);
+                _imp->cardAspectCacheTime = time;
+            }
+            hx = _imp->cardAspectCache * 0.5f * sx;
+            hy = 0.5f * sy;
+            hz = 0.005f; // slim but non-degenerate slab
+        } else {
+            hx = geoSize * 0.5f * sx;
+            hy = geoSize * 0.5f * sy;
+            hz = geoSize * 0.5f * sz;
+        }
 
         bool hasRotation = (std::abs(rx) > 0.001f || std::abs(ry) > 0.001f || std::abs(rz) > 0.001f);
 

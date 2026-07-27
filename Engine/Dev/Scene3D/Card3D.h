@@ -113,6 +113,11 @@ public:
                           std::vector<CardVertex>& outVertices,
                           std::vector<int>& outTriIndices) const;
 
+    // The card's local aspect ratio (width / height): the img input's aspect
+    // when Image Aspect is on (16:9 fallback), else 1. Local half extents are
+    // (aspect * 0.5, 0.5) in the XY plane. Used by ParticleSolver collision.
+    float getCardAspect(double time) const;
+
     // Nuke "image aspect": when true (default) the card's shape matches the img
     // input's aspect ratio; when false the card is a unit square regardless of the
     // input, so plugging in a differently-shaped image doesn't resize the geometry.
