@@ -61,7 +61,10 @@ NodeGraph::checkForHints(bool shiftdown,
 {
     NodePtr internalNode = selectedNode->getNode();
     bool doMergeHints = shiftdown && controlDown;
-    bool doConnectionHints = controlDown;
+    // Nuke-style: edge-insert hints on a plain drag, no modifier needed.
+    // (Previously gated on Ctrl.) Safe because fully-connected nodes are
+    // filtered out below, so dragging wired trees around doesn't re-insert.
+    bool doConnectionHints = true;
 
     //Ignore hints for backdrops
     BackdropGui* isBd = dynamic_cast<BackdropGui*>( selectedNode.get() );
