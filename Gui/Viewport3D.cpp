@@ -1084,6 +1084,30 @@ static void readTRSFromNode(NATRON_NAMESPACE::EffectInstancePtr effect,
 
 // Returns the look-through camera as a Camera3DNode (writable), or nullptr.
 // All these helpers live in the file's existing NATRON_NAMESPACE block.
+// True when a node's transform is locked — either via a "lockTransform" bool
+// knob (Camera3D Lock Transform, and any future node using the same
+// convention) or via a user-level per-knob lock (right-click -> Lock
+// Parameter) on any of its TRS knobs.
+static bool
+isNodeTransformLocked(const EffectInstancePtr& effect)
+{
+    if (!effect) return false;
+    if (KnobIPtr lockK = effect->getKnobByName("lockTransform")) {
+        KnobBoolPtr lockB = std::dynamic_pointer_cast<KnobBool>(lockK);
+        if (lockB && lockB->getValue()) return true;
+    }
+    static const char* const trsNames[] = {
+        "translateX", "translateY", "translateZ",
+        "rotateX", "rotateY", "rotateZ",
+        "scaleX", "scaleY", "scaleZ", "uniformScale"
+    };
+    for (const char* const name : trsNames) {
+        KnobIPtr k = effect->getKnobByName(name);
+        if (k && k->isUserLocked()) return true;
+    }
+    return false;
+}
+
 static Camera3DNode*
 getEditableCamera3D(const NodeWPtr& weakNode)
 {
@@ -1092,22 +1116,11 @@ getEditableCamera3D(const NodeWPtr& weakNode)
     EffectInstancePtr eff = node->getEffectInstance();
     if (!eff) return nullptr;
     Camera3DNode* cam = dynamic_cast<Camera3DNode*>(eff.get());
-    // A locked camera (imported/tracked animation) is view-only: look-through
-    // navigation must not write its knobs.
-    if (cam && cam->isTransformLocked()) return nullptr;
+    // A locked camera (imported/tracked animation, node-level Lock Transform
+    // or a per-knob user lock) is view-only: look-through navigation must not
+    // write its knobs.
+    if (cam && isNodeTransformLocked(eff)) return nullptr;
     return cam;
-}
-
-// True when a node's transform is locked via a "lockTransform" bool knob
-// (Camera3D Lock Transform, and any future node using the same convention).
-static bool
-isNodeTransformLocked(const EffectInstancePtr& effect)
-{
-    if (!effect) return false;
-    KnobIPtr lockK = effect->getKnobByName("lockTransform");
-    if (!lockK) return false;
-    KnobBoolPtr lockB = std::dynamic_pointer_cast<KnobBool>(lockK);
-    return lockB && lockB->getValue();
 }
 
 static void

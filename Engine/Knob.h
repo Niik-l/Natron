@@ -912,6 +912,18 @@ public:
     virtual void setDefaultAllDimensionsEnabled(bool b) = 0;
 
     /**
+     * @brief User-level lock (right-click -> Lock Parameter): the knob stays
+     * enabled for plugin logic but is not editable from the GUI. Stored
+     * SEPARATELY from the enabled flag so plugin setEnabled() calls never
+     * fight the user's lock. isEnabled() reports (enabled && !userLocked);
+     * isEnabledRaw() reports the plain enabled flag (used by serialization
+     * so a locked knob doesn't persist as disabled).
+     **/
+    virtual void setUserLocked(bool locked) = 0;
+    virtual bool isUserLocked() const = 0;
+    virtual bool isEnabledRaw(int dimension) const = 0;
+
+    /**
      * @brief Set the knob visible/invisible on the GUI representing it.
      **/
     virtual void setSecret(bool b) = 0;
@@ -1537,6 +1549,9 @@ public:
     virtual bool isDefaultEnabled(int dimension) const OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual void setAllDimensionsEnabled(bool b) OVERRIDE FINAL;
     virtual void setDefaultAllDimensionsEnabled(bool b) OVERRIDE FINAL;
+    virtual void setUserLocked(bool locked) OVERRIDE FINAL;
+    virtual bool isUserLocked() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual bool isEnabledRaw(int dimension) const OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual void setSecret(bool b) OVERRIDE FINAL;
     virtual void setSecretByDefault(bool b) OVERRIDE FINAL;
     virtual bool getIsSecret() const OVERRIDE FINAL WARN_UNUSED_RETURN;

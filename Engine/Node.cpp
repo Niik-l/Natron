@@ -1188,10 +1188,14 @@ Node::loadKnob(const KnobIPtr & knob,
             knob->setSecret( serializedKnob->getIsSecret() );
             if ( knob->getDimension() == serializedKnob->getDimension() ) {
                 for (int i = 0; i < knob->getDimension(); ++i) {
-                    knob->setEnabled( i, serializedKnob->isEnabled(i) );
+                    // Raw flag: the user lock is transferred separately below,
+                    // it must not leak into the enabled state.
+                    knob->setEnabled( i, serializedKnob->isEnabledRaw(i) );
                 }
             }
         }
+
+        knob->setUserLocked( serializedKnob->isUserLocked() );
 
         if (knob->getName() == kOfxImageEffectFileParamName) {
             computeFrameRangeForReader( knob.get() );

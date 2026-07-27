@@ -650,6 +650,16 @@ DopeSheet::moveSelectedKeysAndNodes(double dt)
         if (!knobDs) {
             continue;
         }
+        // Skip keys of disabled / user-locked knobs (mirrors the curve
+        // editor's moveSelectedKeyFrames gate).
+        {
+            KnobIPtr internalKnob = knobDs->getInternalKnob();
+            int dim = knobDs->getDimension();
+            if ( internalKnob && dim >= 0 && dim < internalKnob->getDimension()
+                 && ( !internalKnob->isEnabled(dim) || internalKnob->isSlave(dim) ) ) {
+                continue;
+            }
+        }
         CurvePtr curve = knobDs->getKnobGui()->getCurve( ViewIdx(0), knobDs->getDimension() );
         assert(curve);
         KeyFrame prevKey, nextKey;

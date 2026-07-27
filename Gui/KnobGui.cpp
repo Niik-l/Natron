@@ -324,9 +324,40 @@ KnobGui::showRightClickMenuForDimension(const QPoint &,
     }
 
     createAnimationMenu(_imp->copyRightClickMenu, dimension);
+
+    // Lock Parameter (Maya-style): user-level lock, separate from the plugin's
+    // enabled state. Not offered on organizational knobs (pages/groups/
+    // separators) or buttons.
+    {
+        KnobPage* isPage = dynamic_cast<KnobPage*>( knob.get() );
+        KnobGroup* isGrp = dynamic_cast<KnobGroup*>( knob.get() );
+        KnobSeparator* isSep = dynamic_cast<KnobSeparator*>( knob.get() );
+        KnobButton* isBtn = dynamic_cast<KnobButton*>( knob.get() );
+        if (!isPage && !isGrp && !isSep && !isBtn) {
+            _imp->copyRightClickMenu->addSeparator();
+            QAction* lockAction = new QAction(knob->isUserLocked() ?
+                                              tr("Unlock Parameter") :
+                                              tr("Lock Parameter"),
+                                              _imp->copyRightClickMenu);
+            QObject::connect( lockAction, SIGNAL(triggered()), this, SLOT(onToggleUserLockActionTriggered()) );
+            _imp->copyRightClickMenu->addAction(lockAction);
+        }
+    }
+
     addRightClickMenuEntries(_imp->copyRightClickMenu);
     _imp->copyRightClickMenu->exec( QCursor::pos() );
 } // showRightClickMenuForDimension
+
+void
+KnobGui::onToggleUserLockActionTriggered()
+{
+    KnobIPtr knob = getKnob();
+
+    if (!knob) {
+        return;
+    }
+    knob->setUserLocked( !knob->isUserLocked() );
+}
 
 Menu*
 KnobGui::createInterpolationMenu(QMenu* menu,

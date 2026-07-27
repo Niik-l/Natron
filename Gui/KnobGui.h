@@ -345,6 +345,8 @@ public Q_SLOTS:
 
     void showRightClickMenuForDimension(const QPoint & pos, int dimension);
 
+    void onToggleUserLockActionTriggered();
+
     void setEnabledSlot();
 
     void hide();

@@ -77,7 +77,8 @@ GCC_DIAG_UNUSED_LOCAL_TYPEDEFS_ON
 #define KNOB_SERIALIZATION_REMOVE_SLAVED_TRACKS 12
 #define KNOB_SERIALIZATION_REMOVE_DEFAULT_VALUES 13
 #define KNOB_SERIALIZATION_CHANGE_PLANES_SERIALIZATION 14
-#define KNOB_SERIALIZATION_VERSION KNOB_SERIALIZATION_CHANGE_PLANES_SERIALIZATION
+#define KNOB_SERIALIZATION_INTRODUCES_USER_LOCK 15
+#define KNOB_SERIALIZATION_VERSION KNOB_SERIALIZATION_INTRODUCES_USER_LOCK
 
 #define VALUE_SERIALIZATION_INTRODUCES_CHOICE_LABEL 2
 #define VALUE_SERIALIZATION_INTRODUCES_EXPRESSIONS 3
@@ -292,7 +293,9 @@ struct ValueSerialization
         KnobGroup* isGrp = dynamic_cast<KnobGroup*>( _knob.get() );
         KnobSeparator* isSep = dynamic_cast<KnobSeparator*>( _knob.get() );
         KnobButton* btn = dynamic_cast<KnobButton*>( _knob.get() );
-        bool enabled = _knob->isEnabled(_dimension);
+        // Raw flag on purpose: a user-locked knob must not persist as disabled
+        // (the lock itself is saved knob-level as "UserLocked").
+        bool enabled = _knob->isEnabledRaw(_dimension);
         ar & ::boost::serialization::make_nvp("Enabled", enabled);
         bool hasAnimation = _knob->isAnimated(_dimension);
         ar & ::boost::serialization::make_nvp("HasAnimation", hasAnimation);
@@ -606,6 +609,9 @@ private:
                 ar & ::boost::serialization::make_nvp("HasOverlayHandle", useOverlay);
             }
         }
+
+        bool userLocked = _knob->isUserLocked();
+        ar & ::boost::serialization::make_nvp("UserLocked", userLocked);
     } // save
 
     template<class Archive>
@@ -790,6 +796,12 @@ private:
                     }
                 }
             }
+        }
+
+        if (version >= KNOB_SERIALIZATION_INTRODUCES_USER_LOCK) {
+            bool userLocked = false;
+            ar & ::boost::serialization::make_nvp("UserLocked", userLocked);
+            _knob->setUserLocked(userLocked);
         }
     } // load
 

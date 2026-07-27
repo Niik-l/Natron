@@ -403,9 +403,13 @@ struct KnobHelperPrivate
     std::string inViewerContextLabel;
     bool inViewerContextHasShortcut;
     KnobIWPtr parentKnob;
-    mutable QMutex stateMutex; // protects IsSecret defaultIsSecret enabled
+    mutable QMutex stateMutex; // protects IsSecret defaultIsSecret enabled userLocked
     bool IsSecret, defaultIsSecret, inViewerContextSecret;
     std::vector<bool> enabled, defaultEnabled;
+    // User-level lock (right-click -> Lock Parameter). Separate from enabled:
+    // plugin setEnabled() calls never fight the user's lock. isEnabled()
+    // reports enabled && !userLocked; serialization uses isEnabledRaw().
+    bool userLocked = false;
     bool CanUndo;
     QMutex evaluateOnChangeMutex;
     bool evaluateOnChange; //< if true, a value change will never trigger an evaluation
@@ -3313,7 +3317,40 @@ KnobHelper::isEnabled(int dimension) const
 
     QMutexLocker k(&_imp->stateMutex);
 
+    return _imp->enabled[dimension] && !_imp->userLocked;
+}
+
+bool
+KnobHelper::isEnabledRaw(int dimension) const
+{
+    assert( 0 <= dimension && dimension < getDimension() );
+
+    QMutexLocker k(&_imp->stateMutex);
+
     return _imp->enabled[dimension];
+}
+
+void
+KnobHelper::setUserLocked(bool locked)
+{
+    {
+        QMutexLocker k(&_imp->stateMutex);
+        if (_imp->userLocked == locked) {
+            return;
+        }
+        _imp->userLocked = locked;
+    }
+    if (_signalSlotHandler) {
+        _signalSlotHandler->s_enabledChanged();
+    }
+}
+
+bool
+KnobHelper::isUserLocked() const
+{
+    QMutexLocker k(&_imp->stateMutex);
+
+    return _imp->userLocked;
 }
 
 bool
