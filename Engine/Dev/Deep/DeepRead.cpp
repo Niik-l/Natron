@@ -26,8 +26,13 @@
 #include "DeepRead.h"
 
 #include <cassert>
+#include <cmath>
+#include <cstdio>
 #include <stdexcept>
 #include <sstream>
+
+#include <QtCore/QDir>
+#include <QtCore/QFileInfo>
 
 #include "../../AppInstance.h"
 #include "DeepImage.h"
@@ -45,6 +50,67 @@
 #endif
 
 NATRON_NAMESPACE_ENTER
+
+// Substitute a '####' run in a sequence pattern with the zero-padded frame
+// number. A path without '#' is returned unchanged (single-file behavior).
+static std::string
+resolveSeqPath(const std::string& pattern, int frame)
+{
+    const std::size_t h = pattern.find('#');
+    if (h == std::string::npos) return pattern;
+    std::size_t e = h;
+    while (e < pattern.size() && pattern[e] == '#') ++e;
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%0*d", (int)(e - h), frame);
+    return pattern.substr(0, h) + buf + pattern.substr(e);
+}
+
+// Scan the pattern's directory for existing frames; returns false if the path
+// has no '#' or no frames exist on disk.
+static bool
+seqFrameRangeOnDisk(const std::string& pattern, int* first, int* last)
+{
+    const std::size_t h = pattern.find('#');
+    if (h == std::string::npos) return false;
+
+    const QFileInfo fi(QString::fromStdString(pattern));
+    const QString fname = fi.fileName();
+    const int fh = fname.indexOf(QLatin1Char('#'));
+    if (fh < 0) return false;  // '#' only in the directory part — not a sequence
+    int fe = fh;
+    while (fe < fname.size() && fname[fe] == QLatin1Char('#')) ++fe;
+    const QString prefix = fname.left(fh);
+    const QString suffix = fname.mid(fe);
+
+    const QStringList entries = fi.dir().entryList(
+        QStringList() << (prefix + QString::fromUtf8("*") + suffix), QDir::Files);
+    int mn = 0, mx = 0;
+    bool any = false;
+    for (const QString& en : entries) {
+        const QString mid = en.mid(prefix.size(), en.size() - prefix.size() - suffix.size());
+        bool ok = false;
+        const int f = mid.toInt(&ok);
+        if (!ok) continue;
+        if (!any || f < mn) mn = f;
+        if (!any || f > mx) mx = f;
+        any = true;
+    }
+    if (!any) return false;
+    if (first) *first = mn;
+    if (last) *last = mx;
+    return true;
+}
+
+// Resolve the pattern for probing (info display, metadata): current path if it
+// is a plain file, else the first frame that exists on disk.
+static std::string
+resolveProbePath(const std::string& pattern)
+{
+    int first = 0, last = 0;
+    if (seqFrameRangeOnDisk(pattern, &first, &last))
+        return resolveSeqPath(pattern, first);
+    return resolveSeqPath(pattern, 1);
+}
 
 struct DeepReadPrivate
 {
@@ -120,7 +186,9 @@ DeepRead::initializeKnobs()
 
     KnobFilePtr filePath = AppManager::createKnob<KnobFile>(this, tr("File"));
     filePath->setName("filename");
-    filePath->setHintToolTip(tr("Path to the deep EXR file to read."));
+    filePath->setHintToolTip(tr("Path to the deep EXR file to read. Use #### for a frame-number "
+                                "sequence (e.g. beauty_deep.####.exr) — the frame range is scanned "
+                                "from disk."));
     filePath->setAnimationEnabled(false);
     page->addKnob(filePath);
     _imp->filePath = filePath;
@@ -145,11 +213,12 @@ DeepRead::knobChanged(KnobI* k,
 {
     if (_imp->filePath.lock().get() == k) {
         // File path changed — update info display
-        std::string path = _imp->filePath.lock()->getValue();
-        if (path.empty()) {
+        std::string rawPath = _imp->filePath.lock()->getValue();
+        if (rawPath.empty()) {
             _imp->fileInfo.lock()->setValue("No file loaded");
             return true;
         }
+        std::string path = resolveProbePath(rawPath);
 
 #ifdef NATRON_HAVE_OPENIMAGEIO
         // Probe the file
@@ -166,6 +235,11 @@ DeepRead::knobChanged(KnobI* k,
              << " (data: " << spec.width << " x " << spec.height << ")\n";
         info << "Channels: " << spec.nchannels << "\n";
         info << "Deep: " << (spec.deep ? "Yes" : "No") << "\n";
+        {
+            int f1 = 0, f2 = 0;
+            if (seqFrameRangeOnDisk(rawPath, &f1, &f2))
+                info << "Frames on disk: " << f1 << " - " << f2 << "\n";
+        }
         if (spec.deep) {
             info << "Channel names: ";
             for (int i = 0; i < spec.nchannels; ++i) {
@@ -194,6 +268,7 @@ DeepRead::getPreferredMetadata(NodeMetadata& metadata)
     if (!fileKnob) return eStatusOK;
     std::string path = fileKnob->getValue();
     if (path.empty()) return eStatusOK;
+    path = resolveProbePath(path);
 
     auto input = OIIO::ImageInput::open(path);
     if (!input) return eStatusOK;
@@ -231,6 +306,7 @@ DeepRead::getRegionOfDefinition(U64 /*hash*/,
     if (path.empty()) {
         return eStatusFailed;
     }
+    path = resolveSeqPath(path, (int)std::floor(time + 0.5));
 
     auto input = OIIO::ImageInput::open(path);
     if (!input) {
@@ -262,7 +338,15 @@ void
 DeepRead::getFrameRange(double* first,
                         double* last)
 {
-    // Single frame for now
+    // Sequence: scan the frames on disk. Single file: 1-1.
+    KnobFilePtr fileKnob = _imp->filePath.lock();
+    const std::string path = fileKnob ? fileKnob->getValue() : std::string();
+    int f1 = 0, f2 = 0;
+    if (!path.empty() && seqFrameRangeOnDisk(path, &f1, &f2)) {
+        *first = f1;
+        *last = f2;
+        return;
+    }
     *first = 1;
     *last = 1;
 }
@@ -275,6 +359,7 @@ DeepRead::render(const RenderActionArgs& args)
     if (path.empty()) {
         return eStatusFailed;
     }
+    path = resolveSeqPath(path, (int)std::floor(args.time + 0.5));
 
     // Open the deep EXR file
     auto input = OIIO::ImageInput::open(path);

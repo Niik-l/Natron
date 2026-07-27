@@ -24,6 +24,7 @@
 #include "DeepUtils.h"
 
 #include "DeepImage.h"
+#include "../DotUtils.h"
 #ifdef NATRON_HAVE_OPENIMAGEIO
 #include <OpenImageIO/imageio.h>
 #include <OpenImageIO/deepdata.h>
@@ -68,6 +69,18 @@ NATRON_NAMESPACE_ENTER
 DeepImagePtr
 getDeepImageFromEffect(EffectInstance* effect)
 {
+    if (!effect) {
+        return DeepImagePtr();
+    }
+
+    // See through routing nodes (Dot / DevStamp) centrally, so no caller has
+    // to remember skipDots() — a Dot wired between two deep nodes must not
+    // sever the deep side-channel.
+    EffectInstancePtr resolved;  // keeps the resolved effect alive
+    while (effect && isGraphPassthrough(effect->getPluginID())) {
+        resolved = effect->getInput(0);
+        effect = resolved.get();
+    }
     if (!effect) {
         return DeepImagePtr();
     }

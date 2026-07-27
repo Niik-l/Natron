@@ -209,6 +209,7 @@ private:
     void openInRV();       // launch RV on the latest rendered version's sequence
     void importRender();   // create (or re-point) a linked Read at the latest version
     void updateRender();   // re-point the linked Read to the latest version + clear stale flag
+    void createDeepMergeTree(); // Read + DeepRead -> DeepRecolor -> DeepMerge from the latest version
     void refreshLinkStatus();        // update the linked-Read status + outdated badge
     NodePtr getLinkedReadNode() const; // resolve the linked Read (cache, else by name)
 

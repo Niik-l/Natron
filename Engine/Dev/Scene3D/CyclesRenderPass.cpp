@@ -144,6 +144,7 @@ struct RenderPassPrivate
     KnobFileWPtr   rvPathKnob;
     KnobButtonWPtr openInRvBtn;
     KnobButtonWPtr importRenderBtn;
+    KnobButtonWPtr deepMergeBtn;
     KnobButtonWPtr updateRenderBtn;
     KnobStringWPtr linkStatus;        // read-only: linked-Read status / outdated flag
     KnobStringWPtr linkedReadName;    // hidden + persistent: linked Read's script name
@@ -671,11 +672,23 @@ CyclesRenderPass::initializeKnobs()
         }
         {
             KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Update Render"));
-            k->setName("updateRender");
+            k->setName("updateRender"); k->setAddNewLine(false);
             k->setHintToolTip(tr("Re-point the linked Read to the latest version on disk and clear its "
                                  "outdated flag. Use this after a re-render when you're happy with the new "
                                  "version (nothing changes automatically, so a broken re-render can't sneak in)."));
             outPage->addKnob(k); _imp->updateRenderBtn = k;
+        }
+        {
+            KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Deep Merge"));
+            k->setName("deepMergeTree");
+            k->setHintToolTip(tr("Build a deep comp tree from the latest rendered version:\n"
+                                 "    Read (beauty)  +  DeepRead (deep sequence)\n"
+                                 "        -> DeepRecolor -> DeepMerge (A)\n\n"
+                                 "The DeepRecolor puts the beauty colors back onto the deep samples "
+                                 "(DCM workflow), and the DeepMerge is ready to comp against the rest "
+                                 "of your deep tree on its B input. Requires 'Deep' enabled on the AOV "
+                                 "tab when the version was rendered."));
+            outPage->addKnob(k); _imp->deepMergeBtn = k;
         }
 
         {
@@ -744,6 +757,7 @@ CyclesRenderPass::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     if (KnobButtonPtr b = _imp->openInRvBtn.lock())     { if (k == b.get()) { openInRV();     return true; } }
     if (KnobButtonPtr b = _imp->importRenderBtn.lock()) { if (k == b.get()) { importRender(); return true; } }
     if (KnobButtonPtr b = _imp->updateRenderBtn.lock()) { if (k == b.get()) { updateRender(); return true; } }
+    if (KnobButtonPtr b = _imp->deepMergeBtn.lock())    { if (k == b.get()) { createDeepMergeTree(); return true; } }
 
     // Object / light selection checkboxes are created setEvaluateOnChange(false)
     // (so the discovery refresh doesn't storm renders), which means Natron does NOT
@@ -1633,7 +1647,13 @@ CyclesRenderPass::renderToDisk()
 NodePtr
 CyclesRenderPass::getLinkedReadNode() const
 {
-    if (NodePtr n = _imp->linkedReadNode.lock()) return n;
+    // A deleted node is only deactivated (kept for undo), so both the cached
+    // pointer and the name scan must reject inactive nodes — otherwise Import
+    // Render keeps re-pointing a Read that is no longer in the graph.
+    if (NodePtr n = _imp->linkedReadNode.lock()) {
+        if (n->isActivated()) return n;
+        _imp->linkedReadNode.reset();
+    }
     KnobStringPtr nameK = _imp->linkedReadName.lock();
     const std::string nm = nameK ? nameK->getValue() : std::string();
     if (nm.empty() || !getNode()) return NodePtr();
@@ -1641,7 +1661,9 @@ CyclesRenderPass::getLinkedReadNode() const
     if (!grp) return NodePtr();
     const NodesList nodes = grp->getNodes();
     for (const NodePtr& n : nodes) {
-        if (n && n->getScriptName_mt_safe() == nm) { _imp->linkedReadNode = n; return n; }
+        if (n && n->isActivated() && n->getScriptName_mt_safe() == nm) {
+            _imp->linkedReadNode = n; return n;
+        }
     }
     return NodePtr();
 }
@@ -1756,6 +1778,103 @@ CyclesRenderPass::importRender()
 }
 
 void
+CyclesRenderPass::createDeepMergeTree()
+{
+    clearPersistentMessage(false);
+    std::string passName;
+    const QString passDirPath = resolvePassDir(this, passName);
+    const int latestVer = passDirPath.isEmpty() ? 0 : maxVersionInDir(QDir(passDirPath));
+    if (latestVer <= 0) {
+        setPersistentMessage(eMessageTypeError, "Deep Merge: nothing rendered yet — use Render to Disk first.");
+        return;
+    }
+    const QString beautyPattern = seqPatternForVersion(passDirPath, passName, latestVer);
+
+    // Deep sequence written by Render to Disk: <passDir>/v###/<passName>_deep.####.exr
+    const QDir vdir(QFileInfo(beautyPattern).dir());
+    const QStringList deepFiles = vdir.entryList(
+        QStringList() << QString::fromUtf8("%1_deep.*.exr").arg(QString::fromStdString(passName)),
+        QDir::Files);
+    if (deepFiles.isEmpty()) {
+        setPersistentMessage(eMessageTypeError,
+            "Deep Merge: no deep sequence in v" + std::to_string(latestVer)
+            + " — enable 'Deep' on the AOV tab and Render to Disk again.");
+        return;
+    }
+    const QString deepPattern = vdir.absoluteFilePath(
+        QString::fromUtf8("%1_deep.####.exr").arg(QString::fromStdString(passName)));
+
+    AppInstancePtr app = getApp();
+    NodeCollectionPtr grp = getNode() ? getNode()->getGroup() : NodeCollectionPtr();
+    if (!app || !grp) return;
+
+    // Read (beauty)
+    CreateNodeArgs rArgs(PLUGINID_NATRON_READ, grp);
+    rArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+    rArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+    NodePtr readNode = app->createReader(beautyPattern.toStdString(), rArgs);
+    if (!readNode) {
+        setPersistentMessage(eMessageTypeError, "Deep Merge: failed to create the Read node.");
+        return;
+    }
+    readNode->setLabel(passName + "_beauty");
+
+    // DeepRead (deep sequence)
+    CreateNodeArgs dArgs(PLUGINID_NATRON_DEEPREAD, grp);
+    dArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+    dArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+    NodePtr deepRead = app->createNode(dArgs);
+    if (!deepRead) {
+        setPersistentMessage(eMessageTypeError, "Deep Merge: failed to create the DeepRead node.");
+        return;
+    }
+    if (KnobIPtr fk = deepRead->getKnobByName("filename")) {
+        if (KnobFilePtr ff = std::dynamic_pointer_cast<KnobFile>(fk))
+            ff->setValue(deepPattern.toStdString());
+    }
+    deepRead->setLabel(passName + "_deep");
+
+    // DeepRecolor: Deep (0) = DeepRead, Color (1) = Read
+    CreateNodeArgs rcArgs(PLUGINID_NATRON_DEEPRECOLOR, grp);
+    rcArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+    rcArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+    NodePtr recolor = app->createNode(rcArgs);
+
+    // DeepMerge: A (0) = DeepRecolor, B free for the rest of the deep comp
+    CreateNodeArgs mArgs(PLUGINID_NATRON_DEEPMERGE, grp);
+    mArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+    mArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+    NodePtr merge = app->createNode(mArgs);
+
+    // Dot under the DeepRead so the wire runs straight down, then horizontally
+    // into DeepRecolor's Deep input (no diagonal).
+    CreateNodeArgs dotArgs(PLUGINID_NATRON_DOT, grp);
+    dotArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+    dotArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+    NodePtr dot = app->createNode(dotArgs);
+
+    if (!recolor || !merge || !dot) {
+        setPersistentMessage(eMessageTypeError, "Deep Merge: failed to create the deep nodes.");
+        return;
+    }
+    dot->connectInput(deepRead, 0);
+    recolor->connectInput(dot, 0);
+    recolor->connectInput(readNode, 1);
+    merge->connectInput(recolor, 0);
+
+    // Lay the tree out to the right of this node, mirroring the reference graph:
+    // Read + DeepRead on top, DeepRecolor under the Read, DeepMerge to its left,
+    // the Dot at the DeepRead/DeepRecolor corner.
+    double px = 0, py = 0;
+    getNode()->getPosition(&px, &py);
+    readNode->setPosition(px + 300, py);
+    deepRead->setPosition(px + 500, py);
+    recolor->setPosition(px + 300, py + 200);
+    merge->setPosition(px + 120, py + 200);
+    dot->setPosition(px + 540, py + 215);
+}
+
+void
 CyclesRenderPass::updateRender()
 {
     clearPersistentMessage(false);
@@ -1785,6 +1904,7 @@ void CyclesRenderPass::refreshLinkStatus() {}
 void CyclesRenderPass::openInRV() {}
 void CyclesRenderPass::importRender() {}
 void CyclesRenderPass::updateRender() {}
+void CyclesRenderPass::createDeepMergeTree() {}
 #endif // NATRON_CYCLES
 
 NATRON_NAMESPACE_EXIT
