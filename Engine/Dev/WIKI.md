@@ -423,9 +423,15 @@ ParticleEmitter → Gravity → Wind → ParticleSolver (Cube3D geo)
 ## Templates Menu
 
 The **Templates** menubar builds ready-to-play example graphs, organised by
-category: **3D** (Basic 3D Scene, VDB Fire/Smoke), **Particles** (below), and
-**Project3D / Deep / HDRI** (placeholders, templates to come). Each template is
-a starting point — refine knobs to taste.
+category: **3D** (Basic 3D Scene, VDB Fire/Smoke), **Particles** (below),
+**HDRI** (below), and **Project3D / Deep** (placeholders, templates to come).
+Each template is a starting point — refine knobs to taste.
+
+HDRI templates:
+
+| Template | What it builds |
+|----------|----------------|
+| Basic HDRI | Lat-long face-edit rig: source → Reformat conformed to a custom **LatLong4K** 4096x2048 format (created project-wide) → 6 branches [Grade face-ID tint → SphericalTransform lat-long→cube-face → RotoPaint copy-blend] → Faces-input SphericalTransform reassembly → Viewer. Swap the CheckerBoard for your HDRI Read, paint out lights per face, and the result reassembles seamlessly to lat-long. |
 
 Particle templates:
 
