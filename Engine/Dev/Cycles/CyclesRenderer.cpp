@@ -79,6 +79,8 @@
 #include "Engine/Dev/Scene3D/ReadVDB.h"
 #include "Engine/Dev/Scene3D/Volume3D.h"
 #include "Engine/Dev/Particles/ParticleProvider.h"
+#include "Engine/Dev/Particles/ParticleMaterial.h"
+#include "Engine/Dev/DotUtils.h"
 #include "Engine/Dev/Particles/ParticleInstance.h"
 #include "Engine/Dev/Scene3D/Cube3D.h"
 #include "Engine/Dev/Scene3D/Sphere3D.h"
@@ -624,7 +626,9 @@ createEmissiveMatteShader(ccl::Scene* scene)
 }
 
 static ccl::Shader*
-createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double time)
+createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double time,
+                     bool particleColorTint = false,
+                     float particleEmissionStrength = -1.0f)
 {
     // Resolve: if a Material3D is connected, use it instead of inline knobs
     MaterialProvider* mat = matProvider;
@@ -657,13 +661,60 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     int frame = (int)time;
 
     // Base color texture
+    ccl::ImageTextureNode* baseTex = nullptr;
     std::string texFile = resolveTextureFrame(mat->getMaterialTextureFile(), frame);
     if (!texFile.empty()) {
-        ccl::ImageTextureNode* imgTex = graph->create_node<ccl::ImageTextureNode>();
-        imgTex->set_filename(ccl::ustring(texFile));
-        imgTex->set_colorspace(materialColorspaceToCycles(mat->getMaterialDiffuseColorspace()));
-        graph->connect(texCoord->output("UV"), imgTex->input("Vector"));
-        graph->connect(imgTex->output("Color"), principled->input("Base Color"));
+        baseTex = graph->create_node<ccl::ImageTextureNode>();
+        baseTex->set_filename(ccl::ustring(texFile));
+        baseTex->set_colorspace(materialColorspaceToCycles(mat->getMaterialDiffuseColorspace()));
+        graph->connect(texCoord->output("UV"), baseTex->input("Vector"));
+        if (!particleColorTint) {
+            graph->connect(baseTex->output("Color"), principled->input("Base Color"));
+        }
+    }
+
+    // Particle tint: multiply the per-particle vertex color into the base
+    // color (texture output when present, else the flat material color), and
+    // drive alpha from the particle age fade — so emitter colors and
+    // ParticleAttribute ramps show through the material.
+    ccl::AttributeNode* particleVcol = nullptr;
+    if (particleColorTint) {
+        particleVcol = graph->create_node<ccl::AttributeNode>();
+        // "particle_color", NOT "vertex_color" — the latter is a reserved
+        // Cycles standard-attribute name and never matches our named attr.
+        particleVcol->set_attribute(ccl::ustring("particle_color"));
+        ccl::VectorMathNode* mul = graph->create_node<ccl::VectorMathNode>();
+        mul->set_math_type(ccl::NODE_VECTOR_MATH_MULTIPLY);
+        if (baseTex) {
+            graph->connect(baseTex->output("Color"), mul->input("Vector1"));
+        } else {
+            mul->set_vector1(ccl::make_float3((float)r, (float)g, (float)b));
+        }
+        graph->connect(particleVcol->output("Color"), mul->input("Vector2"));
+        graph->connect(mul->output("Vector"), principled->input("Base Color"));
+        graph->connect(particleVcol->output("Alpha"), principled->input("Alpha"));
+    }
+
+    // ParticleMaterial's Emission Strength (>0) overrides the material's
+    // emission: glow in the per-particle color (tint), else the base color.
+    const bool particleEmissionOverride = (particleEmissionStrength > 0.0f);
+    if (particleEmissionOverride) {
+        // Strength = knob × the per-particle emission attribute (the
+        // ParticleAttribute Emission section's output; 1.0 when unused).
+        ccl::AttributeNode* emisAttr = graph->create_node<ccl::AttributeNode>();
+        emisAttr->set_attribute(ccl::ustring("particle_emission"));
+        ccl::MathNode* emisMul = graph->create_node<ccl::MathNode>();
+        emisMul->set_math_type(ccl::NODE_MATH_MULTIPLY);
+        emisMul->set_value2(particleEmissionStrength);
+        graph->connect(emisAttr->output("Fac"), emisMul->input("Value1"));
+        graph->connect(emisMul->output("Value"), principled->input("Emission Strength"));
+        if (particleVcol) {
+            graph->connect(particleVcol->output("Color"), principled->input("Emission Color"));
+        } else if (baseTex) {
+            graph->connect(baseTex->output("Color"), principled->input("Emission Color"));
+        } else {
+            principled->set_emission_color(ccl::make_float3((float)r, (float)g, (float)b));
+        }
     }
 
     // Normal map
@@ -706,7 +757,9 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         emissionTex->set_filename(ccl::ustring(emissionFile));
         emissionTex->set_colorspace(materialColorspaceToCycles(mat->getMaterialEmissionColorspace()));
         graph->connect(texCoord->output("UV"), emissionTex->input("Vector"));
-        graph->connect(emissionTex->output("Color"), principled->input("Emission Color"));
+        if (!particleEmissionOverride) { // particle glow override wins over the emission map
+            graph->connect(emissionTex->output("Color"), principled->input("Emission Color"));
+        }
     }
 
     // Transmission map (mask) — drives the Principled "Transmission Weight"
@@ -1604,18 +1657,15 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                         shutterOpen = -st; shutterClose = 0; break;
                 }
 
-                // Get particle data at shutter open time
-                ParticleDataPtr dataOpen;
-                double timeOpen = time + shutterOpen;
-                if (provider) dataOpen = provider->getParticleData(timeOpen);
-
-                // Get particle data at shutter close time
-                ParticleDataPtr dataClose;
-                double timeClose = time + shutterClose;
-                if (provider) dataClose = provider->getParticleData(timeClose);
-
-                if (dataOpen && dataClose &&
-                    dataOpen->numParticles() > 0 && dataClose->numParticles() > 0) {
+                // Shutter positions from the CENTER frame's per-particle
+                // velocity (displacement per frame) — the same approach as
+                // ScanlineRender's stretch blur. Re-simulating at shutter
+                // times returned index-SHIFTED arrays as particles die/spawn
+                // (a streak connected two unrelated particles → giant
+                // criss-cross web), and providers snap to whole frames so the
+                // streaks were a full frame long instead of a shutter
+                // fraction. Velocity extrapolation is exact per particle.
+                {
                     // Use 3 motion steps: open, center (implicit), close
                     pc->set_motion_steps(3);
                     pc->set_use_motion_blur(true);
@@ -1626,61 +1676,96 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                         ccl::ATTR_STD_MOTION_VERTEX_POSITION);
                     ccl::float4* motionData = motionAttr->data_float4();
 
-                    // Step 0 = shutter open positions
-                    int openCount = std::min(count, dataOpen->numParticles());
                     for (int pi = 0; pi < count; ++pi) {
-                        if (pi < openCount) {
-                            const Particle& po = dataOpen->particles[pi];
-                            float r = po.size > 0.001f ? po.size : 0.01f;
-                            motionData[pi] = ccl::make_float4(po.px, po.py, po.pz, r);
-                        } else {
-                            // Particle didn't exist at shutter open — use center position
-                            const Particle& p = particleData->particles[pi];
-                            float r = p.size > 0.001f ? p.size : 0.01f;
-                            motionData[pi] = ccl::make_float4(p.px, p.py, p.pz, r);
-                        }
-                    }
-
-                    // Step 1 = shutter close positions
-                    int closeCount = std::min(count, dataClose->numParticles());
-                    for (int pi = 0; pi < count; ++pi) {
-                        if (pi < closeCount) {
-                            const Particle& pc2 = dataClose->particles[pi];
-                            float r = pc2.size > 0.001f ? pc2.size : 0.01f;
-                            motionData[count + pi] = ccl::make_float4(pc2.px, pc2.py, pc2.pz, r);
-                        } else {
-                            const Particle& p = particleData->particles[pi];
-                            float r = p.size > 0.001f ? p.size : 0.01f;
-                            motionData[count + pi] = ccl::make_float4(p.px, p.py, p.pz, r);
-                        }
+                        const Particle& p = particleData->particles[pi];
+                        float r = p.size > 0.001f ? p.size : 0.01f;
+                        motionData[pi] = ccl::make_float4(p.px + p.vx * shutterOpen,
+                                                          p.py + p.vy * shutterOpen,
+                                                          p.pz + p.vz * shutterOpen,
+                                                          r);
+                        motionData[count + pi] = ccl::make_float4(p.px + p.vx * shutterClose,
+                                                                  p.py + p.vy * shutterClose,
+                                                                  p.pz + p.vz * shutterClose,
+                                                                  r);
                     }
                 }
             }
 
-            // Create a simple emissive-ish shader using particle color
-            // Use the first particle's color as a base (per-point color via attribute)
-            ccl::Shader* pShader = scene->create_node<ccl::Shader>();
-            auto pGraph = ccl::make_unique<ccl::ShaderGraph>();
-            ccl::PrincipledBsdfNode* pBsdf = pGraph->create_node<ccl::PrincipledBsdfNode>();
+            // Shading override: walk the particle chain (input 0, through
+            // Dots) for a ParticleMaterial node. With one connected to a
+            // material, particles get the full PBR material; without one the
+            // default per-particle color shader below uses its knob values.
+            ParticleMaterial* pmat = nullptr;
+            {
+                EffectInstancePtr cur = effect;
+                for (int depth = 0; cur && depth < 64; ++depth) {
+                    pmat = dynamic_cast<ParticleMaterial*>(cur.get());
+                    if (pmat) break;
+                    if (!dynamic_cast<ParticleProvider*>(cur.get())) break; // left the chain
+                    cur = skipDots(cur->getInput(0));
+                }
+            }
+            MaterialProvider* particleMatProv = pmat ? pmat->getParticleMaterialProvider() : nullptr;
 
-            // Use vertex color attribute for per-particle color
-            ccl::AttributeNode* colorAttr = pGraph->create_node<ccl::AttributeNode>();
-            colorAttr->set_attribute(ccl::ustring("vertex_color"));
-            pGraph->connect(colorAttr->output("Color"), pBsdf->input("Base Color"));
-            pGraph->connect(colorAttr->output("Color"), pBsdf->input("Emission Color"));
-            pBsdf->set_emission_strength(1.0f);
-            pBsdf->set_roughness(0.5f);
+            fprintf(stderr, "[CyclesParticles] shader select: ParticleMaterial=%s material=%s tint=%d emission=%.2f\n",
+                    pmat ? "FOUND" : "none",
+                    particleMatProv ? "connected" : "none",
+                    pmat ? (int)pmat->getTintWithParticleColor() : -1,
+                    pmat ? pmat->getEmissionStrength(time) : -1.0);
+            fflush(stderr);
 
-            pGraph->connect(pBsdf->output("BSDF"), pGraph->output()->input("Surface"));
-            pShader->set_graph(std::move(pGraph));
+            ccl::Shader* pShader = nullptr;
+            if (particleMatProv) {
+                // Full PBR material, optionally tinted by the per-particle
+                // vertex color (age fade drives alpha). Emission Strength > 0
+                // overrides the material's emission with particle glow.
+                pShader = createMaterialShader(scene, particleMatProv, time,
+                                               pmat->getTintWithParticleColor(),
+                                               (float)pmat->getEmissionStrength(time));
+            } else {
+                // Default: per-particle color shader. ParticleMaterial's
+                // knobs override the historic hardcoded values when present.
+                const float emisStrength = pmat ? (float)pmat->getEmissionStrength(time) : 1.0f;
+                const float roughVal     = pmat ? (float)pmat->getRoughness(time)        : 0.5f;
+                const float metalVal     = pmat ? (float)pmat->getMetallic(time)         : 0.0f;
+
+                pShader = scene->create_node<ccl::Shader>();
+                auto pGraph = ccl::make_unique<ccl::ShaderGraph>();
+                ccl::PrincipledBsdfNode* pBsdf = pGraph->create_node<ccl::PrincipledBsdfNode>();
+
+                // Per-particle color attribute. NOTE: the name must NOT be
+                // "vertex_color" — that is a RESERVED Cycles standard-attribute
+                // name (ATTR_STD_VERTEX_COLOR); the AttributeNode converts it
+                // into a std lookup which never matches a plain named
+                // attribute, so the shader silently reads black.
+                ccl::AttributeNode* colorAttr = pGraph->create_node<ccl::AttributeNode>();
+                colorAttr->set_attribute(ccl::ustring("particle_color"));
+                pGraph->connect(colorAttr->output("Color"), pBsdf->input("Base Color"));
+                pGraph->connect(colorAttr->output("Color"), pBsdf->input("Emission Color"));
+                // Per-particle emission (ParticleAttribute Emission section)
+                // × the node/hardcoded strength.
+                ccl::AttributeNode* emisAttr = pGraph->create_node<ccl::AttributeNode>();
+                emisAttr->set_attribute(ccl::ustring("particle_emission"));
+                ccl::MathNode* emisMul = pGraph->create_node<ccl::MathNode>();
+                emisMul->set_math_type(ccl::NODE_MATH_MULTIPLY);
+                emisMul->set_value2(emisStrength);
+                pGraph->connect(emisAttr->output("Fac"), emisMul->input("Value1"));
+                pGraph->connect(emisMul->output("Value"), pBsdf->input("Emission Strength"));
+                pBsdf->set_roughness(roughVal);
+                pBsdf->set_metallic(metalVal);
+
+                pGraph->connect(pBsdf->output("BSDF"), pGraph->output()->input("Surface"));
+                pShader->set_graph(std::move(pGraph));
+            }
             pShader->tag_update(scene);
 
             ccl::array<ccl::Node*> used_shaders;
             used_shaders.push_back_slow(pShader);
             pc->set_used_shaders(used_shaders);
 
-            // Set per-point color attribute
-            ccl::Attribute* vcol = pc->attributes.add(ccl::ustring("vertex_color"),
+            // Set per-point color attribute ("particle_color" — see the shader
+            // note about the reserved "vertex_color" standard name).
+            ccl::Attribute* vcol = pc->attributes.add(ccl::ustring("particle_color"),
                                                        ccl::TypeRGBA,
                                                        ccl::ATTR_ELEMENT_VERTEX);
             ccl::float4* colorData = vcol->data_float4();
@@ -1689,6 +1774,16 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 float ageFrac = (p.life > 0) ? (p.age / p.life) : 1.0f;
                 float alpha = p.a * (1.0f - ageFrac);
                 colorData[pi] = ccl::make_float4(p.r, p.g, p.b, alpha);
+            }
+
+            // Per-particle emission multiplier (ParticleAttribute Emission
+            // section) — scales the shader's emission strength per point.
+            ccl::Attribute* vemis = pc->attributes.add(ccl::ustring("particle_emission"),
+                                                        ccl::TypeFloat,
+                                                        ccl::ATTR_ELEMENT_VERTEX);
+            float* emisData = vemis->data_float();
+            for (int pi = 0; pi < count; ++pi) {
+                emisData[pi] = particleData->particles[pi].emission;
             }
 
             // Create object

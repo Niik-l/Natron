@@ -37,6 +37,7 @@ struct Particle {
     float age;              // current age in frames
     float life;             // total lifetime in frames
     float mass;             // mass (affects how forces act)
+    float emission;         // self-emission multiplier (ParticleAttribute Emission section; Cycles glow)
     uint32_t id;            // unique particle ID for tracking across frames
     int bounceCount;        // number of times this particle has bounced
     bool collided;          // set true by ParticleSolver on bounce frame
@@ -49,6 +50,7 @@ struct Particle {
         , size(0.1f)
         , age(0), life(50)
         , mass(1.0f)
+        , emission(1.0f)
         , id(0)
         , bounceCount(0)
         , collided(false)

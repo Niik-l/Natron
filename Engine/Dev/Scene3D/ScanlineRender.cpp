@@ -3098,6 +3098,9 @@ ScanlineRender::render(const RenderActionArgs& args)
     if (particleData && particleData->numParticles() > 0) {
         int partMode = _imp->particleMode.lock() ? _imp->particleMode.lock()->getValue() : 3;
         int blendMode = _imp->particleBlend.lock() ? _imp->particleBlend.lock()->getValue() : 0;
+        // Additive particles get per-particle emission boost (ParticleAttribute
+        // Emission section). Over-blend ignores it: emission is a glow concept.
+        const bool emissiveBoost = (blendMode == 0);
         float globalScale = _imp->particleScale.lock() ? (float)_imp->particleScale.lock()->getValueAtTime(args.time) : 1.0f;
         bool solidParticles = _imp->particleSolid.lock() ? _imp->particleSolid.lock()->getValue() : false;
 
@@ -3222,6 +3225,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                 verts.reserve((size_t)particleData->numParticles() * 2);
                 for (int i = 0; i < particleData->numParticles(); ++i) {
                     const Particle& p = particleData->particles[i];
+                    const float pe = emissiveBoost ? p.emission : 1.0f;
                     float alpha = p.a;
                     if (alpha < 0.001f) continue;
                     float vx = p.vx, vy = p.vy, vz = p.vz;
@@ -3231,7 +3235,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                     float vPZ = vz - vDotF * fwdZ;
                     float vLen = std::sqrt(vPX*vPX + vPY*vPY + vPZ*vPZ);
                     if (vLen < 0.0001f) {
-                        ParticleVertex v = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                        ParticleVertex v = { p.px, p.py, p.pz, p.r * pe, p.g * pe, p.b * pe, alpha };
                         fillAovs(v, p);
                         verts.push_back(v); verts.push_back(v);
                         continue;
@@ -3242,7 +3246,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                         p.px - vPX*invLen*stretch, p.py - vPY*invLen*stretch, p.pz - vPZ*invLen*stretch,
                         p.r, p.g, p.b, 0.0f
                     };
-                    ParticleVertex head = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                    ParticleVertex head = { p.px, p.py, p.pz, p.r * pe, p.g * pe, p.b * pe, alpha };
                     fillAovs(tail, p); fillAovs(head, p);
                     verts.push_back(tail);
                     verts.push_back(head);
@@ -3253,9 +3257,10 @@ ScanlineRender::render(const RenderActionArgs& args)
                 verts.reserve((size_t)particleData->numParticles());
                 for (int i = 0; i < particleData->numParticles(); ++i) {
                     const Particle& p = particleData->particles[i];
+                    const float pe = emissiveBoost ? p.emission : 1.0f;
                     float alpha = p.a;
                     if (alpha < 0.001f) continue;
-                    ParticleVertex v = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                    ParticleVertex v = { p.px, p.py, p.pz, p.r * pe, p.g * pe, p.b * pe, alpha };
                     fillAovs(v, p);
                     verts.push_back(v);
                 }
@@ -3280,6 +3285,7 @@ ScanlineRender::render(const RenderActionArgs& args)
 
             for (int i = 0; i < particleData->numParticles(); ++i) {
                 const Particle& p = particleData->particles[i];
+                const float pe = emissiveBoost ? p.emission : 1.0f;
                 float alpha = p.a;
                 if (alpha < 0.001f) continue;
                 float hs = p.size * 0.5f * globalScale;
@@ -3309,7 +3315,7 @@ ScanlineRender::render(const RenderActionArgs& args)
 
                         const int segs = 16;
                         const float edgeAlpha = solidParticles ? alpha : 0.0f;
-                        ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                        ParticleVertex center = { p.px, p.py, p.pz, p.r * pe, p.g * pe, p.b * pe, alpha };
                         fillAovs(center, p);
                         // Pre-compute ring of edge verts once
                         std::vector<ParticleVertex> ring((size_t)segs + 1);
@@ -3333,7 +3339,7 @@ ScanlineRender::render(const RenderActionArgs& args)
 
                 if (!didMotionBlur) {
                     const float edgeAlpha = solidParticles ? alpha : 0.0f;
-                    ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                    ParticleVertex center = { p.px, p.py, p.pz, p.r * pe, p.g * pe, p.b * pe, alpha };
                     fillAovs(center, p);
                     // Pre-compute ring of edge verts once
                     std::vector<ParticleVertex> ring((size_t)segments + 1);
@@ -3378,6 +3384,7 @@ ScanlineRender::render(const RenderActionArgs& args)
 
             for (int i = 0; i < particleData->numParticles(); ++i) {
                 const Particle& p = particleData->particles[i];
+                const float pe = emissiveBoost ? p.emission : 1.0f;
                 float alpha = p.a;
                 if (alpha < 0.001f) continue;
                 float rad = p.size * 0.5f * globalScale;
@@ -3406,7 +3413,7 @@ ScanlineRender::render(const RenderActionArgs& args)
 
                         const int segs = 16;
                         const float edgeAlpha = solidParticles ? alpha : 0.0f;
-                        ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                        ParticleVertex center = { p.px, p.py, p.pz, p.r * pe, p.g * pe, p.b * pe, alpha };
                         fillAovs(center, p);
                         std::vector<ParticleVertex> ring((size_t)segs + 1);
                         for (int s = 0; s <= segs; ++s) {
@@ -3499,6 +3506,7 @@ ScanlineRender::render(const RenderActionArgs& args)
 
             for (int i = 0; i < particleData->numParticles(); ++i) {
                 const Particle& p = particleData->particles[i];
+                const float pe = emissiveBoost ? p.emission : 1.0f;
                 float alpha = p.a;
                 if (alpha < 0.001f) continue;
 
@@ -3534,7 +3542,7 @@ ScanlineRender::render(const RenderActionArgs& args)
 
                         const int segs = 16;
                         const float edgeAlpha = solidParticles ? alpha : 0.0f;
-                        ParticleVertex center = { p.px, p.py, p.pz, p.r, p.g, p.b, alpha };
+                        ParticleVertex center = { p.px, p.py, p.pz, p.r * pe, p.g * pe, p.b * pe, alpha };
                         fillAovs(center, p);
                         std::vector<ParticleVertex> ring((size_t)segs + 1);
                         for (int s = 0; s <= segs; ++s) {
@@ -3563,10 +3571,10 @@ ScanlineRender::render(const RenderActionArgs& args)
                 // particle mode.
                 float rx = rightX * hs, ry = rightY * hs, rz = rightZ * hs;
                 float ux = upX * hs,    uy = upY * hs,    uz = upZ * hs;
-                ParticleVertex bl = { p.px - rx - ux, p.py - ry - uy, p.pz - rz - uz, p.r, p.g, p.b, alpha };
-                ParticleVertex br = { p.px + rx - ux, p.py + ry - uy, p.pz + rz - uz, p.r, p.g, p.b, alpha };
-                ParticleVertex tr = { p.px + rx + ux, p.py + ry + uy, p.pz + rz + uz, p.r, p.g, p.b, alpha };
-                ParticleVertex tl = { p.px - rx + ux, p.py - ry + uy, p.pz - rz + uz, p.r, p.g, p.b, alpha };
+                ParticleVertex bl = { p.px - rx - ux, p.py - ry - uy, p.pz - rz - uz, p.r * pe, p.g * pe, p.b * pe, alpha };
+                ParticleVertex br = { p.px + rx - ux, p.py + ry - uy, p.pz + rz - uz, p.r * pe, p.g * pe, p.b * pe, alpha };
+                ParticleVertex tr = { p.px + rx + ux, p.py + ry + uy, p.pz + rz + uz, p.r * pe, p.g * pe, p.b * pe, alpha };
+                ParticleVertex tl = { p.px - rx + ux, p.py - ry + uy, p.pz - rz + uz, p.r * pe, p.g * pe, p.b * pe, alpha };
                 fillAovs(bl, p); fillAovs(br, p); fillAovs(tr, p); fillAovs(tl, p);
                 bl.u = 0.0f; bl.v = 0.0f;
                 br.u = 1.0f; br.v = 0.0f;

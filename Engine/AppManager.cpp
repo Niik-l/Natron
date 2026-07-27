@@ -192,6 +192,7 @@
 #include "Dev/Particles/ParticleInstance.h"
 #include "Dev/Particles/ParticleMerge.h"
 #include "Dev/Particles/PointsToParticles.h"
+#include "Dev/Particles/ParticleMaterial.h"
 #include "Dev/Particles/WriteAlembicParticles.h"
 #include "Dev/Particles/ReadAlembicParticles.h"
 #include "Dev/Particles/ParticleAttribute.h"
@@ -1728,6 +1729,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<ReadAlembicParticles>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ParticleAttribute>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<PointsToParticles>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ParticleMaterial>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
     // Dev nodes — Transform
     registerBuiltInPlugin<LensWarp>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/transform_grouping_2.png"), false, false);
