@@ -1122,6 +1122,10 @@ CyclesRender::render(const RenderActionArgs& args)
         bool ok = executeCyclesPasses(*_imp->activeRenderer, prepared, req,
                                        _imp->cachedPassBuffers, execErr);
         if (!ok) {
+            // The failed attempt may have partially written the cache buffers
+            // — invalidate them so a later hash match can't serve torn data.
+            _imp->cachedPassBuffers.clear();
+            _imp->cachedHash = 0;
             _imp->activeRenderer.reset();
             return eStatusFailed;
         }

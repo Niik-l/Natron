@@ -2483,6 +2483,14 @@ CyclesRenderer::renderToBufferWithCamera(const SceneGraph& sg,
     startRender();
     waitForRender();
 
+    // See the multipass path: never return a cancelled render as success —
+    // Natron would cache the black frame.
+    if (_impl->session->progress.get_cancel()) {
+        fprintf(stderr, "[CyclesRenderer] render cancelled mid-flight — discarding partial buffer (not cached)\n");
+        fflush(stderr);
+        return false;
+    }
+
     // Harvest deep samples: hand the Combined pass to the driver as the
     // beauty buffer (Deep Recolor distributes its RGB into the samples via
     // log-domain alpha scaling), then copy out the processed per-pixel lists.
@@ -2689,6 +2697,17 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
     startRender();
     waitForRender();
 
+    // A cancelled session returns from wait() with an empty/partial buffer.
+    // Returning success would let Natron CACHE a black frame (seen as
+    // "particles visible at one zoom level, black at another" — different
+    // mip entries cached from different renders). Fail instead; the host
+    // re-requests when it actually needs the frame.
+    if (_impl->session->progress.get_cancel()) {
+        fprintf(stderr, "[CyclesRenderer] render cancelled mid-flight — discarding partial buffer (not cached)\n");
+        fflush(stderr);
+        return false;
+    }
+
     // Harvest deep samples BEFORE any host-side composite mutates Combined —
     // Deep Recolor must distribute the kernel's own beauty into the samples.
     if (outDeep) {
@@ -2872,6 +2891,13 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
         startRender();
         waitForRender();
         _impl->emissiveMatteMode = false;
+
+        // Cancelled second pass -> fail the whole render (no black cache).
+        if (_impl->session->progress.get_cancel()) {
+            fprintf(stderr, "[CyclesRenderer] matte pass cancelled mid-flight — discarding\n");
+            fflush(stderr);
+            return false;
+        }
 
         auto itMC = matteBuffers.find("Combined");
         if (itMC != matteBuffers.end()) {
