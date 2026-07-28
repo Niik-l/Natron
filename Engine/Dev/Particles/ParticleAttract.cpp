@@ -23,6 +23,8 @@
 
 #include "ParticleAttract.h"
 
+#include "ParticleParallel.h"
+
 #include <cmath>
 
 #include "../../AppManager.h"
@@ -126,16 +128,18 @@ ParticleAttract::applyForce(ParticleDataPtr data, double time)
 
     if (strength == 0.0f) return;
 
-    for (size_t i = 0; i < data->particles.size(); ++i) {
-        Particle& p = data->particles[i];
+    const float maxDistSq = maxDist * maxDist;
+    forEachParticleParallel(data->particles, [&](Particle& p) {
 
         float dx = ptX - p.px;
         float dy = ptY - p.py;
         float dz = ptZ - p.pz;
-        float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-
-        if (dist > maxDist) continue;
-        if (dist < 0.001f) continue; // avoid divide by zero
+        // Cull on the squared distance BEFORE paying for the sqrt (same
+        // accept/reject set — sqrt is monotonic).
+        const float distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq > maxDistSq) return;
+        if (distSq < 1e-6f) return; // avoid divide by zero (dist < 0.001)
+        float dist = std::sqrt(distSq);
 
         // Normalize direction
         dx /= dist;
@@ -153,7 +157,7 @@ ParticleAttract::applyForce(ParticleDataPtr data, double time)
         p.vx += dx * force * 0.01f;
         p.vy += dy * force * 0.01f;
         p.vz += dz * force * 0.01f;
-    }
+    });
 }
 
 NATRON_NAMESPACE_EXIT

@@ -112,7 +112,10 @@ private:
     // the substep size (1.0/numSubsteps); threaded through to bounceParticle
     // so the post-bounce displacement is scaled to one substep, not one full
     // frame.
-    void applyCollision(Particle& p, double time, float dt);
+    // Resolve all collision inputs (geo knobs, elasticity/friction, shape)
+    // once per frame; applyCollision then runs pure per-particle math.
+    void prepareCollisionEnv(double time);
+    void applyCollision(Particle& p, float dt);
 
     std::unique_ptr<ParticleSolverPrivate> _imp;
 };

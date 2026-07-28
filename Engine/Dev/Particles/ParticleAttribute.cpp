@@ -38,6 +38,7 @@
 
 #include "KnobGradient.h"
 #include "ParticleData.h"
+#include "ParticleParallel.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -1031,6 +1032,16 @@ ParticleAttribute::knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec
 
 namespace {
 // Cached per-section state read once per applyForce call.
+inline float
+lutSample(const std::vector<float>& lut, double t)
+{
+    const double x = t * (double)(lut.size() - 1);
+    const int i0 = (int)x;
+    const int i1 = (i0 + 1 < (int)lut.size()) ? i0 + 1 : i0;
+    const float f = (float)(x - (double)i0);
+    return lut[i0] + (lut[i1] - lut[i0]) * f;
+}
+
 struct SectionState
 {
     bool                            active = false;
@@ -1040,6 +1051,7 @@ struct SectionState
     double                          invRange = 1.0;
     float                           mix = 1.0f;
     KnobParametricPtr               curve;
+    std::vector<float>              lut;   // curve sampled once per apply (KnobParametric::getValue is lock-taking; was 3 evals PER PARTICLE)
     std::vector<KnobGradient::Stop> stops;
     bool                            isGradient = false;
     // v2: variation + stochastic-source context
@@ -1099,6 +1111,15 @@ readSection(const SectionKnobs& sec, double time, double flickerSpeed,
     } else {
         s.curve = sec.curve.lock();
         if (!s.curve) return s;
+        // Sample the curve into a LUT once — per-particle lookups then cost a
+        // lerp instead of a mutex-guarded parametric evaluation.
+        const int kLutSize = 1024;
+        s.lut.resize(kLutSize);
+        for (int li = 0; li < kLutSize; ++li) {
+            double y = 0.0;
+            s.curve->getValue(0, (double)li / (double)(kLutSize - 1), &y);
+            s.lut[li] = (float)y;
+        }
     }
     s.active = true;
     return s;
@@ -1148,8 +1169,7 @@ ParticleAttribute::applyForce(ParticleDataPtr data, double time)
         }
     }
 
-    for (size_t i = 0; i < data->particles.size(); ++i) {
-        Particle& p = data->particles[i];
+    forEachParticleParallel(data->particles, [&](Particle& p) {
 
         auto normalize = [&p](const SectionState& s) {
             const float v = readSource(p, s.source, s.ctx);
@@ -1179,8 +1199,7 @@ ParticleAttribute::applyForce(ParticleDataPtr data, double time)
         // Pscale — curve sample → size lerp; variation = per-ID multiplier
         if (pscaleS.active) {
             const double t = normalize(pscaleS);
-            double y = 0.0;
-            pscaleS.curve->getValue(0, t, &y);
+            const double y = (double)lutSample(pscaleS.lut, t);
             float v = (float)y * variationFactor(p.id, pscaleS.ctx.seed, pscaleS.bias, pscaleS.variation);
             p.size = lerp(p.size, v, pscaleS.mix);
         }
@@ -1188,8 +1207,7 @@ ParticleAttribute::applyForce(ParticleDataPtr data, double time)
         // Alpha — curve sample → a lerp; variation = per-ID multiplier
         if (alphaS.active) {
             const double t = normalize(alphaS);
-            double y = 0.0;
-            alphaS.curve->getValue(0, t, &y);
+            const double y = (double)lutSample(alphaS.lut, t);
             float v = (float)y * variationFactor(p.id, alphaS.ctx.seed, alphaS.bias, alphaS.variation);
             p.a = lerp(p.a, v, alphaS.mix);
         }
@@ -1198,12 +1216,11 @@ ParticleAttribute::applyForce(ParticleDataPtr data, double time)
         // (Bias "Few High Outliers" = the 'some sparks are much hotter' control)
         if (emissionS.active) {
             const double t = normalize(emissionS);
-            double y = 0.0;
-            emissionS.curve->getValue(0, t, &y);
+            const double y = (double)lutSample(emissionS.lut, t);
             float v = (float)y * variationFactor(p.id, emissionS.ctx.seed, emissionS.bias, emissionS.variation);
             p.emission = lerp(p.emission, v, emissionS.mix);
         }
-    }
+    });
 }
 
 NATRON_NAMESPACE_EXIT

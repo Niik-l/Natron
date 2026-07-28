@@ -306,10 +306,23 @@ struct ParticleSolverPrivate
     KnobIntWPtr substeps;
     KnobBoolWPtr showCollisions;
 
-    // Per-frame cache for Card3D collision aspect (getCardAspect hits the img
-    // input's RoD — far too expensive per particle; the sim loop is serial).
-    double cardAspectCacheTime = -1e300;
-    float cardAspectCache = 1.0f;
+    // Per-frame collision environment — resolved once per frame by
+    // prepareCollisionEnv() instead of per particle per substep.
+    struct CollisionEnv {
+        bool hasGeo = false;
+        bool isSphere = false;
+        bool hasRotation = false;
+        int maxBounces = 0;
+        float elasticity = 0.5f, friction = 0.2f;
+        float tx = 0, ty = 0, tz = 0;
+        float hx = 0.5f, hy = 0.5f, hz = 0.5f;
+        float sphereRadius = 0.5f;
+        float rot[3][3] = { {1,0,0}, {0,1,0}, {0,0,1} };
+    };
+    CollisionEnv collisionEnv;
+
+    // Velocity-snapshot scratch reused across forces/substeps/frames.
+    std::vector<std::array<float, 3>> preVelScratch;
 
     // Cache page knobs (Phase A skeleton).
     KnobBoolWPtr   cacheEnabled;
@@ -709,6 +722,16 @@ ParticleSolver::getParticleData(double time)
             _imp->cachedData->particles[j].collided = false;
         }
 
+        // Collision parameters are constant within a frame (knobs are
+        // evaluated at the integer frame) — resolve them ONCE instead of
+        // ~13 animated knob evals + 11 string-keyed getKnobByName lookups
+        // per particle per substep (~5M knob evals/frame at 100k particles).
+        prepareCollisionEnv((double)frame);
+
+        // Velocity-snapshot scratch reused across forces/substeps/frames —
+        // this was a fresh heap allocation per force per substep.
+        std::vector<std::array<float, 3>>& preVel = _imp->preVelScratch;
+
         for (int sub = 0; sub < numSubsteps; ++sub) {
             // 3. Apply all upstream forces (scaled by dt)
             //    Forces add a per-frame velocity delta. For substeps we want
@@ -716,7 +739,7 @@ ParticleSolver::getParticleData(double time)
             //    force, apply it (full delta), then scale the delta by dt.
             for (size_t f = 0; f < forces.size(); ++f) {
                 // Snapshot velocities
-                std::vector<std::array<float, 3>> preVel(_imp->cachedData->particles.size());
+                preVel.resize(_imp->cachedData->particles.size());
                 for (size_t j = 0; j < _imp->cachedData->particles.size(); ++j) {
                     const Particle& p = _imp->cachedData->particles[j];
                     preVel[j] = {p.vx, p.vy, p.vz};
@@ -748,7 +771,7 @@ ParticleSolver::getParticleData(double time)
             //    it accumulates across the frame's substeps, see above.)
             for (size_t j = 0; j < _imp->cachedData->particles.size(); ++j) {
                 Particle& p = _imp->cachedData->particles[j];
-                applyCollision(p, (double)frame, dt);
+                applyCollision(p, dt);
             }
         }
 
@@ -897,30 +920,26 @@ static void invRotVec(const float m[3][3], float x, float y, float z,
 #define M_PI 3.14159265358979323846
 #endif
 
-// Collision dispatch — called per-particle after position integration.
-// Reads connected geometry node's transform (including rotation) to build
-// the collision shape. For boxes, particles are transformed into the geo's
-// local space for AABB testing, then results are transformed back (OBB collision).
+// Collision environment — resolved ONCE per frame (knob values are constant
+// within a frame). Previously every knob below was re-read PER PARTICLE PER
+// SUBSTEP through string-keyed getKnobByName lookups + animated evals.
 void
-ParticleSolver::applyCollision(Particle& p, double time, float dt)
+ParticleSolver::prepareCollisionEnv(double time)
 {
-    // Check max bounces — kill particle if exceeded (0 = unlimited)
-    int maxBouncesVal = _imp->maxBounces.lock() ? _imp->maxBounces.lock()->getValue() : 0;
-    if (maxBouncesVal > 0 && p.bounceCount >= maxBouncesVal) {
-        p.life = p.age; // kill particle
-        return;
-    }
+    ParticleSolverPrivate::CollisionEnv& env = _imp->collisionEnv;
+    env = ParticleSolverPrivate::CollisionEnv();
 
     EffectInstancePtr geoEffect = getInput(1);
     if (!geoEffect) return;
+    env.hasGeo = true;
 
-    float elasticityVal = (float)_imp->elasticity.lock()->getValueAtTime(time);
-    float frictionVal = (float)_imp->friction.lock()->getValueAtTime(time);
+    env.elasticity = (float)_imp->elasticity.lock()->getValueAtTime(time);
+    env.friction   = (float)_imp->friction.lock()->getValueAtTime(time);
+    env.maxBounces = _imp->maxBounces.lock() ? _imp->maxBounces.lock()->getValue() : 0;
 
     // Read transform + rotation + size knobs from connected geometry node.
     // Each lookup is guarded against a non-KnobDouble (a future node with a
     // KnobChoice / KnobInt of the same name would otherwise null-deref).
-    float tx = 0, ty = 0, tz = 0;
     float rx = 0, ry = 0, rz = 0;
     float sx = 1, sy = 1, sz = 1;
     float geoSize = 1.0f;
@@ -931,9 +950,9 @@ ParticleSolver::applyCollision(Particle& p, double time, float dt)
             out = (float)kd->getValueAtTime(time);
         }
     };
-    readDouble("translateX", tx);
-    readDouble("translateY", ty);
-    readDouble("translateZ", tz);
+    readDouble("translateX", env.tx);
+    readDouble("translateY", env.ty);
+    readDouble("translateZ", env.tz);
     readDouble("rotateX",    rx);
     readDouble("rotateY",    ry);
     readDouble("rotateZ",    rz);
@@ -942,8 +961,7 @@ ParticleSolver::applyCollision(Particle& p, double time, float dt)
     readDouble("scaleZ",     sz);
     readDouble("size",       geoSize);
     // Uniform Scale multiplies all axes on top of the per-axis Scale (matches
-    // the drawn wireframe; previously ignored here, so a uniformly-scaled
-    // collision shape bounced at the wrong surface).
+    // the drawn wireframe).
     float uniformScale = 1.0f;
     readDouble("uniformScale", uniformScale);
     sx *= uniformScale;
@@ -951,81 +969,92 @@ ParticleSolver::applyCollision(Particle& p, double time, float dt)
     sz *= uniformScale;
 
     std::string pluginID = geoEffect->getPluginID();
-    bool isSphere = (pluginID.find("Sphere") != std::string::npos);
+    env.isSphere = (pluginID.find("Sphere") != std::string::npos);
     Card3D* isCard = dynamic_cast<Card3D*>(geoEffect.get());
 
-    if (isSphere) {
-        // Sphere is rotation-invariant — no need for OBB
-        float radius = geoSize * 0.5f * sx;
-        collideGeoSphere(p, tx, ty, tz, radius, elasticityVal, frictionVal, dt);
-        pushOutOfSphere(p, tx, ty, tz, radius);
+    if (env.isSphere) {
+        env.sphereRadius = geoSize * 0.5f * sx;
+    } else if (isCard) {
+        // Card3D is a FLAT quad in the XY plane — collide as a thin slab with
+        // the card's real extents; the swept ray-AABB test keeps thin slabs
+        // tunnel-proof.
+        env.hx = isCard->getCardAspect(time) * 0.5f * sx;
+        env.hy = 0.5f * sy;
+        env.hz = 0.005f; // slim but non-degenerate slab
     } else {
-        // OBB collision: transform particle into the cube's local space,
-        // do AABB test, transform back.
-        float hx, hy, hz;
-        if (isCard) {
-            // Card3D is a FLAT quad in the XY plane (halfW = aspect*0.5,
-            // halfH = 0.5, no depth) — collide as a thin slab with the card's
-            // real extents. Without this it collided as a size^3 BOX, so
-            // particles bounced off an invisible half-unit-deep volume.
-            // The swept ray-AABB test keeps thin slabs tunnel-proof.
-            if (_imp->cardAspectCacheTime != time) {
-                _imp->cardAspectCache = isCard->getCardAspect(time);
-                _imp->cardAspectCacheTime = time;
-            }
-            hx = _imp->cardAspectCache * 0.5f * sx;
-            hy = 0.5f * sy;
-            hz = 0.005f; // slim but non-degenerate slab
-        } else {
-            hx = geoSize * 0.5f * sx;
-            hy = geoSize * 0.5f * sy;
-            hz = geoSize * 0.5f * sz;
-        }
+        env.hx = geoSize * 0.5f * sx;
+        env.hy = geoSize * 0.5f * sy;
+        env.hz = geoSize * 0.5f * sz;
+    }
 
-        bool hasRotation = (std::abs(rx) > 0.001f || std::abs(ry) > 0.001f || std::abs(rz) > 0.001f);
+    env.hasRotation = (std::abs(rx) > 0.001f || std::abs(ry) > 0.001f || std::abs(rz) > 0.001f);
+    if (env.hasRotation) {
+        buildRotationMatrix(rx, ry, rz, env.rot);
+    }
+}
 
-        if (!hasRotation) {
+// Collision dispatch — called per-particle after position integration, using
+// the per-frame environment from prepareCollisionEnv(). For boxes, particles
+// are transformed into the geo's local space for AABB testing, then results
+// are transformed back (OBB collision).
+void
+ParticleSolver::applyCollision(Particle& p, float dt)
+{
+    const ParticleSolverPrivate::CollisionEnv& env = _imp->collisionEnv;
+    if (!env.hasGeo) return;
+
+    // Check max bounces — kill particle if exceeded (0 = unlimited)
+    if (env.maxBounces > 0 && p.bounceCount >= env.maxBounces) {
+        p.life = p.age; // kill particle
+        return;
+    }
+
+    if (env.isSphere) {
+        // Sphere is rotation-invariant — no need for OBB
+        collideGeoSphere(p, env.tx, env.ty, env.tz, env.sphereRadius,
+                         env.elasticity, env.friction, dt);
+        pushOutOfSphere(p, env.tx, env.ty, env.tz, env.sphereRadius);
+    } else {
+        if (!env.hasRotation) {
             // Fast path: no rotation, standard AABB
-            float bMinX = tx - hx, bMaxX = tx + hx;
-            float bMinY = ty - hy, bMaxY = ty + hy;
-            float bMinZ = tz - hz, bMaxZ = tz + hz;
+            float bMinX = env.tx - env.hx, bMaxX = env.tx + env.hx;
+            float bMinY = env.ty - env.hy, bMaxY = env.ty + env.hy;
+            float bMinZ = env.tz - env.hz, bMaxZ = env.tz + env.hz;
             collideGeoBox(p, bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ,
-                          elasticityVal, frictionVal, dt);
+                          env.elasticity, env.friction, dt);
             pushOutOfBox(p, bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ);
         } else {
             // OBB: transform particle positions into local space
-            float rot[3][3];
-            buildRotationMatrix(rx, ry, rz, rot);
-
             // Save world-space state
             float worldPx = p.px, worldPy = p.py, worldPz = p.pz;
             float worldPrevPx = p.prevPx, worldPrevPy = p.prevPy, worldPrevPz = p.prevPz;
             float worldVx = p.vx, worldVy = p.vy, worldVz = p.vz;
 
             // Transform to local space (inverse rotation of position relative to geo center)
-            float relX = p.px - tx, relY = p.py - ty, relZ = p.pz - tz;
-            float relPrevX = p.prevPx - tx, relPrevY = p.prevPy - ty, relPrevZ = p.prevPz - tz;
-            invRotVec(rot, relX, relY, relZ, p.px, p.py, p.pz);
-            invRotVec(rot, relPrevX, relPrevY, relPrevZ, p.prevPx, p.prevPy, p.prevPz);
-            invRotVec(rot, p.vx, p.vy, p.vz, p.vx, p.vy, p.vz);
+            float relX = p.px - env.tx, relY = p.py - env.ty, relZ = p.pz - env.tz;
+            float relPrevX = p.prevPx - env.tx, relPrevY = p.prevPy - env.ty, relPrevZ = p.prevPz - env.tz;
+            invRotVec(env.rot, relX, relY, relZ, p.px, p.py, p.pz);
+            invRotVec(env.rot, relPrevX, relPrevY, relPrevZ, p.prevPx, p.prevPy, p.prevPz);
+            invRotVec(env.rot, p.vx, p.vy, p.vz, p.vx, p.vy, p.vz);
 
             // AABB test in local space (centered at origin)
-            collideGeoBox(p, -hx, -hy, -hz, hx, hy, hz, elasticityVal, frictionVal, dt);
-            pushOutOfBox(p, -hx, -hy, -hz, hx, hy, hz);
+            collideGeoBox(p, -env.hx, -env.hy, -env.hz, env.hx, env.hy, env.hz,
+                          env.elasticity, env.friction, dt);
+            pushOutOfBox(p, -env.hx, -env.hy, -env.hz, env.hx, env.hy, env.hz);
 
             if (p.collided) {
                 // Transform results back to world space
                 float localPx = p.px, localPy = p.py, localPz = p.pz;
                 float localVx = p.vx, localVy = p.vy, localVz = p.vz;
-                rotVec(rot, localPx, localPy, localPz, p.px, p.py, p.pz);
-                p.px += tx; p.py += ty; p.pz += tz;
-                rotVec(rot, localVx, localVy, localVz, p.vx, p.vy, p.vz);
+                rotVec(env.rot, localPx, localPy, localPz, p.px, p.py, p.pz);
+                p.px += env.tx; p.py += env.ty; p.pz += env.tz;
+                rotVec(env.rot, localVx, localVy, localVz, p.vx, p.vy, p.vz);
             } else {
                 // No collision — restore world positions
                 p.px = worldPx; p.py = worldPy; p.pz = worldPz;
                 p.vx = worldVx; p.vy = worldVy; p.vz = worldVz;
             }
-            // Always restore prevP (it's for next frame's tracking, stays in world space)
+            // Always restore prevP (it is for next frame's tracking, stays in world space)
             p.prevPx = worldPrevPx; p.prevPy = worldPrevPy; p.prevPz = worldPrevPz;
         }
     }

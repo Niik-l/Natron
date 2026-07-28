@@ -23,6 +23,8 @@
 
 #include "ParticleTurbulence.h"
 
+#include "ParticleParallel.h"
+
 #include <cmath>
 
 #include "../../AppManager.h"
@@ -241,8 +243,10 @@ ParticleTurbulence::applyForce(ParticleDataPtr data, double time)
     float timeOffset = (float)time * speed * 0.1f;
     float eps = 0.01f;
 
-    for (size_t i = 0; i < data->particles.size(); ++i) {
-        Particle& p = data->particles[i];
+    // Curl noise is by far the most expensive force (dozens of Perlin
+    // evaluations per particle per substep) and each particle is fully
+    // independent — fan out across cores.
+    forEachParticleParallel(data->particles, [&](Particle& p) {
 
         double x = (double)p.px * invScale;
         double y = (double)p.py * invScale;
@@ -275,7 +279,7 @@ ParticleTurbulence::applyForce(ParticleDataPtr data, double time)
         p.vx += curlX * strength * 0.1f;
         p.vy += curlY * strength * 0.1f;
         p.vz += curlZ * strength * 0.1f;
-    }
+    });
 }
 
 NATRON_NAMESPACE_EXIT

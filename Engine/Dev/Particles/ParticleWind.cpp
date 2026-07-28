@@ -23,6 +23,8 @@
 
 #include "ParticleWind.h"
 
+#include "ParticleParallel.h"
+
 #include <cmath>
 
 #include "../../AppManager.h"
@@ -138,18 +140,19 @@ ParticleWind::applyForce(ParticleDataPtr data, double time)
 
     unsigned int frame = (unsigned int)(int)time;
 
-    for (size_t i = 0; i < data->particles.size(); ++i) {
-        Particle& p = data->particles[i];
+    forEachParticleParallel(data->particles, [&](Particle& p) {
 
         float gust = 1.0f;
         if (gustiness > 0.0f) {
-            gust = 1.0f + (hashFloat((unsigned int)i + frame * 7919u) - 0.5f) * gustiness * 2.0f;
+            // Seed by stable particle ID, not array index — expiry compaction
+            // reshuffles indices, which made every survivor's gust jump.
+            gust = 1.0f + (hashFloat(p.id + frame * 7919u) - 0.5f) * gustiness * 2.0f;
         }
 
         p.vx += dx * strengthVal * gust * 0.01f;
         p.vy += dy * strengthVal * gust * 0.01f;
         p.vz += dz * strengthVal * gust * 0.01f;
-    }
+    });
 }
 
 NATRON_NAMESPACE_EXIT

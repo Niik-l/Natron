@@ -23,6 +23,8 @@
 
 #include "ParticleDrag.h"
 
+#include "ParticleParallel.h"
+
 #include "../../AppManager.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
@@ -76,12 +78,11 @@ ParticleDrag::applyForce(ParticleDataPtr data, double time)
 
     float damping = 1.0f - dragVal;
 
-    for (size_t i = 0; i < data->particles.size(); ++i) {
-        Particle& p = data->particles[i];
+    forEachParticleParallel(data->particles, [&](Particle& p) {
         p.vx *= damping;
         p.vy *= damping;
         p.vz *= damping;
-    }
+    });
 }
 
 NATRON_NAMESPACE_EXIT

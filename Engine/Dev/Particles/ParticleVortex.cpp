@@ -23,6 +23,8 @@
 
 #include "ParticleVortex.h"
 
+#include "ParticleParallel.h"
+
 #include <cmath>
 
 #include "../../AppManager.h"
@@ -144,8 +146,7 @@ ParticleVortex::applyForce(ParticleDataPtr data, double time)
     ay /= axLen;
     az /= axLen;
 
-    for (size_t i = 0; i < data->particles.size(); ++i) {
-        Particle& p = data->particles[i];
+    forEachParticleParallel(data->particles, [&](Particle& p) {
 
         // Vector from center to particle
         float rx = p.px - ctrX;
@@ -159,7 +160,7 @@ ParticleVortex::applyForce(ParticleDataPtr data, double time)
         rz -= dot * az;
 
         float dist = std::sqrt(rx * rx + ry * ry + rz * rz);
-        if (dist < 0.001f) continue;
+        if (dist < 0.001f) return;
 
         // Tangent direction = cross(axis, r) -- this is the spin direction
         float tx = ay * rz - az * ry;
@@ -186,7 +187,7 @@ ParticleVortex::applyForce(ParticleDataPtr data, double time)
             p.vy -= nry * inwardPull * 0.01f;
             p.vz -= nrz * inwardPull * 0.01f;
         }
-    }
+    });
 }
 
 NATRON_NAMESPACE_EXIT

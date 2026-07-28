@@ -23,6 +23,8 @@
 
 #include "ParticleTurbulence2D.h"
 
+#include "ParticleParallel.h"
+
 #include <cmath>
 
 #include "../../AppManager.h"
@@ -241,33 +243,34 @@ ParticleTurbulence2D::applyForce(ParticleDataPtr data, double time)
     float timeOffset = (float)time * speed * 0.1f;
     float eps = 0.01f;
 
-    for (size_t i = 0; i < data->particles.size(); ++i) {
-        Particle& p = data->particles[i];
+    // Curl noise is by far the most expensive force (dozens of Perlin
+    // evaluations per particle per substep) and each particle is fully
+    // independent — fan out across cores.
+    forEachParticleParallel(data->particles, [&](Particle& p) {
 
         double x = (double)p.px * invScale + timeOffset;
         double y = (double)p.py * invScale;
         double z = (double)p.pz * invScale;
 
-        // Curl noise via finite differences of scalar noise
-        float curlX = (float)((fbm3(x, y + eps, z, octaves, lacunarity, gain) -
-                               fbm3(x, y - eps, z, octaves, lacunarity, gain) -
-                               fbm3(x, y, z + eps, octaves, lacunarity, gain) +
-                               fbm3(x, y, z - eps, octaves, lacunarity, gain)) / (2.0 * eps));
+        // Curl noise via finite differences of ONE scalar field — only 6
+        // distinct sample points exist; the previous code evaluated each of
+        // them exactly twice (12 fbm3 calls for 6 values, a strict 2x waste).
+        const double invTwoEps = 1.0 / (2.0 * eps);
+        const double dX = (fbm3(x + eps, y, z, octaves, lacunarity, gain) -
+                           fbm3(x - eps, y, z, octaves, lacunarity, gain)) * invTwoEps;
+        const double dY = (fbm3(x, y + eps, z, octaves, lacunarity, gain) -
+                           fbm3(x, y - eps, z, octaves, lacunarity, gain)) * invTwoEps;
+        const double dZ = (fbm3(x, y, z + eps, octaves, lacunarity, gain) -
+                           fbm3(x, y, z - eps, octaves, lacunarity, gain)) * invTwoEps;
 
-        float curlY = (float)((fbm3(x, y, z + eps, octaves, lacunarity, gain) -
-                               fbm3(x, y, z - eps, octaves, lacunarity, gain) -
-                               fbm3(x + eps, y, z, octaves, lacunarity, gain) +
-                               fbm3(x - eps, y, z, octaves, lacunarity, gain)) / (2.0 * eps));
-
-        float curlZ = (float)((fbm3(x + eps, y, z, octaves, lacunarity, gain) -
-                               fbm3(x - eps, y, z, octaves, lacunarity, gain) -
-                               fbm3(x, y + eps, z, octaves, lacunarity, gain) +
-                               fbm3(x, y - eps, z, octaves, lacunarity, gain)) / (2.0 * eps));
+        float curlX = (float)(dY - dZ);
+        float curlY = (float)(dZ - dX);
+        float curlZ = (float)(dX - dY);
 
         p.vx += curlX * strength * 0.1f;
         p.vy += curlY * strength * 0.1f;
         p.vz += curlZ * strength * 0.1f;
-    }
+    });
 }
 
 NATRON_NAMESPACE_EXIT

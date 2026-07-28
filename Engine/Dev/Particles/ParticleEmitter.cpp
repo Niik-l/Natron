@@ -864,6 +864,9 @@ ParticleEmitter::getParticleData(double time)
         float eb = (float)_imp->endColorB.lock()->getValueAtTime(frame);
         float fadeInFrac = (float)_imp->fadeIn.lock()->getValueAtTime(frame);
         float fadeOutFrac = (float)_imp->fadeOut.lock()->getValueAtTime(frame);
+        // Hoisted: this was an animated knob eval PER PARTICLE per frame.
+        const float cVar = _imp->colorVariance.lock()
+                         ? (float)_imp->colorVariance.lock()->getValueAtTime(frame) : 0.0f;
 
         for (size_t j = 0; j < data->particles.size(); ++j) {
             Particle& p = data->particles[j];
@@ -891,7 +894,6 @@ ParticleEmitter::getParticleData(double time)
             p.g = sg + (eg - sg) * ageFrac;
             p.b = sb + (eb - sb) * ageFrac;
 
-            float cVar = _imp->colorVariance.lock() ? (float)_imp->colorVariance.lock()->getValueAtTime(frame) : 0.0f;
             if (cVar > 0.001f) {
                 uint32_t h = p.id;
                 h ^= h >> 16; h *= 0x45d9f3b; h ^= h >> 16; h *= 0x45d9f3b; h ^= h >> 16;

@@ -23,6 +23,8 @@
 
 #include "ParticleGravity.h"
 
+#include "ParticleParallel.h"
+
 #include "../../AppManager.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
@@ -94,13 +96,12 @@ ParticleGravity::applyForce(ParticleDataPtr data, double time)
     float gz = (float)_imp->gravityZ.lock()->getValueAtTime(time);
     float str = (float)_imp->strength.lock()->getValueAtTime(time);
 
-    for (size_t i = 0; i < data->particles.size(); ++i) {
-        Particle& p = data->particles[i];
+    forEachParticleParallel(data->particles, [&](Particle& p) {
         float invMass = (p.mass > 0.001f) ? (1.0f / p.mass) : 1.0f;
         p.vx += gx * str * invMass;
         p.vy += gy * str * invMass;
         p.vz += gz * str * invMass;
-    }
+    });
 }
 
 NATRON_NAMESPACE_EXIT
