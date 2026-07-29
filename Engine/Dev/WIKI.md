@@ -356,6 +356,15 @@ Each particle carries these attributes through the pipeline:
 
 ## ScanlineRender Particle Settings
 
+**Trail mode (2026-07-29):** Particle Mode = Trail renders each particle as a
+camera-facing ribbon through its PAST positions (Houdini particle-trail style)
+— bounces draw bent Vs, arcs curve. Knobs (shown only in Trail mode): Trail
+Length (past frames), Head/Tail Width (teardrop taper), Tail Fade (alpha at
+the tail), Tail Tint (head→tail color — deep red = white-hot head, cooling
+tail). CyclesRender gets the same look via ParticleMaterial's Trails section
+(native Cycles curves). First render at a new frame simulates the history
+frames; the solver's cache makes later renders cheap.
+
 On the **Particles** tab of ScanlineRender:
 
 | Knob | Type | Default | Description |
