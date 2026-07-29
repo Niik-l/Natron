@@ -65,6 +65,7 @@ struct ParticleEmitterPrivate
 
     // Transform
     KnobDoubleWPtr translateX, translateY, translateZ;
+    KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobDoubleWPtr emitDirX, emitDirY, emitDirZ;
 
     // Color
@@ -282,6 +283,25 @@ ParticleEmitter::initializeKnobs()
         xformPage->addKnob(k); _imp->translateZ = k;
     }
     {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate X"));
+        k->setName("rotateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        k->setHintToolTip(tr("Rotate the whole emitter (degrees, extrinsic XYZ like the rest of the 3D system): the emitter SHAPE (disc, box, line, mask plane) and the emit direction turn together."));
+        xformPage->addKnob(k); _imp->rotateX = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Y"));
+        k->setName("rotateY"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateY = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Z"));
+        k->setName("rotateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        xformPage->addKnob(k); _imp->rotateZ = k;
+    }
+    {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Emit Direction X"));
         k->setName("emitDirX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
         k->setDisplayMinimum(-1.0); k->setDisplayMaximum(1.0);
@@ -475,6 +495,8 @@ ParticleEmitter::getParticleData(double time)
     // Override position + emit direction from transform input (input 1).
     // Each lookup is guarded so a non-KnobDouble knob with a matching name
     // (KnobChoice / KnobInt etc.) doesn't null-deref.
+    double parentRot[3][3] = { {1,0,0}, {0,1,0}, {0,0,1} };
+    bool hasParentRot = false;
     EffectInstancePtr xformInput = getInput(1);
     if (xformInput) {
         auto readDouble = [&](const char* name, double& out) {
@@ -502,6 +524,49 @@ ParticleEmitter::getParticleData(double time)
         edx = m[0][0]*ldx + m[0][1]*ldy + m[0][2]*ldz;
         edy = m[1][0]*ldx + m[1][1]*ldy + m[1][2]*ldz;
         edz = m[2][0]*ldx + m[2][1]*ldy + m[2][2]*ldz;
+
+        // Parent rotation also orients the emitter SHAPE below.
+        for (int rI = 0; rI < 3; ++rI)
+            for (int rJ = 0; rJ < 3; ++rJ)
+                parentRot[rI][rJ] = m[rI][rJ];
+        hasParentRot = (rxDeg != 0 || ryDeg != 0 || rzDeg != 0);
+    }
+
+    // Emitter-local Rotate knobs: turn the shape AND the emit direction
+    // together (composed with any transform-input rotation: parent * local).
+    double emitterRot[3][3] = { {1,0,0}, {0,1,0}, {0,0,1} };
+    bool hasEmitterRot = false;
+    {
+        const double lrx = _imp->rotateX.lock() ? _imp->rotateX.lock()->getValueAtTime(time) : 0.0;
+        const double lry = _imp->rotateY.lock() ? _imp->rotateY.lock()->getValueAtTime(time) : 0.0;
+        const double lrz = _imp->rotateZ.lock() ? _imp->rotateZ.lock()->getValueAtTime(time) : 0.0;
+        const bool hasLocalRot = (lrx != 0 || lry != 0 || lrz != 0);
+        if (hasLocalRot) {
+            double mLocal[3][3];
+            RotationConventions::compose(lrx, lry, lrz, mLocal);
+            // Local rotation also turns the emit direction.
+            const double ldx = edx, ldy = edy, ldz = edz;
+            edx = mLocal[0][0]*ldx + mLocal[0][1]*ldy + mLocal[0][2]*ldz;
+            edy = mLocal[1][0]*ldx + mLocal[1][1]*ldy + mLocal[1][2]*ldz;
+            edz = mLocal[2][0]*ldx + mLocal[2][1]*ldy + mLocal[2][2]*ldz;
+            if (hasParentRot) {
+                for (int rI = 0; rI < 3; ++rI)
+                    for (int rJ = 0; rJ < 3; ++rJ)
+                        emitterRot[rI][rJ] = parentRot[rI][0]*mLocal[0][rJ]
+                                           + parentRot[rI][1]*mLocal[1][rJ]
+                                           + parentRot[rI][2]*mLocal[2][rJ];
+            } else {
+                for (int rI = 0; rI < 3; ++rI)
+                    for (int rJ = 0; rJ < 3; ++rJ)
+                        emitterRot[rI][rJ] = mLocal[rI][rJ];
+            }
+            hasEmitterRot = true;
+        } else if (hasParentRot) {
+            for (int rI = 0; rI < 3; ++rI)
+                for (int rJ = 0; rJ < 3; ++rJ)
+                    emitterRot[rI][rJ] = parentRot[rI][rJ];
+            hasEmitterRot = true;
+        }
     }
 
     float colR = (float)_imp->startColorR.lock()->getValueAtTime(time);
@@ -777,6 +842,14 @@ ParticleEmitter::getParticleData(double time)
                 }
                 default: // Point
                     break;
+            }
+            // Rotate the shape offset by the emitter rotation (Card3D mask
+            // offsets are already world-based via the card's own transform).
+            if (hasEmitterRot && !(shapeType == 4 && card3dMask)) {
+                const float ox = offX, oy = offY, oz = offZ;
+                offX = (float)(emitterRot[0][0]*ox + emitterRot[0][1]*oy + emitterRot[0][2]*oz);
+                offY = (float)(emitterRot[1][0]*ox + emitterRot[1][1]*oy + emitterRot[1][2]*oz);
+                offZ = (float)(emitterRot[2][0]*ox + emitterRot[2][1]*oy + emitterRot[2][2]*oz);
             }
             p.px = (float)emPosX + offX;
             p.py = (float)emPosY + offY;

@@ -47,6 +47,7 @@ The source of all particles. Spawns particles each frame with initial velocity, 
 | Emitter Shape | Choice | Point | Point, Disc, Sphere, Line |
 | Shape Size | Double | 1.0 | Radius of emitter shape |
 | Translate X/Y/Z | Double | 0,0,0 | Emitter world position |
+| Rotate X/Y/Z | Double | 0,0,0 | Rotate the whole emitter — shape (disc/box/line/mask plane) and emit direction turn together; composes with the transform input |
 | Emit Direction X/Y/Z | Double | 0,1,0 | Emission direction (Y-up default) |
 | Start Color R/G/B/A | Double | 1,1,1,1 | Initial particle color |
 | End Color R/G/B | Double | 1,1,1 | Color at end of life |
