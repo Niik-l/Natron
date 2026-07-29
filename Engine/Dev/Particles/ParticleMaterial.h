@@ -111,6 +111,15 @@ public:
      *  material's base color (and drive alpha by particle age fade). */
     bool getTintWithParticleColor() const;
 
+    // Trails (Cycles): render particles as curve ribbons through their past
+    // positions instead of points. Read by CyclesRenderer's particle branch.
+    bool getTrailsEnabled() const;
+    int getTrailLength(double time) const;
+    double getTrailHeadRadius(double time) const;
+    double getTrailTailRadius(double time) const;
+    double getTrailTailFade(double time) const;
+    void getTrailTailTint(double time, double& r, double& g, double& b) const;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;

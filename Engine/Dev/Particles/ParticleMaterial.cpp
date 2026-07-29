@@ -22,6 +22,7 @@
 
 #include "ParticleMaterial.h"
 
+#include <algorithm>
 #include <cassert>
 
 #include "../../AppManager.h"
@@ -41,6 +42,14 @@ struct ParticleMaterialPrivate
     KnobDoubleWPtr roughness;
     KnobDoubleWPtr metallic;
     KnobBoolWPtr tintWithColor;
+
+    // Trails (Cycles)
+    KnobBoolWPtr   trailsEnabled;
+    KnobIntWPtr    trailLength;
+    KnobDoubleWPtr trailHeadRadius;
+    KnobDoubleWPtr trailTailRadius;
+    KnobDoubleWPtr trailTailFade;
+    KnobColorWPtr  trailTailTint;
 };
 
 ParticleMaterial::ParticleMaterial(NodePtr node)
@@ -145,6 +154,68 @@ ParticleMaterial::initializeKnobs()
     tint->setDefaultValue(true);
     page->addKnob(tint);
     _imp->tintWithColor = tint;
+
+    KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Trails"));
+    sep->setName("sepTrails");
+    page->addKnob(sep);
+
+    KnobBoolPtr tren = AppManager::createKnob<KnobBool>(this, tr("Render as Trails"));
+    tren->setName("trailsEnabled");
+    tren->setDefaultValue(false);
+    tren->setAnimationEnabled(false);
+    tren->setHintToolTip(tr("Render each particle as a curve ribbon through its PAST positions "
+                            "(native Cycles curves) instead of a point — bent trails through "
+                            "bounces and arcs. The trail follows the real simulated path."));
+    page->addKnob(tren);
+    _imp->trailsEnabled = tren;
+
+    KnobIntPtr tlen = AppManager::createKnob<KnobInt>(this, tr("Trail Length"));
+    tlen->setName("trailLength");
+    tlen->setDefaultValue(4);
+    tlen->setMinimum(1); tlen->setMaximum(16);
+    tlen->setAnimationEnabled(true);
+    tlen->setAddNewLine(false);
+    tlen->setHintToolTip(tr("How many past frames the trail spans."));
+    page->addKnob(tlen);
+    _imp->trailLength = tlen;
+
+    KnobDoublePtr thr = AppManager::createKnob<KnobDouble>(this, tr("Head Radius"));
+    thr->setName("trailHeadRadius");
+    thr->setDefaultValue(1.0);
+    thr->setMinimum(0.0); thr->setDisplayMinimum(0.0); thr->setDisplayMaximum(4.0);
+    thr->setAnimationEnabled(true);
+    thr->setAddNewLine(false);
+    thr->setHintToolTip(tr("Trail radius at the particle (head), as a multiple of half the particle size."));
+    page->addKnob(thr);
+    _imp->trailHeadRadius = thr;
+
+    KnobDoublePtr ttr = AppManager::createKnob<KnobDouble>(this, tr("Tail Radius"));
+    ttr->setName("trailTailRadius");
+    ttr->setDefaultValue(0.25);
+    ttr->setMinimum(0.0); ttr->setDisplayMinimum(0.0); ttr->setDisplayMaximum(4.0);
+    ttr->setAnimationEnabled(true);
+    ttr->setHintToolTip(tr("Trail radius at the oldest point (tail). Smaller than Head Radius = teardrop."));
+    page->addKnob(ttr);
+    _imp->trailTailRadius = ttr;
+
+    KnobDoublePtr tfd = AppManager::createKnob<KnobDouble>(this, tr("Tail Fade"));
+    tfd->setName("trailTailFade");
+    tfd->setDefaultValue(0.0);
+    tfd->setMinimum(0.0); tfd->setMaximum(1.0);
+    tfd->setAnimationEnabled(true);
+    tfd->setAddNewLine(false);
+    tfd->setHintToolTip(tr("Alpha at the tail relative to the head. 0 = the trail fades out completely."));
+    page->addKnob(tfd);
+    _imp->trailTailFade = tfd;
+
+    KnobColorPtr ttn = AppManager::createKnob<KnobColor>(this, tr("Tail Tint"), 3);
+    ttn->setName("trailTailTint");
+    ttn->setDefaultValue(1.0, 0); ttn->setDefaultValue(1.0, 1); ttn->setDefaultValue(1.0, 2);
+    ttn->setAnimationEnabled(true);
+    ttn->setHintToolTip(tr("Color multiplier at the tail, lerped along the trail. White = off. "
+                           "Deep red makes spark heads burn white-hot while tails cool."));
+    page->addKnob(ttn);
+    _imp->trailTailTint = ttn;
 }
 
 ParticleDataPtr
@@ -191,6 +262,52 @@ ParticleMaterial::getTintWithParticleColor() const
 {
     KnobBoolPtr k = _imp->tintWithColor.lock();
     return k ? k->getValue() : true;
+}
+
+bool
+ParticleMaterial::getTrailsEnabled() const
+{
+    KnobBoolPtr k = _imp->trailsEnabled.lock();
+    return k && k->getValue();
+}
+
+int
+ParticleMaterial::getTrailLength(double time) const
+{
+    KnobIntPtr k = _imp->trailLength.lock();
+    return k ? std::max(1, k->getValueAtTime(time)) : 4;
+}
+
+double
+ParticleMaterial::getTrailHeadRadius(double time) const
+{
+    KnobDoublePtr k = _imp->trailHeadRadius.lock();
+    return k ? k->getValueAtTime(time) : 1.0;
+}
+
+double
+ParticleMaterial::getTrailTailRadius(double time) const
+{
+    KnobDoublePtr k = _imp->trailTailRadius.lock();
+    return k ? k->getValueAtTime(time) : 0.25;
+}
+
+double
+ParticleMaterial::getTrailTailFade(double time) const
+{
+    KnobDoublePtr k = _imp->trailTailFade.lock();
+    return k ? k->getValueAtTime(time) : 0.0;
+}
+
+void
+ParticleMaterial::getTrailTailTint(double time, double& r, double& g, double& b) const
+{
+    r = g = b = 1.0;
+    if (KnobColorPtr k = _imp->trailTailTint.lock()) {
+        r = k->getValueAtTime(time, 0);
+        g = k->getValueAtTime(time, 1);
+        b = k->getValueAtTime(time, 2);
+    }
 }
 
 StatusEnum

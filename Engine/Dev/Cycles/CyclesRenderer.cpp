@@ -39,6 +39,7 @@
 #include "scene/mesh.h"
 #include "scene/object.h"
 #include "scene/pointcloud.h"
+#include "scene/hair.h"
 #include "scene/volume.h"
 #include "scene/image.h"
 #include "scene/image_vdb.h"
@@ -80,6 +81,7 @@
 #include "Engine/Dev/Scene3D/Volume3D.h"
 #include "Engine/Dev/Particles/ParticleProvider.h"
 #include "Engine/Dev/Particles/ParticleMaterial.h"
+#include <unordered_map>
 #include "Engine/Dev/DotUtils.h"
 #include "Engine/Dev/Particles/ParticleInstance.h"
 #include "Engine/Dev/Scene3D/Cube3D.h"
@@ -1632,19 +1634,142 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
             int count = particleData->numParticles();
 
-            // Create PointCloud geometry
-            ccl::PointCloud* pc = scene->create_node<ccl::PointCloud>();
-            pc->reserve(count);
+            // Shading override: walk the particle chain (input 0, through
+            // Dots) for a ParticleMaterial node. Found BEFORE geometry
+            // creation because its Trails toggle selects curve geometry.
+            ParticleMaterial* pmat = nullptr;
+            {
+                EffectInstancePtr cur = effect;
+                for (int depth = 0; cur && depth < 64; ++depth) {
+                    pmat = dynamic_cast<ParticleMaterial*>(cur.get());
+                    if (pmat) break;
+                    if (!dynamic_cast<ParticleProvider*>(cur.get())) break; // left the chain
+                    cur = skipDots(cur->getInput(0));
+                }
+            }
+            MaterialProvider* particleMatProv = pmat ? pmat->getParticleMaterialProvider() : nullptr;
+            const bool wantTrails = pmat && pmat->getTrailsEnabled();
 
-            for (int pi = 0; pi < count; ++pi) {
-                const Particle& p = particleData->particles[pi];
-                pc->add_point(ccl::make_float3(p.px, p.py, p.pz),
-                              p.size > 0.001f ? p.size : 0.01f,
-                              0);
+            fprintf(stderr, "[CyclesParticles] shader select: ParticleMaterial=%s material=%s tint=%d emission=%.2f trails=%d\n",
+                    pmat ? "FOUND" : "none",
+                    particleMatProv ? "connected" : "none",
+                    pmat ? (int)pmat->getTintWithParticleColor() : -1,
+                    pmat ? pmat->getEmissionStrength(time) : -1.0,
+                    (int)wantTrails);
+            fflush(stderr);
+
+            ccl::Geometry* particleGeom = nullptr;
+            ccl::PointCloud* pc = nullptr;
+            ccl::Hair* hair = nullptr;
+
+            // Per-key colors/emission gathered during trail construction.
+            std::vector<ccl::float4> keyColors;
+            std::vector<float> keyEmis;
+
+            if (wantTrails) {
+                // --- Trail mode: one curve per particle through its PAST
+                // positions (matched by ID via the provider's frame cache).
+                // Cycles renders these as camera-facing ribbons natively.
+                const int trailLen = pmat->getTrailLength(time);
+                const float headR = (float)pmat->getTrailHeadRadius(time);
+                const float tailR = (float)pmat->getTrailTailRadius(time);
+                const float tailFade = (float)pmat->getTrailTailFade(time);
+                double ttr, ttg, ttb;
+                pmat->getTrailTailTint(time, ttr, ttg, ttb);
+
+                std::vector<std::unordered_map<uint32_t, const Particle*> > history;
+                std::vector<ParticleDataPtr> historyData; // keeps snapshots alive
+                for (int k = 1; k <= trailLen; ++k) {
+                    ParticleDataPtr past = provider ? provider->getParticleData(time - k) : ParticleDataPtr();
+                    if (!past || past->particles.empty()) break;
+                    historyData.push_back(past);
+                    history.push_back(std::unordered_map<uint32_t, const Particle*>());
+                    std::unordered_map<uint32_t, const Particle*>& m = history.back();
+                    m.reserve(past->particles.size());
+                    for (size_t q = 0; q < past->particles.size(); ++q) {
+                        m[past->particles[q].id] = &past->particles[q];
+                    }
+                }
+
+                // Chains: head (current) then progressively older.
+                std::vector<ccl::float3> keyPos;
+                std::vector<float> keyRad;
+                std::vector<int> curveFirstKey;
+                std::vector<int> curveNumKeys;
+                keyPos.reserve((size_t)count * (size_t)(trailLen + 1));
+                keyRad.reserve(keyPos.capacity());
+                keyColors.reserve(keyPos.capacity());
+                keyEmis.reserve(keyPos.capacity());
+
+                for (int pi = 0; pi < count; ++pi) {
+                    const Particle& p = particleData->particles[pi];
+                    const float baseR = (p.size > 0.001f ? p.size : 0.01f) * 0.5f;
+                    const float ageFrac = (p.life > 0) ? (p.age / p.life) : 1.0f;
+                    const float headAlpha = p.a * (1.0f - ageFrac);
+
+                    const int firstKey = (int)keyPos.size();
+                    int nKeys = 0;
+
+                    // head
+                    keyPos.push_back(ccl::make_float3(p.px, p.py, p.pz));
+                    keyRad.push_back(baseR * headR);
+                    keyColors.push_back(ccl::make_float4(p.r, p.g, p.b, headAlpha));
+                    keyEmis.push_back(p.emission);
+                    ++nKeys;
+
+                    for (size_t k = 0; k < history.size(); ++k) {
+                        std::unordered_map<uint32_t, const Particle*>::const_iterator it = history[k].find(p.id);
+                        if (it == history[k].end()) break;
+                        const Particle& hp = *it->second;
+                        const float t = (float)(k + 1) / (float)trailLen;
+                        keyPos.push_back(ccl::make_float3(hp.px, hp.py, hp.pz));
+                        keyRad.push_back(baseR * (headR + (tailR - headR) * t));
+                        keyColors.push_back(ccl::make_float4(
+                            p.r * (1.0f + ((float)ttr - 1.0f) * t),
+                            p.g * (1.0f + ((float)ttg - 1.0f) * t),
+                            p.b * (1.0f + ((float)ttb - 1.0f) * t),
+                            headAlpha * (1.0f + (tailFade - 1.0f) * t)));
+                        keyEmis.push_back(p.emission * (1.0f + (tailFade - 1.0f) * t));
+                        ++nKeys;
+                    }
+                    if (nKeys < 2) {
+                        // Newborn: synthesize a one-frame-back tail from velocity.
+                        keyPos.push_back(ccl::make_float3(p.px - p.vx, p.py - p.vy, p.pz - p.vz));
+                        keyRad.push_back(baseR * tailR);
+                        keyColors.push_back(ccl::make_float4(p.r, p.g, p.b, headAlpha * tailFade));
+                        keyEmis.push_back(p.emission * tailFade);
+                        ++nKeys;
+                    }
+                    curveFirstKey.push_back(firstKey);
+                    curveNumKeys.push_back(nKeys);
+                }
+
+                hair = scene->create_node<ccl::Hair>();
+                hair->reserve_curves((int)curveFirstKey.size(), (int)keyPos.size());
+                for (size_t ki = 0; ki < keyPos.size(); ++ki) {
+                    hair->add_curve_key(keyPos[ki], keyRad[ki]);
+                }
+                for (size_t ci = 0; ci < curveFirstKey.size(); ++ci) {
+                    hair->add_curve(curveFirstKey[ci], 0);
+                }
+                particleGeom = hair;
+            } else {
+                // --- Point mode (default): PointCloud geometry ---
+                pc = scene->create_node<ccl::PointCloud>();
+                pc->reserve(count);
+
+                for (int pi = 0; pi < count; ++pi) {
+                    const Particle& p = particleData->particles[pi];
+                    pc->add_point(ccl::make_float3(p.px, p.py, p.pz),
+                                  p.size > 0.001f ? p.size : 0.01f,
+                                  0);
+                }
+                particleGeom = pc;
             }
 
-            // Motion blur: evaluate particles at a second time step
-            if (motionBlur && motionBlur->enabled) {
+            // Motion blur: velocity-extrapolated shutter positions (points
+            // only — a trail IS the motion representation).
+            if (pc && motionBlur && motionBlur->enabled) {
                 // Compute shutter open/close times
                 float shutterOpen = 0, shutterClose = 0;
                 float st = motionBlur->shutterTime;
@@ -1661,7 +1786,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 // velocity (displacement per frame) — the same approach as
                 // ScanlineRender's stretch blur. Re-simulating at shutter
                 // times returned index-SHIFTED arrays as particles die/spawn
-                // (a streak connected two unrelated particles → giant
+                // (a streak connected two unrelated particles -> giant
                 // criss-cross web), and providers snap to whole frames so the
                 // streaks were a full frame long instead of a shutter
                 // fraction. Velocity extrapolation is exact per particle.
@@ -1691,29 +1816,6 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 }
             }
 
-            // Shading override: walk the particle chain (input 0, through
-            // Dots) for a ParticleMaterial node. With one connected to a
-            // material, particles get the full PBR material; without one the
-            // default per-particle color shader below uses its knob values.
-            ParticleMaterial* pmat = nullptr;
-            {
-                EffectInstancePtr cur = effect;
-                for (int depth = 0; cur && depth < 64; ++depth) {
-                    pmat = dynamic_cast<ParticleMaterial*>(cur.get());
-                    if (pmat) break;
-                    if (!dynamic_cast<ParticleProvider*>(cur.get())) break; // left the chain
-                    cur = skipDots(cur->getInput(0));
-                }
-            }
-            MaterialProvider* particleMatProv = pmat ? pmat->getParticleMaterialProvider() : nullptr;
-
-            fprintf(stderr, "[CyclesParticles] shader select: ParticleMaterial=%s material=%s tint=%d emission=%.2f\n",
-                    pmat ? "FOUND" : "none",
-                    particleMatProv ? "connected" : "none",
-                    pmat ? (int)pmat->getTintWithParticleColor() : -1,
-                    pmat ? pmat->getEmissionStrength(time) : -1.0);
-            fflush(stderr);
-
             ccl::Shader* pShader = nullptr;
             if (particleMatProv) {
                 // Full PBR material, optionally tinted by the per-particle
@@ -1742,8 +1844,12 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 colorAttr->set_attribute(ccl::ustring("particle_color"));
                 pGraph->connect(colorAttr->output("Color"), pBsdf->input("Base Color"));
                 pGraph->connect(colorAttr->output("Color"), pBsdf->input("Emission Color"));
+                if (wantTrails) {
+                    // Trails carry a per-key alpha fade — honor it.
+                    pGraph->connect(colorAttr->output("Alpha"), pBsdf->input("Alpha"));
+                }
                 // Per-particle emission (ParticleAttribute Emission section)
-                // × the node/hardcoded strength.
+                // x the node/hardcoded strength.
                 ccl::AttributeNode* emisAttr = pGraph->create_node<ccl::AttributeNode>();
                 emisAttr->set_attribute(ccl::ustring("particle_emission"));
                 ccl::MathNode* emisMul = pGraph->create_node<ccl::MathNode>();
@@ -1761,34 +1867,46 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
             ccl::array<ccl::Node*> used_shaders;
             used_shaders.push_back_slow(pShader);
-            pc->set_used_shaders(used_shaders);
+            particleGeom->set_used_shaders(used_shaders);
 
-            // Set per-point color attribute ("particle_color" — see the shader
-            // note about the reserved "vertex_color" standard name).
-            ccl::Attribute* vcol = pc->attributes.add(ccl::ustring("particle_color"),
-                                                       ccl::TypeRGBA,
-                                                       ccl::ATTR_ELEMENT_VERTEX);
-            ccl::float4* colorData = vcol->data_float4();
-            for (int pi = 0; pi < count; ++pi) {
-                const Particle& p = particleData->particles[pi];
-                float ageFrac = (p.life > 0) ? (p.age / p.life) : 1.0f;
-                float alpha = p.a * (1.0f - ageFrac);
-                colorData[pi] = ccl::make_float4(p.r, p.g, p.b, alpha);
-            }
+            // Attributes ("particle_color" / "particle_emission" — see the
+            // shader note about the reserved "vertex_color" standard name).
+            if (hair) {
+                ccl::Attribute* vcol = hair->attributes.add(ccl::ustring("particle_color"),
+                                                            ccl::TypeRGBA,
+                                                            ccl::ATTR_ELEMENT_CURVE_KEY);
+                ccl::float4* colorData = vcol->data_float4();
+                for (size_t ki = 0; ki < keyColors.size(); ++ki) colorData[ki] = keyColors[ki];
 
-            // Per-particle emission multiplier (ParticleAttribute Emission
-            // section) — scales the shader's emission strength per point.
-            ccl::Attribute* vemis = pc->attributes.add(ccl::ustring("particle_emission"),
-                                                        ccl::TypeFloat,
-                                                        ccl::ATTR_ELEMENT_VERTEX);
-            float* emisData = vemis->data_float();
-            for (int pi = 0; pi < count; ++pi) {
-                emisData[pi] = particleData->particles[pi].emission;
+                ccl::Attribute* vemis = hair->attributes.add(ccl::ustring("particle_emission"),
+                                                             ccl::TypeFloat,
+                                                             ccl::ATTR_ELEMENT_CURVE_KEY);
+                float* emisData = vemis->data_float();
+                for (size_t ki = 0; ki < keyEmis.size(); ++ki) emisData[ki] = keyEmis[ki];
+            } else {
+                ccl::Attribute* vcol = pc->attributes.add(ccl::ustring("particle_color"),
+                                                           ccl::TypeRGBA,
+                                                           ccl::ATTR_ELEMENT_VERTEX);
+                ccl::float4* colorData = vcol->data_float4();
+                for (int pi = 0; pi < count; ++pi) {
+                    const Particle& p = particleData->particles[pi];
+                    float ageFrac = (p.life > 0) ? (p.age / p.life) : 1.0f;
+                    float alpha = p.a * (1.0f - ageFrac);
+                    colorData[pi] = ccl::make_float4(p.r, p.g, p.b, alpha);
+                }
+
+                ccl::Attribute* vemis = pc->attributes.add(ccl::ustring("particle_emission"),
+                                                            ccl::TypeFloat,
+                                                            ccl::ATTR_ELEMENT_VERTEX);
+                float* emisData = vemis->data_float();
+                for (int pi = 0; pi < count; ++pi) {
+                    emisData[pi] = particleData->particles[pi].emission;
+                }
             }
 
             // Create object
             ccl::Object* obj = scene->create_node<ccl::Object>();
-            obj->set_geometry(pc);
+            obj->set_geometry(particleGeom);
             obj->set_tfm(ccl::transform_identity());
 
             // Apply CyclesRenderPass visibility if provided
