@@ -30,6 +30,7 @@
 #include <cstdio>   // fprintf/fflush — used by Phase 3 GLSL helpers
 #include <cstring>
 #include <vector>
+#include <unordered_map>
 
 #include "RotationConventions.h"
 
@@ -87,6 +88,11 @@ struct ScanlineRenderPrivate
     KnobChoiceWPtr particleBlend;  // Additive, Over
     KnobBoolWPtr   particleSolid;  // edge alpha = p.a (true) vs fade-to-0 (false)
     KnobDoubleWPtr particleScale;  // global size multiplier
+    KnobIntWPtr    trailLength;      // Trail mode: past frames spanned
+    KnobDoubleWPtr trailHeadWidth;   // Trail mode: width at the particle
+    KnobDoubleWPtr trailTailWidth;   // Trail mode: width at the oldest point
+    KnobDoubleWPtr trailTailFade;    // Trail mode: alpha at the tail
+    KnobColorWPtr  trailTailTint;    // Trail mode: color multiply at the tail
     KnobDoubleWPtr particleMotionBlur; // velocity stretch amount (legacy cheat mode)
 
     // Global multi-sample motion blur — applies to every geo + particle +
@@ -388,10 +394,51 @@ ScanlineRender::initializeKnobs()
         entries.push_back(ChoiceOption("Disc", "", "Camera-facing filled circle with soft edge"));
         entries.push_back(ChoiceOption("Sphere", "", "Lit sphere with simple N dot L shading"));
         entries.push_back(ChoiceOption("Sprite", "", "Camera-facing quad (current behavior)"));
+        entries.push_back(ChoiceOption("Trail", "", "Multi-frame ribbon through each particle's PAST positions — bent trails through bounces and arcs (Houdini particle-trail style). Width/alpha taper head to tail; see the Trail knobs."));
         k->populateChoices(entries);
         k->setDefaultValue(3); // Sprite default (matches current behavior)
         partPage->addKnob(k); _imp->particleMode = k;
     }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Trail Length"));
+        k->setName("trailLength"); k->setDefaultValue(4); k->setAnimationEnabled(true);
+        k->setMinimum(1); k->setMaximum(16); k->setDisplayMinimum(1); k->setDisplayMaximum(16);
+        k->setAddNewLine(false);
+        k->setHintToolTip(tr("Trail mode: how many PAST frames the ribbon spans. Trails bend through bounces (V shapes) because they follow the particle's real path."));
+        partPage->addKnob(k); _imp->trailLength = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Head Width"));
+        k->setName("trailHeadWidth"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(4.0);
+        k->setAddNewLine(false);
+        k->setHintToolTip(tr("Trail width at the particle (head), as a multiple of particle size."));
+        partPage->addKnob(k); _imp->trailHeadWidth = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Tail Width"));
+        k->setName("trailTailWidth"); k->setDefaultValue(0.25); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(4.0);
+        k->setHintToolTip(tr("Trail width at the oldest point (tail), as a multiple of particle size. Smaller than Head Width = teardrop."));
+        partPage->addKnob(k); _imp->trailTailWidth = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Tail Fade"));
+        k->setName("trailTailFade"); k->setDefaultValue(0.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setAddNewLine(false);
+        k->setHintToolTip(tr("Alpha at the tail relative to the head. 0 = trail fades out completely toward the tail."));
+        partPage->addKnob(k); _imp->trailTailFade = k;
+    }
+    {
+        KnobColorPtr k = AppManager::createKnob<KnobColor>(this, tr("Tail Tint"), 3);
+        k->setName("trailTailTint");
+        k->setDefaultValue(1.0, 0); k->setDefaultValue(1.0, 1); k->setDefaultValue(1.0, 2);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Color multiplier at the tail, lerped along the trail. White = off. For sparks try a deep red so the head burns white-hot and the tail cools."));
+        partPage->addKnob(k); _imp->trailTailTint = k;
+    }
+    refreshTrailKnobsVisibility(); // hidden unless Particle Mode = Trail
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Blend Mode"));
         k->setName("particleBlend"); k->setAnimationEnabled(false);
@@ -484,12 +531,30 @@ ScanlineRender::initializeKnobs()
     }
 }
 
+void
+ScanlineRender::refreshTrailKnobsVisibility()
+{
+    const bool isTrail = _imp->particleMode.lock()
+                       && _imp->particleMode.lock()->getValue() == 4;
+    if (KnobIntPtr k = _imp->trailLength.lock())      k->setSecret(!isTrail);
+    if (KnobDoublePtr k = _imp->trailHeadWidth.lock()) k->setSecret(!isTrail);
+    if (KnobDoublePtr k = _imp->trailTailWidth.lock()) k->setSecret(!isTrail);
+    if (KnobDoublePtr k = _imp->trailTailFade.lock())  k->setSecret(!isTrail);
+    if (KnobColorPtr k = _imp->trailTailTint.lock())   k->setSecret(!isTrail);
+}
+
 bool
 ScanlineRender::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
                              ViewSpec /*view*/, double /*time*/,
                              bool /*originatedFromMainThread*/)
 {
     if (!k) return false;
+
+    // Trail knobs only matter in Trail mode.
+    if (_imp->particleMode.lock() && k == _imp->particleMode.lock().get()) {
+        refreshTrailKnobsVisibility();
+        return false; // mode change still evaluates normally
+    }
 
     // Sync to Project — copy project default format → width/height.
     KnobButtonPtr syncBtn = _imp->syncToProject.lock();
@@ -2565,6 +2630,8 @@ ScanlineRender::render(const RenderActionArgs& args)
 
     // Underlying particle data for motion blur offsetting (works for both sprites and instances)
     ParticleDataPtr motionBlurPData;
+    // Provider kept for the Trail particle mode (queries past frames' data).
+    ParticleProvider* trailProvider = nullptr;
 
     // Check for particle nodes (only if NOT an instancer — instancer renders geo, not sprites)
     if (!particleInstancer) {
@@ -2572,6 +2639,7 @@ ScanlineRender::render(const RenderActionArgs& args)
         if (pProvider) {
             particleData = pProvider->getParticleData(args.time);
             motionBlurPData = particleData;
+            trailProvider = pProvider;
         }
     } else {
         // Instancer: get the upstream particle data for motion blur offsetting
@@ -2614,6 +2682,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                 if (sProvider) {
                     particleData = sProvider->getParticleData(args.time);
                     motionBlurPData = particleData;
+                    trailProvider = sProvider;
                 } else {
                     extractGeometries(sceneInput, args.time, args.view, geoObjects);
                 }
@@ -3582,6 +3651,123 @@ ScanlineRender::render(const RenderActionArgs& args)
                 tl.u = 0.0f; tl.v = 1.0f;
                 verts.push_back(bl); verts.push_back(br); verts.push_back(tr);
                 verts.push_back(bl); verts.push_back(tr); verts.push_back(tl);
+            }
+
+            drawParticlePrimitives(GL_TRIANGLES, verts);
+        } else if (partMode == 4 && glslParticleProg) {
+            // --- Trail mode: multi-frame camera-facing ribbon through each
+            // particle's PAST positions (Houdini particle-trail style). The
+            // ribbon follows the real path, so bounces render as bent Vs and
+            // arcs curve — unlike the straight velocity streaks. Width, alpha
+            // and color taper head -> tail via the Trail knobs.
+            const int trailLen = _imp->trailLength.lock() ? _imp->trailLength.lock()->getValueAtTime(args.time) : 4;
+            const float headW = _imp->trailHeadWidth.lock() ? (float)_imp->trailHeadWidth.lock()->getValueAtTime(args.time) : 1.0f;
+            const float tailW = _imp->trailTailWidth.lock() ? (float)_imp->trailTailWidth.lock()->getValueAtTime(args.time) : 0.25f;
+            const float tailFade = _imp->trailTailFade.lock() ? (float)_imp->trailTailFade.lock()->getValueAtTime(args.time) : 0.0f;
+            float tintR = 1.f, tintG = 1.f, tintB = 1.f;
+            if (KnobColorPtr tk = _imp->trailTailTint.lock()) {
+                tintR = (float)tk->getValueAtTime(args.time, 0);
+                tintG = (float)tk->getValueAtTime(args.time, 1);
+                tintB = (float)tk->getValueAtTime(args.time, 2);
+            }
+
+            // Past-frame snapshots, id -> particle. The solver's frame cache
+            // makes these lookups cheap after the first render.
+            std::vector<std::unordered_map<uint32_t, const Particle*> > history;
+            std::vector<ParticleDataPtr> historyData; // keeps snapshots alive
+            if (trailProvider) {
+                for (int k = 1; k <= trailLen; ++k) {
+                    ParticleDataPtr past = trailProvider->getParticleData(args.time - k);
+                    if (!past || past->particles.empty()) break;
+                    historyData.push_back(past);
+                    history.push_back(std::unordered_map<uint32_t, const Particle*>());
+                    std::unordered_map<uint32_t, const Particle*>& m = history.back();
+                    m.reserve(past->particles.size());
+                    for (size_t q = 0; q < past->particles.size(); ++q) {
+                        m[past->particles[q].id] = &past->particles[q];
+                    }
+                }
+            }
+
+            std::vector<ParticleVertex> verts;
+            verts.reserve((size_t)particleData->numParticles() * (size_t)(trailLen * 6));
+            std::vector<const Particle*> chain;
+            chain.reserve((size_t)trailLen + 1);
+            Particle synth; // synthesized 1-frame-back tail for newborns
+
+            for (int i = 0; i < particleData->numParticles(); ++i) {
+                const Particle& p = particleData->particles[i];
+                const float pe = emissiveBoost ? p.emission : 1.0f;
+                float alpha = p.a;
+                if (alpha < 0.001f) continue;
+
+                // Head (current) then progressively older, matched BY ID —
+                // stop where the particle didn't exist yet.
+                chain.clear();
+                chain.push_back(&p);
+                for (size_t k = 0; k < history.size(); ++k) {
+                    std::unordered_map<uint32_t, const Particle*>::const_iterator it = history[k].find(p.id);
+                    if (it == history[k].end()) break;
+                    chain.push_back(it->second);
+                }
+                if (chain.size() < 2) {
+                    // Newborn with no history — synthesize a one-frame-back
+                    // tail from velocity so it doesn't pop invisible.
+                    synth = p;
+                    synth.px = p.px - p.vx;
+                    synth.py = p.py - p.vy;
+                    synth.pz = p.pz - p.vz;
+                    chain.push_back(&synth);
+                }
+                const int nPts = (int)chain.size();
+
+                // Ribbon: two vertices per chain point, offset along the
+                // screen-space right vector (perpendicular to both the local
+                // trail direction and the camera forward).
+                float prevLx = 0, prevLy = 0, prevLz = 0, prevRx = 0, prevRy = 0, prevRz = 0;
+                float prevA = 0, prevCr = 0, prevCg = 0, prevCb = 0;
+                for (int j = 0; j < nPts; ++j) {
+                    const Particle& cp = *chain[j];
+                    // taper parameter over the FULL requested length so short
+                    // chains keep their head look
+                    const float t = (trailLen > 0) ? (float)j / (float)trailLen : 0.f;
+                    const float w = cp.size * 0.5f * globalScale * (headW + (tailW - headW) * t);
+                    const float aj = alpha * (1.0f + (tailFade - 1.0f) * t);
+                    const float cr = p.r * pe * (1.0f + (tintR - 1.0f) * t);
+                    const float cg = p.g * pe * (1.0f + (tintG - 1.0f) * t);
+                    const float cb = p.b * pe * (1.0f + (tintB - 1.0f) * t);
+
+                    // Local direction: central difference where possible
+                    const Particle& pn = *chain[(j + 1 < nPts) ? j + 1 : j];
+                    const Particle& pp2 = *chain[(j > 0) ? j - 1 : j];
+                    float dx = pp2.px - pn.px, dy = pp2.py - pn.py, dz = pp2.pz - pn.pz;
+                    float dLen = std::sqrt(dx*dx + dy*dy + dz*dz);
+                    if (dLen < 1e-6f) { dx = 1; dy = 0; dz = 0; dLen = 1; }
+                    dx /= dLen; dy /= dLen; dz /= dLen;
+                    // right = dir x fwd (camera-facing ribbon)
+                    float rX = dy * fwdZ - dz * fwdY;
+                    float rY = dz * fwdX - dx * fwdZ;
+                    float rZ = dx * fwdY - dy * fwdX;
+                    float rLen = std::sqrt(rX*rX + rY*rY + rZ*rZ);
+                    if (rLen < 1e-6f) { rX = rightX; rY = rightY; rZ = rightZ; rLen = 1; }
+                    rX /= rLen; rY /= rLen; rZ /= rLen;
+
+                    const float lx = cp.px - rX * w, ly = cp.py - rY * w, lz = cp.pz - rZ * w;
+                    const float rx2 = cp.px + rX * w, ry2 = cp.py + rY * w, rz2 = cp.pz + rZ * w;
+
+                    if (j > 0) {
+                        ParticleVertex v0 = { prevLx, prevLy, prevLz, prevCr, prevCg, prevCb, prevA };
+                        ParticleVertex v1 = { prevRx, prevRy, prevRz, prevCr, prevCg, prevCb, prevA };
+                        ParticleVertex v2 = { rx2, ry2, rz2, cr, cg, cb, aj };
+                        ParticleVertex v3 = { lx, ly, lz, cr, cg, cb, aj };
+                        fillAovs(v0, p); fillAovs(v1, p); fillAovs(v2, p); fillAovs(v3, p);
+                        verts.push_back(v0); verts.push_back(v1); verts.push_back(v2);
+                        verts.push_back(v0); verts.push_back(v2); verts.push_back(v3);
+                    }
+                    prevLx = lx; prevLy = ly; prevLz = lz;
+                    prevRx = rx2; prevRy = ry2; prevRz = rz2;
+                    prevA = aj; prevCr = cr; prevCg = cg; prevCb = cb;
+                }
             }
 
             drawParticlePrimitives(GL_TRIANGLES, verts);
