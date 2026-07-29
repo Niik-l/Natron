@@ -42,6 +42,8 @@ NATRON_NAMESPACE_ENTER
 struct ParticleSpawnPrivate
 {
     KnobChoiceWPtr trigger;
+    KnobDoubleWPtr burstAge;
+    KnobDoubleWPtr burstAgeVariance;
     KnobIntWPtr rate;
     KnobDoubleWPtr inheritVelocity;
     KnobDoubleWPtr extraSpeed;
@@ -121,9 +123,25 @@ ParticleSpawn::initializeKnobs()
         entries.push_back(ChoiceOption("On Birth", "", "Emit only from newly born parent particles"));
         entries.push_back(ChoiceOption("On Death", "", "Emit only from dying parent particles"));
         entries.push_back(ChoiceOption("On Collision", "", "Emit from particles that just collided (requires ParticleSolver upstream)"));
+        entries.push_back(ChoiceOption("At Age (burst)", "", "Emit once when each parent reaches its burst age — mid-air firework bursts, crackle, secondary pops. Burst Age Variance staggers the bursts per particle."));
         k->populateChoices(entries);
         k->setDefaultValue(0);
         mainPage->addKnob(k); _imp->trigger = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Burst Age"));
+        k->setName("burstAge"); k->setDefaultValue(15.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(100.0);
+        k->setAddNewLine(false);
+        k->setHintToolTip(tr("At Age trigger: parent age (frames) at which the burst fires. Each parent bursts exactly once."));
+        mainPage->addKnob(k); _imp->burstAge = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Variance"));
+        k->setName("burstAgeVariance"); k->setDefaultValue(5.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(50.0);
+        k->setHintToolTip(tr("Per-particle random spread (+/-) on Burst Age, stable per parent ID — staggers the bursts so they don't all pop on the same frame."));
+        mainPage->addKnob(k); _imp->burstAgeVariance = k;
     }
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Rate"));
@@ -233,6 +251,8 @@ ParticleSpawn::getParticleData(double time)
     float childG = (float)_imp->childColorG.lock()->getValueAtTime(time);
     float childB = (float)_imp->childColorB.lock()->getValueAtTime(time);
     float prob = (float)_imp->probability.lock()->getValueAtTime(time);
+    float burstAgeVal = _imp->burstAge.lock() ? (float)_imp->burstAge.lock()->getValueAtTime(time) : 15.0f;
+    float burstVarVal = _imp->burstAgeVariance.lock() ? (float)_imp->burstAgeVariance.lock()->getValueAtTime(time) : 5.0f;
 
     if (rateVal <= 0) {
         _cachedData = data;
@@ -266,6 +286,15 @@ ParticleSpawn::getParticleData(double time)
                 shouldSpawn = (parent.age >= parent.life - 1.0f);  // On Death
             } else if (triggerMode == 3) {
                 shouldSpawn = parent.collided;  // On Collision
+            } else if (triggerMode == 4) {
+                // At Age (burst): fire in the one-frame window where the
+                // parent crosses its per-ID randomized target age. Stable
+                // hash keeps the target identical across frames/re-sims.
+                uint32_t h = parent.id * 2654435761u + 0x9E3779B9u;
+                h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+                const float u = (float)(h & 0x00FFFFFFu) / 16777216.0f;
+                const float target = burstAgeVal + (u * 2.0f - 1.0f) * burstVarVal;
+                shouldSpawn = (parent.age >= target && parent.age < target + 1.0f);
             }
 
             if (!shouldSpawn) continue;
