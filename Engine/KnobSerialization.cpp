@@ -25,6 +25,10 @@
 
 #include "KnobSerialization.h"
 
+#include "Engine/Dev/Particles/KnobGradient.h"
+#include "Engine/Dev/Channel/KnobShuffle.h"
+#include "Engine/Dev/Cycles/KnobPassTable.h"
+
 #include <algorithm> // min, max
 #include <cassert>
 #include <stdexcept>
@@ -175,6 +179,17 @@ KnobSerialization::createKnob(const std::string & typeName,
         ret = std::make_shared<KnobGroup>((KnobHolder*)NULL, std::string(), dimension, false);
     } else if ( typeName == KnobPage::typeNameStatic() ) {
         ret = std::make_shared<KnobPage>((KnobHolder*)NULL, std::string(), dimension, false);
+    } else if ( typeName == KnobGradient::typeNameStatic() ) {
+        // Custom knob types MUST be registered here or copy/paste of any node
+        // carrying them desyncs the clipboard stream (the unknown item bails
+        // out of load early and the next read throws).
+        ret = std::make_shared<KnobGradient>((KnobHolder*)NULL, std::string(), dimension, false);
+    } else if ( typeName == KnobTracksTable::typeNameStatic() ) {
+        ret = std::make_shared<KnobTracksTable>((KnobHolder*)NULL, std::string(), dimension, false);
+    } else if ( typeName == KnobShuffle::typeNameStatic() ) {
+        ret = std::make_shared<KnobShuffle>((KnobHolder*)NULL, std::string(), dimension, false);
+    } else if ( typeName == KnobPassTable::typeNameStatic() ) {
+        ret = std::make_shared<KnobPassTable>((KnobHolder*)NULL, std::string(), dimension, false);
     }
 
     if (ret) {
