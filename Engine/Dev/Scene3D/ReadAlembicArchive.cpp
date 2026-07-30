@@ -593,8 +593,9 @@ ReadAlembicArchive::loadAlembicFile(const std::string& path)
 
     // Hold the archive lock for the whole (re)load — render threads holding
     // ArchiveEntry references or indexing `visible` must not see the vectors
-    // freed/refilled mid-walk.
-    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+    // freed/refilled mid-walk. unique_lock (not lock_guard): it MUST be
+    // released before the archiveReloaded emit below.
+    std::unique_lock<std::mutex> lk(_imp->archiveMutex);
 
     _imp->entries.clear();
     _imp->visible.clear();
@@ -686,6 +687,12 @@ ReadAlembicArchive::loadAlembicFile(const std::string& path)
     } catch (const std::exception& e) {
         setPersistentMessage(eMessageTypeError, std::string("Error reading Alembic file: ") + e.what());
     }
+
+    // Release BEFORE notifying: the settings panel's AlembicTreeWidget slot
+    // runs SYNCHRONOUSLY off archiveReloaded and re-enters getEntryTree(),
+    // which takes this same non-recursive mutex — emitting under the lock
+    // froze the GUI solid (self-deadlock) on every fresh archive load.
+    lk.unlock();
 #else
     Q_UNUSED(path);
     if (_imp->info.lock()) {
