@@ -567,10 +567,24 @@ ReadAlembicCamera::loadAlembicFile(const std::string& path)
                 // Imath stores M_col with row-major memory, which means
                 // m_imath[i][j] = M_col[j][i] — so transpose into our column-vector
                 // 3x3 form, then decompose.
+                //
+                // The xform may carry scale (Maya exports bake unit-conversion
+                // scale onto the camera — 78.5x on real assets). Scale is
+                // meaningless for a camera's view but it corrupts the Euler
+                // decompose (the asin term clamps at ±1 → bogus ±90° Y), so
+                // divide each basis column by its length, as
+                // ReadAlembicTransform does.
+                double sLen[3];
+                for (int j = 0; j < 3; ++j) {
+                    sLen[j] = std::sqrt(matrix[j][0]*matrix[j][0] + matrix[j][1]*matrix[j][1] + matrix[j][2]*matrix[j][2]);
+                    if (sLen[j] < 1e-12) {
+                        sLen[j] = 1.0;
+                    }
+                }
                 double mCol[3][3];
                 for (int i = 0; i < 3; ++i) {
                     for (int j = 0; j < 3; ++j) {
-                        mCol[i][j] = matrix[j][i];
+                        mCol[i][j] = matrix[j][i] / sLen[j];
                     }
                 }
                 double rxDeg = 0, ryDeg = 0, rzDeg = 0;
