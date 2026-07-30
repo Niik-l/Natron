@@ -1391,7 +1391,14 @@ Viewport3D::paintGL()
         LookAt(eye, at, up, _imp->cameraView);
 
         float aspect = (_imp->viewH > 0) ? (float)_imp->viewW / (float)_imp->viewH : 1.0f;
-        Perspective(_imp->fov, aspect, 0.1f, 500.f, _imp->cameraProjection);
+        // Adaptive clip planes: the old fixed 0.1/500 pair clipped large
+        // environments (terrain vanishing past 500 units). Scale with the
+        // orbit distance, with a generous far floor so big scenes are visible
+        // even while zoomed in close. Near scales too, keeping the depth
+        // ratio ~2e5-1e6 (safe for the 24-bit depth buffer).
+        const float zNear = std::max(0.02f, _imp->camDistance * 0.002f);
+        const float zFar  = std::max(10000.f, _imp->camDistance * 400.f);
+        Perspective(_imp->fov, aspect, zNear, zFar, _imp->cameraProjection);
     }
 
     // 2. Set GL matrices
@@ -2060,8 +2067,9 @@ Viewport3D::wheelEvent(QWheelEvent* e)
 {
     float delta = e->angleDelta().y() / 120.0f;
     _imp->camDistance *= (1.0f - delta * 0.1f);
-    // Clamp
-    _imp->camDistance = std::max(0.1f, std::min(500.0f, _imp->camDistance));
+    // Clamp — wide range so large environments can be framed (the old 500
+    // cap couldn't even back away far enough to see a big terrain).
+    _imp->camDistance = std::max(0.01f, std::min(50000.0f, _imp->camDistance));
     update();
 }
 
