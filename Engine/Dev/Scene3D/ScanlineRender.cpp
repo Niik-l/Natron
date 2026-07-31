@@ -2165,6 +2165,27 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
             sharedTex = abcArchive->getImage(1, time, RenderScale(), view, NULL, NULL, false, true, eStorageModeRAM, 0, &roi);
         }
 
+        // Project3D / MergeMat on the archive's material input: the archive has
+        // ONE material input shared by all entries, so build the projection
+        // layers once and stamp them onto every entry's GeoData (the viewport
+        // projects per-entry the same way; without this the projection showed
+        // in the viewport but vanished in the ScanlineRender output).
+        GeoData projTpl;
+        applyProjectorMaterial(effect, time, view, projTpl);
+        auto stampProjector = [&projTpl](GeoData& g) {
+            if (!projTpl.useProjector) return;
+            g.useProjector = true;
+            g.projLayers = projTpl.projLayers;
+            for (int m = 0; m < 16; ++m) g.projectorVP[m] = projTpl.projectorVP[m];
+            for (int m = 0; m < 3; ++m) g.projForward[m] = projTpl.projForward[m];
+            g.projOn = projTpl.projOn;
+            g.projCrop = projTpl.projCrop;
+            g.projNear = projTpl.projNear;
+            g.projFar = projTpl.projFar;
+            g.projPlateImg = projTpl.projPlateImg;
+            g.occMode = projTpl.occMode;
+        };
+
         const int count = abcArchive->getSceneNodeCount();
         for (int i = 0; i < count; ++i) {
             MeshDataPtr mesh = abcArchive->getMeshDataAt(i, time);
@@ -2197,6 +2218,7 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
                 }
             }
             g.texImg = sharedTex;
+            stampProjector(g);
             out.push_back(g);
         }
         return;
