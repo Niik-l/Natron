@@ -15,10 +15,21 @@ log "Staging install into $I (python $PYV)"
 mkdir -p "$I/App/platforms" "$I/lib" \
          "$I/Plugins/OFX/Natron" "$I/Plugins/PyPlugs" "$I/Resources"
 
+# OIDN loads its CPU device module at runtime by the UN-prefixed name, but
+# MSYS2 ships it lib-prefixed — without this copy, Cycles denoise fails with
+# "unsupported device type: CPU".
+fix_oidn() { # dir
+  if [ ! -f "$1/OpenImageDenoise_device_cpu.dll" ] && [ -f "$1/libOpenImageDenoise_device_cpu.dll" ]; then
+    cp "$1/libOpenImageDenoise_device_cpu.dll" "$1/OpenImageDenoise_device_cpu.dll"
+    ok "$(basename "$1"): staged un-prefixed OIDN CPU device module"
+  fi
+}
+
 # --- GUI binary + bundled DLLs + Qt platform plugin ---
 log "App: binary + DLLs"
 cp "$B/App/Natron.exe" "$I/App/"
 cp "$MINGW"/bin/*.dll "$I/App/"
+fix_oidn "$I/App"
 cp "$MINGW/share/qt6/plugins/platforms/qwindows.dll" "$I/App/platforms/"
 
 # --- Headless renderer (optional) ---
@@ -27,6 +38,7 @@ if [ "${STAGE_RENDERER:-1}" = "1" ]; then
   mkdir -p "$I/Renderer/platforms"
   cp "$B/Renderer/NatronRenderer.exe" "$I/Renderer/"
   cp "$MINGW"/bin/*.dll "$I/Renderer/"
+  fix_oidn "$I/Renderer"
   cp "$MINGW/share/qt6/plugins/platforms/qwindows.dll" "$I/Renderer/platforms/"
 fi
 

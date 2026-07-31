@@ -79,7 +79,8 @@ pacman -S --noconfirm \
   mingw-w64-x86_64-boost \
   mingw-w64-x86_64-cairo \
   mingw-w64-x86_64-expat \
-  mingw-w64-x86_64-openvdb
+  mingw-w64-x86_64-openvdb \
+  mingw-w64-x86_64-alembic
 
 # For OFX plugins (Read/Write/Blur nodes)
 pacman -S --noconfirm \
@@ -91,6 +92,11 @@ pacman -S --noconfirm \
   mingw-w64-x86_64-libpng
 ```
 
+> **Note:** `mingw-w64-x86_64-alembic` is a *soft* dependency — if it's missing,
+> cmake prints "Alembic not found" and the build SILENTLY produces a Natron
+> without .abc support (ReadGeo limited; ReadAlembicArchive/Camera/Transform and
+> the matchmove ingest all degraded). Don't skip it.
+>
 > **Note:** `mingw-w64-x86_64-openvdb` is required by Cycles' VDB image loader.
 > Without it, the Natron + Cycles link step fails with `undefined reference to
 > ccl::VDBImageLoader::VDBImageLoader(...)`. Pull it in even if you don't plan
@@ -561,19 +567,28 @@ pacman -S --noconfirm \
 
 ### Build Cycles standalone
 
+> **IMPORTANT — use the Niik-l cycles fork, not upstream.** Natron's
+> `CyclesRenderer.cpp` hard-requires the deep-EXR output API
+> (`session/deep_output_driver.h`, `Film::set_use_deep_output`,
+> `Session::set_deep_output_driver`, …) which only exists on
+> `Niik-l/cycles` branch **`feature/cycles-deep`** (= v5.0.0 + the deep
+> port `787be0655` + the MinGW fixes below already committed). Cloning
+> upstream `blender/cycles` at `v5.0.0` compiles Cycles fine but the
+> Natron build then fails on the missing deep headers/symbols.
+
 ```bash
 cd $NATRON_ROOT
-git clone https://github.com/blender/cycles.git
+git clone --branch feature/cycles-deep https://github.com/Niik-l/cycles.git
 cd cycles
-git checkout v5.0.0
 
-# Apply MinGW compatibility patch (from Natron repo)
-git apply $NATRON_ROOT/Natron/patches/cycles-mingw.patch
+# The Natron MinGW patch (patches/cycles-mingw.patch) is already a COMMIT on
+# feature/cycles-deep — do NOT git-apply it again. The two build-system
+# tweaks below are still needed on a fresh clone:
 
-# Patch 1 — FindTBB.cmake doesn't recognize MSYS2's libtbb12. In Cycles
-# v5.0.0 the `find_library(TBB_LIBRARY ...)` block puts NAMES on its own
-# line followed by `tbb` on the next, so the obvious one-line sed never
-# matches. Match the `    tbb` line directly:
+# Patch 1 — FindTBB.cmake doesn't recognize MSYS2's libtbb12. The
+# `find_library(TBB_LIBRARY ...)` block puts NAMES on its own line followed
+# by `tbb` on the next, so the obvious one-line sed never matches. Match
+# the `    tbb` line directly:
 sed -i 's/^    tbb$/    tbb tbb12/' src/cmake/Modules/FindTBB.cmake
 
 # Patch 2 — MinGW doesn't expose M_PI from <cmath> unless _USE_MATH_DEFINES
@@ -588,6 +603,9 @@ if(WIN32)\
   add_compile_definitions(_USE_MATH_DEFINES)\
 endif()\
 ' CMakeLists.txt
+
+# (tools/win-build/02-patch.sh applies all of the above with content-sentinel
+# checks — safe to run on either the fork branch or upstream v5.0.0.)
 
 mkdir build && cd build
 cmake .. -G "MinGW Makefiles" \
@@ -615,6 +633,8 @@ mingw32-make -j2
 ```
 
 > **Why `WITH_CYCLES_OPENVDB=ON`:** Natron's `Engine/Dev/Cycles/CyclesRenderer.cpp` calls `ccl::VDBImageLoader` without `#ifdef` guards (used by ReadVDB → CyclesRender for fire/smoke volumes). Building Cycles with `WITH_CYCLES_OPENVDB=OFF` produces a Cycles library that's missing the symbol, and the subsequent Natron link will fail with `undefined reference to ccl::VDBImageLoader::VDBImageLoader(...)`. Worse, the linker deletes the previous working `Natron.exe` before failing, leaving no binary. Keep `NanoVDB` at its default `ON` — disabling it independently of OpenVDB breaks `cycles/src/util/nanovdb.cpp`.
+
+> **OpenImageDenoise runtime gotcha:** MSYS2 ships the OIDN CPU device module as `libOpenImageDenoise_device_cpu.dll` (lib-prefixed), but the OIDN core loads device modules at runtime by the **un-prefixed** name. If only the lib-prefixed file is present next to `Natron.exe` (or on PATH), Cycles denoising fails at render time with `unsupported device type: CPU`. Fix: copy the module un-prefixed alongside the core DLL — `cp /mingw64/bin/libOpenImageDenoise_device_cpu.dll <dest>/OpenImageDenoise_device_cpu.dll`. `tools/win-build/06-install.sh` does this automatically when staging App/ and Renderer/.
 
 ### Rebuild Natron with Cycles enabled
 

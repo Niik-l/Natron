@@ -21,7 +21,7 @@ log "Natron submodules"; git -C Natron submodule update --init --recursive
 
 if [ "${WITH_CYCLES:-1}" = "1" ]; then
   if [ -d cycles/.git ]; then ok "cycles already present (skipping clone)"
-  else log "Cloning cycles @ $CYCLES_REF (shallow)"; git clone --branch "$CYCLES_REF" --depth 1 https://github.com/blender/cycles.git cycles; fi
+  else log "Cloning cycles @ $CYCLES_REF (shallow)"; git clone --branch "$CYCLES_REF" --depth 1 https://github.com/Niik-l/cycles.git cycles; fi
 fi
 
 clone_at https://github.com/NatronGitHub/openfx-misc.git openfx-misc "$OPENFX_MISC_REF"

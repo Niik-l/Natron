@@ -26,7 +26,10 @@ NATRON_JOBS=""          # leave empty to derive from JOBS (capped at 8 for moc s
 # Natron tracks the branch tip so a re-run picks up the latest RB-2.6.
 NATRON_BRANCH="RB-2.6"
 # Dependencies are PINNED to the 2026-05-25 known-good build so the patches apply.
-CYCLES_REF="v5.0.0"
+# Niik-l fork branch, NOT an upstream tag: Natron's CyclesRenderer requires the
+# deep-EXR output API (deep_output_driver.h etc.) that only exists there
+# (= v5.0.0 + deep port 787be0655 + MinGW fixes committed).
+CYCLES_REF="feature/cycles-deep"
 OPENFX_MISC_REF="0abd46b5a8cbc98fa24579042129460d0aa87b8f"
 OPENFX_IO_REF="31ebb488d0b4aec52e92ec94cdc30da277091d30"
 # natron-plugins is content only (no patch); tracks tip. Built-with: b0c499fb6391024f54be9f26ed41b5cf7475d574
