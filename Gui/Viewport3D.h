@@ -119,7 +119,8 @@ public:
         eWireframe = 0,
         eShaded,
         eShadedWire,
-        eFlat
+        eFlat,
+        eFaceOrientation   // front faces blue / back faces red (winding check)
     };
     void setShadingMode(ShadingMode mode);
     ShadingMode getShadingMode() const;

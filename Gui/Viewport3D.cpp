@@ -2877,6 +2877,70 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
     const ShadingMode mode = _imp->shadingMode;
     const int nv = (int)mesh->numVertices;
 
+    // ----- Face Orientation (Blender-style front/back check) -----
+    // Two cull passes over the same triangles: front faces (as wound) in
+    // blue, back faces in red. Winding is the source of truth for normals
+    // everywhere (viewport lighting, ScanlineRender, Cycles), so red = faces
+    // whose normals point away — candidates for the readers' Reverse Normals.
+    if (mode == eFaceOrientation) {
+        auto emitAllTris = [&]() {
+            glBegin(GL_TRIANGLES);
+            auto emitTri = [&](int v0, int v1, int v2) {
+                if (v0 >= 0 && v0 < nv && v1 >= 0 && v1 < nv && v2 >= 0 && v2 < nv) {
+                    glVertex3fv(&mesh->vertices[v0 * 3]);
+                    glVertex3fv(&mesh->vertices[v1 * 3]);
+                    glVertex3fv(&mesh->vertices[v2 * 3]);
+                }
+            };
+            if (!mesh->faceCounts.empty()) {
+                size_t off = 0;
+                for (size_t f = 0; f < mesh->faceCounts.size(); ++f) {
+                    const int c = mesh->faceCounts[f];
+                    if (c < 3 || off + (size_t)c > mesh->faceIndices.size()) {
+                        off += (size_t)std::max(0, c);
+                        continue;
+                    }
+                    for (int i = 1; i + 1 < c; ++i) {
+                        emitTri(mesh->faceIndices[off], mesh->faceIndices[off + i], mesh->faceIndices[off + i + 1]);
+                    }
+                    off += (size_t)c;
+                }
+            } else {
+                for (size_t i = 0; i + 2 < mesh->faceIndices.size(); i += 3) {
+                    emitTri(mesh->faceIndices[i], mesh->faceIndices[i + 1], mesh->faceIndices[i + 2]);
+                }
+            }
+            glEnd();
+        };
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(1.0f, 1.0f);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);                 // draw front faces
+        glColor3f(0.25f, 0.45f, 1.0f);
+        emitAllTris();
+        glCullFace(GL_FRONT);                // draw back faces
+        glColor3f(1.0f, 0.30f, 0.25f);
+        emitAllTris();
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        // Dim wire overlay so shape stays readable on the flat colors.
+        if (!mesh->edgeIndices.empty()) {
+            glColor3f(0.25f, 0.25f, 0.25f);
+            glLineWidth(1.0f);
+            glBegin(GL_LINES);
+            for (size_t i = 0; i + 1 < mesh->edgeIndices.size(); i += 2) {
+                const int i0 = mesh->edgeIndices[i];
+                const int i1 = mesh->edgeIndices[i + 1];
+                if (i0 >= 0 && i0 < nv && i1 >= 0 && i1 < nv) {
+                    glVertex3fv(&mesh->vertices[i0 * 3]);
+                    glVertex3fv(&mesh->vertices[i1 * 3]);
+                }
+            }
+            glEnd();
+        }
+        return;
+    }
+
     // ----- Resolve a texture for the shaded fill -----
     // A downstream UVProject (geo -> UVProject) projects its img (input 2) onto this
     // mesh with rewritten PER-VERTEX UVs and takes precedence. Otherwise a connected
@@ -3186,6 +3250,24 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
     }
 
     const ShadingMode mode = _imp->shadingMode;
+
+    // Face Orientation: the card is a flat quad wound CCW seen from +Z, so
+    // the +Z side reads blue (front) and -Z red (back).
+    if (mode == eFaceOrientation) {
+        glEnable(GL_CULL_FACE);
+        for (int pass = 0; pass < 2; ++pass) {
+            if (pass == 0) { glCullFace(GL_BACK);  glColor3f(0.25f, 0.45f, 1.0f); }
+            else           { glCullFace(GL_FRONT); glColor3f(1.0f, 0.30f, 0.25f); }
+            glBegin(GL_QUADS);
+            glVertex3f(-halfW, -halfH, 0);
+            glVertex3f( halfW, -halfH, 0);
+            glVertex3f( halfW,  halfH, 0);
+            glVertex3f(-halfW,  halfH, 0);
+            glEnd();
+        }
+        glDisable(GL_CULL_FACE);
+        return;
+    }
 
     if (mode != eWireframe) {
         if (mode == eShadedWire) {

@@ -226,12 +226,13 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
         _shadingDropdown->setFixedHeight(22);
         _shadingDropdown->setPopupMode(QToolButton::InstantPopup);
         QMenu* shMenu = new QMenu(_shadingDropdown);
-        const char* labels[4]  = { "Wireframe", "Flat", "Shaded", "Shaded+Wire" };
-        const int   modes[4]   = { (int)Viewport3D::eWireframe,
+        const char* labels[5]  = { "Wireframe", "Flat", "Shaded", "Shaded+Wire", "Face Orientation" };
+        const int   modes[5]   = { (int)Viewport3D::eWireframe,
                                    (int)Viewport3D::eFlat,
                                    (int)Viewport3D::eShaded,
-                                   (int)Viewport3D::eShadedWire };
-        for (int i = 0; i < 4; ++i) {
+                                   (int)Viewport3D::eShadedWire,
+                                   (int)Viewport3D::eFaceOrientation };
+        for (int i = 0; i < 5; ++i) {
             QAction* a = shMenu->addAction(QString::fromUtf8(labels[i]));
             a->setData(modes[i]);
             connect(a, SIGNAL(triggered()), this, SLOT(onShadingModeSelected()));
@@ -471,6 +472,7 @@ Viewport3DTab::onShadingModeSelected()
         case Viewport3D::eFlat:        label = QString::fromUtf8("Flat"); break;
         case Viewport3D::eShaded:      label = QString::fromUtf8("Shaded"); break;
         case Viewport3D::eShadedWire:  label = QString::fromUtf8("Shaded+Wire"); break;
+        case Viewport3D::eFaceOrientation: label = QString::fromUtf8("Face Orientation"); break;
     }
     _shadingDropdown->setText(QString::fromUtf8("Shading: ") + label);
 }
