@@ -17,6 +17,24 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Large-environment import + normals tooling (2026-07-29..31)** —
+  **Alembic:** ReadAlembicArchive self-deadlock on load fixed (archiveMutex was held
+  across the archiveReloaded emit; the tree-widget slot re-enters getEntryTree()
+  synchronously); ReadAlembicCamera now normalizes scale out of the rotation matrix
+  before Euler decompose (Maya exports bake unit-conversion scale — 78.5x on real
+  assets — which clamped the asin term into a bogus ±90° rotate Y). **Viewport:**
+  adaptive clip planes (far = max(10000, distance×400), near scales with distance;
+  zoom range 0.01..50000 — the old fixed 0.1/500 clipped big terrains) and a new
+  **Face Orientation** shading mode (front faces blue / back faces red via two cull
+  passes, dim wire overlay; works on meshes + Card3D). **Normals:** `Reverse Normals`
+  knob on ReadGeo + ReadAlembicArchive flips face winding (and the parallel
+  per-face-vertex UVs) at the source, so viewport lighting, ScanlineRender, Cycles
+  and Project3D front/back all agree; helper `reverseMeshWinding()` lives in
+  MeshData.h. **ScanlineRender:** Project3D/MergeMat projections now render on
+  ReadAlembicArchive geo — the archive multi-entry extract path never ran
+  applyProjectorMaterial (projection showed in the viewport but not the render);
+  layers are built once and stamped onto every entry's GeoData.
+
 - **Deep workflow + stability sweep (2026-07-24/25)** —
   **Deep suite:** DeepRecolor now recolors RGB-less deep inputs (Karma DCMs carry only
   A/Z/ZBack — missing R/G/B channels are appended and filled from the flat Color input);
