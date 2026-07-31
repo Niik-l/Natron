@@ -18,8 +18,10 @@
 
 #include "../../../Global/Macros.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
+#include <utility>
 #include <vector>
 
 NATRON_NAMESPACE_ENTER
@@ -72,6 +74,46 @@ struct MeshData
 };
 
 typedef std::shared_ptr<MeshData> MeshDataPtr;
+
+/** Flip every face's winding order (and the parallel per-face-vertex uv /
+ *  texCoord slots, which are indexed by position within faceIndices) so that
+ *  derived normals point the other way. Every consumer — viewport lighting,
+ *  ScanlineRender, Cycles, Project3D front/back culling — takes normals from
+ *  winding, so this is the single place a "Reverse Normals" knob needs to
+ *  touch. edgeIndices are direction-agnostic and stay as-is. */
+inline void reverseMeshWinding(MeshData& m)
+{
+    const std::size_t nIdx = m.faceIndices.size();
+    auto reverseRange = [&m](std::size_t off, int c) {
+        for (int i = 0, j = c - 1; i < j; ++i, --j) {
+            std::swap(m.faceIndices[off + i], m.faceIndices[off + j]);
+            if (m.texCoordComponents == 2 && ((off + j) * 2 + 1) < m.uvs.size()) {
+                std::swap(m.uvs[(off + i) * 2],     m.uvs[(off + j) * 2]);
+                std::swap(m.uvs[(off + i) * 2 + 1], m.uvs[(off + j) * 2 + 1]);
+            } else if (m.texCoordComponents == 3 && ((off + j) * 3 + 2) < m.texCoords.size()) {
+                for (int k = 0; k < 3; ++k) {
+                    std::swap(m.texCoords[(off + i) * 3 + k], m.texCoords[(off + j) * 3 + k]);
+                }
+            }
+        }
+    };
+    if (!m.faceCounts.empty()) {
+        std::size_t off = 0;
+        for (std::size_t f = 0; f < m.faceCounts.size(); ++f) {
+            const int c = m.faceCounts[f];
+            if (c < 2 || off + (std::size_t)c > nIdx) {
+                off += (std::size_t)std::max(0, c);
+                continue;
+            }
+            reverseRange(off, c);
+            off += (std::size_t)c;
+        }
+    } else {
+        for (std::size_t off = 0; off + 2 < nIdx; off += 3) {
+            reverseRange(off, 3);
+        }
+    }
+}
 
 NATRON_NAMESPACE_EXIT
 

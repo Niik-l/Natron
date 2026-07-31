@@ -274,6 +274,7 @@ struct ReadAlembicArchivePrivate
     KnobButtonWPtr reloadBtn;
     KnobStringWPtr objectFilter;
     KnobBoolWPtr includeMeshes;
+    KnobBoolWPtr reverseNormals;
     KnobIntWPtr frameOffset;
     KnobChoiceWPtr timeMode;
     KnobStringWPtr excludedPaths;  // one excluded archive path per line (driven by AlembicTreeWidget)
@@ -384,6 +385,17 @@ ReadAlembicArchive::initializeKnobs()
         k->setHintToolTip(tr("If unchecked, mesh entries (IPolyMesh) are skipped — useful for tracker-only imports."));
         page->addKnob(k);
         _imp->includeMeshes = k;
+    }
+
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Reverse Normals"));
+        k->setName("reverseNormals");
+        k->setDefaultValue(false);
+        k->setHintToolTip(tr("Flip the face winding of every mesh in the archive so normals "
+                             "point the other way. Use the 3D viewport's Face Orientation "
+                             "shading mode to check: blue = facing you, red = facing away."));
+        page->addKnob(k);
+        _imp->reverseNormals = k;
     }
 
     {
@@ -539,12 +551,14 @@ ReadAlembicArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     KnobIPtr includeKnob = _imp->includeMeshes.lock();
 
     KnobIPtr excludedKnob = _imp->excludedPaths.lock();
+    KnobIPtr revNormKnob = _imp->reverseNormals.lock();
 
     const bool isFileChange = (fpKnob && k == fpKnob.get());
     const bool isReload     = (reloadKnob && k == reloadKnob.get());
     const bool isFilter     = (filterKnob && k == filterKnob.get())
                             || (includeKnob && k == includeKnob.get())
-                            || (excludedKnob && k == excludedKnob.get());
+                            || (excludedKnob && k == excludedKnob.get())
+                            || (revNormKnob && k == revNormKnob.get());
 
     if (isFileChange || isReload) {
         if (fpKnob) {
@@ -679,6 +693,17 @@ ReadAlembicArchive::loadAlembicFile(const std::string& path)
         }
         const int tm = _imp->timeMode.lock() ? _imp->timeMode.lock()->getValue() : 0;
         ss << " | Time mode: " << (tm == 1 ? "Time-based" : "Frame-by-frame");
+        // Reverse Normals: flip every mesh entry's winding. Applied at load
+        // time so a knob toggle just re-runs the load (isFilter path) and the
+        // applied state always matches the knob.
+        if (_imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue()) {
+            for (ArchiveEntry& e : _imp->entries) {
+                if (e.isMesh && e.meshData) {
+                    reverseMeshWinding(*e.meshData);
+                }
+            }
+        }
+
         if (_imp->info.lock()) _imp->info.lock()->setValue(ss.str());
 
         _imp->loadedFilePath = path;

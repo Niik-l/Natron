@@ -191,6 +191,7 @@ struct ReadGeoPrivate
     KnobFileWPtr filePath;
     KnobChoiceWPtr objectPath;
     KnobButtonWPtr reloadBtn;
+    KnobBoolWPtr reverseNormals;
     KnobStringWPtr info;
 
     // Transform
@@ -328,6 +329,17 @@ ReadGeo::initializeKnobs()
         reload->setName("reload");
         page->addKnob(reload);
         _imp->reloadBtn = reload;
+    }
+
+    {
+        KnobBoolPtr rn = AppManager::createKnob<KnobBool>(this, tr("Reverse Normals"));
+        rn->setName("reverseNormals");
+        rn->setDefaultValue(false);
+        rn->setHintToolTip(tr("Flip the face winding so normals point the other way. "
+                              "Use the 3D viewport's Face Orientation shading mode to check: "
+                              "blue = facing you, red = facing away."));
+        page->addKnob(rn);
+        _imp->reverseNormals = rn;
     }
 
     {
@@ -494,6 +506,13 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
 
     // Object dropdown changed: reload the selected object from the already-open file
     if (_imp->objectPath.lock().get() == k) {
+        loadGeoFromFile(_imp->filePath.lock()->getValue());
+        return true;
+    }
+
+    // Reverse Normals: re-run the loader so the flip is applied to freshly
+    // built data (keeps applied state == knob state, no toggle bookkeeping).
+    if (_imp->reverseNormals.lock().get() == k) {
         loadGeoFromFile(_imp->filePath.lock()->getValue());
         return true;
     }
@@ -782,6 +801,10 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             }
         }
 
+        if (_imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue()) {
+            reverseMeshWinding(*mesh);
+        }
+
         // --- Store result ---
         _lastMeshData = mesh;
         _imp->loadedFilePath = path;
@@ -1022,6 +1045,10 @@ ReadGeo::loadObjGeo(const std::string& path)
     // Identity transform — the node's own Translate/Rotate/Scale knobs handle
     // user-controlled placement downstream.
     for (int i = 0; i < 16; ++i) mesh->transform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+
+    if (_imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue()) {
+        reverseMeshWinding(*mesh);
+    }
 
     // --- Store result ---
     _lastMeshData = mesh;
