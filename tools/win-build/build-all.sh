@@ -15,4 +15,5 @@ for ph in "${PHASES[@]}"; do
   fi
 done
 printf '\n\033[1;32mALL PHASES COMPLETE in %ss. Install: %s\033[0m\n' "$(( $(date +%s) - START ))" "$INSTALL_DIR"
-echo "Launch: $INSTALL_DIR/App/Natron.exe"
+echo "Launch: $INSTALL_DIR/App/Natron.exe   (the install is self-contained — NOT build-qt6/App)"
+echo "Optional: ./08-cleanup.sh deletes the source/build trees (~10 GB) once you're happy."

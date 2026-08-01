@@ -64,6 +64,7 @@ first (`nano config.sh`; Ctrl+O saves, Ctrl+X exits).
 | `05-plugins.sh` | build openfx-misc (Misc.ofx, CImg.ofx) + openfx-io (IO.ofx) |
 | `06-install.sh` | stage a clean `$INSTALL_DIR`: exes + bundled DLLs + Python + plugins + PyPlugs + OCIO |
 | `07-verify.sh`  | launch the staged binary headless with a clean PATH; assert version + plugins + Cycles |
+| `08-cleanup.sh` | **optional, destructive, NOT run by build-all** — after a verified install, delete the source/build trees (`Natron/ cycles/ openfx-misc/ openfx-io/ natron-plugins/`, ~10 GB); `Natron-install/` is self-contained. Prompts unless `--yes` |
 
 `build-all.sh` runs 00→07, tee-ing each phase to `logs/<phase>.log`, and stops loudly on failure.
 

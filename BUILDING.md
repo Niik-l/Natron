@@ -670,7 +670,7 @@ rm -rf cycles openfx-misc openfx-io natron-plugins
 
 Their outputs are already installed inside `build-qt6/`'s `Plugins/` tree.
 
-> The `tools/win-build/` automated script flow instead stages a **separate, relocatable `Natron-install/`** folder via `06-install.sh` — different deliverable, different cleanup story. See `tools/win-build/README.md` for that flow's specifics.
+> The `tools/win-build/` automated script flow instead stages a **separate, relocatable `Natron-install/`** folder via `06-install.sh` — there the cleanup story is the opposite: `Natron-install/` is fully self-contained (binaries, DLLs, Python stdlib, OFX plugins, PyPlugs, OCIO configs are all copies), so **everything else can go**, including the `Natron/` clone and its `build-qt6/`. Run `./08-cleanup.sh` (optional, prompts first, `--yes` to skip the prompt) to delete `Natron/ cycles/ openfx-misc/ openfx-io/ natron-plugins/` and reclaim ~10 GB — a verified-looking install must exist or it refuses. Launch the app from `Natron-install/App/Natron.exe` (not `build-qt6/App/` — that one only runs from a MINGW64 shell). Rebuilding later means re-running `./build-all.sh` from scratch (~40 min).
 
 ---
 
