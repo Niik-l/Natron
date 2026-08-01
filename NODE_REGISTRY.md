@@ -123,7 +123,7 @@ Updated: 2026-06-24
 
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
-| **DevShuffle** | `fr.inria.built-in.DevShuffle` | Registered | Channel shuffle node |
+| **Shuffle2** | `fr.inria.built-in.DevShuffle` | Registered | Layer-aware channel shuffle (label renamed from DevShuffle 2026-08-01; class/ID keep the old name) |
 
 ## Transform (2 nodes)
 

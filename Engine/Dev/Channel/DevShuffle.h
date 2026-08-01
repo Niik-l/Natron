@@ -71,8 +71,10 @@ public:
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return PLUGINID_NATRON_DEVSHUFFLE; }
 
+    // Label renamed DevShuffle -> Shuffle2 (Nuke-style "the modern Shuffle");
+    // the plugin ID stays fr.inria.built-in.DevShuffle so saved projects load.
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "DevShuffle"; }
+    { return "Shuffle2"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
