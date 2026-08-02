@@ -50,6 +50,8 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QCoreApplication>
 #include <QProcess>     // RV launcher uses QProcess::startDetached
 #include <QStringList>
+#include <QFile>
+#include <QFileInfo>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 
@@ -1412,7 +1414,8 @@ WriteNode::knobChanged(KnobI* k,
         KnobOutputFilePtr fileKnob = _imp->outputFileKnob.lock();
 
         std::string rvExe = rvPath  ? rvPath->getValue()  : std::string();
-        const std::string outF = fileKnob ? fileKnob->getValue() : std::string();
+        std::string outF = fileKnob ? fileKnob->getValue() : std::string();
+        getApp()->getProject()->canonicalizePath(outF); // expand [Project] etc. variables
 
         // Runtime fallback: when the knob is empty (e.g. project saved before
         // NATRON_RV_PATH was set), use the env var directly.
@@ -1422,22 +1425,31 @@ WriteNode::knobChanged(KnobI* k,
             }
         }
 
+        // Errors go up as MODAL dialogs, not persistent messages — the node's
+        // next successful render clears persistent messages near-instantly, so
+        // they flashed by unreadably. (Mirrors ReadNode.)
         if (rvExe.empty()) {
-            setPersistentMessage(eMessageTypeError,
-                "RV executable path is not set. Fill in \"RV Executable\" above, "
-                "or set the NATRON_RV_PATH environment variable before launching Natron.");
+            Dialogs::errorDialog( getNode()->getLabel(),
+                tr("RV executable path is not set. Fill in \"RV Executable\" in the panel, "
+                   "or set the NATRON_RV_PATH environment variable before launching Natron.").toStdString() );
         } else if (outF.empty()) {
-            setPersistentMessage(eMessageTypeError,
-                "Write node has no output filename to open.");
+            Dialogs::errorDialog( getNode()->getLabel(),
+                tr("Write node has no output filename to open.").toStdString() );
+        } else if ( !QFile::exists( QString::fromUtf8( rvExe.c_str() ) ) ) {
+            Dialogs::errorDialog( getNode()->getLabel(),
+                tr("RV executable not found at:\n%1").arg( QString::fromUtf8( rvExe.c_str() ) ).toStdString() );
         } else {
             // RV understands ####/%04d notation natively — pass the pattern as-is.
             // Detached process: RV runs independently, closing Natron does not affect it.
+            // Working directory = RV's own bin dir so its DLLs resolve.
             QStringList rvArgs;
             rvArgs << QString::fromUtf8(outF.c_str());
-            bool ok = QProcess::startDetached(QString::fromUtf8(rvExe.c_str()), rvArgs);
+            const QString rvExeQ = QString::fromUtf8(rvExe.c_str());
+            bool ok = QProcess::startDetached(rvExeQ, rvArgs, QFileInfo(rvExeQ).absolutePath());
             if (!ok) {
-                setPersistentMessage(eMessageTypeError,
-                    "Failed to launch RV. Verify the executable path and that RV is installed.");
+                Dialogs::errorDialog( getNode()->getLabel(),
+                    tr("Failed to launch RV from:\n%1\nVerify the executable path and that RV is installed.")
+                        .arg(rvExeQ).toStdString() );
             }
         }
     } else if ( k == _imp->refreshPlanesButton.lock().get() ) {
