@@ -485,11 +485,10 @@ Particle templates:
 
 | Template | What it builds |
 |----------|----------------|
-| Basic Particle System | Emitter → Gravity → Solver → Scene → ScanlineRender |
-| Sparks | Emitter raining onto a Cube3D floor; Spawn On-Collision fires hot orange sparks, merged with the main stream |
-| Jet Exhaust | Hot fast core + slow gray smoke trail — two emitter/force/solver chains merged (forces upstream of a Merge don't reach a shared solver, so each branch owns its chain); additive discs + stretch motion blur |
-| Heat Distortion (ST Distort) | Red/green turbulent particle branches rendered additive → Blur → IDistort UV input, distorting the plate (Checkerboard placeholder — swap in footage). Production heat-haze rig |
-| Rain + Splashes | Wide disc emitter, Max Bounces=1 kills drops on floor impact, Spawn On-Collision splash droplets, full stretch motion blur for streaks |
+| Temp - Basic Particle System | Emitter → Gravity → Solver → Scene → ScanlineRender |
+| Temp - Sparks | Emitter raining onto a Cube3D floor; Spawn On-Collision fires hot orange sparks, merged with the main stream |
+| Temp - Jet Exhaust | Hot fast core + slow gray smoke trail — two emitter/force/solver chains merged (forces upstream of a Merge don't reach a shared solver, so each branch owns its chain); additive discs + stretch motion blur |
+| Temp - Heat Distortion (ST Distort) | Red/green turbulent particle branches rendered additive → Blur → IDistort UV input, distorting the plate (Checkerboard placeholder — swap in footage). Production heat-haze rig |
 
 Adding a template (dev): a slot in `Gui.h`, a menu action in `Gui.cpp`
 (Templates block), and a `runTemplatePython` block in `Gui50.cpp`.

@@ -592,7 +592,6 @@ public Q_SLOTS:
     void createTemplateParticleSparks();
     void createTemplateParticleJetExhaust();
     void createTemplateParticleHeatDistort();
-    void createTemplateParticleRain();
     void createTemplateHDRIBasic();
 
     void autoSave();

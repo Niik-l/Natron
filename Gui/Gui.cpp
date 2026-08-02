@@ -747,29 +747,24 @@ Gui::createMenuActions()
         QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateVDBFire()));
         menu3D->addAction(a);
 
-        a = new QAction(tr("Basic Particle System"), this);
+        a = new QAction(tr("Temp - Basic Particle System"), this);
         a->setStatusTip(tr("Create Emitter + Gravity + Solver + Scene + Camera + ScanlineRender + Viewer"));
         QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateParticles()));
         menuParticles->addAction(a);
 
-        a = new QAction(tr("Sparks"), this);
+        a = new QAction(tr("Temp - Sparks"), this);
         a->setStatusTip(tr("Collision sparks: Emitter + Gravity + Solver (Cube3D floor) + Spawn On-Collision + Merge + Scene + ScanlineRender"));
         QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateParticleSparks()));
         menuParticles->addAction(a);
 
-        a = new QAction(tr("Jet Exhaust"), this);
+        a = new QAction(tr("Temp - Jet Exhaust"), this);
         a->setStatusTip(tr("Hot core + smoke trail: two emitter/force/solver chains merged, additive discs with stretch motion blur"));
         QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateParticleJetExhaust()));
         menuParticles->addAction(a);
 
-        a = new QAction(tr("Heat Distortion (ST Distort)"), this);
+        a = new QAction(tr("Temp - Heat Distortion (ST Distort)"), this);
         a->setStatusTip(tr("Red/green turbulent particles rendered as a UV pass, blurred and driving IDistort on the plate input"));
         QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateParticleHeatDistort()));
-        menuParticles->addAction(a);
-
-        a = new QAction(tr("Rain + Splashes"), this);
-        a->setStatusTip(tr("Disc emitter raining onto a floor, Max Bounces kill + Spawn On-Collision splashes, stretch motion blur streaks"));
-        QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateParticleRain()));
         menuParticles->addAction(a);
     }
 
