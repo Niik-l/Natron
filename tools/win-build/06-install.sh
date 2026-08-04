@@ -42,6 +42,16 @@ if [ "${STAGE_RENDERER:-1}" = "1" ]; then
   cp "$MINGW/share/qt6/plugins/platforms/qwindows.dll" "$I/Renderer/platforms/"
 fi
 
+# FastVolumeRender runtime: wgpu-native isn't an MSYS2 package, so the DLL
+# must come from the build's wgpu dir (only present when the node was built).
+if [ -f "$NATRON_ROOT/wgpu/wgpu_native.dll" ]; then
+  cp "$NATRON_ROOT/wgpu/wgpu_native.dll" "$I/App/"
+  if [ "${STAGE_RENDERER:-1}" = "1" ]; then
+    cp "$NATRON_ROOT/wgpu/wgpu_native.dll" "$I/Renderer/"
+  fi
+  ok "staged wgpu_native.dll (FastVolumeRender)"
+fi
+
 # --- Python standard library (+ PySide6, qtpy live in its site-packages) ---
 log "Python stdlib (lib/python$PYV)"
 rm -rf "$I/lib/python$PYV"

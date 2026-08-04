@@ -176,6 +176,12 @@ You should see output ending with:
 `FastVolumeRender` is a real-time GPU volume renderer (see `NODE_REGISTRY.md`). It is
 **off by default** and depends on **wgpu-native**, which is **not vendored in this repo**.
 
+> **Automated builds:** `tools/win-build/04-natron.sh` auto-enables the node when a
+> **`wgpu/` directory sits next to the `Natron/` checkout** (i.e. `$NATRON_ROOT/wgpu`
+> containing `webgpu.h`, `wgpu.h`, `wgpu_native.dll` — step 1 below), and `06-install.sh`
+> stages the DLL into App/ and Renderer/. Without that folder the scripts build a Natron
+> **without** FastVolumeRender — which is how the 2026-08-02 release shipped missing it.
+
 1. **Get wgpu-native** — `webgpu.h`, `wgpu.h`, and the runtime DLL. Either download a
    release from <https://github.com/gfx-rs/wgpu-native/releases>, or extract them from the
    `wgpu` Python wheel (`.../site-packages/wgpu/resources/`). Put the two headers + the DLL
