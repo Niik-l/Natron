@@ -86,6 +86,11 @@ struct ReadAlembicCameraPrivate
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobBoolWPtr lockTransform;
+
+    // Freeze at Frame (built-in FrameHold for the camera)
+    KnobBoolWPtr freezeEnabled;
+    KnobDoubleWPtr freezeFrame;
+    KnobButtonWPtr freezeUseCurrent;
     KnobDoubleWPtr focalLength;
     KnobDoubleWPtr hAperture, vAperture;
     KnobDoubleWPtr nearClipKnob, farClipKnob;
@@ -231,6 +236,36 @@ ReadAlembicCamera::initializeKnobs()
                             "deliberately offset the camera by hand."));
     camPage->addKnob(lock); _imp->lockTransform = lock;
 
+    // Freeze at Frame — non-destructive FrameHold built into the camera.
+    // Classic use: lock a projection camera to one frame for Project3D while
+    // the timeline plays on (a 2D FrameHold node can't do this — camera
+    // consumers call the provider getters with render time directly).
+    {
+        KnobBoolPtr fz = AppManager::createKnob<KnobBool>(this, tr("Freeze at Frame"));
+        fz->setName("freezeAtFrame");
+        fz->setDefaultValue(false);
+        fz->setAnimationEnabled(false);
+        fz->setHintToolTip(tr("Hold the camera (transform + focal/aperture) at the frame below "
+                              "instead of following the timeline. Non-destructive — untick to "
+                              "resume the baked animation. Typical use: freeze a projection "
+                              "camera for Project3D on a chosen frame."));
+        camPage->addKnob(fz); _imp->freezeEnabled = fz;
+
+        KnobDoublePtr ff = AppManager::createKnob<KnobDouble>(this, tr("Freeze Frame"));
+        ff->setName("freezeFrame");
+        ff->setDefaultValue(1.0);
+        ff->setAnimationEnabled(false);
+        ff->setHintToolTip(tr("The frame the camera is held at while Freeze at Frame is on. "
+                              "Fractional frames interpolate between baked keys."));
+        camPage->addKnob(ff); _imp->freezeFrame = ff;
+
+        KnobButtonPtr fb = AppManager::createKnob<KnobButton>(this, tr("Use Current Frame"));
+        fb->setName("freezeUseCurrent");
+        fb->setHintToolTip(tr("Set Freeze Frame to the current timeline frame and enable "
+                              "Freeze at Frame."));
+        camPage->addKnob(fb); _imp->freezeUseCurrent = fb;
+    }
+
     KnobDoublePtr fl = AppManager::createKnob<KnobDouble>(this, tr("Focal Length"));
     fl->setName("focalLength"); fl->setAnimationEnabled(true); fl->setEvaluateOnChange(false);
     fl->setDefaultValue(50.0);
@@ -319,6 +354,21 @@ ReadAlembicCamera::knobChanged(KnobI* k,
         std::string path = _imp->filePath.lock()->getValue();
         if (!path.empty()) {
             loadAlembicFile(path);
+        }
+        return true;
+    }
+
+    // "Use Current Frame" → grab the timeline frame and switch the freeze on.
+    if (_imp->freezeUseCurrent.lock().get() == k) {
+        AppInstancePtr app = getApp();
+        if (app) {
+            const double cur = (double)app->getTimeLine()->currentFrame();
+            if (KnobDoublePtr ff = _imp->freezeFrame.lock()) {
+                ff->setValue(cur);
+            }
+            if (KnobBoolPtr fz = _imp->freezeEnabled.lock()) {
+                fz->setValue(true);
+            }
         }
         return true;
     }
@@ -622,10 +672,24 @@ ReadAlembicCamera::loadAlembicFile(const std::string& path)
 #endif
 }
 
+double
+ReadAlembicCamera::effectiveTime(double time) const
+{
+    KnobBoolPtr fz = _imp->freezeEnabled.lock();
+    if (fz && fz->getValue()) {
+        KnobDoublePtr ff = _imp->freezeFrame.lock();
+        if (ff) {
+            return ff->getValue();
+        }
+    }
+    return time;
+}
+
 void
 ReadAlembicCamera::getCameraTransform(double time, double& tx, double& ty, double& tz,
                                       double& rx, double& ry, double& rz) const
 {
+    time = effectiveTime(time);
     tx = _imp->translateX.lock()->getValueAtTime(time);
     ty = _imp->translateY.lock()->getValueAtTime(time);
     tz = _imp->translateZ.lock()->getValueAtTime(time);
@@ -637,19 +701,19 @@ ReadAlembicCamera::getCameraTransform(double time, double& tx, double& ty, doubl
 double
 ReadAlembicCamera::getFocalLength(double time) const
 {
-    return _imp->focalLength.lock()->getValueAtTime(time);
+    return _imp->focalLength.lock()->getValueAtTime( effectiveTime(time) );
 }
 
 double
 ReadAlembicCamera::getHAperture(double time) const
 {
-    return _imp->hAperture.lock()->getValueAtTime(time);
+    return _imp->hAperture.lock()->getValueAtTime( effectiveTime(time) );
 }
 
 double
 ReadAlembicCamera::getVAperture(double time) const
 {
-    return _imp->vAperture.lock()->getValueAtTime(time);
+    return _imp->vAperture.lock()->getValueAtTime( effectiveTime(time) );
 }
 
 StatusEnum

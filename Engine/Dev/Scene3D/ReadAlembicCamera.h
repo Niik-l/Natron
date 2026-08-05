@@ -115,6 +115,13 @@ public:
 
 private:
 
+    /** Freeze at Frame: when enabled, every time-based accessor evaluates at
+     *  the held frame instead of the render time — a built-in FrameHold for
+     *  the camera (a 2D FrameHold node can't work here: camera consumers call
+     *  the provider getters with the render time directly, bypassing image
+     *  time-remapping). Non-destructive: the baked keyframes stay intact. */
+    double effectiveTime(double time) const;
+
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     // Auto-load the camera when a saved project is restored: the file-path knob
