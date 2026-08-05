@@ -38,7 +38,7 @@ Updated: 2026-06-24
 | Node | Plugin ID | Status | Description |
 |------|-----------|--------|-------------|
 | **Camera3D** | `fr.inria.built-in.Camera3D` | Registered | Camera with T/R, focal length, aperture, DOF. V Aperture default is computed from the project format (24.576mm H × projectH/projectW) so a fresh camera matches the project aspect out of the box. **Lock Transform** knob (2026-07-26) guards Translate/Rotate against every edit path — panel, viewport gizmo, and look-through orbit/pan/dolly — protecting tracked/imported animation; CameraTracker's Create Camera3D sets it automatically. |
-| **ReadAlembicCamera** | `fr.inria.built-in.ReadAlembicCamera` | Registered | Import animated camera from .abc. **Lock Transform** (default ON) protects the baked T/R keyframes from accidental edits; Reload still rebakes. |
+| **ReadAlembicCamera** | `fr.inria.built-in.ReadAlembicCamera` | Registered | Import animated camera from .abc. **Lock Transform** (default ON) protects the baked T/R keyframes from accidental edits; Reload still rebakes.; Freeze at Frame (built-in camera FrameHold, 2026-08-04) |
 | **ReadAlembicTransform** | `fr.inria.built-in.ReadAlembicTransform` | Registered | Import animated transform/null/locator from .abc. Outputs translate/rotate/scale. Connect to ParticleEmitter transform input. **Lock Transform** (default ON) protects the baked T/R/S keyframes; Reload still rebakes. |
 | **Light3D** | `fr.inria.built-in.Light3D` | Registered | Point/Spot/Area/Distant/Dome light with HDRI |
 

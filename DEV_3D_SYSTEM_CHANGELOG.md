@@ -17,6 +17,22 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Shuffle2, RV integration, camera freeze + first portable releases (2026-08-01..05)** —
+  DevShuffle label renamed **Shuffle2** (plugin ID unchanged — projects load).
+  Read/Write **Open in RV** hardened: modal error dialogs (persistent messages were
+  cleared by the next render before they could be read), exe-existence check,
+  [Project] variable expansion, RV's bin dir as working directory; NATRON_RV_PATH
+  env var pre-fills the knob. **Freeze at Frame** on ReadAlembicCamera: a built-in,
+  non-destructive camera FrameHold (freeze + frame + Use Current Frame button) —
+  all time-based getters redirect, so viewport/ScanlineRender/Cycles/Project3D pin
+  to the held frame (key deletion never sticks: the bake regenerates from the .abc;
+  a 2D FrameHold can't remap provider-getter time). Particle templates: Rain
+  removed, remaining prefixed "Temp -". Build/release: portable releases
+  natron-2.6-2026.08.02 + .08.05 published (build-all.sh + runbook Part B/C);
+  win-build fixes — cycles fork branch pin, alembic dep, un-prefixed OIDN module,
+  wgpu auto-detect for FastVolumeRender (was silently missing from the first
+  release asset).
+
 - **Large-environment import + normals tooling (2026-07-29..31)** —
   **Alembic:** ReadAlembicArchive self-deadlock on load fixed (archiveMutex was held
   across the archiveReloaded emit; the tree-widget slot re-enters getEntryTree()
