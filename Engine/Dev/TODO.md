@@ -28,6 +28,9 @@ Tracking known bugs, incomplete features, and planned improvements.
 - [ ] Use backplate in Cycles renders
 - [x] Blender deep? — DONE 2026-07-26: Blender PR #154410 ported into our standalone Cycles (fork feature/cycles-deep) + wired into CyclesRender/CyclesRenderPass (Deep toggle, DCM mode, merge thresholds, versioned `<pass>_deep.####.exr` sequences, Deep Merge comp-tree button). REMAINING validation gates: DeepFlatten-vs-Combined parity, VDB volumetric deep, Karma DCM comparison
 - [ ] Denoise
+- [ ] **ReadVDB frame-offset UX + VDB error reporting** (2026-08-15, diagnosed from a release-build report — engine verified correct, both items are discoverability):
+  - [ ] `frameOffset` knob (`ReadVDB.cpp:221-226`): display range is ±100 so the slider can't reach a real shot offset (timeline at 1001 over a `_0000`-based sequence needs −1000; typing works, dragging doesn't). Widen it, and add the tooltip this knob alone is missing — `file frame = current frame + offset`, with the 1001 → −1000 example. Note `resolveFramePath()` rewrites the last digit group before `.vdb` unconditionally, so ANY numbered filename is treated as a sequence.
+  - [ ] Error text: `getVDBDirect()` / `getVolumeData()` swallow the OpenVDB exception to stderr (`ReadVDB.cpp:835`), so FastVolumeRender (and the Cycles volume path, same getter) can only report a bare "failed to load VDB grids." Put the resolved path + exception into the persistent message — a GUI launch never sees stderr, which is what made this undiagnosable. Deliberately NOT adding the missing-frame fallback `getBounds()` has (`ReadVDB.cpp:576-583`): silently rendering the wrong frame is worse than an error.
 
 ---
 
