@@ -1681,7 +1681,13 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<ScanlineRender>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 #ifdef NATRON_CYCLES
     registerBuiltInPlugin<CyclesRender>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
-    registerBuiltInPlugin<CyclesRenderPassManager>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    // CyclesRenderPassManager retired 2026-08-17 — no longer offered as a node.
+    // NOT to be confused with CyclesRenderPass (registered below, still current):
+    // the per-pass scoping node with the Active Lights ray-visibility rows is the
+    // one everything uses. The class and its pass-table UI stay compiled; only the
+    // registration is gone, so re-enabling is this one line. A saved project
+    // holding a CyclesRenderPassManager node will report it as unknown on load.
+    // registerBuiltInPlugin<CyclesRenderPassManager>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<CyclesRenderSettings>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 #endif
 #ifdef NATRON_FASTVOLUME
