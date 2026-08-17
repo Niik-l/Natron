@@ -17,6 +17,26 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Cycles transform motion blur (2026-08-17)** — Cycles blurred deforming
+  geometry (vertex positions sampled at shutter open/close) and particles, but
+  anything driven by a *matrix* rendered frozen: a keyframed geo node, an
+  animated Group3D parent, or a rigid Alembic carrying a baked xform never moves
+  a vertex, so there was nothing for the deformation path to see. Object
+  transforms are now sampled too — `prepareCyclesPasses()` rebuilds the
+  SceneGraph at shutter open/close (the rebuild resolves the whole parent chain,
+  so group animation comes along for free) and passes per-node world matrices,
+  keyed by `SceneNode::name`, to `CyclesRenderer::setMotionTransforms()`; the
+  mesh object then gets `set_motion({open, centre, close})` in the same 3-step
+  layout the ParticleInstance branch has always used. The two mechanisms
+  compose, so a deforming mesh that is also moving gets both. Static meshes are
+  skipped (no motion arrays allocated), the shutter matrices feed the render
+  hash so a stale streak can't survive in cache, and the centre-time rebuild is
+  done LAST because the provider mesh getters mutate shared state in place.
+  Verified headlessly: a keyframed Cube3D differs by 125,152 px (6.04% of frame)
+  between blur off/on, while the same scene with the cube static is
+  bit-identical. Camera, volumes and lights still take a single centre
+  transform — a keyframed camera does not blur yet.
+
 - **Shuffle2, RV integration, camera freeze + first portable releases (2026-08-01..05)** —
   DevShuffle label renamed **Shuffle2** (plugin ID unchanged — projects load).
   Read/Write **Open in RV** hardened: modal error dialogs (persistent messages were
