@@ -1075,6 +1075,23 @@ CyclesRender::render(const RenderActionArgs& args)
             sceneHash = hashCombine(sceneHash, 0xBB11ULL);
             hashFloat(mbParams.shutterTime);
             sceneHash = hashCombine(sceneHash, (U64)mbParams.shutterPosition);
+
+            // ...and the shutter-open/close world matrices that drive transform
+            // motion blur. The centre matrices are hashed above, but centre
+            // alone doesn't pin the blur: an object at the apex of a bounce (or
+            // any two frames that share a position while moving differently)
+            // has an unchanged centre and a different smear. Without this the
+            // cache would serve the previous frame's streak.
+            for (int pass = 0; pass < 2; ++pass) {
+                const CyclesRenderer::MotionMatrixMap& mm =
+                    (pass == 0) ? prepared.motionOpen : prepared.motionClose;
+                for (CyclesRenderer::MotionMatrixMap::const_iterator it = mm.begin();
+                     it != mm.end(); ++it) {
+                    for (int mi = 0; mi < 16; ++mi) {
+                        hashFloat(it->second.m[mi]);
+                    }
+                }
+            }
         }
 
         // Hash integrator params — changing bounce counts now invalidates

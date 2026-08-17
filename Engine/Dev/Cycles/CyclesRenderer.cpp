@@ -343,6 +343,11 @@ struct CyclesRenderer::Impl
     // Per-light ray-visibility overrides for the current render (light name -> flags).
     std::map<std::string, LightRayVis> lightRayVis;
 
+    // Per-node world matrices at shutter open/close for TRANSFORM motion blur,
+    // keyed by SceneNode::name (see setMotionTransforms). Empty = deformation
+    // blur only, which is all this renderer did before 2026-08.
+    CyclesRenderer::MotionMatrixMap motionOpen, motionClose;
+
     // When true, objects flagged reflectionMatte are rendered as pure white
     // emitters instead of their normal material. Used by the second (reflection
     // matte) render pass — emission carries through glossy bounces, so the matte
@@ -812,6 +817,14 @@ CyclesRenderer::setLightRayVisibility(const std::map<std::string, LightRayVis>* 
 {
     if (overrides) _impl->lightRayVis = *overrides;
     else           _impl->lightRayVis.clear();
+}
+
+void
+CyclesRenderer::setMotionTransforms(const MotionMatrixMap& open,
+                                    const MotionMatrixMap& close)
+{
+    _impl->motionOpen  = open;
+    _impl->motionClose = close;
 }
 
 bool
@@ -2503,6 +2516,40 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         ccl::Object* obj = scene->create_node<ccl::Object>();
         obj->set_geometry(mesh);
         obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix));
+
+        // Transform motion blur — world matrices sampled at shutter open/close
+        // by the caller (SceneGraph rebuilds at those times, so parent Group3D
+        // animation is already baked into them). This is the half the
+        // deformation path above can't see: a keyframed geo node, an animated
+        // group, or a rigid Alembic carrying a baked xform never moves a single
+        // vertex, so ATTR_STD_MOTION_VERTEX_POSITION stays flat while the object
+        // flies across frame. Same 3-step open/centre/close layout the
+        // ParticleInstance branch uses; the two mechanisms compose, so a
+        // deforming mesh that is ALSO moving gets both.
+        if (mbEnabled && !_impl->motionOpen.empty()) {
+            MotionMatrixMap::const_iterator itO = _impl->motionOpen.find(sn.name);
+            MotionMatrixMap::const_iterator itC = _impl->motionClose.find(sn.name);
+            if (itO != _impl->motionOpen.end() && itC != _impl->motionClose.end()) {
+                // Skip static objects: enabling motion on every mesh in the
+                // scene would allocate motion arrays for geometry that never
+                // moves. Exact compare is right here — these come from the same
+                // matrix builder, so an unanimated node reproduces bit-identical
+                // values at any time.
+                const bool moves =
+                    memcmp(itO->second.m, sn.worldMatrix, sizeof(float) * 16) != 0 ||
+                    memcmp(itC->second.m, sn.worldMatrix, sizeof(float) * 16) != 0;
+                if (moves) {
+                    mesh->set_use_motion_blur(true);
+                    mesh->set_motion_steps(3);
+                    ccl::array<ccl::Transform> motionTfms;
+                    motionTfms.resize(3);
+                    motionTfms[0] = natronMatrixToCyclesTransform(itO->second.m);
+                    motionTfms[1] = natronMatrixToCyclesTransform(sn.worldMatrix);
+                    motionTfms[2] = natronMatrixToCyclesTransform(itC->second.m);
+                    obj->set_motion(motionTfms);
+                }
+            }
+        }
 
         // Apply CyclesRenderPass visibility if provided
         if (visibilityMap) {

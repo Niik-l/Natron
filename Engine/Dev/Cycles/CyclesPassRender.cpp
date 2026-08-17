@@ -23,6 +23,7 @@
 #include "CyclesPassRender.h"
 #include "../Deep/DeepImage.h"
 
+#include <cstring>   // memcpy — shutter-time world matrices
 #include <memory>
 #include <set>
 
@@ -144,7 +145,48 @@ prepareCyclesPasses(EffectInstance*           effect,
         }
     }
 
-    out.sceneGraph.rebuild(allNodes, req.time);
+    // --- Transform motion blur: sample every node's world matrix at shutter
+    // open/close. rebuild() resolves the whole parent chain, so an animated
+    // Group3D above the geo is already folded into each matrix, and knob
+    // keyframes / Alembic xform samples both interpolate at fractional times.
+    //
+    // ORDER MATTERS: the sub-time graphs are built FIRST and the centre graph
+    // LAST. rebuild() pulls mesh data through the provider getters, which mutate
+    // the source node's shared mesh in place (ReadGeo / ReadAlembicArchive do
+    // this by design), so whichever time is rebuilt last is the state the
+    // providers are left holding — and out.sceneGraph's meshData pointers read
+    // it during scene sync. Build centre last and everything downstream sees
+    // centre-frame geometry.
+    if (req.mb && req.mb->enabled) {
+        float shutterOpen = 0.0f, shutterClose = 0.0f;
+        const float st = req.mb->shutterTime;
+        switch (req.mb->shutterPosition) {
+            case 0: shutterOpen = 0;          shutterClose = st;        break; // Start
+            case 1: shutterOpen = -st * 0.5f; shutterClose = st * 0.5f; break; // Center
+            case 2: shutterOpen = -st;        shutterClose = 0;         break; // End
+        }
+        if (shutterOpen != 0.0f || shutterClose != 0.0f) {
+            struct Local {
+                static void collect(const SceneGraph& sg,
+                                    CyclesRenderer::MotionMatrixMap& outMap)
+                {
+                    const std::vector<SceneNode>& nodes = sg.nodes();
+                    for (size_t i = 0; i < nodes.size(); ++i) {
+                        CyclesRenderer::MotionMatrix mm;
+                        memcpy(mm.m, nodes[i].worldMatrix, sizeof(float) * 16);
+                        outMap[nodes[i].name] = mm;
+                    }
+                }
+            };
+            SceneGraph sgShutter;
+            sgShutter.rebuild(allNodes, req.time + shutterOpen);
+            Local::collect(sgShutter, out.motionOpen);
+            sgShutter.rebuild(allNodes, req.time + shutterClose);
+            Local::collect(sgShutter, out.motionClose);
+        }
+    }
+
+    out.sceneGraph.rebuild(allNodes, req.time);   // centre LAST — see above
     if (out.sceneGraph.size() == 0) {
         errOut = "scene graph is empty after rebuild";
         return false;
@@ -219,6 +261,11 @@ executeCyclesPasses(CyclesRenderer&            renderer,
 
     // OpenImageDenoise toggle — applied to the integrator in syncSceneWithCamera.
     renderer.setDenoise(req.denoise);
+
+    // Shutter-open/close world matrices for transform motion blur. Empty maps
+    // (no motion blur, or a scene where nothing moves) clear any previous
+    // render's matrices, so a stale set can't blur a static frame.
+    renderer.setMotionTransforms(prepared.motionOpen, prepared.motionClose);
 
     const bool ok = renderer.renderToBufferWithCameraMultiPass(
         prepared.sceneGraph,

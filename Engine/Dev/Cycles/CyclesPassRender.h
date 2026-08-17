@@ -129,6 +129,13 @@ struct CyclesPassPrepared
 {
     SceneGraph sceneGraph;
 
+    // Per-node world matrices sampled at shutter open/close, keyed by
+    // SceneNode::name — the input to transform motion blur (a keyframed geo
+    // node, an animated Group3D parent, a rigid Alembic with a baked xform).
+    // Filled only when req.mb is non-null and enabled; both empty otherwise,
+    // which leaves the renderer on deformation-only blur.
+    CyclesRenderer::MotionMatrixMap motionOpen, motionClose;
+
     // Camera, resolved with priority: req.cameraOverride > effect input 2 >
     // these fallback defaults. `cameraResolved` is true iff a CameraProvider
     // was actually consulted (false → defaults were used).

@@ -85,6 +85,32 @@ public:
         int shutterPosition = 1;    // 0=Start, 1=Center, 2=End
     };
 
+    /**
+     * @brief One column-major 4x4 world matrix, sampled at a shutter time.
+     */
+    struct MotionMatrix { float m[16]; };
+
+    /**
+     * @brief Per-node world matrices at one shutter time, keyed by
+     * SceneNode::name (the same key the visibility map uses). Keyed rather
+     * than indexed so a sub-time rebuild that emits a different node count
+     * can't silently mis-pair transforms.
+     */
+    typedef std::map<std::string, MotionMatrix> MotionMatrixMap;
+
+    /**
+     * @brief Supply per-node world matrices sampled at shutter open/close for
+     * TRANSFORM motion blur (a keyframed geo node, an animated Group3D parent,
+     * or a rigid Alembic with a baked xform). Deformation blur — vertices that
+     * move — is handled separately during scene sync and needs nothing here.
+     *
+     * Both maps empty (the default) = no transform motion blur, i.e. the
+     * pre-2026-08 behaviour. Applies to the next render only in the sense that
+     * the maps are copied; call again per frame.
+     */
+    void setMotionTransforms(const MotionMatrixMap& open,
+                             const MotionMatrixMap& close);
+
     struct IntegratorParams {
         int maxBounces = 7;
         int diffuseBounces = 7;
