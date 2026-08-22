@@ -17,6 +17,63 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Megascans asset loader + the material slots it needed (2026-08-21/22)** —
+  **Templates → 3D → Megascans Asset…** turns a Quixel Bridge folder into a wired
+  graph: pick a mesh from a tris-labelled list, get ReadGeo + Material3D with
+  albedo through a Read (gradeable in comp) and the data maps as file paths.
+  Handles both layouts Quixel ships — flat "3d asset", and "3dplant" with
+  variations in `VarN/` subfolders and maps split across `Textures/Atlas` and
+  `Textures/Billboard` — reading the asset `.json` (two different schemas) for
+  tris/variation/LOD but discovering files from DISK, since a download contains
+  only what was ticked in Bridge. It also absorbs the traps: Megascans meshes are
+  authored in **centimetres** (0.01 on the ReadGeo), a connected image input is
+  baked to a **linear** `.hdr` so Diffuse Colorspace must say linear, and per-LOD
+  normal maps must match the chosen LOD. FBX-only folders are told to re-download
+  as Alembic/OBJ — ReadGeo reads those two, and the Autodesk FBX SDK is
+  GPL-incompatible for a shipped binary.
+  **Material3D** gained Specular, Displacement (+Scale/Midlevel), Opacity
+  (+Invert) and Translucency (+Amount) — see NODE_REGISTRY for how each maps onto
+  Principled, and why displacement is bump-only and translucency is a mixed
+  Translucent BSDF rather than subsurface.
+  **Two cache-correctness fixes fell out of it.** The scene hash enumerated a
+  hand-written list of material getters, so a graded albedo (baked to a temp file
+  whose PATH never changes) and every map knob added since were invisible: the
+  render was skipped and the previous frame stayed on screen. It now folds in the
+  material node's own `getHash()`, the six input chains' hashes, and the source
+  geo node's hash. Separately, `resolveTextureFrame` rewrote the last digit group
+  of any texture path with the current frame — silently loading `Normal_LOD1`
+  when you asked for `Normal_LOD3`, and mangling the baked-albedo filename into
+  one that never existed (the surface rendered pink). Animated textures must now
+  say `####` or `%04d`. Same root mistake as the ReadVDB fix below; swept the
+  tree afterwards, and the only other copy is in the retired
+  CyclesRenderPassManager.
+
+- **ReadVDB single-frame + offset fixes (2026-08-21)** — `resolveFramePath`
+  substituted a frame number into any filename ending in digits, so a one-off
+  `smoke_0000.vdb` or a versioned `fire_v003.vdb` was read as a sequence and
+  failed — everywhere except the 3D viewport, whose preview paths quietly fall
+  back to the un-substituted name (which is why it looked like a FastVolumeRender
+  bug). `detectSequence` now decides once per file pick by counting matching
+  siblings on disk. Frame Offset's slider reached only ±100 (a 1001-based
+  timeline over a 0000-based sequence needs −1000) and had no tooltip; both
+  fixed. The OpenVDB exception now reaches the persistent message instead of
+  stderr, which a GUI launch never shows.
+
+- **Scene3D / Viewport3D quality-of-life (2026-08-22)** — **Uniform Scale** on
+  ReadGeo, honoured by `SceneGraph::rebuild`'s generic branch and
+  `ScanlineRender::extractGeometry` (only the Alembic-archive branch read the
+  knob before, so it was inert on every other node type); **Frustum Display
+  Length** on ReadAlembicCamera, since Viewport3D already looked the knob up by
+  name and imported cm-scale shots left the 3.0 default gizmo invisible. And a
+  **two-viewport gizmo fix**: dragging geo in a look-through view jumped whenever
+  a second 3D viewport was open. Two causes — `ImGui::CreateContext()` was called
+  without ever storing the pointer or calling `SetCurrentContext`, so both
+  widgets shared one context; and ImGuizmo keeps a single FILE-STATIC `gContext`
+  (view/projection, screen rect, in-progress drag) that cannot be split per
+  widget at all. Each viewport now owns an ImGui context, and the viewport last
+  clicked owns the gizmo — so the manipulator appears in one view at a time,
+  which is the price of that shared static.
+
 - **Cycles transform motion blur (2026-08-17)** — Cycles blurred deforming
   geometry (vertex positions sampled at shutter open/close) and particles, but
   anything driven by a *matrix* rendered frozen: a keyframed geo node, an
