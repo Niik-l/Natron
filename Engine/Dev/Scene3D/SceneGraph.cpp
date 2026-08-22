@@ -313,6 +313,15 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             float sx = kSX ? (float)dynamic_cast<KnobDouble*>(kSX.get())->getValueAtTime(time) : 1;
             float sy = kSY ? (float)dynamic_cast<KnobDouble*>(kSY.get())->getValueAtTime(time) : 1;
             float sz = kSZ ? (float)dynamic_cast<KnobDouble*>(kSZ.get())->getValueAtTime(time) : 1;
+            // Uniform Scale multiplies the per-axis scales. Read by name so a
+            // node without the knob (or a project saved before it existed) just
+            // gets 1. Previously only the ReadAlembicArchive branch below looked
+            // for this, so the knob did nothing on any other node type.
+            {
+                KnobIPtr kUS = effect->getKnobByName("uniformScale");
+                const float us = kUS ? (float)dynamic_cast<KnobDouble*>(kUS.get())->getValueAtTime(time) : 1.f;
+                sx *= us; sy *= us; sz *= us;
+            }
 
             // Compose userTRS × mesh->transform so animated .abc xforms play
             // back in Cycles + 3D viewport (they previously dropped the

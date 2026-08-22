@@ -1982,9 +1982,13 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         const float rx = readDouble("rotateX", 0.0f);
         const float ry = readDouble("rotateY", 0.0f);
         const float rz = readDouble("rotateZ", 0.0f);
-        const float sx = readDouble("scaleX", 1.0f);
-        const float sy = readDouble("scaleY", 1.0f);
-        const float sz = readDouble("scaleZ", 1.0f);
+        // Uniform Scale multiplies the per-axis scales — must match what
+        // SceneGraph::rebuild does, or the same geo would sit at a different
+        // size in ScanlineRender than in the viewport and Cycles.
+        const float us = readDouble("uniformScale", 1.0f);
+        const float sx = readDouble("scaleX", 1.0f) * us;
+        const float sy = readDouble("scaleY", 1.0f) * us;
+        const float sz = readDouble("scaleZ", 1.0f) * us;
         float userTRS[16];
         SceneGraph::buildTRS(tx, ty, tz, rx, ry, rz, sx, sy, sz, userTRS);
         mat4Mul(out.localMatrix, userTRS, embedded);

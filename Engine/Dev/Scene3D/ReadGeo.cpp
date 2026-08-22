@@ -198,6 +198,7 @@ struct ReadGeoPrivate
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobDoubleWPtr scaleX, scaleY, scaleZ;
+    KnobDoubleWPtr uniformScale;
 
     std::vector<std::string> geoPaths;
     std::string loadedFilePath;
@@ -408,6 +409,17 @@ ReadGeo::initializeKnobs()
         k->setName("scaleZ"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
         k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
         xformPage->addKnob(k); _imp->scaleZ = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Uniform Scale"));
+        k->setName("uniformScale"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.0001);
+        k->setDisplayMinimum(0.001); k->setDisplayMaximum(10.0);
+        k->setHintToolTip(tr("Multiplies Scale X/Y/Z, so the whole object resizes from one "
+                             "knob. The display range goes below 0.01 on purpose: imported "
+                             "assets are often authored in centimetres or millimetres, and "
+                             "0.01 (cm to m) or 0.001 (mm to m) is the usual correction."));
+        xformPage->addKnob(k); _imp->uniformScale = k;
     }
 
     // Material page
