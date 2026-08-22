@@ -593,6 +593,7 @@ public Q_SLOTS:
     void createTemplateParticleJetExhaust();
     void createTemplateParticleHeatDistort();
     void createTemplateHDRIBasic();
+    void createTemplateMegascansAsset();
 
     void autoSave();
 

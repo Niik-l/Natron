@@ -45,6 +45,14 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
 #include <QKeyEvent>
 GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include <QMenuBar>
+#include <QFileDialog>    // Megascans asset loader: folder pick
+#include <QInputDialog>   // Megascans asset loader: LOD pick
+#include <QDir>
+#include <QDirIterator>   // Megascans: recursive mesh discovery (Var1/../VarN)
+#include <QJsonDocument>  // Megascans: tris / variation / lod from the asset json
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QFile>
 #include <QToolButton>
 #include <QProgressDialog>
 #include <QClipboard>
@@ -989,6 +997,219 @@ runTemplatePython(Gui* gui, const char* script)
     } else if (!output.empty()) {
         gui->getApp()->appendToScriptEditor(output);
     }
+}
+
+// Megascans / Quixel Bridge asset loader.
+//
+// Unlike the other templates this one needs the user to pick an asset, so the
+// folder + mesh choice happen in C++ and the resulting paths are baked into the
+// Python that builds the graph. Texture discovery is done from what is actually
+// ON DISK (glob), not from the asset .json: the json advertises every map at
+// every resolution Quixel offers, while a download only contains the formats and
+// maps the user ticked in Bridge.
+void
+Gui::createTemplateMegascansAsset()
+{
+    const QString dir = QFileDialog::getExistingDirectory(
+        this, tr("Choose a Megascans asset folder"), QString(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if ( dir.isEmpty() ) return;
+
+    // Meshes we can actually read, found RECURSIVELY: a "3d asset" keeps its
+    // LODs beside the textures, while a "3dplant" puts each variation in its own
+    // Var1/…Var19/ subfolder. FBX is deliberately absent — ReadGeo handles .abc
+    // and .obj only, and Bridge exports all three, so the fix is a re-download.
+    QDir d(dir);
+    QStringList meshRelPaths;
+    {
+        QStringList meshFilter;
+        meshFilter << QString::fromUtf8("*.abc") << QString::fromUtf8("*.obj");
+        QDirIterator it(dir, meshFilter, QDir::Files, QDirIterator::Subdirectories);
+        while ( it.hasNext() ) {
+            it.next();
+            meshRelPaths << d.relativeFilePath( it.filePath() );
+        }
+    }
+    if ( meshRelPaths.isEmpty() ) {
+        QDirIterator fbxIt(dir, QStringList() << QString::fromUtf8("*.fbx"),
+                           QDir::Files, QDirIterator::Subdirectories);
+        Dialogs::errorDialog(tr("Megascans").toStdString(),
+            (fbxIt.hasNext()
+                ? tr("This asset only contains .fbx meshes, which Natron cannot read yet.\n\n"
+                     "Re-download it from Bridge with the Alembic (.abc) or OBJ format "
+                     "selected — Quixel publishes all three for every LOD.")
+                : tr("No .abc or .obj mesh found in that folder (searched subfolders too).")).toStdString());
+        return;
+    }
+
+    // The asset .json knows the triangle count, variation and LOD of each mesh —
+    // far more useful to choose on than a filename. Two schemas exist: "3dplant"
+    // uses models[] (with variation/lod/tris), "3d asset" uses meshes[] (no
+    // counts). Anything unparseable just falls back to sorted paths.
+    QMap<QString, QString> labelToRel;   // display label -> relative path
+    QMap<QString, QPair<int, int> > relToOrder; // relative path -> (variation, lod)
+    {
+        const QStringList jsons = d.entryList(QStringList() << QString::fromUtf8("*.json"),
+                                              QDir::Files);
+        if ( !jsons.isEmpty() ) {
+            QFile jf( d.absoluteFilePath( jsons.first() ) );
+            if ( jf.open(QIODevice::ReadOnly) ) {
+                const QJsonObject root = QJsonDocument::fromJson( jf.readAll() ).object();
+                Q_FOREACH(const QJsonValue& mv, root.value(QString::fromUtf8("models")).toArray()) {
+                    const QJsonObject mo = mv.toObject();
+                    const QString uri = mo.value(QString::fromUtf8("uri")).toString();
+                    if ( uri.isEmpty() ) continue;
+                    const QString rel = QDir::fromNativeSeparators(uri);
+                    const int var  = mo.value(QString::fromUtf8("variation")).toInt(-1);
+                    const int lod  = mo.value(QString::fromUtf8("lod")).toInt(-1);
+                    const int tris = mo.value(QString::fromUtf8("tris")).toInt(-1);
+                    if (var >= 0 || lod >= 0) relToOrder.insert(rel, qMakePair(var, lod));
+                    if (tris > 0) {
+                        // Group digits so 340795 reads as 340,795 at a glance.
+                        QString t = QString::number(tris);
+                        for (int p = t.size() - 3; p > 0; p -= 3) t.insert(p, QChar::fromLatin1(','));
+                        labelToRel.insert(QString::fromUtf8("%1  —  %2 tris").arg(rel).arg(t), rel);
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by (variation, LOD) when the json gave us those, so Var2 doesn't sort
+    // after Var10; otherwise plain path order.
+    std::sort(meshRelPaths.begin(), meshRelPaths.end(),
+              [&relToOrder](const QString& a, const QString& b) {
+                  const bool ha = relToOrder.contains(a), hb = relToOrder.contains(b);
+                  if (ha && hb) return relToOrder.value(a) < relToOrder.value(b);
+                  return a < b;
+              });
+
+    QStringList choices;
+    QMap<QString, QString> choiceToRel;
+    Q_FOREACH(const QString& rel, meshRelPaths) {
+        QString label = rel;
+        for (QMap<QString, QString>::const_iterator lit = labelToRel.constBegin();
+             lit != labelToRel.constEnd(); ++lit) {
+            if (lit.value() == rel) { label = lit.key(); break; }
+        }
+        choices << label;
+        choiceToRel.insert(label, rel);
+    }
+
+    bool ok = false;
+    const QString choice = QInputDialog::getItem(
+        this, tr("Megascans"),
+        tr("Mesh to load (%1 found):").arg(choices.size()),
+        choices, 0, false, &ok);
+    if (!ok || choice.isEmpty()) return;
+
+    const QString meshPath = d.absoluteFilePath( choiceToRel.value(choice, choice) );
+
+    // Python does discovery + wiring. Paths are passed as raw strings so Windows
+    // backslashes survive.
+    QString py = QString::fromUtf8(
+"app = app1\n"
+"import os, glob, re\n"
+"folder = r\"%1\"\n"
+"meshPath = r\"%2\"\n"
+"\n"
+"# LOD index of the chosen mesh, so the LOD-matched maps get picked. Megascans\n"
+"# ships per-LOD normals (Normal_LOD0..LOD5) and mixing them up is a silent,\n"
+"# hard-to-spot shading error.\n"
+"m = re.search(r'_LOD(\\d+)', os.path.basename(meshPath))\n"
+"lod = m.group(1) if m else None\n"
+"\n"
+"# Where the maps live. A '3d asset' keeps them beside the meshes; a '3dplant'\n"
+"# splits them into Textures/Atlas (the leaf/bark atlas) and Textures/Billboard\n"
+"# (for the flat billboard LOD). Search the most specific first, then the root.\n"
+"atlasDir = os.path.join(folder, 'Textures', 'Atlas')\n"
+"bbDir    = os.path.join(folder, 'Textures', 'Billboard')\n"
+"texDirs  = []\n"
+"if 'billboard' in os.path.basename(meshPath).lower() and os.path.isdir(bbDir):\n"
+"    texDirs.append(bbDir)\n"
+"if os.path.isdir(atlasDir): texDirs.append(atlasDir)\n"
+"if os.path.isdir(bbDir) and bbDir not in texDirs: texDirs.append(bbDir)\n"
+"texDirs.append(folder)\n"
+"\n"
+"def first(pats):\n"
+"    for d in texDirs:\n"
+"        for p in pats:\n"
+"            hits = sorted(glob.glob(os.path.join(d, p)))\n"
+"            if hits: return hits[0]\n"
+"    return ''\n"
+"\n"
+"def pick(kind, perLod=True):\n"
+"    pats = []\n"
+"    if lod and perLod:\n"
+"        pats += ['*_%s_LOD' % kind + lod + '.exr', '*_%s_LOD' % kind + lod + '.jpg']\n"
+"    # EXR first: height/roughness want the bit depth, and Quixel ships both.\n"
+"    pats += ['*_%s.exr' % kind, '*_%s.jpg' % kind, '*_%s.png' % kind]\n"
+"    return first(pats)\n"
+"\n"
+"albedo = pick('Albedo')\n"
+"rough  = pick('Roughness', False)\n"
+"normal = pick('Normal')\n"
+"spec   = pick('Specular', False)\n"
+"disp   = pick('Displacement', False)\n"
+"opac   = pick('Opacity', False)\n"
+"trans  = pick('Translucency', False)\n"
+"\n"
+"geo = app.createNode('fr.inria.built-in.ReadGeo')\n"
+"geo.getParam('filename').setValue(meshPath)\n"
+"mat = app.createNode('fr.inria.built-in.Material3D')\n"
+"geo.connectInput(0, mat)          # ReadGeo input 0 = Material\n"
+"\n"
+"# Albedo through a Read so it can be graded in the comp. Material3D bakes a\n"
+"# connected input to a LINEAR .hdr before Cycles sees it, so Diffuse Colorspace\n"
+"# must say linear here — pointing it at sRGB would decode the texture twice.\n"
+"read = None\n"
+"if albedo:\n"
+"    read = app.createReader(albedo)\n"
+"    if read is not None:\n"
+"        mat.connectInput(0, read)  # Material3D input 0 = Diffuse\n"
+"        cs = mat.getParam('diffuseColorspace')\n"
+"        if cs is not None:\n"
+"            for i in range(cs.getNumOptions()):\n"
+"                if 'linear' in cs.getOption(i).lower():\n"
+"                    cs.setValue(i); break\n"
+"\n"
+"# The rest as file paths on the material: they are data maps, nothing to grade.\n"
+"for knob, path in (('roughnessMapFile', rough), ('normalMapFile', normal),\n"
+"                   ('specularMapFile', spec), ('displacementMapFile', disp),\n"
+"                   ('opacityMapFile', opac), ('translucencyMapFile', trans)):\n"
+"    if path:\n"
+"        p = mat.getParam(knob)\n"
+"        if p is not None: p.setValue(path)\n"
+"\n"
+"# Megascans meshes are authored in CENTIMETRES: this tree measures ~205 units\n"
+"# for a 2.06 m trunk. Bring it to metres so it sits sanely next to everything\n"
+"# else in the scene.\n"
+"for k in ('scaleX', 'scaleY', 'scaleZ'):\n"
+"    p = geo.getParam(k)\n"
+"    if p is not None: p.setValue(0.01)\n"
+"\n"
+"if read is not None: read.setPosition(-150, -250)\n"
+"mat.setPosition(-150, -120)\n"
+"geo.setPosition(0, 0)\n"
+"\n"
+"wired = [n for n, p in (('albedo', albedo), ('roughness', rough), ('normal', normal),\n"
+"                        ('specular', spec), ('displacement', disp),\n"
+"                        ('opacity', opac), ('translucency', trans)) if p]\n"
+"print('Megascans: loaded ' + os.path.basename(meshPath) + ' (scaled cm->m)')\n"
+"print('Megascans: wired ' + (', '.join(wired) if wired else 'no maps found'))\n"
+"# Say what was ignored rather than leaving the user to wonder where it went.\n"
+"skipped = []\n"
+"for d in texDirs:\n"
+"    for f in sorted(glob.glob(os.path.join(d, '*'))):\n"
+"        if re.search(r'_(Cavity|Gloss|Bump|NormalBump|AO|Fuzz|Metalness|Curvature)\\.', f):\n"
+"            skipped.append(os.path.basename(f))\n"
+"skipped = sorted(set(skipped))\n"
+"if skipped:\n"
+"    print('Megascans: not wired (no matching material input): ' + ', '.join(skipped))\n"
+"print('Megascans: displacement is applied as BUMP - shading detail only, silhouette unchanged')\n"
+        ).arg(dir).arg(meshPath);
+
+    runTemplatePython( this, py.toStdString().c_str() );
 }
 
 void
