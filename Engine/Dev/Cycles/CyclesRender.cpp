@@ -1006,6 +1006,31 @@ CyclesRender::render(const RenderActionArgs& args)
                         for (size_t ci = 0; ci < texFile.size(); ++ci) {
                             sceneHash = hashCombine(sceneHash, (U64)texFile[ci]);
                         }
+                        // ...and the upstream chains feeding the material's image
+                        // inputs. Those get baked to a temp file named after the
+                        // node, so the path above is byte-identical however the
+                        // upstream nodes are edited — hashing it alone meant
+                        // grading a connected albedo changed nothing and the
+                        // cache replayed the previous render.
+                        sceneHash = hashCombine(sceneHash,
+                                                (U64)mat->getMaterialInputsHash(args.time));
+                        // ...and the material node's own knob hash. Enumerating
+                        // individual getters above has repeatedly gone stale:
+                        // every map path, Normal Strength, Displacement Scale,
+                        // Translucency Amount and Invert Opacity were invisible
+                        // to the cache, so changing them left the previous
+                        // render on screen and the knob looked broken. Hashing
+                        // the node covers every knob it has now and every one
+                        // added later.
+                        if (EffectInstance* matEff = dynamic_cast<EffectInstance*>(mat)) {
+                            sceneHash = hashCombine(sceneHash, matEff->getHash());
+                        }
+                    }
+                    // The geo node's own knobs too — swapping a ReadGeo's file
+                    // or LOD doesn't move its world matrix, so nothing else here
+                    // would notice.
+                    if (EffectInstancePtr srcEff = node->getEffectInstance()) {
+                        sceneHash = hashCombine(sceneHash, srcEff->getHash());
                     }
                 }
             }
