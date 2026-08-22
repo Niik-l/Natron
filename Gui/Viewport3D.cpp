@@ -736,6 +736,11 @@ struct Viewport3DPrivate
 
     // ImGuizmo state
     bool imguiInitialized;
+    // This widget's own ImGui context. ImGui keeps ONE global current context,
+    // so with two Viewport3Ds open the second CreateContext() silently made both
+    // widgets share it — each overwriting the other's DisplaySize/MousePos every
+    // repaint. Kept per widget and made current before any ImGui/ImGuizmo call.
+    ImGuiContext* imguiCtx;
     ImGuizmo::OPERATION imguizmoOp;
     ImGuizmo::MODE imguizmoMode;
 
@@ -830,6 +835,7 @@ struct Viewport3DPrivate
         , camDistance(8.0f)
         , fov(27.0f)
         , imguiInitialized(false)
+        , imguiCtx(NULL)
         , imguizmoOp(ImGuizmo::TRANSLATE)
         , imguizmoMode(ImGuizmo::WORLD)
         , selectedCardIndex(-1)
@@ -886,8 +892,21 @@ Viewport3D::Viewport3D(Gui* gui,
     setContextMenuPolicy(Qt::PreventContextMenu);
 }
 
+// Which viewport currently drives the shared ImGuizmo state. See the comment at
+// the Manipulate call in paintGL — ImGuizmo's context is a file-static, so two
+// viewports manipulating at once corrupt each other's drag.
+Viewport3D* Viewport3D::s_gizmoOwner = NULL;
+
 Viewport3D::~Viewport3D()
 {
+    if (s_gizmoOwner == this) {
+        s_gizmoOwner = NULL;
+    }
+    if (_imp->imguiCtx) {
+        ImGui::DestroyContext(_imp->imguiCtx);
+        _imp->imguiCtx = NULL;
+        _imp->imguiInitialized = false;
+    }
 }
 
 QSize
@@ -944,12 +963,15 @@ Viewport3D::initializeGL()
     // Initialize ImGui + ImGuizmo.
     // The ImGui *context* is CPU-side state — create it once for this widget.
     if (!_imp->imguiInitialized) {
-        ImGui::CreateContext();
+        _imp->imguiCtx = ImGui::CreateContext();
+        ImGui::SetCurrentContext(_imp->imguiCtx);
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = NULL; // don't save imgui.ini
         io.LogFilename = NULL;
         io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
         _imp->imguiInitialized = true;
+    } else {
+        ImGui::SetCurrentContext(_imp->imguiCtx);
     }
     // The font texture is a GL resource. QOpenGLWidget calls initializeGL again
     // whenever its GL context is recreated (e.g. when the widget is reparented
@@ -1664,6 +1686,10 @@ Viewport3D::paintGL()
 
     // 7. ImGuizmo overlay
     if (_imp->imguiInitialized) {
+        // Make OUR context current: another Viewport3D repainting in between
+        // would otherwise leave its own context selected and we would write into
+        // its state (and read its mouse position).
+        ImGui::SetCurrentContext(_imp->imguiCtx);
         ImGuiIO& io = ImGui::GetIO();
         io.DisplaySize = ImVec2((float)_imp->viewW, (float)_imp->viewH);
         io.DeltaTime = 1.0f / 30.0f;
@@ -1719,7 +1745,16 @@ Viewport3D::paintGL()
         }
 
         // ImGuizmo Manipulate for selected node
-        if (!_imp->selectedNodeName.empty()) {
+        // ImGuizmo keeps ONE file-static context (ImGuizmo.cpp gContext) holding
+        // the view/projection, screen rect and in-progress drag state — it is not
+        // per ImGui context, so it cannot be made per widget the way the ImGui
+        // context above was. With two viewports both calling Manipulate, each
+        // repaint overwrote the other's matrices and the drag delta was computed
+        // against whichever viewport painted last: dragging geo in a
+        // look-through view jumped around. Only the viewport the user last
+        // interacted with drives the gizmo; the others draw the scene without it.
+        const bool ownsGizmo = (s_gizmoOwner == NULL || s_gizmoOwner == this);
+        if (!_imp->selectedNodeName.empty() && ownsGizmo) {
             const std::vector<SceneNode>& sns = _imp->sceneGraph.nodes();
             for (size_t si = 0; si < sns.size(); ++si) {
                 const SceneNode& sn = sns[si];
@@ -1837,8 +1872,15 @@ Viewport3D::mousePressEvent(QMouseEvent* e)
     _imp->lastMouseX = e->x();
     _imp->lastMouseY = e->y();
 
+    // Clicking in a viewport hands it the (shared, file-static) ImGuizmo state,
+    // so the gizmo follows the view you are actually working in. Handing it over
+    // on press rather than hover means a drag can leave the widget without the
+    // other viewport stealing the gizmo mid-drag.
+    s_gizmoOwner = this;
+
     // Feed ImGui mouse state directly (not polled)
     if (_imp->imguiInitialized) {
+        ImGui::SetCurrentContext(_imp->imguiCtx);
         ImGuiIO& io = ImGui::GetIO();
         io.MousePos = ImVec2((float)e->x(), (float)e->y());
         if (e->button() == Qt::LeftButton) io.MouseDown[0] = true;
@@ -1947,6 +1989,7 @@ Viewport3D::mouseMoveEvent(QMouseEvent* e)
 
     // Feed ImGui
     if (_imp->imguiInitialized) {
+        ImGui::SetCurrentContext(_imp->imguiCtx);
         ImGuiIO& io = ImGui::GetIO();
         io.MousePos = ImVec2((float)e->x(), (float)e->y());
     }
@@ -2019,6 +2062,7 @@ Viewport3D::mouseReleaseEvent(QMouseEvent* e)
 {
     // Feed ImGui
     if (_imp->imguiInitialized) {
+        ImGui::SetCurrentContext(_imp->imguiCtx);
         ImGuiIO& io = ImGui::GetIO();
         if (e->button() == Qt::LeftButton) io.MouseDown[0] = false;
         if (e->button() == Qt::RightButton) io.MouseDown[1] = false;

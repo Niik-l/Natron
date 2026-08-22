@@ -144,6 +144,12 @@ public:
 
 private:
 
+    // Which viewport currently drives ImGuizmo. Its context is a file-static
+    // inside ImGuizmo (not per ImGui context), so only one Viewport3D may call
+    // Manipulate — otherwise two open viewports overwrite each other's
+    // view/projection and in-progress drag, and dragging geo jumps.
+    static Viewport3D* s_gizmoOwner;
+
     virtual void initializeGL() OVERRIDE FINAL;
     virtual void paintGL() OVERRIDE FINAL;
     virtual void resizeGL(int w, int h) OVERRIDE FINAL;
