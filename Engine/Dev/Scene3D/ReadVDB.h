@@ -160,6 +160,17 @@ public:
                       double& tx, double& ty, double& tz,
                       double& sx, double& sy, double& sz) const;
 
+    /**
+     * @brief Why the last file read failed — the resolved path plus the OpenVDB
+     * exception text. Empty when the last read succeeded.
+     *
+     * The readers (FastVolumeRender, CyclesRenderer) surface this in their own
+     * error message: on its own "failed to load VDB grids" gives the user
+     * nothing to act on, and the underlying reason previously only reached
+     * stderr, which a GUI launch never shows.
+     */
+    std::string getLastLoadError() const;
+
     virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL;
 
 private:
@@ -171,6 +182,12 @@ private:
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     void loadVDBFile(const std::string& path);
+
+    // Resolve the file to read for `time`: applies Frame Offset and substitutes
+    // the frame number ONLY when the picked file was detected as part of a real
+    // sequence (see detectSequence in the .cpp). A single-frame VDB is returned
+    // untouched, whatever digits its name happens to end in.
+    std::string resolvePathAtTime(double time) const;
 
     std::unique_ptr<ReadVDBPrivate> _imp;
 };

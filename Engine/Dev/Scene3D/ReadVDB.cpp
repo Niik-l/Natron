@@ -32,6 +32,11 @@
 
 #include <iostream>
 
+#include <QtCore/QDir>          // sequence detection — see detectSequence
+#include <QtCore/QFileInfo>
+#include <QtCore/QString>
+#include <QtCore/QStringList>
+
 #ifdef NATRON_HAVE_OPENVDB
 #include <openvdb/openvdb.h>
 #include <openvdb/tools/Dense.h>
@@ -99,38 +104,102 @@ struct ReadVDBPrivate
     float bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ;
     bool hasCachedBounds;
 
+    // Is the chosen file part of a real, on-disk sequence? Decided once per file
+    // pick (loadVDBFile). false = single frame: never substitute a frame number
+    // into the name, however many digits it ends in. A one-off `smoke_0000.vdb`
+    // used to be read as `smoke_<currentFrame>.vdb` and fail everywhere but the
+    // viewport preview (which silently falls back to the un-substituted name).
+    bool isSequence;
+
+    // Why the last read failed (resolved path + OpenVDB exception). Surfaced to
+    // the user through getLastLoadError(); empty after a successful read.
+    std::string lastError;
+
     ReadVDBPrivate()
     : hasCachedData(false)
     , bMinX(-1), bMinY(-1), bMinZ(-1), bMaxX(1), bMaxY(1), bMaxZ(1)
     , hasCachedBounds(false)
+    , isSequence(false)
     {}
 };
+
+// Locate the frame-number digit group in a VDB filename: the last run of digits
+// before the .vdb extension. Returns false when there is none (e.g. "smoke.vdb").
+static bool
+findFrameDigits(const std::string& path, size_t& numStart, size_t& numEnd)
+{
+    size_t dotVdb = path.rfind(".vdb");
+    if (dotVdb == std::string::npos) dotVdb = path.rfind(".VDB");
+    if (dotVdb == std::string::npos) return false;
+
+    // Search backwards from the extension for digits, stepping over a separating
+    // dot first (e.g. "smoke.0050.vdb" → "0050").
+    numEnd = dotVdb;
+    while (numEnd > 0 && path[numEnd - 1] == '.') --numEnd;
+    numStart = numEnd;
+    while (numStart > 0 && path[numStart - 1] >= '0' && path[numStart - 1] <= '9') --numStart;
+
+    return numStart != numEnd;
+}
+
+// Does this file look like one frame of an on-disk sequence? Counts siblings
+// matching <prefix><same number of digits><suffix>; two or more = a sequence.
+//
+// Why this exists: the frame substitution below is destructive, so applying it
+// to a file that ISN'T a sequence breaks single-frame VDBs — a one-off
+// "smoke_0000.vdb" got read as "smoke_<currentFrame>.vdb", and a versioned
+// "fire_v003.vdb" as "fire_v001.vdb". Deciding sequence-ness from what is
+// actually on disk fixes that at the root, rather than papering over the missing
+// file with a fallback (which would silently render the wrong frame of a real
+// sequence — see getVDBBounds, which does exactly that for preview purposes).
+//
+// Compared on FILE NAMES, never full paths: the knob may hold backslashes while
+// Qt hands back forward slashes, and a prefix compare would then never match.
+static bool
+detectSequence(const std::string& path)
+{
+    const QFileInfo fi( QString::fromUtf8( path.c_str() ) );
+    const std::string fileName = fi.fileName().toStdString();
+
+    size_t numStart = 0, numEnd = 0;
+    if ( !findFrameDigits(fileName, numStart, numEnd) ) {
+        return false;   // no digits at all -> definitively a single frame
+    }
+
+    const std::string prefix = fileName.substr(0, numStart);
+    const std::string suffix = fileName.substr(numEnd);
+    const int padding = (int)(numEnd - numStart);
+
+    QDir dir = fi.absoluteDir();
+    if ( !dir.exists() ) return false;
+
+    const QString qPrefix = QString::fromUtf8( prefix.c_str() );
+    const QString qSuffix = QString::fromUtf8( suffix.c_str() );
+    QStringList filter;
+    filter << (qPrefix + QString::fromUtf8("*") + qSuffix);
+
+    int matches = 0;
+    const QStringList entries = dir.entryList(filter, QDir::Files);
+    for (const QString& name : entries) {
+        const int digitsLen = name.size() - qPrefix.size() - qSuffix.size();
+        if (digitsLen != padding) continue;          // different padding = different sequence
+        bool allDigits = true;
+        for (int i = 0; i < padding; ++i) {
+            if ( !name.at(qPrefix.size() + i).isDigit() ) { allDigits = false; break; }
+        }
+        if (allDigits && ++matches > 1) return true; // two frames is enough
+    }
+    return false;
+}
 
 // Resolve frame number in a VDB filename
 // e.g. "smoke.0050.vdb" at frame 10 with offset 0 → "smoke.0010.vdb"
 static std::string
 resolveFramePath(const std::string& templatePath, int frame)
 {
-    // Find the last group of digits before .vdb
     std::string path = templatePath;
-    size_t dotVdb = path.rfind(".vdb");
-    if (dotVdb == std::string::npos) dotVdb = path.rfind(".VDB");
-    if (dotVdb == std::string::npos) return path;
-
-    // Find the digit group before .vdb
-    size_t digitEnd = dotVdb;
-    // Skip the dot before digits (e.g. ".0050.vdb" → find "0050")
-    if (digitEnd > 0 && path[digitEnd - 1] == '.') {
-        // No digits between dots
-    }
-
-    // Search backwards from dotVdb for digits
-    size_t numEnd = dotVdb;
-    while (numEnd > 0 && path[numEnd - 1] == '.') --numEnd; // skip dot
-    size_t numStart = numEnd;
-    while (numStart > 0 && path[numStart - 1] >= '0' && path[numStart - 1] <= '9') --numStart;
-
-    if (numStart == numEnd) return path; // no digits found
+    size_t numStart = 0, numEnd = 0;
+    if ( !findFrameDigits(path, numStart, numEnd) ) return path;
 
     int padding = (int)(numEnd - numStart);
     if (padding < 1) padding = 4;
@@ -140,6 +209,30 @@ resolveFramePath(const std::string& templatePath, int frame)
     ss << std::setfill('0') << std::setw(padding) << frame;
 
     return path.substr(0, numStart) + ss.str() + path.substr(numEnd);
+}
+
+std::string
+ReadVDB::resolvePathAtTime(double time) const
+{
+    KnobFilePtr fileKnob = _imp->filePath.lock();
+    if (!fileKnob) return std::string();
+    const std::string templatePath = fileKnob->getValue();
+    if ( templatePath.empty() ) return templatePath;
+
+    // Single frame — the name is the name, whatever digits it ends in.
+    if (!_imp->isSequence) return templatePath;
+
+    KnobIntPtr offKnob = _imp->frameOffset.lock();
+    int frame = (int)time + (offKnob ? offKnob->getValueAtTime(time) : 0);
+    if (frame < 0) frame = 0;
+    return resolveFramePath(templatePath, frame);
+}
+
+std::string
+ReadVDB::getLastLoadError() const
+{
+    std::lock_guard<std::mutex> lk(_imp->vdbMutex);
+    return _imp->lastError;
 }
 
 
@@ -220,7 +313,16 @@ ReadVDB::initializeKnobs()
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Frame Offset"));
         k->setName("frameOffset"); k->setDefaultValue(0);
-        k->setDisplayMinimum(-100); k->setDisplayMaximum(100);
+        // Wide enough to reach a real shot offset by dragging: a timeline
+        // starting at 1001 over a sequence numbered from 0000 needs -1000, which
+        // the old +/-100 slider range couldn't express (typing worked, dragging
+        // didn't, so the knob read as broken).
+        k->setDisplayMinimum(-2000); k->setDisplayMaximum(2000);
+        k->setHintToolTip(tr("Offset applied to the current frame when reading a VDB "
+                             "SEQUENCE: file frame = current frame + offset. A timeline "
+                             "starting at 1001 reading a sequence numbered from 0000 needs "
+                             "-1000. Ignored for single-frame VDBs — those are read exactly "
+                             "as named, whatever digits the filename ends in."));
         mainPage->addKnob(k);
         _imp->frameOffset = k;
     }
@@ -495,6 +597,14 @@ ReadVDB::loadVDBFile(const std::string& path)
 {
 #ifdef NATRON_HAVE_OPENVDB
     std::lock_guard<std::mutex> lk(_imp->vdbMutex);
+
+    // Decide ONCE per file pick whether this is a sequence. Every later read
+    // consults this instead of blindly substituting a frame number into the
+    // name (which broke single-frame and versioned filenames).
+    _imp->isSequence = detectSequence(path);
+    std::cerr << "[ReadVDB] " << (_imp->isSequence ? "sequence" : "single frame")
+              << ": " << path << std::endl;
+
     try {
         openvdb::initialize();
         std::cerr << "[ReadVDB] Opening file: " << path << std::endl;
@@ -522,8 +632,13 @@ ReadVDB::loadVDBFile(const std::string& path)
         _imp->lastLoadedPath = path;
         _imp->hasCachedData = false;
         _imp->hasCachedBounds = false;
+        _imp->lastError.clear();
+    } catch (const std::exception& e) {
+        _imp->lastError = "could not open " + path + " (" + e.what() + ")";
+        std::cerr << "[ReadVDB] " << _imp->lastError << std::endl;
     } catch (...) {
-        // VDB load failed
+        _imp->lastError = "could not open " + path + " (unknown error)";
+        std::cerr << "[ReadVDB] " << _imp->lastError << std::endl;
     }
 #else
     (void)path;
@@ -562,9 +677,7 @@ ReadVDB::getVDBBounds(double time,
     std::string templatePath = fileKnob->getValue();
     if (templatePath.empty()) return false;
 
-    int frame = (int)time + _imp->frameOffset.lock()->getValueAtTime(time);
-    if (frame < 0) frame = 0;
-    std::string path = resolveFramePath(templatePath, frame);
+    std::string path = resolvePathAtTime(time);
 
     // Cache hit — return stored bounds
     if (_imp->hasCachedBounds && _imp->lastBoundsPath == path) {
@@ -647,9 +760,7 @@ ReadVDB::getViewportDensitySamples(double time, int targetN,
     std::string templatePath = fileKnob->getValue();
     if (templatePath.empty()) return false;
 
-    int frame = (int)time + _imp->frameOffset.lock()->getValueAtTime(time);
-    if (frame < 0) frame = 0;
-    std::string path = resolveFramePath(templatePath, frame);
+    std::string path = resolvePathAtTime(time);
     {
         std::ifstream testFile(path.c_str());
         if (!testFile.good()) path = templatePath;
@@ -761,9 +872,7 @@ ReadVDB::getVDBDirect(double time, VDBDirectData& outData)
     std::string templatePath = fileKnob->getValue();
     if (templatePath.empty()) return false;
 
-    int frame = (int)time + _imp->frameOffset.lock()->getValueAtTime(time);
-    if (frame < 0) frame = 0;
-    std::string path = resolveFramePath(templatePath, frame);
+    std::string path = resolvePathAtTime(time);
 
     try {
         openvdb::initialize();
@@ -830,9 +939,15 @@ ReadVDB::getVDBDirect(double time, VDBDirectData& outData)
             }
         }
 
+        _imp->lastError.clear();
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "[ReadVDB] Error reading VDB: " << e.what() << std::endl;
+        // Record WHY, with the path actually opened — the callers (FastVolume,
+        // Cycles) put this in their persistent message. stderr alone is
+        // invisible in a GUI launch, which is what made a missing frame read as
+        // an unexplained "failed to load VDB grids".
+        _imp->lastError = "could not open " + path + " (" + e.what() + ")";
+        std::cerr << "[ReadVDB] " << _imp->lastError << std::endl;
         return false;
     }
 }
@@ -847,10 +962,7 @@ ReadVDB::getVolumeData(double time, VDBVolumeData& outData)
     std::string templatePath = fileKnob->getValue();
     if (templatePath.empty()) return false;
 
-    // Resolve frame number in the filename
-    int frame = (int)time + _imp->frameOffset.lock()->getValueAtTime(time);
-    if (frame < 0) frame = 0;
-    std::string path = resolveFramePath(templatePath, frame);
+    std::string path = resolvePathAtTime(time);
 
     int maxRes = _imp->maxResolution.lock()->getValueAtTime(time);
 

@@ -624,7 +624,16 @@ FastVolumeRender::render(const RenderActionArgs& args)
             if (readVdb) {
                 ReadVDB::VDBDirectData vdbData;
                 if (!readVdb->getVDBDirect(args.time, vdbData)) {
-                    setPersistentMessage(eMessageTypeError, "FastVolumeRender: failed to load VDB grids.");
+                    // Name the file and the OpenVDB error. The bare "failed to
+                    // load VDB grids" gave the user nothing to act on — the
+                    // usual cause is a resolved frame that doesn't exist, and
+                    // the path says so at a glance.
+                    const std::string why = readVdb->getLastLoadError();
+                    std::string msg = "FastVolumeRender: failed to load VDB grids.";
+                    if ( !why.empty() ) {
+                        msg = "FastVolumeRender: failed to load VDB grids — " + why;
+                    }
+                    setPersistentMessage( eMessageTypeError, msg.c_str() );
                     return eStatusFailed;
                 }
                 // grid selection honors ReadVDB's binding knobs, with fallbacks
