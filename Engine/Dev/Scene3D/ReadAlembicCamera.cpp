@@ -94,6 +94,7 @@ struct ReadAlembicCameraPrivate
     KnobDoubleWPtr focalLength;
     KnobDoubleWPtr hAperture, vAperture;
     KnobDoubleWPtr nearClipKnob, farClipKnob;
+    KnobDoubleWPtr frustumDisplayLength;  // viewport gizmo size only
     KnobStringWPtr info;
 
     // Sensor / project-format aspect info — discoverable mismatch + 1-click fix.
@@ -280,6 +281,23 @@ ReadAlembicCamera::initializeKnobs()
     va->setName("vAperture"); va->setAnimationEnabled(true); va->setEvaluateOnChange(false);
     va->setDefaultValue(24.0);
     camPage->addKnob(va); _imp->vAperture = va;
+
+    {
+        // Same knob name Camera3D uses — Viewport3D looks it up by name when it
+        // draws the frustum gizmo, so an imported camera can be made readable at
+        // large scene scales instead of being stuck at the 3.0 default.
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Frustum Display Length"));
+        k->setName("frustumDisplayLength");
+        k->setDefaultValue(3.0);
+        k->setMinimum(0.1); k->setDisplayMinimum(0.5); k->setDisplayMaximum(500.0);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false); // viewport gizmo only — never triggers a re-render
+        k->setHintToolTip(tr("Size of the camera gizmo drawn in the 3D viewport. Display only "
+                             "— it does not affect rendering or the camera itself. Imported "
+                             "cameras often sit in scenes authored in centimetres, where the "
+                             "default 3.0 gizmo is invisibly small; try 100+ there."));
+        camPage->addKnob(k); _imp->frustumDisplayLength = k;
+    }
 
     KnobDoublePtr nc = AppManager::createKnob<KnobDouble>(this, tr("Near Clip"));
     nc->setName("nearClip"); nc->setAnimationEnabled(true); nc->setEvaluateOnChange(false);
