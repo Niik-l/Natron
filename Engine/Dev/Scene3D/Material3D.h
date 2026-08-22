@@ -108,6 +108,15 @@ public:
     virtual std::string getMaterialEmissionMapFile() const OVERRIDE;
     virtual std::string getMaterialTransmissionMapFile() const OVERRIDE;
     virtual double getMaterialNormalStrength(double time) const OVERRIDE;
+    virtual unsigned long long getMaterialInputsHash(double time) const OVERRIDE;
+    virtual std::string getMaterialSpecularMapFile() const OVERRIDE;
+    virtual std::string getMaterialDisplacementMapFile() const OVERRIDE;
+    virtual std::string getMaterialOpacityMapFile() const OVERRIDE;
+    virtual bool getMaterialOpacityInvert() const OVERRIDE;
+    virtual std::string getMaterialTranslucencyMapFile() const OVERRIDE;
+    virtual double getMaterialTranslucencyStrength(double time) const OVERRIDE;
+    virtual double getMaterialDisplacementScale(double time) const OVERRIDE;
+    virtual double getMaterialDisplacementMidlevel(double time) const OVERRIDE;
     virtual std::string getMaterialDiffuseColorspace() const OVERRIDE;
     virtual std::string getMaterialEmissionColorspace() const OVERRIDE;
 

@@ -43,6 +43,18 @@ public:
     virtual double getMaterialIOR(double time) const = 0;
     virtual std::string getMaterialTextureFile() const = 0;
 
+    /**
+     * @brief Hash of the connected 2D input chains (Read -> Grade -> ... into
+     * the Diffuse/Roughness/... inputs) at `time`. 0 when nothing is connected.
+     *
+     * CyclesRender folds this into its scene hash. Hashing the texture PATH is
+     * not enough for connected inputs: those are baked to a temp file named
+     * after the node, so the path is byte-identical no matter what the upstream
+     * nodes do — grading the albedo would leave the hash unchanged and the
+     * render cache would serve the previous frame.
+     */
+    virtual unsigned long long getMaterialInputsHash(double /*time*/) const { return 0; }
+
     // PBR texture map slots (default: empty = no texture, use scalar value)
     virtual std::string getMaterialNormalMapFile() const { return std::string(); }
     virtual std::string getMaterialRoughnessMapFile() const { return std::string(); }
@@ -50,6 +62,24 @@ public:
     virtual std::string getMaterialEmissionMapFile() const { return std::string(); }
     virtual std::string getMaterialTransmissionMapFile() const { return std::string(); }
     virtual double getMaterialNormalStrength(double /*time*/) const { return 1.0; }
+
+    // Specular level + height map. Height is applied as BUMP (shading normals
+    // only) — true displacement needs the mesh path to emit subdivision faces,
+    // which it doesn't yet, so a DISPLACE_TRUE shader would render unchanged.
+    virtual std::string getMaterialSpecularMapFile() const { return std::string(); }
+
+    // Foliage pair. Opacity drives Principled's Alpha (atlas cutout); the
+    // translucency map is mixed in as a Translucent BSDF for backlit thin
+    // surfaces — deliberately not subsurface, which is noisy and slow on the
+    // single-sided cards Megascans plants are built from.
+    virtual std::string getMaterialOpacityMapFile() const { return std::string(); }
+    // Some libraries ship the mask inverted and call it "Transparency".
+    virtual bool getMaterialOpacityInvert() const { return false; }
+    virtual std::string getMaterialTranslucencyMapFile() const { return std::string(); }
+    virtual double getMaterialTranslucencyStrength(double /*time*/) const { return 1.0; }
+    virtual std::string getMaterialDisplacementMapFile() const { return std::string(); }
+    virtual double getMaterialDisplacementScale(double /*time*/) const { return 0.1; }
+    virtual double getMaterialDisplacementMidlevel(double /*time*/) const { return 0.5; }
 
     // Texture colorspace (for color textures — diffuse, emission)
     // Returns Cycles-compatible colorspace string: "sRGB", "Linear", "ACEScg", "Raw", "Non-Color"

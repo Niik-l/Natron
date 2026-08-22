@@ -97,6 +97,13 @@ struct Material3DPrivate
 
     // PBR texture maps
     KnobFileWPtr normalMapFile;
+    KnobFileWPtr specularMapFile;
+    KnobFileWPtr opacityMapFile;
+    KnobBoolWPtr opacityInvert;
+    KnobFileWPtr translucencyMapFile;
+    KnobDoubleWPtr translucencyStrength;
+    KnobFileWPtr displacementMapFile;
+    KnobDoubleWPtr displacementScale, displacementMidlevel;
     KnobDoubleWPtr normalStrength;
     KnobFileWPtr roughnessMapFile;
     KnobFileWPtr metallicMapFile;
@@ -112,6 +119,13 @@ struct Material3DPrivate
     // Cycles render path while the getMaterial*File getters are read from the
     // scene-hash / shader-build threads — a torn std::string read is UB.
     std::mutex bakePathMutex;
+    // What the last bake was made from: the connected inputs' hash + the time
+    // it was baked at. Re-baking is a full input render plus a multi-MB HDR
+    // write per map, so it is skipped while both are unchanged.
+    bool hasBakedOnce = false;
+    unsigned long long lastBakeInputsHash = 0;
+    double lastBakeTime = 0.;
+
     std::string bakedDiffusePath;
     std::string bakedMetallicPath;
     std::string bakedRoughnessPath;
@@ -308,6 +322,84 @@ Material3D::initializeKnobs()
         k->setAnimationEnabled(true);
         texPage->addKnob(k); _imp->normalStrength = k;
     }
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Specular Map"));
+        k->setName("specularMapFile");
+        k->setHintToolTip(tr("Greyscale specular level map, driving Principled's "
+                             "\"Specular IOR Level\" (0.5 = default dielectric). "
+                             "Read as Non-Color."));
+        texPage->addKnob(k); _imp->specularMapFile = k;
+    }
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Opacity Map"));
+        k->setName("opacityMapFile");
+        k->setHintToolTip(tr("Greyscale cutout mask driving Principled's Alpha: white = opaque, "
+                             "black = fully transparent. Required for atlas-based foliage — "
+                             "without it every leaf card renders as a solid quad. Read as "
+                             "Non-Color."));
+        texPage->addKnob(k); _imp->opacityMapFile = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Invert Opacity"));
+        k->setName("opacityInvert"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Flip the cutout. Some libraries ship the mask the other way up "
+                             "and call it \"Transparency\" — white meaning see-through rather "
+                             "than solid. The giveaway is a plant whose leaves vanish and whose "
+                             "background turns solid.\n\n"
+                             "Only opacity gets this tick: roughness and normal have image "
+                             "inputs, so those can be inverted upstream in the comp."));
+        k->setAnimationEnabled(false);
+        texPage->addKnob(k); _imp->opacityInvert = k;
+    }
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Translucency Map"));
+        k->setName("translucencyMapFile");
+        k->setHintToolTip(tr("Backlight colour for thin surfaces (leaves, petals, paper). Mixed "
+                             "in as a Translucent BSDF using the map's luminance as the blend "
+                             "amount — cheaper and better suited to thin geometry than "
+                             "subsurface scattering, which is noisy on single-sided cards."));
+        texPage->addKnob(k); _imp->translucencyMapFile = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translucency Amount"));
+        k->setName("translucencyStrength"); k->setDefaultValue(1.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Scales how much of the Translucency Map is blended in. "
+                             "0 = ignore the map entirely, 1 = full strength."));
+        k->setAnimationEnabled(true);
+        texPage->addKnob(k); _imp->translucencyStrength = k;
+    }
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Displacement Map"));
+        k->setName("displacementMapFile");
+        k->setHintToolTip(tr("Greyscale height map. Currently applied as BUMP — it perturbs "
+                             "shading normals, so surface detail lights correctly but the "
+                             "silhouette is unchanged. True displacement needs mesh "
+                             "subdivision and is not wired yet. Read as Non-Color."));
+        texPage->addKnob(k); _imp->displacementMapFile = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Displacement Scale"));
+        k->setName("displacementScale"); k->setDefaultValue(0.1);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Height multiplier, in scene units. Megascans height maps are "
+                             "normalised 0-1, so this is how deep the detail reads — start "
+                             "small and raise until it looks right."));
+        k->setAnimationEnabled(true);
+        texPage->addKnob(k); _imp->displacementScale = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Displacement Midlevel"));
+        k->setName("displacementMidlevel"); k->setDefaultValue(0.5);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setHintToolTip(tr("Height value treated as \"no displacement\". 0.5 matches the "
+                             "usual convention where mid-grey is the neutral surface, so "
+                             "darker pushes in and brighter pushes out."));
+        k->setAnimationEnabled(true);
+        texPage->addKnob(k); _imp->displacementMidlevel = k;
+    }
 }
 
 // ==================== MaterialProvider ====================
@@ -428,6 +520,33 @@ std::string Material3D::getMaterialNormalMapFile() const
 
 double Material3D::getMaterialNormalStrength(double time) const
 { KnobDoublePtr k = _imp->normalStrength.lock(); return k ? k->getValueAtTime(time) : 1.0; }
+
+// Specular + displacement are file-only: Material3D's six image inputs are
+// Diffuse/Metallic/Roughness/Emission/Normal/Transmission, so there is no input
+// to bake from — unlike the getters above, which prefer a baked input image.
+std::string Material3D::getMaterialSpecularMapFile() const
+{ KnobFilePtr k = _imp->specularMapFile.lock(); return k ? k->getValue() : std::string(); }
+
+std::string Material3D::getMaterialDisplacementMapFile() const
+{ KnobFilePtr k = _imp->displacementMapFile.lock(); return k ? k->getValue() : std::string(); }
+
+std::string Material3D::getMaterialOpacityMapFile() const
+{ KnobFilePtr k = _imp->opacityMapFile.lock(); return k ? k->getValue() : std::string(); }
+
+bool Material3D::getMaterialOpacityInvert() const
+{ KnobBoolPtr k = _imp->opacityInvert.lock(); return k ? k->getValue() : false; }
+
+std::string Material3D::getMaterialTranslucencyMapFile() const
+{ KnobFilePtr k = _imp->translucencyMapFile.lock(); return k ? k->getValue() : std::string(); }
+
+double Material3D::getMaterialTranslucencyStrength(double time) const
+{ KnobDoublePtr k = _imp->translucencyStrength.lock(); return k ? k->getValueAtTime(time) : 1.0; }
+
+double Material3D::getMaterialDisplacementScale(double time) const
+{ KnobDoublePtr k = _imp->displacementScale.lock(); return k ? k->getValueAtTime(time) : 0.1; }
+
+double Material3D::getMaterialDisplacementMidlevel(double time) const
+{ KnobDoublePtr k = _imp->displacementMidlevel.lock(); return k ? k->getValueAtTime(time) : 0.5; }
 
 std::string Material3D::getMaterialRoughnessMapFile() const
 {
@@ -583,9 +702,43 @@ renderInputToFile(EffectInstance* input, double time, const std::string& outPath
     return true;
 }
 
+unsigned long long
+Material3D::getMaterialInputsHash(double /*time*/) const
+{
+    // Same mixer CyclesRender uses for its scene hash. The per-input hash is
+    // EffectInstance::getHash(), which tracks the whole upstream chain — so a
+    // Grade edit three nodes up changes this value.
+    auto mix = [](unsigned long long seed, unsigned long long val) -> unsigned long long {
+        return seed ^ (val * 0x9e3779b97f4a7c15ULL + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+    };
+
+    unsigned long long h = 0;
+    for (int i = 0; i < 6; ++i) {
+        EffectInstancePtr input = getInput(i);
+        // Mix the slot index either way, so connecting/disconnecting a map
+        // changes the hash instead of two different wirings colliding.
+        h = mix(h, (unsigned long long)(i + 1));
+        h = mix(h, input ? (unsigned long long)input->getHash() : 0ULL);
+    }
+    return h;
+}
+
 void
 Material3D::bakeInputTextures(double time)
 {
+    // Skip the work when nothing upstream moved. Without this every Cycles
+    // render re-pulls each connected input and rewrites a multi-MB HDR, even
+    // when only the camera nudged.
+    const unsigned long long inputsHash = getMaterialInputsHash(time);
+    {
+        std::lock_guard<std::mutex> lk(_imp->bakePathMutex);
+        if (_imp->hasBakedOnce &&
+            _imp->lastBakeInputsHash == inputsHash &&
+            _imp->lastBakeTime == time) {
+            return;
+        }
+    }
+
     // Input mapping: 0=Diffuse, 1=Metallic, 2=Roughness, 3=Emission, 4=Normal,
     // 5=Transmission
     // Bake into locals first, publish under the lock at the end — holding the
@@ -617,6 +770,9 @@ Material3D::bakeInputTextures(double time)
         _imp->bakedEmissionPath     = local[3];
         _imp->bakedNormalPath       = local[4];
         _imp->bakedTransmissionPath = local[5];
+        _imp->lastBakeInputsHash    = inputsHash;
+        _imp->lastBakeTime          = time;
+        _imp->hasBakedOnce          = true;
     }
 }
 

@@ -567,26 +567,32 @@ static std::string resolveTextureFrame(const std::string& path, int frame)
         return result;
     }
 
-    // Replace %04d style patterns
-    char buf[1024];
-    snprintf(buf, sizeof(buf), result.c_str(), frame);
-    if (std::string(buf) != result) return std::string(buf);
-
-    // Also try: find last digit group before extension and substitute
-    size_t dotPos = result.rfind('.');
-    if (dotPos != std::string::npos && dotPos > 0) {
-        size_t numEnd = dotPos;
-        size_t numStart = numEnd;
-        while (numStart > 0 && result[numStart - 1] >= '0' && result[numStart - 1] <= '9') --numStart;
-        if (numStart < numEnd) {
-            int padding = (int)(numEnd - numStart);
-            std::ostringstream ss;
-            ss << std::setfill('0') << std::setw(padding) << frame;
-            result.replace(numStart, numEnd - numStart, ss.str());
-            return result;
+    // %04d style patterns — but ONLY when the path really is a single integer
+    // conversion. Handing an arbitrary path to snprintf as the FORMAT string is
+    // undefined behaviour: "wood_100%_diffuse.jpg" mis-parses, and a path
+    // containing %s or %n reads unrelated memory or corrupts the stack.
+    const size_t pc = result.find('%');
+    if (pc != std::string::npos && result.find('%', pc + 1) == std::string::npos) {
+        size_t i = pc + 1;
+        while (i < result.size() && result[i] >= '0' && result[i] <= '9') ++i;
+        if (i < result.size() && result[i] == 'd') {
+            char buf[1024];
+            snprintf(buf, sizeof(buf), result.c_str(), frame);
+            return std::string(buf);
         }
     }
 
+    // NOTE: there is deliberately NO "substitute the last digit group" fallback.
+    // It used to rewrite any filename ending in digits, which silently destroyed
+    // ordinary texture paths:
+    //   - Megascans LOD maps: "..._Normal_LOD3.jpg" at frame 1 became
+    //     "..._Normal_LOD1.jpg" — a file that EXISTS, so the wrong normal map
+    //     loaded with no error at all.
+    //   - Material3D's baked input textures are named with the node pointer
+    //     ("natron_mat3d_diffuse_<addr>.hdr"); the trailing hex digits were
+    //     overwritten with the frame, so Cycles asked for a file that never
+    //     existed and the surface rendered pink.
+    // An animated texture must therefore say so explicitly, with #### or %04d.
     return result;
 }
 
@@ -747,6 +753,38 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         graph->connect(roughTex->output("Color"), principled->input("Roughness"));
     }
 
+    // Specular map — drives Principled's "Specular IOR Level" per-pixel (0.5 is
+    // the neutral dielectric value the scalar knob defaults to). Megascans ships
+    // one of these per asset; without it the whole surface shares one specular
+    // level, which flattens wet/dry and polished/worn variation.
+    std::string specFile = resolveTextureFrame(mat->getMaterialSpecularMapFile(), frame);
+    if (!specFile.empty()) {
+        ccl::ImageTextureNode* specTex = graph->create_node<ccl::ImageTextureNode>();
+        specTex->set_filename(ccl::ustring(specFile));
+        specTex->set_colorspace(ccl::ustring("__builtin_raw"));
+        graph->connect(texCoord->output("UV"), specTex->input("Vector"));
+        graph->connect(specTex->output("Color"), principled->input("Specular IOR Level"));
+    }
+
+    // Displacement map — wired as BUMP for now: the height map perturbs shading
+    // normals, so surface detail lights and shades correctly, but the silhouette
+    // is unchanged. DISPLACE_TRUE would need the mesh sync path to emit
+    // subdivision faces (Mesh::add_subd_face, which this renderer never calls),
+    // so selecting it today would render identically while costing dicing time.
+    std::string dispFile = resolveTextureFrame(mat->getMaterialDisplacementMapFile(), frame);
+    if (!dispFile.empty()) {
+        ccl::ImageTextureNode* dispTex = graph->create_node<ccl::ImageTextureNode>();
+        dispTex->set_filename(ccl::ustring(dispFile));
+        dispTex->set_colorspace(ccl::ustring("__builtin_raw"));
+        ccl::DisplacementNode* disp = graph->create_node<ccl::DisplacementNode>();
+        disp->set_midlevel((float)mat->getMaterialDisplacementMidlevel(time));
+        disp->set_scale((float)mat->getMaterialDisplacementScale(time));
+        graph->connect(texCoord->output("UV"), dispTex->input("Vector"));
+        graph->connect(dispTex->output("Color"), disp->input("Height"));
+        graph->connect(disp->output("Displacement"), graph->output()->input("Displacement"));
+        shader->set_displacement_method(ccl::DISPLACE_BUMP);
+    }
+
     // Metallic map
     std::string metalFile = resolveTextureFrame(mat->getMaterialMetallicMapFile(), frame);
     if (!metalFile.empty()) {
@@ -781,7 +819,60 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         graph->connect(transTex->output("Color"), principled->input("Transmission Weight"));
     }
 
-    graph->connect(principled->output("BSDF"), graph->output()->input("Surface"));
+    // Opacity map -> Principled "Alpha". Atlas foliage lives or dies on this:
+    // the leaf shapes only exist in the cutout, so without it every card is a
+    // solid quad and a shrub renders as a green box.
+    std::string opacityFile = resolveTextureFrame(mat->getMaterialOpacityMapFile(), frame);
+    if (!opacityFile.empty()) {
+        ccl::ImageTextureNode* opacityTex = graph->create_node<ccl::ImageTextureNode>();
+        opacityTex->set_filename(ccl::ustring(opacityFile));
+        opacityTex->set_colorspace(ccl::ustring("__builtin_raw"));
+        graph->connect(texCoord->output("UV"), opacityTex->input("Vector"));
+        if ( mat->getMaterialOpacityInvert() ) {
+            // "Transparency"-style mask: white means see-through. Fac stays at
+            // its default 1.0, i.e. fully inverted.
+            ccl::InvertNode* inv = graph->create_node<ccl::InvertNode>();
+            graph->connect(opacityTex->output("Color"), inv->input("Color"));
+            graph->connect(inv->output("Color"), principled->input("Alpha"));
+        } else {
+            graph->connect(opacityTex->output("Color"), principled->input("Alpha"));
+        }
+    }
+
+    // Translucency: blend a Translucent BSDF over the Principled result, using
+    // the map's luminance (scaled by the Amount knob) as the mix factor. This is
+    // the thin-surface backlight look — leaves glowing when lit from behind.
+    // Subsurface would be the other option but it is noisy and expensive on the
+    // single-sided cards these atlases are built from.
+    ccl::ShaderNode* surfaceOut = principled;
+    const char* surfaceSocket = "BSDF";
+    std::string translucencyFile = resolveTextureFrame(mat->getMaterialTranslucencyMapFile(), frame);
+    if (!translucencyFile.empty()) {
+        ccl::ImageTextureNode* transTexNode = graph->create_node<ccl::ImageTextureNode>();
+        transTexNode->set_filename(ccl::ustring(translucencyFile));
+        transTexNode->set_colorspace(materialColorspaceToCycles(mat->getMaterialDiffuseColorspace()));
+        graph->connect(texCoord->output("UV"), transTexNode->input("Vector"));
+
+        ccl::TranslucentBsdfNode* translucent = graph->create_node<ccl::TranslucentBsdfNode>();
+        graph->connect(transTexNode->output("Color"), translucent->input("Color"));
+
+        // Colour -> float on Fac converts to luminance in Cycles; the Math node
+        // applies the user's Amount on top.
+        ccl::MathNode* facMul = graph->create_node<ccl::MathNode>();
+        facMul->set_math_type(ccl::NODE_MATH_MULTIPLY);
+        facMul->set_value2((float)mat->getMaterialTranslucencyStrength(time));
+        graph->connect(transTexNode->output("Color"), facMul->input("Value1"));
+
+        ccl::MixClosureNode* mix = graph->create_node<ccl::MixClosureNode>();
+        graph->connect(facMul->output("Value"), mix->input("Fac"));
+        graph->connect(principled->output("BSDF"), mix->input("Closure1"));
+        graph->connect(translucent->output("BSDF"), mix->input("Closure2"));
+
+        surfaceOut = mix;
+        surfaceSocket = "Closure";
+    }
+
+    graph->connect(surfaceOut->output(surfaceSocket), graph->output()->input("Surface"));
     shader->set_graph(std::move(graph));
     shader->tag_update(scene);
     return shader;
