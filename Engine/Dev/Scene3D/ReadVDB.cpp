@@ -91,6 +91,7 @@ struct ReadVDBPrivate
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobDoubleWPtr scaleX, scaleY, scaleZ;
+    KnobDoubleWPtr uniformScale;   // multiplies all three axes together
 
     // Cached data
     std::string lastLoadedPath;
@@ -396,6 +397,23 @@ ReadVDB::initializeKnobs()
         k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
         xformPage->addKnob(k); _imp->scaleZ = k;
     }
+    {
+        // Same knob every other 3D source has (Card/Cube/Sphere/Cylinder,
+        // ReadGeo, ReadAlembicArchive); until now a VDB could only be resized by
+        // editing three knobs in lockstep. Folded into getTransform(), so the
+        // 3D viewport, ScanlineRender, Cycles and FastVolumeRender all see it
+        // through the one path they already use; FastVolumeRender keys its GPU
+        // upload on the resulting matrix, so a change re-uploads the bricks.
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Uniform Scale"));
+        k->setName("uniformScale"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.0001);
+        k->setDisplayMinimum(0.001); k->setDisplayMaximum(10.0);
+        k->setHintToolTip(tr("Multiplies Scale X/Y/Z, so the whole volume resizes from one "
+                             "knob. The display range goes below 0.01 on purpose: EmberGen "
+                             "and Houdini caches are often authored in centimetres (0.01) "
+                             "or millimetres (0.001) relative to a metre-scale scene."));
+        xformPage->addKnob(k); _imp->uniformScale = k;
+    }
 
     KnobPagePtr colorPage = AppManager::createKnob<KnobPage>(this, tr("Color"));
     {
@@ -656,6 +674,14 @@ ReadVDB::getTransform(double time,
     sx = _imp->scaleX.lock()->getValueAtTime(time);
     sy = _imp->scaleY.lock()->getValueAtTime(time);
     sz = _imp->scaleZ.lock()->getValueAtTime(time);
+    // Uniform Scale multiplies the per-axis scales (every consumer — SceneGraph
+    // for the viewport/Cycles/FastVolumeRender, ScanlineRender's bbox — goes
+    // through here, so this is the single place it is applied).
+    KnobDoublePtr us = _imp->uniformScale.lock();
+    if (us) {
+        const double u = us->getValueAtTime(time);
+        sx *= u; sy *= u; sz *= u;
+    }
 }
 
 StatusEnum

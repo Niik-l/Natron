@@ -17,6 +17,18 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **ReadVDB: Uniform Scale (2026-09-07)** — the one 3D source that still lacked
+  it. Added to the Transform page with ReadGeo's range (min 0.0001, display
+  0.001–10, since EmberGen/Houdini caches are often authored in cm or mm) and
+  folded into `ReadVDB::getTransform`, which is the single path every consumer
+  already takes: SceneGraph builds `sn.worldMatrix` from it for the 3D viewport,
+  Cycles and FastVolumeRender, and ScanlineRender's volume bbox reads it too.
+  FastVolumeRender keys its GPU brick upload on that matrix, so a change
+  re-uploads without a separate key change. Also re-ran the digit-suffix
+  frame-substitution sweep from 08-22 across Engine/Dev: still clean (DeepRead
+  and the render-pass writer only substitute an explicit `####`; ReadGeo and the
+  Alembic readers have no per-frame filename handling).
+
 - **Read: OpenImageIO 3 colorspace names (2026-09-07)** — every Read of an
   8-bit JPEG/TIFF (anything decoded by ReadOIIO; PNG goes through ReadPNG) came
   up with File Colorspace `srgb_rec709_scene`, a text field instead of the menu,
