@@ -47,6 +47,7 @@ struct Volume3DPrivate
     KnobDoubleWPtr centerX, centerY, centerZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobDoubleWPtr scaleX, scaleY, scaleZ;
+    KnobDoubleWPtr uniformScale;   // multiplies all three axes together
 
     // Volume
     KnobChoiceWPtr preset;     // shape preset loader (resets to Custom after applying)
@@ -176,6 +177,18 @@ Volume3D::initializeKnobs()
         k->setName("scaleZ"); k->setDefaultValue(2.0); k->setAnimationEnabled(true);
         k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(10.0);
         xformPage->addKnob(k); _imp->scaleZ = k;
+    }
+    {
+        // Same knob every other 3D source has; folded into getVolumeParams(), the
+        // one place every consumer (SceneGraph for the viewport / Cycles /
+        // FastVolumeRender, ScanlineRender, and getShapeHash for the GPU upload
+        // key) reads the shape's scale from.
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Uniform Scale"));
+        k->setName("uniformScale"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.0001);
+        k->setDisplayMinimum(0.001); k->setDisplayMaximum(10.0);
+        k->setHintToolTip(tr("Multiplies Scale X/Y/Z, so the whole volume resizes from one knob."));
+        xformPage->addKnob(k); _imp->uniformScale = k;
     }
 
     // Volume
@@ -486,6 +499,12 @@ Volume3D::getVolumeParams(double time) const
     vp.scaleX = (float)_imp->scaleX.lock()->getValueAtTime(time);
     vp.scaleY = (float)_imp->scaleY.lock()->getValueAtTime(time);
     vp.scaleZ = (float)_imp->scaleZ.lock()->getValueAtTime(time);
+    // Uniform Scale multiplies the per-axis scales; applied here so the shape
+    // hash, the viewport matrix and every renderer agree.
+    if (KnobDoublePtr us = _imp->uniformScale.lock()) {
+        const float u = (float)us->getValueAtTime(time);
+        vp.scaleX *= u; vp.scaleY *= u; vp.scaleZ *= u;
+    }
     vp.density = (float)_imp->density.lock()->getValueAtTime(time);
     vp.colorR = (float)_imp->colorR.lock()->getValueAtTime(time);
     vp.colorG = (float)_imp->colorG.lock()->getValueAtTime(time);
