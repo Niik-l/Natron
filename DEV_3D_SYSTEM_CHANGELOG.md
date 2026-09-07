@@ -17,6 +17,25 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Read: an empty Read given a file never guessed its params (2026-09-07)** —
+  `app.createNode("Read")` then `filename.set("x.jpg")` (or cancel the file dialog,
+  then browse) left File Colorspace on `scene_linear`, and premult / components /
+  frame range at their defaults, while `app.createReader("x.jpg")` guessed
+  everything. Traced with file-logging through `KnobHolder::endChanges`: the
+  decoder's knobs are held by the ReadNode wrapper, so a decoder created in
+  response to the file knob changing binds its `filename` param to the knob that
+  already holds the new path; `setValue` is a no-op, no instanceChanged reaches
+  the plugin, and `guessParamsFromFilename` never runs. Pre-existing (reproduced
+  on the 08.05 release). `ReadNodePrivate::createReadNode` now notifies the
+  decoder explicitly when the knob already held the path — the same call its
+  same-decoder branch already made — and skips it on project load so serialized
+  first/last frames survive. The mechanism written into TODO.md that morning
+  (a reason-code mismatch) was wrong and has been replaced.
+  Fixing it exposed that ReadPNG's own sRGB lookup also knew only the classic
+  config names, so a PNG under an ACES config ended on an unknown name; the
+  ACES texture-space names are now in both of its sRGB branches too
+  (`tools/win-build/patches/openfx-io.patch`, BUILDING.md §3b).
+
 - **ReadVDB: Uniform Scale (2026-09-07)** — the one 3D source that still lacked
   it. Added to the Transform page with ReadGeo's range (min 0.0001, display
   0.001–10, since EmberGen/Houdini caches are often authored in cm or mm) and
