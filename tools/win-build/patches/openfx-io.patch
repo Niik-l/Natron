@@ -36,7 +36,7 @@ index 0b2a2a2..c16ba34 100644
      if (!avFrameOut->data[0]) {
          int res = av_image_alloc(avFrameOut->data, avFrameOut->linesize, avFrameOut->width, avFrameOut->height, dstPixFmt, 32);
 diff --git a/OIIO/ReadOIIO.cpp b/OIIO/ReadOIIO.cpp
-index 8e1eec6..e662a9b 100644
+index 8e1eec6..d920b1c 100644
 --- a/OIIO/ReadOIIO.cpp
 +++ b/OIIO/ReadOIIO.cpp
 @@ -499,7 +499,7 @@ private:
@@ -57,7 +57,128 @@ index 8e1eec6..e662a9b 100644
      , _outputLayer(NULL)
      , _outputLayerString(NULL)
      , _availableViews(NULL)
-@@ -2560,7 +2560,9 @@ ReadOIIOPlugin::decodePlane(const string& filename,
+@@ -1497,6 +1497,56 @@ ReadOIIOPlugin::restoreStateFromParams()
+     _offsetNegativeDispWindow->setIsSecretAndDisabled(!supportsDisplayWindow);
+ }
+ 
++#ifdef OFX_IO_USING_OCIO
++// OpenImageIO 3.x labels files with the canonical names of OCIO's built-in config
++// ("srgb_rec709_scene", "lin_rec709", "g22_rec709", ...) and their aliases, where
++// OIIO 2.x wrote the legacy hints "sRGB" / "Linear" / "GammaCorrected". The per-config
++// lookup in guessColorspace() understands only the legacy hints, so fold the new
++// names back onto them. Names not in the table pass through unchanged (they may
++// still exist in the active config). *gamma receives the encoding gamma for the
++// "GammaCorrected" hint, 0 otherwise.
++static const char*
++legacyColorSpaceHint(const char* name,
++                     float* gamma)
++{
++    struct Hint { const char* oiio; const char* legacy; float gamma; };
++    static const Hint table[] = {
++        // sRGB-encoded textures
++        { "srgb_rec709_scene", "sRGB", 0.f },
++        { "srgb_tx", "sRGB", 0.f },
++        { "srgb_texture", "sRGB", 0.f },
++        { "sRGB - Texture", "sRGB", 0.f },
++        { "Utility - sRGB - Texture", "sRGB", 0.f },
++        { "sRGB Encoded Rec.709 (sRGB)", "sRGB", 0.f },
++        { "srgb_p3d65", "sRGB", 0.f }, // closest a classic config can do
++        // pure-gamma encodings
++        { "g22_rec709", "GammaCorrected", 2.2f },
++        { "g18_rec709", "GammaCorrected", 1.8f },
++        // scene-linear (a classic config has one linear space; primaries are lost)
++        { "lin_rec709", "Linear", 0.f },
++        { "lin_srgb", "Linear", 0.f },
++        { "linear", "Linear", 0.f },
++        { "scene_linear", "Linear", 0.f },
++        { "Linear Rec.709 (sRGB)", "Linear", 0.f },
++        { "Utility - Linear - sRGB", "Linear", 0.f },
++        { "lin_ap0", "Linear", 0.f },
++        { "lin_ap1", "Linear", 0.f },
++        { "lin_p3d65", "Linear", 0.f },
++        { "lin_rec2020", "Linear", 0.f },
++    };
++    *gamma = 0.f;
++    for (std::size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
++        if (!strcmp(name, table[i].oiio)) {
++            *gamma = table[i].gamma;
++
++            return table[i].legacy;
++        }
++    }
++
++    return name;
++}
++#endif // OFX_IO_USING_OCIO
++
+ void
+ ReadOIIOPlugin::guessColorspace(const string& filename,
+                                 const ImageSpec& imagespec,
+@@ -1527,6 +1577,15 @@ ReadOIIOPlugin::guessColorspace(const string& filename,
+             colorSpaceStr = "KodakLog";
+         }
+     }
++    float gammaHint = 0.f;
++#ifdef OFX_IO_USING_OCIO
++    // Keep the file's name when the active config knows it (an OCIO v2 ACES config
++    // resolves "srgb_rec709_scene" through its aliases); otherwise map it onto the
++    // legacy hint the config-specific lookup below expects.
++    if (colorSpaceStr && !ocio->hasColorspace(colorSpaceStr)) {
++        colorSpaceStr = legacyColorSpaceHint(colorSpaceStr, &gammaHint);
++    }
++#endif
+     if (!colorSpaceStr) {
+         // no colorspace... we'll probably have to try something else, then.
+         // we set the following defaults:
+@@ -1554,7 +1613,7 @@ ReadOIIOPlugin::guessColorspace(const string& filename,
+     }
+     if (colorSpaceStr) {
+         if (colorSpaceStr && !strcmp(colorSpaceStr, "GammaCorrected")) {
+-            float gamma = imagespec.get_float_attribute("oiio:Gamma");
++            float gamma = gammaHint > 0.f ? gammaHint : imagespec.get_float_attribute("oiio:Gamma");
+             if (endsWith(filename, ".cin") || endsWith(filename, ".CIN")) {
+                 // Cineon files (e.g. Kodak Digital LAD, see link below) get wrongly attributed
+                 // a GammaCorrected colorspace <https://github.com/OpenImageIO/oiio/issues/1463>
+@@ -1604,6 +1663,18 @@ ReadOIIOPlugin::guessColorspace(const string& filename,
+                 // blender-cycles
+                 *colorspace = "sRGB D65";
+                 colorSpaceStr = NULL;
++            } else if (ocio->hasColorspace("sRGB - Texture")) {
++                // aces 1.1-1.3 (cg/studio configs also alias it as srgb_tx)
++                *colorspace = "sRGB - Texture";
++                colorSpaceStr = NULL;
++            } else if (ocio->hasColorspace("srgb_rec709_scene")) {
++                // aces 2.0 cg/studio configs ("sRGB Encoded Rec.709 (sRGB)")
++                *colorspace = "srgb_rec709_scene";
++                colorSpaceStr = NULL;
++            } else if (ocio->hasColorspace("Utility - sRGB - Texture")) {
++                // aces 1.0.x
++                *colorspace = "Utility - sRGB - Texture";
++                colorSpaceStr = NULL;
+             } else if (ocio->hasColorspace("sRGB (D60 sim.)")) {
+                 // out_srgbd60sim or "sRGB (D60 sim.)" in aces 1.0.0
+                 *colorspace = "sRGB (D60 sim.)";
+@@ -1724,8 +1795,17 @@ ReadOIIOPlugin::guessColorspace(const string& filename,
+             *colorspace = colorSpaceStr;
+             colorSpaceStr = NULL;
+         }
+-        if (colorSpaceStr) {
+-            // unknown color-space or Linear, don't do anything
++        if (colorSpaceStr && ocio->getConfig() && !ocio->hasColorspace(colorSpaceStr) && (colorSpaceValue || photoshopICCProfileValue)) {
++            // The file's hint names a colorspace this config does not have. Writing it
++            // through verbatim leaves the Read erroring ("Color space '...' could not be
++            // found") with a text field where the colorspace menu should be. Guess again
++            // as if the file carried no hint, so the bit-depth default applies instead.
++            ImageSpec unlabelled = imagespec;
++            unlabelled.erase_attribute("oiio:ColorSpace");
++            unlabelled.erase_attribute("photoshop:ICCProfile");
++            guessColorspace(filename, unlabelled, colorspace);
++
++            return;
+         }
+ #endif // OFX_IO_USING_OCIO
+     }
+@@ -2560,7 +2640,9 @@ ReadOIIOPlugin::decodePlane(const string& filename,
                  if (spec.tile_width == 0) {
                      // Read by scanlines
  
@@ -68,7 +189,7 @@ index 8e1eec6..e662a9b 100644
                                               yendClamped, // y end
                                               zbegin, // z
                                               chbegin, // chan begin
-@@ -2633,7 +2635,9 @@ ReadOIIOPlugin::decodePlane(const string& filename,
+@@ -2633,7 +2715,9 @@ ReadOIIOPlugin::decodePlane(const string& filename,
  
                      // Pass the valid tile range and buffer to OIIO and decode with a negative Y stride from
                      // top to bottom
@@ -79,7 +200,7 @@ index 8e1eec6..e662a9b 100644
                                           tiledXEnd, // x end
                                           tiledYBegin, // y begin
                                           tiledYEnd, // y end
-@@ -2960,7 +2964,7 @@ ReadOIIOPlugin::metadata(const string& filename)
+@@ -2960,7 +3044,7 @@ ReadOIIOPlugin::metadata(const string& filename)
              ss << std::endl;
          }
  
@@ -88,7 +209,7 @@ index 8e1eec6..e662a9b 100644
              string s = subImages[sIt].metadata_val(*p, true);
              ss << "    " << p->name() << ": ";
              if (s == "1.#INF") {
-@@ -3145,7 +3149,7 @@ ReadOIIOPluginFactory::unload()
+@@ -3145,7 +3229,7 @@ ReadOIIOPluginFactory::unload()
  
  #ifdef OFX_READ_OIIO_SHARED_CACHE
      // get the shared image cache (may be shared with other plugins using OIIO)

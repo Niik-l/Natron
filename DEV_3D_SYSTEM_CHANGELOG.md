@@ -17,6 +17,24 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Read: OpenImageIO 3 colorspace names (2026-09-07)** — every Read of an
+  8-bit JPEG/TIFF (anything decoded by ReadOIIO; PNG goes through ReadPNG) came
+  up with File Colorspace `srgb_rec709_scene`, a text field instead of the menu,
+  and `Color space 'srgb_rec709_scene' could not be found` — including the
+  albedo Read the Megascans loader creates. OpenImageIO 3.x tags files with the
+  built-in OCIO config's canonical names (`srgb_rec709_scene`, `lin_rec709`,
+  `g22_rec709`, …) where 2.x wrote `sRGB` / `Linear`; openfx-io's
+  `guessColorspace` only knew the legacy hints and wrote the new name straight
+  into the knob, which Natron's classic configs (blender / nuke-default) do not
+  have. Shipped like this since the first OIIO-3 build (06.14). Fixed in
+  `tools/win-build/patches/openfx-io.patch` (documented in BUILDING.md §3b): a
+  name→legacy-hint table applied when the active config lacks the raw name, the
+  ACES texture-space names added to the sRGB lookup, and a safety net that
+  re-guesses as an unlabelled file whenever a hint resolves to a name the config
+  lacks — so the bit-depth default applies instead of an error. A related
+  pre-existing quirk (an *empty* Read later given a JPEG never guesses at all)
+  is recorded in `Engine/Dev/TODO.md`.
+
 - **Megascans asset loader + the material slots it needed (2026-08-21/22)** —
   **Templates → 3D → Megascans Asset…** turns a Quixel Bridge folder into a wired
   graph: pick a mesh from a tris-labelled list, get ReadGeo + Material3D with
