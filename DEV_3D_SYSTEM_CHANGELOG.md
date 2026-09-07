@@ -36,8 +36,10 @@ Recent milestones:
   ACES texture-space names are now in both of its sRGB branches too
   (`tools/win-build/patches/openfx-io.patch`, BUILDING.md §3b).
 
-- **ReadVDB: Uniform Scale (2026-09-07)** — the one 3D source that still lacked
-  it. Added to the Transform page with ReadGeo's range (min 0.0001, display
+- **ReadVDB + Volume3D: Uniform Scale (2026-09-07)** — the two 3D sources that
+  still lacked it (Volume3D spotted by the user during the GUI test; folded into
+  `getVolumeParams`, which the shape hash, the viewport matrix and every renderer
+  read, so no consumer changed). Added to the Transform page with ReadGeo's range (min 0.0001, display
   0.001–10, since EmberGen/Houdini caches are often authored in cm or mm) and
   folded into `ReadVDB::getTransform`, which is the single path every consumer
   already takes: SceneGraph builds `sn.worldMatrix` from it for the 3D viewport,
