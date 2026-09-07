@@ -758,7 +758,22 @@ ReadNodePrivate::createReadNode(bool throwErrors,
         if (node) {
             KnobFilePtr fileKnob = std::dynamic_pointer_cast<KnobFile>(node->getKnobByName(kOfxImageEffectFileParamName));
             if (fileKnob) {
+                // The decoder's knobs are held by this ReadNode, so when the decoder is
+                // (re)created in response to the user changing the file, the decoder's
+                // "filename" param binds to the very knob that already holds the new
+                // path. setValue() is then a no-op and never fires the instanceChanged
+                // action, so the decoder never learns its file: no colorspace / premult /
+                // components / frame-range guess (an empty Read later given a JPEG stayed
+                // on "scene_linear"; Python's createNode + filename.set hit it every time,
+                // createReader never did because that knob starts empty). Notify the
+                // decoder explicitly in that case, the way the same-decoder branch above
+                // already does. Not on project load: the serialized first/last frame must
+                // not be overwritten by a fresh guess.
+                const bool alreadyHeld = (fileKnob->getValue() == filename);
                 fileKnob->setValue(filename);
+                if (alreadyHeld && !serialization && !filename.empty()) {
+                    node->getEffectInstance()->onKnobValueChanged_public(fileKnob.get(), eValueChangedReasonNatronInternalEdited, _publicInterface->getCurrentTime(), ViewSpec(0), true);
+                }
             }
         }
         {

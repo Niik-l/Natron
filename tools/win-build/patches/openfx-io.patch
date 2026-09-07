@@ -231,6 +231,42 @@ index 801a9a4..96208e6 100644
      // size_t sizeOfChannel = 0;
      int bitsPerSample = 0;
      int finalBitDepth_i;
+diff --git a/PNG/ReadPNG.cpp b/PNG/ReadPNG.cpp
+index 5b1991f..fbc7ae5 100644
+--- a/PNG/ReadPNG.cpp
++++ b/PNG/ReadPNG.cpp
+@@ -1320,6 +1320,15 @@ ReadPNGPlugin::guessParamsFromFilename(const string& filename,
+             } else if (_ocio->hasColorspace("sRGB D65")) {
+                 // blender-cycles
+                 *colorspace = "sRGB D65";
++            } else if (_ocio->hasColorspace("sRGB - Texture")) {
++                // aces 1.1-1.3 (cg/studio configs also alias it as srgb_tx)
++                *colorspace = "sRGB - Texture";
++            } else if (_ocio->hasColorspace("srgb_rec709_scene")) {
++                // aces 2.0 cg/studio configs ("sRGB Encoded Rec.709 (sRGB)")
++                *colorspace = "srgb_rec709_scene";
++            } else if (_ocio->hasColorspace("Utility - sRGB - Texture")) {
++                // aces 1.0.x
++                *colorspace = "Utility - sRGB - Texture";
+             } else if (_ocio->hasColorspace("sRGB (D60 sim.)")) {
+                 // out_srgbd60sim or "sRGB (D60 sim.)" in aces 1.0.0
+                 *colorspace = "sRGB (D60 sim.)";
+@@ -1348,6 +1357,15 @@ ReadPNGPlugin::guessParamsFromFilename(const string& filename,
+         } else if (_ocio->hasColorspace("sRGB D65")) {
+             // blender-cycles
+             *colorspace = "sRGB D65";
++        } else if (_ocio->hasColorspace("sRGB - Texture")) {
++            // aces 1.1-1.3 (cg/studio configs also alias it as srgb_tx)
++            *colorspace = "sRGB - Texture";
++        } else if (_ocio->hasColorspace("srgb_rec709_scene")) {
++            // aces 2.0 cg/studio configs ("sRGB Encoded Rec.709 (sRGB)")
++            *colorspace = "srgb_rec709_scene";
++        } else if (_ocio->hasColorspace("Utility - sRGB - Texture")) {
++            // aces 1.0.x
++            *colorspace = "Utility - sRGB - Texture";
+         } else if (_ocio->hasColorspace("sRGB (D60 sim.)")) {
+             // out_srgbd60sim or "sRGB (D60 sim.)" in aces 1.0.0
+             *colorspace = "sRGB (D60 sim.)";
 diff --git a/cmake/Modules/FindOpenImageIO.cmake b/cmake/Modules/FindOpenImageIO.cmake
 index 4d4a7ee..760b9a6 100644
 --- a/cmake/Modules/FindOpenImageIO.cmake
