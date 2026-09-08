@@ -34,6 +34,7 @@
 #include "../Scene3D/Group3D.h"
 #include "../Scene3D/Light3D.h"
 #include "../Scene3D/Material3D.h"
+#include "../Scene3D/Card3D.h"
 #include "../Scene3D/MaterialProvider.h"
 #include "../Scene3D/CyclesRenderPass.h"
 #include "../Scene3D/Scene3D.h"
@@ -210,6 +211,14 @@ prepareCyclesPasses(EffectInstance*           effect,
             Material3D* mat3d = dynamic_cast<Material3D*>(resolved);
             if (mat3d) {
                 mat3d->bakeInputTextures(req.time);
+            }
+            // Card3D with nothing on its mat input: its img input is the
+            // texture, so bake it (with alpha) the same way. A connected
+            // material takes over the card's look and skips this.
+            if (resolved == matProv) {
+                if (Card3D* card = dynamic_cast<Card3D*>(matProv)) {
+                    card->bakeInputTexture(req.time);
+                }
             }
         }
     }

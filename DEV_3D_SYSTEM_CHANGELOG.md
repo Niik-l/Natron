@@ -17,6 +17,27 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Card3D in Cycles: image input with alpha, correct aspect (2026-09-08)** — a
+  Card3D fed from its img input rendered in Cycles as an opaque, square,
+  base-colour quad, while the 3D viewport and ScanlineRender showed the image
+  with its cutout. Two separate gaps, both there since the Cycles integration:
+  the Cycles card was a hard-coded unit quad that never read
+  `Card3D::getCardAspect`, and Cycles only textures from files, but nothing
+  baked the card's img input (Material3D bakes its own inputs; Card3D never
+  did) — so the card had no texture at all. `Card3D::bakeInputTexture` now
+  renders the input to a temp RGBA EXR (premultiplied, half, zip; Material3D's
+  Radiance HDR has no alpha channel, hence a second writer), triggered from
+  CyclesPassRender alongside the Material3D bakes and re-done only when the
+  input chain's hash or the time changes. A new `MaterialProvider::
+  getMaterialTextureUsesAlpha` (off by default, on for the baked card) makes
+  createMaterialShader mark the image node's alpha associated and link its
+  Alpha output to Principled Alpha when no Opacity map is set. An explicit
+  Texture File or a connected material still wins, as before. Verified
+  headlessly: a 2:1 PNG with a disc alpha renders as a circle (fill 0.79 of its
+  bbox, transparent outside). Found on the way: WritePNG under an ACES config
+  defaults its output colorspace to the `default` role the CG config lacks and
+  the write fails — recorded in TODO.md.
+
 - **Read: an empty Read given a file never guessed its params (2026-09-07)** —
   `app.createNode("Read")` then `filename.set("x.jpg")` (or cancel the file dialog,
   then browse) left File Colorspace on `scene_linear`, and premult / components /

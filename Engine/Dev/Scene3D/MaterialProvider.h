@@ -84,6 +84,12 @@ public:
     // Texture colorspace (for color textures — diffuse, emission)
     // Returns Cycles-compatible colorspace string: "sRGB", "Linear", "ACEScg", "Raw", "Non-Color"
     virtual std::string getMaterialDiffuseColorspace() const { return "sRGB"; }
+    /** True when the base-color texture's own alpha should cut the surface out
+     *  (Cycles links the image node's Alpha output to Principled Alpha). Off by
+     *  default: a JPEG albedo has no alpha and a PNG albedo with an alpha channel
+     *  should not silently punch holes in a mesh. Card3D turns it on for the
+     *  image it bakes from its img input, which is the whole point of a card. */
+    virtual bool getMaterialTextureUsesAlpha() const { return false; }
     virtual std::string getMaterialEmissionColorspace() const { return "sRGB"; }
 
     /** @brief Whether this node has a Material3D connected to its material input. */

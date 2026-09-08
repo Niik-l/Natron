@@ -74,6 +74,7 @@
 #include "Engine/Dev/Scene3D/SceneGraph.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
+#include "Engine/Dev/Scene3D/Card3D.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
 #include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
 #include "Engine/Dev/Scene3D/CyclesRenderPass.h"
@@ -680,6 +681,12 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         baseTex = graph->create_node<ccl::ImageTextureNode>();
         baseTex->set_filename(ccl::ustring(texFile));
         baseTex->set_colorspace(materialColorspaceToCycles(mat->getMaterialDiffuseColorspace()));
+        if (mat->getMaterialTextureUsesAlpha()) {
+            // Card3D's baked img input: premultiplied RGBA straight from the
+            // comp. Telling Cycles the alpha is associated makes the image node
+            // un-premultiply for its Color output once Alpha is linked below.
+            baseTex->set_alpha_type(ccl::IMAGE_ALPHA_ASSOCIATED);
+        }
         graph->connect(texCoord->output("UV"), baseTex->input("Vector"));
         if (!particleColorTint) {
             graph->connect(baseTex->output("Color"), principled->input("Base Color"));
@@ -837,6 +844,12 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         } else {
             graph->connect(opacityTex->output("Color"), principled->input("Alpha"));
         }
+    } else if (baseTex && !particleColorTint && mat->getMaterialTextureUsesAlpha()) {
+        // No opacity map: let the base texture's own alpha cut the surface out.
+        // Card3D asks for this for its baked img input - a logo card was
+        // rendering as an opaque square in Cycles while the viewport and
+        // ScanlineRender showed the cutout. An explicit Opacity map still wins.
+        graph->connect(baseTex->output("Alpha"), principled->input("Alpha"));
     }
 
     // Translucency: blend a Translucent BSDF over the Principled result, using
@@ -2362,8 +2375,21 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     uvs[vi] = ccl::make_float2(u, v);
                 }
                 break;
-            case eSceneNodeCard:
+            case eSceneNodeCard: {
                 generateQuadMesh(verts, triVerts);
+                // The unit quad is square; the card's shape follows its img
+                // input's aspect (Nuke "image aspect", Card3D::getCardAspect -
+                // the same value the 3D viewport, ScanlineRender and particle
+                // collision use). Without this every card rendered square.
+                float aspect = 1.0f;
+                if (NodePtr cardSrc = sn.sourceNode.lock()) {
+                    if (Card3D* card = dynamic_cast<Card3D*>(cardSrc->getEffectInstance().get())) {
+                        aspect = card->getCardAspect(time);
+                    }
+                }
+                for (size_t vi = 0; vi < verts.size(); ++vi) {
+                    verts[vi].x *= aspect;
+                }
                 // Simple planar UVs for card
                 uvs.resize(verts.size());
                 if (verts.size() >= 4) {
@@ -2373,6 +2399,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     uvs[3] = ccl::make_float2(0.0f, 1.0f);
                 }
                 break;
+            }
             case eSceneNodeCylinder:
                 generateBoxMesh(verts, triVerts);
                 break;
