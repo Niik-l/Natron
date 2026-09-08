@@ -34,6 +34,7 @@
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 #include "MaterialProvider.h"
+#include "MaterialTextureBake.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -142,6 +143,9 @@ public:
     virtual double getMaterialIOR(double time) const OVERRIDE;
     virtual std::string getMaterialTextureFile() const OVERRIDE;
     virtual std::string getMaterialDiffuseColorspace() const OVERRIDE;
+    virtual bool getMaterialTextureUsesAlpha() const OVERRIDE;
+    virtual unsigned long long getMaterialInputsHash(double time) const OVERRIDE;
+    virtual void bakeImageInput(double time) OVERRIDE;
     virtual bool hasMaterialInput() const OVERRIDE;
     virtual MaterialProvider* getConnectedMaterial() const OVERRIDE;
 
@@ -152,6 +156,11 @@ private:
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     std::unique_ptr<Cube3DPrivate> _imp;
+    // img input baked to a temp EXR for Cycles (MaterialTextureBake.h).
+    BakedInputTexture _bakedImg;
+    // True while getMaterialTextureFile() hands out the baked input rather
+    // than the Texture File knob (alpha + linear colorspace follow from it).
+    bool usingBakedInput() const;
     mutable std::mutex _texMutex;
     CachedTexturePtr _cachedTexture = std::make_shared<CachedTexture>();
 };

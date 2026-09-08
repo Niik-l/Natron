@@ -545,15 +545,51 @@ double Cube3D::getMaterialTransmission(double time) const
 double Cube3D::getMaterialIOR(double time) const
 { KnobDoublePtr k = _imp->ior.lock(); return k ? k->getValueAtTime(time) : 1.45; }
 
+bool Cube3D::usingBakedInput() const
+{
+    KnobFilePtr k = _imp->textureFile.lock();
+    if (k && !k->getValue().empty()) return false;   // an explicit file wins
+    std::lock_guard<std::mutex> lk(_bakedImg.mutex);
+    return !_bakedImg.path.empty();
+}
+
 std::string Cube3D::getMaterialTextureFile() const
-{ KnobFilePtr k = _imp->textureFile.lock(); return k ? k->getValue() : std::string(); }
+{
+    KnobFilePtr k = _imp->textureFile.lock();
+    std::string file = k ? k->getValue() : std::string();
+    if (!file.empty()) return file;
+    // No explicit texture: the img input, baked to a temp EXR by
+    // bakeImageInput(). Empty until the first Cycles render request bakes it.
+    std::lock_guard<std::mutex> lk(_bakedImg.mutex);
+    return _bakedImg.path;
+}
 
 std::string Cube3D::getMaterialDiffuseColorspace() const
 {
+    // The bake writes the input's scene-linear float pixels verbatim, so the
+    // Diffuse Colorspace knob (meant for files on disk) must not be applied.
+    if (usingBakedInput()) return "Linear";
     KnobChoicePtr k = _imp->diffuseColorspace.lock();
     int idx = k ? k->getValue() : 0;
     const char* names[] = {"sRGB", "Linear", "ACEScg", "Raw"};
     return (idx >= 0 && idx < 4) ? names[idx] : "sRGB";
+}
+
+bool Cube3D::getMaterialTextureUsesAlpha() const
+{
+    // The img input carries the comp's alpha (a card IS its cutout); a
+    // Texture File path keeps the old opaque behaviour.
+    return usingBakedInput();
+}
+
+unsigned long long Cube3D::getMaterialInputsHash(double /*time*/) const
+{
+    return materialInputChainHash(const_cast<Cube3D*>(this)->getInput(0), 0);
+}
+
+void Cube3D::bakeImageInput(double time)
+{
+    bakeShapeImageInput(this, 0, time, "cube3d_img", _bakedImg);
 }
 
 bool Cube3D::hasMaterialInput() const

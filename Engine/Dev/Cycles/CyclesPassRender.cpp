@@ -34,7 +34,6 @@
 #include "../Scene3D/Group3D.h"
 #include "../Scene3D/Light3D.h"
 #include "../Scene3D/Material3D.h"
-#include "../Scene3D/Card3D.h"
 #include "../Scene3D/MaterialProvider.h"
 #include "../Scene3D/CyclesRenderPass.h"
 #include "../Scene3D/Scene3D.h"
@@ -212,13 +211,12 @@ prepareCyclesPasses(EffectInstance*           effect,
             if (mat3d) {
                 mat3d->bakeInputTextures(req.time);
             }
-            // Card3D with nothing on its mat input: its img input is the
-            // texture, so bake it (with alpha) the same way. A connected
-            // material takes over the card's look and skips this.
+            // A primitive with nothing on its mat input textures itself from
+            // its img input, which Cycles can only read as a file: bake it
+            // (with alpha) here, the same way. A connected material takes over
+            // the shape's look and skips this. No-op for file-based providers.
             if (resolved == matProv) {
-                if (Card3D* card = dynamic_cast<Card3D*>(matProv)) {
-                    card->bakeInputTexture(req.time);
-                }
+                matProv->bakeImageInput(req.time);
             }
         }
     }
