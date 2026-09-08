@@ -21,6 +21,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "Material3D.h"
+#include "MaterialTextureBake.h"
 
 #include "../../AppManager.h"
 #include "../../Image.h"
@@ -35,6 +36,10 @@
 #include <cstdlib>
 #include <cctype>
 #include <algorithm>
+#include <memory>
+#ifdef NATRON_HAVE_OPENIMAGEIO
+#include <OpenImageIO/imageio.h>
+#endif
 
 NATRON_NAMESPACE_ENTER
 
@@ -721,6 +726,111 @@ Material3D::getMaterialInputsHash(double /*time*/) const
         h = mix(h, input ? (unsigned long long)input->getHash() : 0ULL);
     }
     return h;
+}
+
+// ==================== Shape img-input bake (MaterialTextureBake.h) ====================
+
+unsigned long long
+materialInputChainHash(const EffectInstancePtr& input, int slot)
+{
+    auto mix = [](unsigned long long seed, unsigned long long val) -> unsigned long long {
+        return seed ^ (val * 0x9e3779b97f4a7c15ULL + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+    };
+    unsigned long long h = mix(0ULL, (unsigned long long)(slot + 1));
+    return mix(h, input ? (unsigned long long)input->getHash() : 0ULL);
+}
+
+std::string
+bakeImageInputToExr(EffectInstance* input, double time, const char* tag, const void* owner)
+{
+    std::string outPath;
+#ifdef NATRON_HAVE_OPENIMAGEIO
+    if (!input) return outPath;
+    RectD rod;
+    bool isProjectFormat = false;
+    StatusEnum stat = input->getRegionOfDefinition_public(input->getRenderHash(), time, RenderScale::identity,
+                                                          ViewIdx(0), &rod, &isProjectFormat);
+    if (stat != eStatusOK || rod.isNull()) return outPath;
+    const double par = input->getAspectRatio(-1);
+    RectI pixelRoI = rod.toPixelEnclosing(0, par);
+    const int w = pixelRoI.width();
+    const int h = pixelRoI.height();
+    if (w <= 0 || h <= 0) return outPath;
+
+    std::list<ImagePlaneDesc> comps;
+    comps.push_back(ImagePlaneDesc::getRGBAComponents());
+    std::map<ImagePlaneDesc, ImagePtr> outputPlanes;
+    EffectInstance::RenderRoIRetCode ret = input->renderRoI(
+        EffectInstance::RenderRoIArgs(time, RenderScale::identity, 0, ViewIdx(0),
+                                      false, pixelRoI, rod, comps,
+                                      eImageBitDepthFloat, false, NULL,
+                                      eStorageModeRAM, time),
+        &outputPlanes);
+    if (ret != EffectInstance::eRenderRoIRetCodeOk || outputPlanes.empty()) return outPath;
+    ImagePtr image = outputPlanes.begin()->second;
+    if (!image) return outPath;
+
+    const RectI bounds = image->getBounds();
+    const int imgW = bounds.width();
+    const int imgH = bounds.height();
+    const int nComps = image->getComponents().getNumComponents();
+    // Top-down rows for OIIO; pixels stay premultiplied (Natron's convention)
+    // and CyclesRenderer marks the image node's alpha associated.
+    std::vector<float> pixels((size_t)imgW * imgH * 4, 0.0f);
+    {
+        Image::ReadAccess ra(image.get());
+        for (int y = bounds.y1; y < bounds.y2; ++y) {
+            const int dstRow = (imgH - 1) - (y - bounds.y1);
+            for (int x = bounds.x1; x < bounds.x2; ++x) {
+                const float* src = (const float*)ra.pixelAt(x, y);
+                float* dst = &pixels[((size_t)dstRow * imgW + (x - bounds.x1)) * 4];
+                if (src) {
+                    dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+                    dst[3] = (nComps >= 4) ? src[3] : 1.0f;
+                }
+            }
+        }
+    }
+    char tmpPath[512];
+    const char* tmpDir = std::getenv("TEMP") ? std::getenv("TEMP") : "/tmp";
+    std::snprintf(tmpPath, sizeof(tmpPath), "%s/natron_%s_%p.exr", tmpDir, tag, owner);
+    std::unique_ptr<OIIO::ImageOutput> out = OIIO::ImageOutput::create(tmpPath);
+    if (!out) return outPath;
+    OIIO::ImageSpec spec(imgW, imgH, 4, OIIO::TypeDesc::HALF);
+    spec.attribute("compression", "zip");
+    spec.attribute("oiio:ColorSpace", "linear");
+    if (out->open(tmpPath, spec) && out->write_image(OIIO::TypeDesc::FLOAT, pixels.data())) {
+        outPath = tmpPath;
+    }
+    out->close();
+#else
+    (void)input; (void)time; (void)tag; (void)owner;
+#endif
+    return outPath;
+}
+
+void
+bakeShapeImageInput(EffectInstance* owner, int inputIdx, double time, const char* tag, BakedInputTexture& state)
+{
+    EffectInstancePtr input = owner->getInput(inputIdx);
+    if (!input) {
+        std::lock_guard<std::mutex> lk(state.mutex);
+        state.path.clear();
+        state.baked = false;
+        return;
+    }
+    const unsigned long long h = materialInputChainHash(input, inputIdx);
+    {
+        std::lock_guard<std::mutex> lk(state.mutex);
+        if (state.baked && state.hash == h && state.time == time) return;
+    }
+    // Bake unlocked - it is a full input render - and publish under the lock.
+    const std::string path = bakeImageInputToExr(input.get(), time, tag, owner);
+    std::lock_guard<std::mutex> lk(state.mutex);
+    state.path = path;
+    state.hash = h;
+    state.time = time;
+    state.baked = true;
 }
 
 void

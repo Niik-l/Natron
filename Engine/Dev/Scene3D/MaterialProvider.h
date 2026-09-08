@@ -90,6 +90,10 @@ public:
      *  should not silently punch holes in a mesh. Card3D turns it on for the
      *  image it bakes from its img input, which is the whole point of a card. */
     virtual bool getMaterialTextureUsesAlpha() const { return false; }
+    /** Called once per Cycles render request (CyclesPassRender) before the
+     *  scene is built: shapes whose texture comes from an img input bake it to
+     *  a file here (see MaterialTextureBake.h). No-op for file-based providers. */
+    virtual void bakeImageInput(double /*time*/) {}
     virtual std::string getMaterialEmissionColorspace() const { return "sRGB"; }
 
     /** @brief Whether this node has a Material3D connected to its material input. */

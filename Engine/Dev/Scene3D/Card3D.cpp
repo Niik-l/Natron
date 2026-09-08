@@ -26,12 +26,7 @@
 #include "../DotUtils.h"
 
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <vector>
-#ifdef NATRON_HAVE_OPENIMAGEIO
-#include <OpenImageIO/imageio.h>
-#endif
 
 #include "../../AppInstance.h"
 #include "../../AppManager.h"
@@ -526,8 +521,8 @@ bool Card3D::usingBakedInput() const
 {
     KnobFilePtr k = _imp->textureFile.lock();
     if (k && !k->getValue().empty()) return false;   // an explicit file wins
-    std::lock_guard<std::mutex> lk(_bakeMutex);
-    return !_bakedInputPath.empty();
+    std::lock_guard<std::mutex> lk(_bakedImg.mutex);
+    return !_bakedImg.path.empty();
 }
 
 std::string Card3D::getMaterialTextureFile() const
@@ -536,9 +531,9 @@ std::string Card3D::getMaterialTextureFile() const
     std::string file = k ? k->getValue() : std::string();
     if (!file.empty()) return file;
     // No explicit texture: the img input, baked to a temp EXR by
-    // bakeInputTexture(). Empty until the first Cycles render request bakes it.
-    std::lock_guard<std::mutex> lk(_bakeMutex);
-    return _bakedInputPath;
+    // bakeImageInput(). Empty until the first Cycles render request bakes it.
+    std::lock_guard<std::mutex> lk(_bakedImg.mutex);
+    return _bakedImg.path;
 }
 
 std::string Card3D::getMaterialDiffuseColorspace() const
@@ -554,121 +549,19 @@ std::string Card3D::getMaterialDiffuseColorspace() const
 
 bool Card3D::getMaterialTextureUsesAlpha() const
 {
-    // A card exists to show an image, alpha included; the baked input carries
-    // the comp's alpha. A Texture File path keeps the old opaque behaviour.
+    // The img input carries the comp's alpha (a card IS its cutout); a
+    // Texture File path keeps the old opaque behaviour.
     return usingBakedInput();
 }
 
 unsigned long long Card3D::getMaterialInputsHash(double /*time*/) const
 {
-    // Same mixer as Material3D: the img input's EffectInstance::getHash()
-    // tracks the whole upstream chain, so a Grade edit above the card changes
-    // the Cycles scene hash and the baked texture instead of a stale frame
-    // staying on screen.
-    auto mix = [](unsigned long long seed, unsigned long long val) -> unsigned long long {
-        return seed ^ (val * 0x9e3779b97f4a7c15ULL + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
-    };
-    EffectInstancePtr input = const_cast<Card3D*>(this)->getInput(0);
-    unsigned long long h = mix(0ULL, 1ULL);
-    h = mix(h, input ? (unsigned long long)input->getHash() : 0ULL);
-    return h;
+    return materialInputChainHash(const_cast<Card3D*>(this)->getInput(0), 0);
 }
 
-void
-Card3D::bakeInputTexture(double time)
+void Card3D::bakeImageInput(double time)
 {
-    EffectInstancePtr input = getInput(0);
-    if (!input) {
-        std::lock_guard<std::mutex> lk(_bakeMutex);
-        _bakedInputPath.clear();
-        _hasBakedOnce = false;
-        return;
-    }
-    const unsigned long long inputsHash = getMaterialInputsHash(time);
-    {
-        std::lock_guard<std::mutex> lk(_bakeMutex);
-        if (_hasBakedOnce && _lastBakeHash == inputsHash && _lastBakeTime == time) {
-            return;
-        }
-    }
-
-    std::string outPath;
-#ifdef NATRON_HAVE_OPENIMAGEIO
-    // Full-resolution RGBA pull of the img input (Material3D::renderInputToFile
-    // does the same for its maps, but writes Radiance HDR, which has no alpha -
-    // a card without its alpha is a square, so this one writes EXR).
-    RectD rod;
-    bool isProjectFormat = false;
-    StatusEnum stat = input->getRegionOfDefinition_public(input->getRenderHash(), time, RenderScale::identity,
-                                                          ViewIdx(0), &rod, &isProjectFormat);
-    if (stat == eStatusOK && !rod.isNull()) {
-        const double par = input->getAspectRatio(-1);
-        RectI pixelRoI = rod.toPixelEnclosing(0, par);
-        const int w = pixelRoI.width();
-        const int h = pixelRoI.height();
-        if (w > 0 && h > 0) {
-            std::list<ImagePlaneDesc> comps;
-            comps.push_back(ImagePlaneDesc::getRGBAComponents());
-            std::map<ImagePlaneDesc, ImagePtr> outputPlanes;
-            EffectInstance::RenderRoIRetCode ret = input->renderRoI(
-                EffectInstance::RenderRoIArgs(time, RenderScale::identity, 0, ViewIdx(0),
-                                              false, pixelRoI, rod, comps,
-                                              eImageBitDepthFloat, false, NULL,
-                                              eStorageModeRAM, time),
-                &outputPlanes);
-            ImagePtr image = (ret == EffectInstance::eRenderRoIRetCodeOk && !outputPlanes.empty())
-                             ? outputPlanes.begin()->second : ImagePtr();
-            if (image) {
-                const RectI bounds = image->getBounds();
-                const int imgW = bounds.width();
-                const int imgH = bounds.height();
-                const int nComps = image->getComponents().getNumComponents();
-                // Top-down rows for OIIO; pixels stay premultiplied (Natron's
-                // convention) and the Cycles image node is told so.
-                std::vector<float> pixels((size_t)imgW * imgH * 4, 0.0f);
-                {
-                    Image::ReadAccess ra(image.get());
-                    for (int y = bounds.y1; y < bounds.y2; ++y) {
-                        const int dstRow = (imgH - 1) - (y - bounds.y1);
-                        for (int x = bounds.x1; x < bounds.x2; ++x) {
-                            const float* src = (const float*)ra.pixelAt(x, y);
-                            float* dst = &pixels[((size_t)dstRow * imgW + (x - bounds.x1)) * 4];
-                            if (src) {
-                                dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
-                                dst[3] = (nComps >= 4) ? src[3] : 1.0f;
-                            } else {
-                                dst[0] = dst[1] = dst[2] = 0.f; dst[3] = 0.f;
-                            }
-                        }
-                    }
-                }
-                char tmpPath[512];
-                const char* tmpDir = std::getenv("TEMP") ? std::getenv("TEMP") : "/tmp";
-                std::snprintf(tmpPath, sizeof(tmpPath), "%s/natron_card3d_img_%p.exr", tmpDir, (void*)this);
-                std::unique_ptr<OIIO::ImageOutput> out = OIIO::ImageOutput::create(tmpPath);
-                if (out) {
-                    OIIO::ImageSpec spec(imgW, imgH, 4, OIIO::TypeDesc::HALF);
-                    spec.attribute("compression", "zip");
-                    spec.attribute("oiio:ColorSpace", "linear");
-                    if (out->open(tmpPath, spec) &&
-                        out->write_image(OIIO::TypeDesc::FLOAT, pixels.data())) {
-                        outPath = tmpPath;
-                    }
-                    out->close();
-                }
-            }
-        }
-    }
-#else
-    (void)time;
-#endif
-    {
-        std::lock_guard<std::mutex> lk(_bakeMutex);
-        _bakedInputPath = outPath;
-        _lastBakeHash = inputsHash;
-        _lastBakeTime = time;
-        _hasBakedOnce = true;
-    }
+    bakeShapeImageInput(this, 0, time, "card3d_img", _bakedImg);
 }
 
 bool Card3D::hasMaterialInput() const

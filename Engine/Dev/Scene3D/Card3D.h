@@ -34,6 +34,7 @@
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 #include "MaterialProvider.h"
+#include "MaterialTextureBake.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -152,16 +153,9 @@ public:
     virtual std::string getMaterialDiffuseColorspace() const OVERRIDE;
     virtual bool getMaterialTextureUsesAlpha() const OVERRIDE;
     virtual unsigned long long getMaterialInputsHash(double time) const OVERRIDE;
+    virtual void bakeImageInput(double time) OVERRIDE;
     virtual bool hasMaterialInput() const OVERRIDE;
     virtual MaterialProvider* getConnectedMaterial() const OVERRIDE;
-
-    /** Render the img input at full resolution to a temp RGBA EXR so Cycles can
-     *  texture the card with it (alpha included). The 3D viewport and
-     *  ScanlineRender read the input image directly; Cycles only takes files.
-     *  Skipped when the input chain's hash and the time are unchanged since the
-     *  last bake. Call from the render request path (CyclesPassRender), like
-     *  Material3D::bakeInputTextures. */
-    void bakeInputTexture(double time);
 
 private:
 
@@ -170,18 +164,13 @@ private:
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     std::unique_ptr<Card3DPrivate> _imp;
+    // img input baked to a temp EXR for Cycles (MaterialTextureBake.h).
+    BakedInputTexture _bakedImg;
+    // True while getMaterialTextureFile() hands out the baked input rather
+    // than the Texture File knob (alpha + linear colorspace follow from it).
+    bool usingBakedInput() const;
     mutable std::mutex _texMutex;
     CachedTexturePtr _cachedTexture = std::make_shared<CachedTexture>();
-
-    // Baked img-input texture for Cycles (see bakeInputTexture).
-    mutable std::mutex _bakeMutex;
-    std::string _bakedInputPath;
-    unsigned long long _lastBakeHash = 0;
-    double _lastBakeTime = 0.0;
-    bool _hasBakedOnce = false;
-    // True when getMaterialTextureFile() is currently handing out the baked
-    // input rather than the Texture File knob (alpha + linear colorspace follow).
-    bool usingBakedInput() const;
 };
 
 NATRON_NAMESPACE_EXIT

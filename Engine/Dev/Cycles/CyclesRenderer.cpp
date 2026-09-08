@@ -75,6 +75,9 @@
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/Card3D.h"
+#include "Engine/Dev/Scene3D/Sphere3D.h"
+#include "Engine/Dev/Scene3D/Cube3D.h"
+#include "Engine/Dev/Scene3D/Cylinder3D.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
 #include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
 #include "Engine/Dev/Scene3D/CyclesRenderPass.h"
@@ -474,6 +477,33 @@ static void generateQuadMesh(std::vector<ccl::float3>& verts,
         ccl::make_float3(-0.5f,  0.5f, 0.0f),
     };
     triVerts = { 0,1,2, 0,2,3 };
+}
+
+// ============================================================================
+// Helper: take a primitive's own mesh (Sphere3D/Cube3D/Cylinder3D/Card3D
+// generateXMesh - the exact vertices, UVs and sizes the 3D viewport and
+// ScanlineRender draw) into the Cycles vertex/UV arrays. The static
+// generators above are only the fallback when the scene node has no source.
+// ============================================================================
+
+template <class V>
+static void nodeMeshToCycles(const std::vector<V>& cv,
+                             std::vector<ccl::float3>& verts,
+                             std::vector<ccl::float2>& uvs)
+{
+    verts.resize(cv.size());
+    uvs.resize(cv.size());
+    for (size_t i = 0; i < cv.size(); ++i) {
+        verts[i] = ccl::make_float3(cv[i].x, cv[i].y, cv[i].z);
+        uvs[i] = ccl::make_float2(cv[i].u, cv[i].v);
+    }
+}
+
+template <class NodeT>
+static NodeT* sceneNodeAs(const SceneNode& sn)
+{
+    NodePtr src = sn.sourceNode.lock();
+    return src ? dynamic_cast<NodeT*>(src->getEffectInstance().get()) : nullptr;
 }
 
 // ============================================================================
@@ -2349,60 +2379,64 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         std::vector<ccl::float2> uvs; // per-vertex UVs
 
         switch (sn.type) {
-            case eSceneNodeSphere:
-                generateSphereMesh(verts, triVerts);
-                // Generate equirectangular UVs for sphere
-                uvs.resize(verts.size());
-                for (size_t vi = 0; vi < verts.size(); ++vi) {
-                    float x = verts[vi].x, y = verts[vi].y, z = verts[vi].z;
-                    float len = sqrtf(x*x + y*y + z*z);
-                    if (len > 1e-6f) { x /= len; y /= len; z /= len; }
-                    float u = 0.5f + atan2f(x, z) / (2.0f * (float)M_PI);
-                    float v = 0.5f - asinf(fminf(fmaxf(y, -1.0f), 1.0f)) / (float)M_PI;
-                    uvs[vi] = ccl::make_float2(u, v);
-                }
-                break;
-            case eSceneNodeCube:
-                generateBoxMesh(verts, triVerts);
-                // Per-face UVs for cube (each face gets 0-1 range)
-                uvs.resize(verts.size());
-                for (size_t vi = 0; vi < verts.size(); ++vi) {
-                    // 4 verts per face, 6 faces = 24 verts
-                    int face = (int)vi / 4;
-                    int corner = (int)vi % 4;
-                    float u = (corner == 0 || corner == 3) ? 0.0f : 1.0f;
-                    float v = (corner < 2) ? 0.0f : 1.0f;
-                    uvs[vi] = ccl::make_float2(u, v);
-                }
-                break;
-            case eSceneNodeCard: {
-                generateQuadMesh(verts, triVerts);
-                // The unit quad is square; the card's shape follows its img
-                // input's aspect (Nuke "image aspect", Card3D::getCardAspect -
-                // the same value the 3D viewport, ScanlineRender and particle
-                // collision use). Without this every card rendered square.
-                float aspect = 1.0f;
-                if (NodePtr cardSrc = sn.sourceNode.lock()) {
-                    if (Card3D* card = dynamic_cast<Card3D*>(cardSrc->getEffectInstance().get())) {
-                        aspect = card->getCardAspect(time);
+            case eSceneNodeSphere: {
+                if (Sphere3D* n = sceneNodeAs<Sphere3D>(sn)) {
+                    std::vector<Sphere3D::SphereVertex> cv;
+                    n->generateSphereMesh(time, cv, triVerts);
+                    nodeMeshToCycles(cv, verts, uvs);
+                } else {
+                    generateSphereMesh(verts, triVerts);
+                    uvs.resize(verts.size());
+                    for (size_t vi = 0; vi < verts.size(); ++vi) {
+                        float x = verts[vi].x, y = verts[vi].y, z = verts[vi].z;
+                        float len = sqrtf(x*x + y*y + z*z);
+                        if (len > 1e-6f) { x /= len; y /= len; z /= len; }
+                        uvs[vi] = ccl::make_float2(0.5f + atan2f(x, z) / (2.0f * (float)M_PI),
+                                                   0.5f - asinf(fminf(fmaxf(y, -1.0f), 1.0f)) / (float)M_PI);
                     }
-                }
-                for (size_t vi = 0; vi < verts.size(); ++vi) {
-                    verts[vi].x *= aspect;
-                }
-                // Simple planar UVs for card
-                uvs.resize(verts.size());
-                if (verts.size() >= 4) {
-                    uvs[0] = ccl::make_float2(0.0f, 0.0f);
-                    uvs[1] = ccl::make_float2(1.0f, 0.0f);
-                    uvs[2] = ccl::make_float2(1.0f, 1.0f);
-                    uvs[3] = ccl::make_float2(0.0f, 1.0f);
                 }
                 break;
             }
-            case eSceneNodeCylinder:
-                generateBoxMesh(verts, triVerts);
+            case eSceneNodeCube: {
+                if (Cube3D* n = sceneNodeAs<Cube3D>(sn)) {
+                    std::vector<Cube3D::CubeVertex> cv;
+                    n->generateCubeMesh(time, cv, triVerts);
+                    nodeMeshToCycles(cv, verts, uvs);
+                } else {
+                    generateBoxMesh(verts, triVerts);
+                    uvs.resize(verts.size());
+                    for (size_t vi = 0; vi < verts.size(); ++vi) {
+                        int corner = (int)vi % 4;
+                        uvs[vi] = ccl::make_float2((corner == 0 || corner == 3) ? 0.0f : 1.0f, (corner < 2) ? 0.0f : 1.0f);
+                    }
+                }
                 break;
+            }
+            case eSceneNodeCard: {
+                // Card3D::generateCardMesh carries the img input's aspect (Nuke
+                // "image aspect"); the unit-quad fallback made every card square.
+                if (Card3D* n = sceneNodeAs<Card3D>(sn)) {
+                    std::vector<Card3D::CardVertex> cv;
+                    n->generateCardMesh(time, cv, triVerts);
+                    nodeMeshToCycles(cv, verts, uvs);
+                } else {
+                    generateQuadMesh(verts, triVerts);
+                    uvs = { ccl::make_float2(0.0f, 0.0f), ccl::make_float2(1.0f, 0.0f),
+                            ccl::make_float2(1.0f, 1.0f), ccl::make_float2(0.0f, 1.0f) };
+                }
+                break;
+            }
+            case eSceneNodeCylinder: {
+                // Was generateBoxMesh: a Cylinder3D rendered as a box in Cycles.
+                if (Cylinder3D* n = sceneNodeAs<Cylinder3D>(sn)) {
+                    std::vector<Cylinder3D::CylinderVertex> cv;
+                    n->generateCylinderMesh(time, cv, triVerts);
+                    nodeMeshToCycles(cv, verts, uvs);
+                } else {
+                    generateBoxMesh(verts, triVerts);
+                }
+                break;
+            }
             case eSceneNodeMesh: {
                 // Prefer mesh data carried directly on the SceneNode (set by
                 // ReadGeo and ReadAlembicArchive). Fall back to the source-node
