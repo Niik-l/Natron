@@ -47,6 +47,20 @@ Recent milestones:
   and cylinder wrap it with the transparent regions cut away. Found on the way:
   WritePNG under an ACES config defaults its output colorspace to the `default`
   role the CG config lacks and the write fails — recorded in TODO.md.
+  **Regression caught the same evening (user report: a hole in the sphere):**
+  handing Cycles the nodes' meshes and letting it average smooth normals
+  itself gave a dark pinch at the pole and a seam line down the sphere — the
+  lat/long generators duplicate the pole vertices (one per column) and the
+  u=1 seam column, so the per-vertex averages disagree there; the old built-in
+  Cycles sphere shared those vertices, which is why it never showed. Fixed in
+  1a5e7081a by passing the generators' analytic per-vertex normals as
+  `ATTR_STD_VERTEX_NORMAL`, and — because Cycles derives the geometric normal
+  from the winding and flips the shading normal on back-facing hits, which
+  turned the sphere black once real normals were supplied — by re-winding
+  each triangle to agree with its normals. Per triangle, not per mesh:
+  Cylinder3D winds its caps opposite to its wall. Cube faces and cylinder
+  caps come out flat, spheres and walls smooth, all three verified headlessly
+  under a point light from above.
 
 - **Read: an empty Read given a file never guessed its params (2026-09-07)** —
   `app.createNode("Read")` then `filename.set("x.jpg")` (or cancel the file dialog,
