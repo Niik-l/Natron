@@ -1258,6 +1258,25 @@ ReadNode::onKnobsAboutToBeLoaded(const NodeSerializationPtr& serialization)
     _imp->refreshPluginSelectorKnob();
 }
 
+void
+ReadNode::onKnobsLoaded()
+{
+    // Project load, values restored. A colorspace saved under another OCIO
+    // config ("sRGB" from nuke-default/blender, "sRGB - Texture" from ACES) is
+    // mapped onto this config's name by the decoder's changedParam (openfx-io
+    // GenericOCIO), which Natron does not fire while restoring values. Fire it
+    // once so the knob shows a valid entry instead of a text field whose name
+    // fails "Color space 'sRGB' could not be found" at render time.
+    NodePtr reader = getEmbeddedReader();
+    if (!reader) {
+        return;
+    }
+    KnobIPtr csKnob = reader->getKnobByName(kOCIOParamInputSpace);
+    if (csKnob) {
+        reader->getEffectInstance()->onKnobValueChanged_public(csKnob.get(), eValueChangedReasonPluginEdited, getCurrentTime(), ViewSpec(0), true);
+    }
+}
+
 bool
 ReadNode::knobChanged(KnobI* k,
                       ValueChangedReasonEnum reason,
