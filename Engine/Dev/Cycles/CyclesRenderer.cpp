@@ -79,6 +79,7 @@
 #include "Engine/Dev/Scene3D/Cube3D.h"
 #include "Engine/Dev/Scene3D/Cylinder3D.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
+#include "Engine/Dev/Scene3D/MeshProvider.h"
 #include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
 #include "Engine/Dev/Scene3D/CyclesRenderPass.h"
 #include "Engine/Dev/Scene3D/ReadVDB.h"
@@ -2471,9 +2472,9 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 if (!meshData) {
                     NodePtr meshSrcNode = sn.sourceNode.lock();
                     if (!meshSrcNode) continue;
-                    ReadGeo* readGeo = dynamic_cast<ReadGeo*>(meshSrcNode->getEffectInstance().get());
-                    if (!readGeo) continue;
-                    meshData = readGeo->getMeshData(time);
+                    MeshProvider* meshProv = dynamic_cast<MeshProvider*>(meshSrcNode->getEffectInstance().get());
+                    if (!meshProv) continue;
+                    meshData = meshProv->getMeshData(time);
                 }
                 if (!meshData || meshData->numVertices == 0) continue;
 
@@ -2641,7 +2642,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         if (mbEnabled && sn.type == eSceneNodeMesh && srcNode) {
             EffectInstancePtr effInst = srcNode->getEffectInstance();
             ReadAlembicArchive* abcArch = dynamic_cast<ReadAlembicArchive*>(effInst.get());
-            ReadGeo*            readGeo = dynamic_cast<ReadGeo*>(effInst.get());
+            MeshProvider*       meshProv = dynamic_cast<MeshProvider*>(effInst.get());   // ReadGeo, GeoBuilder
 
             // Number of vertices on the Cycles mesh — also the size in float3s
             // we expect from each sub-time query (3 floats per vertex).
@@ -2656,8 +2657,8 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 MeshDataPtr md;
                 if (abcArch && sn.archiveEntryIdx >= 0) {
                     md = abcArch->getMeshDataAt(sn.archiveEntryIdx, t);
-                } else if (readGeo) {
-                    md = readGeo->getMeshData(t);
+                } else if (meshProv) {
+                    md = meshProv->getMeshData(t);
                 }
                 if (!md || md->numVertices != N) return false;
                 outVerts = md->vertices; // deep copy
