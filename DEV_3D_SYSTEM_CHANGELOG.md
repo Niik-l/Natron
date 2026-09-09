@@ -17,6 +17,31 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **GeoBuilder: 2D grids drawn in the viewer, projected through the camera
+  (2026-09-09)** — the part the user actually wanted first (the slice-1 shape
+  panel below was built before that was clear; it stays, parked). With the
+  node's panel open, **Add Grid** then click four corners over the plate in the
+  2D viewer, going around the shape; the grid appears after the fourth click,
+  subdivided Rows x Columns, corners draggable, clicking a corner selects that
+  grid. Grids live one-per-line in a hidden `gridsData` knob (project save,
+  undo, one step per drag). The node passes its **src** input straight through
+  (isIdentity to input 2, RoD follows it) so viewing it shows the plate. With
+  a camera on **cam** and **Planar** on (default), the four corners are
+  projected through that camera *on the frame the grid was drawn* onto the
+  chosen **Plane** — Ground (XZ, y = Offset), Front (XY), Side (YZ), or Facing
+  camera at Offset units — and the grid becomes a flat card in the node's mesh,
+  rows x cols quads spanning the four world corners, so it renders through
+  Scene3D like any geometry and stays put in the world as the camera moves.
+  The viewer then draws the rows/columns by re-projecting the 3D card through
+  the camera at the *current* frame, i.e. in true perspective instead of the
+  plain 2D lerp — that is the "planar / flat surface" behaviour the user asked
+  for after a hand-drawn grid looked wonky. Dragging a corner on another frame
+  than the grid's own puts it on the plane through that frame's camera and
+  stores it as seen from the grid's frame, so the card and the corners never
+  disagree. Verified headlessly: a ground grid drawn over pixels x 400–1500,
+  y 150–500 renders through Cycles as a trapezoid whose alpha bbox is exactly
+  1100 x 350 pixels in the same place.
+
 - **GeoBuilder, slice 1 (2026-09-09)** — a new node for building simple
   geometry for a shot, our take on Nuke's ModelBuilder (research + slice plan in
   `Engine/Dev/Research_GeoBuilder.md`). It owns a list of primitive shapes —

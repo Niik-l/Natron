@@ -127,10 +127,14 @@ public:
     struct Grid
     {
         std::string name;
-        double x[4] = {0, 0, 0, 0};
+        double x[4] = {0, 0, 0, 0};   // corners in plate pixels, as seen at `frame`
         double y[4] = {0, 0, 0, 0};
         int rows = 4;
         int cols = 4;
+        bool planar = true;           // project through the cam input onto `plane`
+        int plane = 0;                // 0 ground (XZ, y=offset) 1 front (XY, z=offset) 2 side (YZ, x=offset) 3 facing camera at distance `offset`
+        double offset = 0.0;
+        double frame = 1.0;           // the frame the corners were placed on
     };
     std::vector<Grid> getGrids() const;
     int getSelectedGridIndex() const;
@@ -187,6 +191,24 @@ private:
     void loadSelectedGridIntoKnobs();
     void storeKnobsIntoSelectedGrid();
     void setGridStatus(const std::string& text);
+
+    // Camera projection of grids (cam input, plate size from src / project).
+    struct CamView
+    {
+        double o[3];          // camera position
+        double R[3][3];       // camera -> world rotation
+        double tanH, tanV;    // half-angle tangents from focal + apertures
+        double x1, y1, w, h;  // plate rectangle in pixels
+    };
+    bool cameraAt(double time, CamView& out) const;
+    bool unprojectToPlane(const CamView& cv, const Grid& g, double px, double py, double out[3]) const;
+    bool projectPoint(const CamView& cv, const double p[3], double& px, double& py) const;
+    bool solveGrid3D(const Grid& g, double corners[4][3]) const;
+    /** Where the grid's corners are drawn at `time`: the stored 2D corners, or
+     *  the 3D corners re-projected through the camera when the grid is planar
+     *  and a camera is connected. Returns false when it had to fall back. */
+    bool displayCorners(const Grid& g, double time, double out[4][2]) const;
+    virtual void onInputChanged(int inputNb) OVERRIDE FINAL;
 
     // Shape list <-> hidden knob, selection <-> per-shape knobs, mesh rebuild.
     void loadShapesFromKnob();

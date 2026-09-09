@@ -23,6 +23,8 @@
 
 #include "GeoBuilder.h"
 #include "SceneGraph.h"
+#include "CameraProvider.h"
+#include "RotationConventions.h"
 #include "../DotUtils.h"
 
 #include <cmath>
@@ -34,8 +36,11 @@
 
 #include "../../../Global/GLIncludes.h"
 
+#include "../../AppInstance.h"
 #include "../../AppManager.h"
 #include "../../ChoiceOption.h"
+#include "../../Format.h"
+#include "../../Project.h"
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobFile.h"
 #include "../../KnobTypes.h"
@@ -60,6 +65,9 @@ struct GeoBuilderPrivate
     KnobChoiceWPtr gridChoice;      // which grid the Rows/Columns knobs edit
     KnobButtonWPtr addGrid, deleteGrid;
     KnobIntWPtr gridRows, gridCols;
+    KnobBoolWPtr gridPlanar;
+    KnobChoiceWPtr gridPlane;
+    KnobDoubleWPtr gridOffset;
     KnobStringWPtr gridStatus;      // label: what to do next / what is selected
     int gridCounter = 0;
     // Overlay interaction
@@ -232,11 +240,35 @@ GeoBuilder::initializeKnobs()
         gridPage->addKnob(k); _imp->gridCols = k;
     }
     {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Planar"));
+        k->setName("gridPlanar"); k->setDefaultValue(true); k->setIsPersistent(false);
+        k->setHintToolTip(tr("Project the four corners through the cam input onto the Plane, on the "
+                             "frame the grid was drawn. The grid becomes a flat 3D card (it renders "
+                             "through Scene3D and follows the camera), and the viewer draws its rows "
+                             "and columns in true perspective instead of a plain 2D lerp. Needs a "
+                             "camera on cam; without one the grid stays 2D."));
+        gridPage->addKnob(k); _imp->gridPlanar = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Plane"));
+        k->setName("gridPlane");
+        std::vector<ChoiceOption> entries;
+        entries.push_back(ChoiceOption("Ground (XZ)", "", "Horizontal plane at Y = Offset. Floors, roads, ground."));
+        entries.push_back(ChoiceOption("Front (XY)", "", "Vertical plane facing Z at Z = Offset. Building fronts seen head-on."));
+        entries.push_back(ChoiceOption("Side (YZ)", "", "Vertical plane facing X at X = Offset. Side walls."));
+        entries.push_back(ChoiceOption("Facing camera", "", "Plane perpendicular to the camera at Offset units in front of it."));
+        k->populateChoices(entries);
+        k->setDefaultValue(0); k->setIsPersistent(false);
+        k->setAddNewLine(false);
+        gridPage->addKnob(k); _imp->gridPlane = k;
+    }
+    _imp->gridOffset = makeDouble(this, gridPage, tr("Offset"), "gridOffset", 0.0, -100.0, 100.0, false);
+    _imp->gridOffset.lock()->setHintToolTip(tr("Position of the plane along its normal (world units). For Facing camera: the distance in front of the camera."));
+    {
         KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Grids Data"));
         k->setName("gridsData");
         k->setAsMultiLine();
         k->setSecret(true);
-        k->setEvaluateOnChange(false);   // 2D only for now: no render depends on it
         gridPage->addKnob(k); _imp->gridsData = k;
     }
 
@@ -419,6 +451,7 @@ GeoBuilder::saveGridsToKnob()
         for (size_t c = 0; c < nm.size(); ++c) { if (nm[c] == '|' || nm[c] == '\n' || nm[c] == '\r') nm[c] = ' '; }
         ss << nm << '|' << g.rows << '|' << g.cols;
         for (int c = 0; c < 4; ++c) ss << '|' << g.x[c] << '|' << g.y[c];
+        ss << '|' << (g.planar ? 1 : 0) << '|' << g.plane << '|' << g.offset << '|' << g.frame;
         ss << '\n';
     }
     KnobStringPtr k = _imp->gridsData.lock();
@@ -451,6 +484,12 @@ GeoBuilder::loadGridsFromKnob()
         g.rows = std::max(1, std::atoi(f[1].c_str()));
         g.cols = std::max(1, std::atoi(f[2].c_str()));
         for (int c = 0; c < 4; ++c) { g.x[c] = std::atof(f[3 + c * 2].c_str()); g.y[c] = std::atof(f[4 + c * 2].c_str()); }
+        if (f.size() >= 15) {   // fields added with the camera projection; older lines keep the defaults
+            g.planar = std::atoi(f[11].c_str()) != 0;
+            g.plane = std::max(0, std::min(3, std::atoi(f[12].c_str())));
+            g.offset = std::atof(f[13].c_str());
+            g.frame = std::atof(f[14].c_str());
+        }
         _imp->grids.push_back(g);
         ++_imp->gridCounter;
     }
@@ -493,6 +532,12 @@ GeoBuilder::loadSelectedGridIntoKnobs()
     if (rows) { rows->setValue(has ? _imp->grids[i].rows : 4); rows->setEnabled(0, has); }
     KnobIntPtr cols = _imp->gridCols.lock();
     if (cols) { cols->setValue(has ? _imp->grids[i].cols : 4); cols->setEnabled(0, has); }
+    KnobBoolPtr planar = _imp->gridPlanar.lock();
+    if (planar) { planar->setValue(has ? _imp->grids[i].planar : true); planar->setEnabled(0, has); }
+    KnobChoicePtr plane = _imp->gridPlane.lock();
+    if (plane) { plane->setValue(has ? _imp->grids[i].plane : 0); plane->setEnabled(0, has); }
+    KnobDoublePtr off = _imp->gridOffset.lock();
+    if (off) { off->setValue(has ? _imp->grids[i].offset : 0.0); off->setEnabled(0, has); }
     KnobButtonPtr del = _imp->deleteGrid.lock();
     if (del) del->setEnabled(0, has);
     _imp->syncing = false;
@@ -507,6 +552,144 @@ GeoBuilder::storeKnobsIntoSelectedGrid()
     if (rows) _imp->grids[i].rows = std::max(1, rows->getValue());
     KnobIntPtr cols = _imp->gridCols.lock();
     if (cols) _imp->grids[i].cols = std::max(1, cols->getValue());
+    KnobBoolPtr planar = _imp->gridPlanar.lock();
+    if (planar) _imp->grids[i].planar = planar->getValue();
+    KnobChoicePtr plane = _imp->gridPlane.lock();
+    if (plane) {
+        const int newPlane = plane->getValue();
+        // Switching to "Facing camera" with a zero offset would put the plane
+        // through the camera; start it at Nuke's shape distance instead.
+        if (newPlane == 3 && _imp->grids[i].plane != 3 && std::fabs(_imp->grids[i].offset) < 1e-9) {
+            _imp->grids[i].offset = 10.0;
+            KnobDoublePtr off = _imp->gridOffset.lock();
+            if (off) { _imp->syncing = true; off->setValue(10.0); _imp->syncing = false; }
+        }
+        _imp->grids[i].plane = newPlane;
+    }
+    KnobDoublePtr off = _imp->gridOffset.lock();
+    if (off) _imp->grids[i].offset = off->getValue();
+}
+
+// ---------------------------------------------------------------------------
+// Camera projection
+// ---------------------------------------------------------------------------
+
+bool
+GeoBuilder::cameraAt(double time, CamView& cv) const
+{
+    EffectInstancePtr camEff = skipDots(const_cast<GeoBuilder*>(this)->getInput(1));
+    const CameraProvider* cam = camEff ? dynamic_cast<const CameraProvider*>(camEff.get()) : nullptr;
+    if (!cam) return false;
+    double rx, ry, rz;
+    cam->getCameraPosition(time, cv.o[0], cv.o[1], cv.o[2], rx, ry, rz);
+    RotationConventions::compose(rx, ry, rz, cv.R);
+    const double fl = cam->getCameraFocalLength(time);
+    if (fl <= 1e-9) return false;
+    cv.tanH = cam->getCameraHAperture(time) / (2.0 * fl);
+    cv.tanV = cam->getCameraVAperture(time) / (2.0 * fl);
+    if (cv.tanH <= 1e-12 || cv.tanV <= 1e-12) return false;
+
+    // Plate rectangle: the src input's RoD, else the project format.
+    cv.x1 = 0; cv.y1 = 0; cv.w = 0; cv.h = 0;
+    EffectInstancePtr src = const_cast<GeoBuilder*>(this)->getInput(2);
+    if (src) {
+        RectD rod;
+        bool isProject = false;
+        if (src->getRegionOfDefinition_public(src->getHash(), time, RenderScale::identity, ViewIdx(0), &rod, &isProject) == eStatusOK && !rod.isNull()) {
+            cv.x1 = rod.x1; cv.y1 = rod.y1; cv.w = rod.x2 - rod.x1; cv.h = rod.y2 - rod.y1;
+        }
+    }
+    if (cv.w <= 0 || cv.h <= 0) {
+        AppInstancePtr app = getApp();
+        if (!app) return false;
+        Format fmt;
+        app->getProject()->getProjectDefaultFormat(&fmt);
+        cv.x1 = fmt.x1; cv.y1 = fmt.y1; cv.w = fmt.x2 - fmt.x1; cv.h = fmt.y2 - fmt.y1;
+    }
+    return cv.w > 0 && cv.h > 0;
+}
+
+bool
+GeoBuilder::unprojectToPlane(const CamView& cv, const Grid& g, double px, double py, double out[3]) const
+{
+    // Pixel -> NDC -> camera-space direction -> world direction.
+    const double nx = ((px - cv.x1) / cv.w) * 2.0 - 1.0;
+    const double ny = ((py - cv.y1) / cv.h) * 2.0 - 1.0;
+    const double dc[3] = { nx * cv.tanH, ny * cv.tanV, -1.0 };
+    double d[3];
+    for (int r = 0; r < 3; ++r) d[r] = cv.R[r][0] * dc[0] + cv.R[r][1] * dc[1] + cv.R[r][2] * dc[2];
+
+    // Plane: normal n, passes through point q.
+    double n[3] = {0, 1, 0}, q[3] = {0, g.offset, 0};
+    switch (g.plane) {
+        case 0: n[0] = 0; n[1] = 1; n[2] = 0; q[0] = 0; q[1] = g.offset; q[2] = 0; break;
+        case 1: n[0] = 0; n[1] = 0; n[2] = 1; q[0] = 0; q[1] = 0; q[2] = g.offset; break;
+        case 2: n[0] = 1; n[1] = 0; n[2] = 0; q[0] = g.offset; q[1] = 0; q[2] = 0; break;
+        default: {
+            // Facing the camera: normal = camera forward (-Z in camera space).
+            for (int r = 0; r < 3; ++r) n[r] = -cv.R[r][2];
+            const double dist = (std::fabs(g.offset) < 1e-9) ? 10.0 : g.offset;
+            for (int r = 0; r < 3; ++r) q[r] = cv.o[r] + n[r] * dist;
+            break;
+        }
+    }
+    const double denom = n[0] * d[0] + n[1] * d[1] + n[2] * d[2];
+    if (std::fabs(denom) < 1e-9) return false;                       // ray parallel to the plane
+    const double t = (n[0] * (q[0] - cv.o[0]) + n[1] * (q[1] - cv.o[1]) + n[2] * (q[2] - cv.o[2])) / denom;
+    if (t <= 1e-6) return false;                                      // plane behind the camera
+    for (int r = 0; r < 3; ++r) out[r] = cv.o[r] + d[r] * t;
+    return true;
+}
+
+bool
+GeoBuilder::projectPoint(const CamView& cv, const double p[3], double& px, double& py) const
+{
+    // World -> camera space (R^T (p - o)) -> NDC -> pixel.
+    const double v[3] = { p[0] - cv.o[0], p[1] - cv.o[1], p[2] - cv.o[2] };
+    double c[3];
+    for (int r = 0; r < 3; ++r) c[r] = cv.R[0][r] * v[0] + cv.R[1][r] * v[1] + cv.R[2][r] * v[2];
+    if (c[2] >= -1e-9) return false;                                  // behind the camera
+    const double nx = (c[0] / -c[2]) / cv.tanH;
+    const double ny = (c[1] / -c[2]) / cv.tanV;
+    px = cv.x1 + (nx + 1.0) * 0.5 * cv.w;
+    py = cv.y1 + (ny + 1.0) * 0.5 * cv.h;
+    return true;
+}
+
+bool
+GeoBuilder::solveGrid3D(const Grid& g, double corners[4][3]) const
+{
+    if (!g.planar) return false;
+    CamView cv;
+    if (!cameraAt(g.frame, cv)) return false;
+    for (int c = 0; c < 4; ++c) {
+        if (!unprojectToPlane(cv, g, g.x[c], g.y[c], corners[c])) return false;
+    }
+    return true;
+}
+
+bool
+GeoBuilder::displayCorners(const Grid& g, double time, double out[4][2]) const
+{
+    double c3[4][3];
+    CamView cv;
+    if (solveGrid3D(g, c3) && cameraAt(time, cv)) {
+        bool ok = true;
+        for (int c = 0; c < 4 && ok; ++c) ok = projectPoint(cv, c3[c], out[c][0], out[c][1]);
+        if (ok) return true;
+    }
+    for (int c = 0; c < 4; ++c) { out[c][0] = g.x[c]; out[c][1] = g.y[c]; }
+    return false;
+}
+
+void
+GeoBuilder::onInputChanged(int inputNb)
+{
+    EffectInstance::onInputChanged(inputNb);
+    if (inputNb == 1 || inputNb == 2) {   // cam or src: the projection changes
+        rebuildMesh();
+        redrawOverlayInteract();
+    }
 }
 
 void
@@ -547,7 +730,7 @@ static inline void lerp2(double ax, double ay, double bx, double by, double t, d
 }
 
 void
-GeoBuilder::drawOverlay(double /*time*/, const RenderScale& /*renderScale*/, ViewIdx /*view*/)
+GeoBuilder::drawOverlay(double time, const RenderScale& /*renderScale*/, ViewIdx /*view*/)
 {
     GLProtectAttrib a(GL_HINT_BIT | GL_ENABLE_BIT | GL_LINE_BIT | GL_COLOR_BUFFER_BIT | GL_POINT_BIT | GL_CURRENT_BIT);
     glEnable(GL_BLEND);
@@ -563,27 +746,50 @@ GeoBuilder::drawOverlay(double /*time*/, const RenderScale& /*renderScale*/, Vie
         const bool isSel = ((int)gi == sel);
         // Corners in click order: 0 -> 1 -> 2 -> 3 around the shape. Rows run
         // between edge 0-3 and edge 1-2, columns between edge 0-1 and edge 3-2.
+        double cd[4][2];
+        double c3[4][3];
+        CamView cv;
+        // Planar + camera: subdivide the flat 3D card and re-project every
+        // line end through the camera at this frame, so the grid reads in true
+        // perspective (and follows a moving camera). Else a plain 2D lerp.
+        const bool persp = displayCorners(g, time, cd) && solveGrid3D(g, c3) && cameraAt(time, cv);
+
         if (isSel) glColor4f(1.0f, 0.85f, 0.2f, 0.9f); else glColor4f(0.3f, 0.9f, 1.0f, 0.7f);
         glLineWidth(isSel ? 1.8f : 1.2f);
         glBegin(GL_LINE_LOOP);
-        for (int c = 0; c < 4; ++c) glVertex2d(g.x[c], g.y[c]);
+        for (int c = 0; c < 4; ++c) glVertex2d(cd[c][0], cd[c][1]);
         glEnd();
 
         glLineWidth(1.0f);
         if (isSel) glColor4f(1.0f, 0.85f, 0.2f, 0.45f); else glColor4f(0.3f, 0.9f, 1.0f, 0.35f);
         glBegin(GL_LINES);
+        auto lerp3 = [](const double a[3], const double b[3], double t, double o[3]) {
+            for (int k = 0; k < 3; ++k) o[k] = a[k] + (b[k] - a[k]) * t;
+        };
         for (int r = 1; r < g.rows; ++r) {
             const double t = (double)r / g.rows;
             double lx, ly, rx, ry;
-            lerp2(g.x[0], g.y[0], g.x[3], g.y[3], t, lx, ly);
-            lerp2(g.x[1], g.y[1], g.x[2], g.y[2], t, rx, ry);
+            if (persp) {
+                double l3[3], r3[3];
+                lerp3(c3[0], c3[3], t, l3); lerp3(c3[1], c3[2], t, r3);
+                if (!projectPoint(cv, l3, lx, ly) || !projectPoint(cv, r3, rx, ry)) continue;
+            } else {
+                lerp2(cd[0][0], cd[0][1], cd[3][0], cd[3][1], t, lx, ly);
+                lerp2(cd[1][0], cd[1][1], cd[2][0], cd[2][1], t, rx, ry);
+            }
             glVertex2d(lx, ly); glVertex2d(rx, ry);
         }
         for (int c = 1; c < g.cols; ++c) {
             const double t = (double)c / g.cols;
             double bx, by, tx, ty;
-            lerp2(g.x[0], g.y[0], g.x[1], g.y[1], t, bx, by);
-            lerp2(g.x[3], g.y[3], g.x[2], g.y[2], t, tx, ty);
+            if (persp) {
+                double b3[3], t3[3];
+                lerp3(c3[0], c3[1], t, b3); lerp3(c3[3], c3[2], t, t3);
+                if (!projectPoint(cv, b3, bx, by) || !projectPoint(cv, t3, tx, ty)) continue;
+            } else {
+                lerp2(cd[0][0], cd[0][1], cd[1][0], cd[1][1], t, bx, by);
+                lerp2(cd[3][0], cd[3][1], cd[2][0], cd[2][1], t, tx, ty);
+            }
             glVertex2d(bx, by); glVertex2d(tx, ty);
         }
         glEnd();
@@ -593,10 +799,10 @@ GeoBuilder::drawOverlay(double /*time*/, const RenderScale& /*renderScale*/, Vie
         glLineWidth(1.5f);
         for (int c = 0; c < 4; ++c) {
             glBegin(GL_LINE_LOOP);
-            glVertex2d(g.x[c] - handle, g.y[c] - handle);
-            glVertex2d(g.x[c] + handle, g.y[c] - handle);
-            glVertex2d(g.x[c] + handle, g.y[c] + handle);
-            glVertex2d(g.x[c] - handle, g.y[c] + handle);
+            glVertex2d(cd[c][0] - handle, cd[c][1] - handle);
+            glVertex2d(cd[c][0] + handle, cd[c][1] - handle);
+            glVertex2d(cd[c][0] + handle, cd[c][1] + handle);
+            glVertex2d(cd[c][0] - handle, cd[c][1] + handle);
             glEnd();
         }
     }
@@ -620,7 +826,7 @@ GeoBuilder::drawOverlay(double /*time*/, const RenderScale& /*renderScale*/, Vie
 }
 
 bool
-GeoBuilder::onOverlayPenDown(double /*time*/, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+GeoBuilder::onOverlayPenDown(double time, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
                              const QPointF& /*viewportPos*/, const QPointF& pos,
                              double /*pressure*/, double /*timestamp*/, PenType /*pen*/)
 {
@@ -639,6 +845,7 @@ GeoBuilder::onOverlayPenDown(double /*time*/, const RenderScale& /*renderScale*/
         }
         Grid g;
         g.name = "Grid" + std::to_string(++_imp->gridCounter);
+        g.frame = time;
         for (int i = 0; i < 4; ++i) { g.x[i] = _imp->placingX[i]; g.y[i] = _imp->placingY[i]; }
         KnobIntPtr rows = _imp->gridRows.lock();
         KnobIntPtr cols = _imp->gridCols.lock();
@@ -652,7 +859,13 @@ GeoBuilder::onOverlayPenDown(double /*time*/, const RenderScale& /*renderScale*/
         KnobChoicePtr choice = _imp->gridChoice.lock();
         if (choice) { _imp->syncing = true; choice->setValue((int)_imp->grids.size() - 1); _imp->syncing = false; }
         loadSelectedGridIntoKnobs();
-        setGridStatus(g.name + " created - drag its corners, or Add Grid for another.");
+        rebuildMesh();
+        {
+            double c3[4][3];
+            const bool solved = solveGrid3D(g, c3);
+            setGridStatus(g.name + (solved ? " created and projected onto the plane - drag its corners, or Add Grid for another."
+                                           : " created (2D: connect a camera to cam to project it) - drag its corners, or Add Grid for another."));
+        }
         redrawOverlayInteract();
         return true;
     }
@@ -660,9 +873,10 @@ GeoBuilder::onOverlayPenDown(double /*time*/, const RenderScale& /*renderScale*/
     // Otherwise: grab a corner handle. The selected grid wins ties.
     const double threshold = 12.0;
     auto hit = [&](int gi) -> int {
-        const Grid& g = _imp->grids[gi];
+        double cd[4][2];
+        displayCorners(_imp->grids[gi], time, cd);
         for (int c = 0; c < 4; ++c) {
-            const double dx = pos.x() - g.x[c], dy = pos.y() - g.y[c];
+            const double dx = pos.x() - cd[c][0], dy = pos.y() - cd[c][1];
             if (dx * dx + dy * dy < threshold * threshold) return c;
         }
         return -1;
@@ -688,14 +902,28 @@ GeoBuilder::onOverlayPenDown(double /*time*/, const RenderScale& /*renderScale*/
 }
 
 bool
-GeoBuilder::onOverlayPenMotion(double /*time*/, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+GeoBuilder::onOverlayPenMotion(double time, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
                                const QPointF& /*viewportPos*/, const QPointF& pos,
                                double /*pressure*/, double /*timestamp*/)
 {
     if (_imp->dragGrid >= 0 && _imp->dragGrid < (int)_imp->grids.size() && _imp->dragCorner >= 0) {
         Grid& g = _imp->grids[_imp->dragGrid];
-        g.x[_imp->dragCorner] = pos.x();
-        g.y[_imp->dragCorner] = pos.y();
+        double nx = pos.x(), ny = pos.y();
+        // Dragging on another frame than the one the grid was drawn on: put the
+        // new position on the plane through this frame's camera, then store it
+        // as seen from the grid's own frame, so the stored corners stay
+        // consistent with the 3D card.
+        if (g.planar && std::fabs(time - g.frame) > 1e-6) {
+            CamView now, then;
+            double p3[3], sx, sy;
+            if (cameraAt(time, now) && unprojectToPlane(now, g, pos.x(), pos.y(), p3) &&
+                cameraAt(g.frame, then) && projectPoint(then, p3, sx, sy)) {
+                nx = sx; ny = sy;
+            }
+        }
+        g.x[_imp->dragCorner] = nx;
+        g.y[_imp->dragCorner] = ny;
+        rebuildMesh();
         redrawOverlayInteract();
         return true;
     }
@@ -810,20 +1038,6 @@ GeoBuilder::refreshShapeChoice()
     c->populateChoices(entries);
     _imp->syncing = false;
 
-    KnobStringPtr info = _imp->info.lock();
-    if (info) {
-        std::ostringstream ss;
-        size_t nv = 0, nf = 0;
-        {
-            std::lock_guard<std::mutex> lk(_meshMutex);
-            if (_mesh) { nv = _mesh->numVertices; nf = _mesh->numFaces; }
-        }
-        ss << _imp->shapes.size() << " shape" << (_imp->shapes.size() == 1 ? "" : "s")
-           << ", " << nv << " vertices, " << nf << " faces";
-        _imp->syncing = true;
-        info->setValue(ss.str());
-        _imp->syncing = false;
-    }
 }
 
 void
@@ -1076,6 +1290,40 @@ GeoBuilder::rebuildMesh()
             case 3: emitCylinder(b, s); break;
         }
     }
+    // Projected grids: each planar grid with a camera becomes a flat card,
+    // rows x cols quads spanning the four world-space corners (in click order).
+    {
+        static const float ident[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        for (size_t gi = 0; gi < _imp->grids.size(); ++gi) {
+            const Grid& g = _imp->grids[gi];
+            double c3[4][3];
+            if (!solveGrid3D(g, c3)) continue;
+            b.beginShape(ident);
+            const int R = std::max(1, g.rows), C = std::max(1, g.cols);
+            std::vector<int> idx((R + 1) * (C + 1));
+            for (int r = 0; r <= R; ++r) {
+                const double v = (double)r / R;
+                for (int c = 0; c <= C; ++c) {
+                    const double u = (double)c / C;
+                    // bilinear over the quad: bottom edge 0->1, top edge 3->2
+                    double p[3];
+                    for (int k = 0; k < 3; ++k) {
+                        const double bot = c3[0][k] + (c3[1][k] - c3[0][k]) * u;
+                        const double top = c3[3][k] + (c3[2][k] - c3[3][k]) * u;
+                        p[k] = bot + (top - bot) * v;
+                    }
+                    idx[r * (C + 1) + c] = b.vert((float)p[0], (float)p[1], (float)p[2]);
+                }
+            }
+            for (int r = 0; r < R; ++r) {
+                for (int c = 0; c < C; ++c) {
+                    const float u0 = (float)c / C, u1 = (float)(c + 1) / C, v0 = (float)r / R, v1 = (float)(r + 1) / R;
+                    b.quad(idx[r*(C+1)+c], idx[r*(C+1)+c+1], idx[(r+1)*(C+1)+c+1], idx[(r+1)*(C+1)+c],
+                           u0, v0, u1, v0, u1, v1, u0, v1);
+                }
+            }
+        }
+    }
     mesh->numVertices = mesh->vertices.size() / 3;
     mesh->numFaces = mesh->faceCounts.size();
     mesh->texCoordComponents = 2;
@@ -1083,6 +1331,18 @@ GeoBuilder::rebuildMesh()
     {
         std::lock_guard<std::mutex> lk(_meshMutex);
         _mesh = mesh;
+    }
+    // Info line: shapes + projected grids, and what the mesh came to.
+    if (KnobStringPtr info = _imp->info.lock()) {
+        int projected = 0;
+        for (size_t gi = 0; gi < _imp->grids.size(); ++gi) { double c3[4][3]; if (solveGrid3D(_imp->grids[gi], c3)) ++projected; }
+        std::ostringstream ss;
+        ss << _imp->shapes.size() << " shape" << (_imp->shapes.size() == 1 ? "" : "s") << ", "
+           << _imp->grids.size() << " grid" << (_imp->grids.size() == 1 ? "" : "s") << " (" << projected << " projected), "
+           << mesh->numVertices << " vertices, " << mesh->numFaces << " faces";
+        _imp->syncing = true;
+        info->setValue(ss.str());
+        _imp->syncing = false;
     }
 }
 
@@ -1119,6 +1379,7 @@ GeoBuilder::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         KnobChoicePtr c = _imp->gridChoice.lock();
         if (c && !_imp->grids.empty()) { _imp->syncing = true; c->setValue(std::min(i, (int)_imp->grids.size() - 1)); _imp->syncing = false; }
         loadSelectedGridIntoKnobs();
+        rebuildMesh();
         setGridStatus(_imp->grids.empty() ? "No grids. Add Grid, then click four corners in the viewer."
                                           : "Grid deleted.");
         redrawOverlayInteract();
@@ -1129,9 +1390,11 @@ GeoBuilder::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         redrawOverlayInteract();
         return true;
     }
-    if (k == _imp->gridRows.lock().get() || k == _imp->gridCols.lock().get()) {
+    if (k == _imp->gridRows.lock().get() || k == _imp->gridCols.lock().get() ||
+        k == _imp->gridPlanar.lock().get() || k == _imp->gridPlane.lock().get() || k == _imp->gridOffset.lock().get()) {
         storeKnobsIntoSelectedGrid();
         saveGridsToKnob();
+        rebuildMesh();
         redrawOverlayInteract();
         return true;
     }
@@ -1143,6 +1406,7 @@ GeoBuilder::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         KnobChoicePtr c = _imp->gridChoice.lock();
         if (c && !_imp->grids.empty()) { _imp->syncing = true; c->setValue(std::max(0, std::min(keep, (int)_imp->grids.size() - 1))); _imp->syncing = false; }
         loadSelectedGridIntoKnobs();
+        rebuildMesh();
         redrawOverlayInteract();
         return true;
     }
