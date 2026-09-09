@@ -47,6 +47,14 @@ struct GeoBuilderPrivate;
  * @brief GeoBuilder — build simple geometry for a shot inside Natron (our
  * take on Nuke's ModelBuilder; see Engine/Dev/Research_GeoBuilder.md).
  *
+ * 2D grids (the part that matters first): with the node's panel open, Add
+ * Grid then click four corners over the plate in the 2D viewer; the grid is
+ * drawn as a quad subdivided by rows/cols and its corners stay draggable.
+ * Grids are 2D only for now — a later step projects them through the cam
+ * input onto a plane so they become 3D cards. When the src input is
+ * connected the node passes it straight through, so viewing the node shows
+ * the plate with the grids over it.
+ *
  * Slice 1: the node owns a list of primitive shapes (card, cube, sphere,
  * cylinder), each with its own transform and a few parameters, and hands the
  * scene their union as one mesh (MeshProvider) with one material
@@ -97,6 +105,36 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
+    // 2D pass-through of the src input, so the plate shows under the grids.
+    virtual bool isIdentity(double time, const RenderScale& scale, const RectI& roi, ViewIdx view,
+                            double* inputTime, ViewIdx* inputView, int* inputNb) OVERRIDE FINAL WARN_UNUSED_RETURN;
+
+    // 2D viewer overlay: the grids.
+    virtual bool hasOverlay() const OVERRIDE FINAL { return true; }
+    virtual void drawOverlay(double time, const RenderScale& renderScale, ViewIdx view) OVERRIDE FINAL;
+    virtual bool onOverlayPenDown(double time, const RenderScale& renderScale, ViewIdx view,
+                                  const QPointF& viewportPos, const QPointF& pos,
+                                  double pressure, double timestamp, PenType pen) OVERRIDE FINAL;
+    virtual bool onOverlayPenMotion(double time, const RenderScale& renderScale, ViewIdx view,
+                                    const QPointF& viewportPos, const QPointF& pos,
+                                    double pressure, double timestamp) OVERRIDE FINAL;
+    virtual bool onOverlayPenUp(double time, const RenderScale& renderScale, ViewIdx view,
+                                const QPointF& viewportPos, const QPointF& pos,
+                                double pressure, double timestamp) OVERRIDE FINAL;
+
+    /** A 2D grid drawn over the plate: four corners in the order they were
+     *  clicked (go around the shape), subdivided rows x cols. */
+    struct Grid
+    {
+        std::string name;
+        double x[4] = {0, 0, 0, 0};
+        double y[4] = {0, 0, 0, 0};
+        int rows = 4;
+        int cols = 4;
+    };
+    std::vector<Grid> getGrids() const;
+    int getSelectedGridIndex() const;
+
     // MeshProvider: the union of all visible shapes, in the node's local
     // space (the node-level Transform knobs are applied by the consumers).
     virtual MeshDataPtr getMeshData(double time) const OVERRIDE;
@@ -141,6 +179,14 @@ private:
     virtual void onKnobsLoaded() OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
+
+    // Grid list <-> hidden knob, selection <-> grid knobs.
+    void loadGridsFromKnob();
+    void saveGridsToKnob();
+    void refreshGridChoice();
+    void loadSelectedGridIntoKnobs();
+    void storeKnobsIntoSelectedGrid();
+    void setGridStatus(const std::string& text);
 
     // Shape list <-> hidden knob, selection <-> per-shape knobs, mesh rebuild.
     void loadShapesFromKnob();

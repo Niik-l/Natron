@@ -32,6 +32,8 @@
 #include <string>
 #include <vector>
 
+#include "../../../Global/GLIncludes.h"
+
 #include "../../AppManager.h"
 #include "../../ChoiceOption.h"
 #include "../../ImagePlaneDesc.h"
@@ -52,6 +54,21 @@ NATRON_NAMESPACE_ENTER
 
 struct GeoBuilderPrivate
 {
+    // 2D grids (the node's state) + their persistent home
+    std::vector<GeoBuilder::Grid> grids;
+    KnobStringWPtr gridsData;       // hidden, persistent: serialised grid list
+    KnobChoiceWPtr gridChoice;      // which grid the Rows/Columns knobs edit
+    KnobButtonWPtr addGrid, deleteGrid;
+    KnobIntWPtr gridRows, gridCols;
+    KnobStringWPtr gridStatus;      // label: what to do next / what is selected
+    int gridCounter = 0;
+    // Overlay interaction
+    int placingCount = -1;          // -1: not placing; 0..3: corners clicked so far
+    double placingX[4] = {0, 0, 0, 0};
+    double placingY[4] = {0, 0, 0, 0};
+    int dragGrid = -1;
+    int dragCorner = -1;
+
     // Shape list (the node's state) + its persistent home
     std::vector<GeoBuilder::Shape> shapes;
     KnobStringWPtr shapesData;      // hidden, persistent: serialised shape list
@@ -173,6 +190,56 @@ makeDouble(GeoBuilder* self, KnobPagePtr page, const QString& label, const char*
 void
 GeoBuilder::initializeKnobs()
 {
+    // ---------------- Grid page (2D, drawn in the viewer) ----------------
+    KnobPagePtr gridPage = AppManager::createKnob<KnobPage>(this, tr("Grid"));
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Add Grid"));
+        k->setName("addGrid");
+        k->setHintToolTip(tr("Then click four corners over the plate in the 2D viewer, going "
+                             "around the shape. The grid appears after the fourth click and its "
+                             "corners stay draggable."));
+        gridPage->addKnob(k); _imp->addGrid = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Status"));
+        k->setName("gridStatus"); k->setAsLabel(); k->setIsPersistent(false); k->setEvaluateOnChange(false);
+        gridPage->addKnob(k); _imp->gridStatus = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Grid"));
+        k->setName("grid");
+        k->setIsPersistent(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("The grid the Rows / Columns knobs edit (also selected by clicking a corner in the viewer)."));
+        gridPage->addKnob(k); _imp->gridChoice = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Delete Grid"));
+        k->setName("deleteGrid"); k->setAddNewLine(false);
+        gridPage->addKnob(k); _imp->deleteGrid = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Rows"));
+        k->setName("gridRows"); k->setDefaultValue(4); k->setMinimum(1); k->setMaximum(256);
+        k->setDisplayMinimum(1); k->setDisplayMaximum(32); k->setIsPersistent(false); k->setEvaluateOnChange(false);
+        k->setAddNewLine(false);
+        gridPage->addKnob(k); _imp->gridRows = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Columns"));
+        k->setName("gridCols"); k->setDefaultValue(4); k->setMinimum(1); k->setMaximum(256);
+        k->setDisplayMinimum(1); k->setDisplayMaximum(32); k->setIsPersistent(false); k->setEvaluateOnChange(false);
+        gridPage->addKnob(k); _imp->gridCols = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Grids Data"));
+        k->setName("gridsData");
+        k->setAsMultiLine();
+        k->setSecret(true);
+        k->setEvaluateOnChange(false);   // 2D only for now: no render depends on it
+        gridPage->addKnob(k); _imp->gridsData = k;
+    }
+
     // ---------------- Shapes page ----------------
     KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Shapes"));
 
@@ -333,6 +400,320 @@ GeoBuilder::initializeKnobs()
     refreshShapeChoice();
     loadSelectedShapeIntoKnobs();
     rebuildMesh();
+    refreshGridChoice();
+    loadSelectedGridIntoKnobs();
+    setGridStatus("Add Grid, then click four corners in the viewer.");
+}
+
+// ---------------------------------------------------------------------------
+// Grids: list <-> hidden knob, selection <-> knobs
+// ---------------------------------------------------------------------------
+
+void
+GeoBuilder::saveGridsToKnob()
+{
+    std::ostringstream ss;
+    for (size_t i = 0; i < _imp->grids.size(); ++i) {
+        const Grid& g = _imp->grids[i];
+        std::string nm = g.name;
+        for (size_t c = 0; c < nm.size(); ++c) { if (nm[c] == '|' || nm[c] == '\n' || nm[c] == '\r') nm[c] = ' '; }
+        ss << nm << '|' << g.rows << '|' << g.cols;
+        for (int c = 0; c < 4; ++c) ss << '|' << g.x[c] << '|' << g.y[c];
+        ss << '\n';
+    }
+    KnobStringPtr k = _imp->gridsData.lock();
+    if (!k) return;
+    _imp->syncing = true;
+    k->setValue(ss.str());
+    _imp->syncing = false;
+}
+
+void
+GeoBuilder::loadGridsFromKnob()
+{
+    _imp->grids.clear();
+    _imp->gridCounter = 0;
+    KnobStringPtr k = _imp->gridsData.lock();
+    if (!k) return;
+    std::istringstream in(k->getValue());
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::vector<std::string> f;
+        std::string cur;
+        for (size_t c = 0; c < line.size(); ++c) {
+            if (line[c] == '|') { f.push_back(cur); cur.clear(); } else cur.push_back(line[c]);
+        }
+        f.push_back(cur);
+        if (f.size() < 11) continue;
+        Grid g;
+        g.name = f[0];
+        g.rows = std::max(1, std::atoi(f[1].c_str()));
+        g.cols = std::max(1, std::atoi(f[2].c_str()));
+        for (int c = 0; c < 4; ++c) { g.x[c] = std::atof(f[3 + c * 2].c_str()); g.y[c] = std::atof(f[4 + c * 2].c_str()); }
+        _imp->grids.push_back(g);
+        ++_imp->gridCounter;
+    }
+}
+
+std::vector<GeoBuilder::Grid>
+GeoBuilder::getGrids() const
+{
+    return _imp->grids;
+}
+
+int
+GeoBuilder::getSelectedGridIndex() const
+{
+    KnobChoicePtr c = _imp->gridChoice.lock();
+    if (!c || _imp->grids.empty()) return -1;
+    const int i = c->getValue();
+    return (i >= 0 && i < (int)_imp->grids.size()) ? i : -1;
+}
+
+void
+GeoBuilder::refreshGridChoice()
+{
+    KnobChoicePtr c = _imp->gridChoice.lock();
+    if (!c) return;
+    std::vector<ChoiceOption> entries;
+    for (size_t i = 0; i < _imp->grids.size(); ++i) entries.push_back(ChoiceOption(_imp->grids[i].name, "", ""));
+    _imp->syncing = true;
+    c->populateChoices(entries);
+    _imp->syncing = false;
+}
+
+void
+GeoBuilder::loadSelectedGridIntoKnobs()
+{
+    const int i = getSelectedGridIndex();
+    const bool has = (i >= 0);
+    _imp->syncing = true;
+    KnobIntPtr rows = _imp->gridRows.lock();
+    if (rows) { rows->setValue(has ? _imp->grids[i].rows : 4); rows->setEnabled(0, has); }
+    KnobIntPtr cols = _imp->gridCols.lock();
+    if (cols) { cols->setValue(has ? _imp->grids[i].cols : 4); cols->setEnabled(0, has); }
+    KnobButtonPtr del = _imp->deleteGrid.lock();
+    if (del) del->setEnabled(0, has);
+    _imp->syncing = false;
+}
+
+void
+GeoBuilder::storeKnobsIntoSelectedGrid()
+{
+    const int i = getSelectedGridIndex();
+    if (i < 0) return;
+    KnobIntPtr rows = _imp->gridRows.lock();
+    if (rows) _imp->grids[i].rows = std::max(1, rows->getValue());
+    KnobIntPtr cols = _imp->gridCols.lock();
+    if (cols) _imp->grids[i].cols = std::max(1, cols->getValue());
+}
+
+void
+GeoBuilder::setGridStatus(const std::string& text)
+{
+    KnobStringPtr k = _imp->gridStatus.lock();
+    if (!k) return;
+    _imp->syncing = true;
+    k->setValue(text);
+    _imp->syncing = false;
+}
+
+// ---------------------------------------------------------------------------
+// 2D pass-through of the src input
+// ---------------------------------------------------------------------------
+
+bool
+GeoBuilder::isIdentity(double time, const RenderScale& /*scale*/, const RectI& /*roi*/, ViewIdx view,
+                       double* inputTime, ViewIdx* inputView, int* inputNb)
+{
+    if (getInput(2)) {
+        *inputTime = time;
+        *inputView = view;
+        *inputNb = 2;
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Overlay: draw the grids over the viewer image
+// ---------------------------------------------------------------------------
+
+static inline void lerp2(double ax, double ay, double bx, double by, double t, double& ox, double& oy)
+{
+    ox = ax + (bx - ax) * t;
+    oy = ay + (by - ay) * t;
+}
+
+void
+GeoBuilder::drawOverlay(double /*time*/, const RenderScale& /*renderScale*/, ViewIdx /*view*/)
+{
+    GLProtectAttrib a(GL_HINT_BIT | GL_ENABLE_BIT | GL_LINE_BIT | GL_COLOR_BUFFER_BIT | GL_POINT_BIT | GL_CURRENT_BIT);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_DONT_CARE);
+
+    const int sel = getSelectedGridIndex();
+    const double handle = 6.0;
+
+    for (size_t gi = 0; gi < _imp->grids.size(); ++gi) {
+        const Grid& g = _imp->grids[gi];
+        const bool isSel = ((int)gi == sel);
+        // Corners in click order: 0 -> 1 -> 2 -> 3 around the shape. Rows run
+        // between edge 0-3 and edge 1-2, columns between edge 0-1 and edge 3-2.
+        if (isSel) glColor4f(1.0f, 0.85f, 0.2f, 0.9f); else glColor4f(0.3f, 0.9f, 1.0f, 0.7f);
+        glLineWidth(isSel ? 1.8f : 1.2f);
+        glBegin(GL_LINE_LOOP);
+        for (int c = 0; c < 4; ++c) glVertex2d(g.x[c], g.y[c]);
+        glEnd();
+
+        glLineWidth(1.0f);
+        if (isSel) glColor4f(1.0f, 0.85f, 0.2f, 0.45f); else glColor4f(0.3f, 0.9f, 1.0f, 0.35f);
+        glBegin(GL_LINES);
+        for (int r = 1; r < g.rows; ++r) {
+            const double t = (double)r / g.rows;
+            double lx, ly, rx, ry;
+            lerp2(g.x[0], g.y[0], g.x[3], g.y[3], t, lx, ly);
+            lerp2(g.x[1], g.y[1], g.x[2], g.y[2], t, rx, ry);
+            glVertex2d(lx, ly); glVertex2d(rx, ry);
+        }
+        for (int c = 1; c < g.cols; ++c) {
+            const double t = (double)c / g.cols;
+            double bx, by, tx, ty;
+            lerp2(g.x[0], g.y[0], g.x[1], g.y[1], t, bx, by);
+            lerp2(g.x[3], g.y[3], g.x[2], g.y[2], t, tx, ty);
+            glVertex2d(bx, by); glVertex2d(tx, ty);
+        }
+        glEnd();
+
+        // Corner handles
+        if (isSel) glColor4f(1.0f, 0.85f, 0.2f, 1.0f); else glColor4f(0.3f, 0.9f, 1.0f, 0.9f);
+        glLineWidth(1.5f);
+        for (int c = 0; c < 4; ++c) {
+            glBegin(GL_LINE_LOOP);
+            glVertex2d(g.x[c] - handle, g.y[c] - handle);
+            glVertex2d(g.x[c] + handle, g.y[c] - handle);
+            glVertex2d(g.x[c] + handle, g.y[c] + handle);
+            glVertex2d(g.x[c] - handle, g.y[c] + handle);
+            glEnd();
+        }
+    }
+
+    // Corners placed so far for the grid being created
+    if (_imp->placingCount > 0) {
+        glColor4f(1.0f, 0.4f, 0.2f, 1.0f);
+        glLineWidth(1.5f);
+        glBegin(GL_LINE_STRIP);
+        for (int c = 0; c < _imp->placingCount; ++c) glVertex2d(_imp->placingX[c], _imp->placingY[c]);
+        glEnd();
+        for (int c = 0; c < _imp->placingCount; ++c) {
+            glBegin(GL_LINE_LOOP);
+            glVertex2d(_imp->placingX[c] - handle, _imp->placingY[c] - handle);
+            glVertex2d(_imp->placingX[c] + handle, _imp->placingY[c] - handle);
+            glVertex2d(_imp->placingX[c] + handle, _imp->placingY[c] + handle);
+            glVertex2d(_imp->placingX[c] - handle, _imp->placingY[c] + handle);
+            glEnd();
+        }
+    }
+}
+
+bool
+GeoBuilder::onOverlayPenDown(double /*time*/, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+                             const QPointF& /*viewportPos*/, const QPointF& pos,
+                             double /*pressure*/, double /*timestamp*/, PenType /*pen*/)
+{
+    // Placing a new grid: each click is a corner.
+    if (_imp->placingCount >= 0) {
+        const int c = _imp->placingCount;
+        _imp->placingX[c] = pos.x();
+        _imp->placingY[c] = pos.y();
+        ++_imp->placingCount;
+        if (_imp->placingCount < 4) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "Corner %d of 4 placed - click corner %d.", _imp->placingCount, _imp->placingCount + 1);
+            setGridStatus(buf);
+            redrawOverlayInteract();
+            return true;
+        }
+        Grid g;
+        g.name = "Grid" + std::to_string(++_imp->gridCounter);
+        for (int i = 0; i < 4; ++i) { g.x[i] = _imp->placingX[i]; g.y[i] = _imp->placingY[i]; }
+        KnobIntPtr rows = _imp->gridRows.lock();
+        KnobIntPtr cols = _imp->gridCols.lock();
+        // New grids take the subdivision currently shown (defaults 4 x 4).
+        if (rows && rows->isEnabled(0)) g.rows = std::max(1, rows->getValue());
+        if (cols && cols->isEnabled(0)) g.cols = std::max(1, cols->getValue());
+        _imp->placingCount = -1;
+        _imp->grids.push_back(g);
+        saveGridsToKnob();
+        refreshGridChoice();
+        KnobChoicePtr choice = _imp->gridChoice.lock();
+        if (choice) { _imp->syncing = true; choice->setValue((int)_imp->grids.size() - 1); _imp->syncing = false; }
+        loadSelectedGridIntoKnobs();
+        setGridStatus(g.name + " created - drag its corners, or Add Grid for another.");
+        redrawOverlayInteract();
+        return true;
+    }
+
+    // Otherwise: grab a corner handle. The selected grid wins ties.
+    const double threshold = 12.0;
+    auto hit = [&](int gi) -> int {
+        const Grid& g = _imp->grids[gi];
+        for (int c = 0; c < 4; ++c) {
+            const double dx = pos.x() - g.x[c], dy = pos.y() - g.y[c];
+            if (dx * dx + dy * dy < threshold * threshold) return c;
+        }
+        return -1;
+    };
+    const int sel = getSelectedGridIndex();
+    if (sel >= 0) {
+        const int c = hit(sel);
+        if (c >= 0) { _imp->dragGrid = sel; _imp->dragCorner = c; return true; }
+    }
+    for (size_t gi = 0; gi < _imp->grids.size(); ++gi) {
+        if ((int)gi == sel) continue;
+        const int c = hit((int)gi);
+        if (c >= 0) {
+            _imp->dragGrid = (int)gi; _imp->dragCorner = c;
+            KnobChoicePtr choice = _imp->gridChoice.lock();
+            if (choice) { _imp->syncing = true; choice->setValue((int)gi); _imp->syncing = false; }
+            loadSelectedGridIntoKnobs();
+            redrawOverlayInteract();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
+GeoBuilder::onOverlayPenMotion(double /*time*/, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+                               const QPointF& /*viewportPos*/, const QPointF& pos,
+                               double /*pressure*/, double /*timestamp*/)
+{
+    if (_imp->dragGrid >= 0 && _imp->dragGrid < (int)_imp->grids.size() && _imp->dragCorner >= 0) {
+        Grid& g = _imp->grids[_imp->dragGrid];
+        g.x[_imp->dragCorner] = pos.x();
+        g.y[_imp->dragCorner] = pos.y();
+        redrawOverlayInteract();
+        return true;
+    }
+    return false;
+}
+
+bool
+GeoBuilder::onOverlayPenUp(double /*time*/, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+                           const QPointF& /*viewportPos*/, const QPointF& /*pos*/,
+                           double /*pressure*/, double /*timestamp*/)
+{
+    if (_imp->dragGrid >= 0) {
+        _imp->dragGrid = -1;
+        _imp->dragCorner = -1;
+        saveGridsToKnob();   // one undo step per drag
+        return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +1103,51 @@ GeoBuilder::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
 {
     if (_imp->syncing) return false;
 
+    // ---- grids ----
+    if (k == _imp->addGrid.lock().get()) {
+        _imp->placingCount = 0;
+        setGridStatus("Click corner 1 of 4 in the viewer (go around the shape).");
+        redrawOverlayInteract();
+        return true;
+    }
+    if (k == _imp->deleteGrid.lock().get()) {
+        const int i = getSelectedGridIndex();
+        if (i < 0) return true;
+        _imp->grids.erase(_imp->grids.begin() + i);
+        saveGridsToKnob();
+        refreshGridChoice();
+        KnobChoicePtr c = _imp->gridChoice.lock();
+        if (c && !_imp->grids.empty()) { _imp->syncing = true; c->setValue(std::min(i, (int)_imp->grids.size() - 1)); _imp->syncing = false; }
+        loadSelectedGridIntoKnobs();
+        setGridStatus(_imp->grids.empty() ? "No grids. Add Grid, then click four corners in the viewer."
+                                          : "Grid deleted.");
+        redrawOverlayInteract();
+        return true;
+    }
+    if (k == _imp->gridChoice.lock().get()) {
+        loadSelectedGridIntoKnobs();
+        redrawOverlayInteract();
+        return true;
+    }
+    if (k == _imp->gridRows.lock().get() || k == _imp->gridCols.lock().get()) {
+        storeKnobsIntoSelectedGrid();
+        saveGridsToKnob();
+        redrawOverlayInteract();
+        return true;
+    }
+    if (k == _imp->gridsData.lock().get()) {
+        // Project load, undo, or a script writing the list directly.
+        const int keep = getSelectedGridIndex();
+        loadGridsFromKnob();
+        refreshGridChoice();
+        KnobChoicePtr c = _imp->gridChoice.lock();
+        if (c && !_imp->grids.empty()) { _imp->syncing = true; c->setValue(std::max(0, std::min(keep, (int)_imp->grids.size() - 1))); _imp->syncing = false; }
+        loadSelectedGridIntoKnobs();
+        redrawOverlayInteract();
+        return true;
+    }
+
+    // ---- shapes ----
     if (k == _imp->addCard.lock().get())     { addShape(0); return true; }
     if (k == _imp->addCube.lock().get())     { addShape(1); return true; }
     if (k == _imp->addSphere.lock().get())   { addShape(2); return true; }
@@ -799,7 +1225,16 @@ GeoBuilder::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
 void
 GeoBuilder::onKnobsLoaded()
 {
-    // Project restored: the hidden list is the truth; rebuild everything from it.
+    // Project restored: the hidden lists are the truth; rebuild everything from them.
+    loadGridsFromKnob();
+    refreshGridChoice();
+    {
+        KnobChoicePtr gc = _imp->gridChoice.lock();
+        if (gc && !_imp->grids.empty()) { _imp->syncing = true; gc->setValue(0); _imp->syncing = false; }
+    }
+    loadSelectedGridIntoKnobs();
+    setGridStatus(_imp->grids.empty() ? "Add Grid, then click four corners in the viewer."
+                                      : std::to_string(_imp->grids.size()) + " grid(s) loaded.");
     loadShapesFromKnob();
     refreshShapeChoice();
     KnobChoicePtr c = _imp->shapeChoice.lock();
@@ -814,9 +1249,16 @@ GeoBuilder::onKnobsLoaded()
 // ---------------------------------------------------------------------------
 
 StatusEnum
-GeoBuilder::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
-                                  ViewIdx /*view*/, RectD* rod)
+GeoBuilder::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale& scale,
+                                  ViewIdx view, RectD* rod)
 {
+    // With a plate on src the node is a pass-through (isIdentity), so report
+    // the plate's RoD; otherwise a token 1x1 like the other 3D sources.
+    EffectInstancePtr src = getInput(2);
+    if (src) {
+        bool isProject = false;
+        return src->getRegionOfDefinition_public(src->getHash(), time, scale, view, rod, &isProject);
+    }
     rod->x1 = 0; rod->y1 = 0; rod->x2 = 1; rod->y2 = 1;
     return eStatusOK;
 }
