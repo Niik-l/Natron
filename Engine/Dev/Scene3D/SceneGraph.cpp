@@ -37,6 +37,7 @@
 #include "Light3D.h"
 #include "../Particles/ParticleProvider.h"
 #include "ReadVDB.h"
+#include "MeshProvider.h"
 #include "Volume3D.h"
 #include "Sphere3D.h"
 #include "Group3D.h"
@@ -282,10 +283,10 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             continue;
         }
 
-        // --- ReadGeo ---
-        ReadGeo* readGeo = dynamic_cast<ReadGeo*>(effect.get());
-        if (readGeo) {
-            MeshDataPtr mesh = readGeo->getMeshData(time);
+        // --- Any mesh source (ReadGeo, GeoBuilder, ...) ---
+        MeshProvider* meshProv = dynamic_cast<MeshProvider*>(effect.get());
+        if (meshProv) {
+            MeshDataPtr mesh = meshProv->getMeshData(time);
             if (!mesh || mesh->numVertices == 0) continue;
 
             SceneNode sn;

@@ -59,6 +59,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/Volume3D.h"
 #include "Engine/Dev/Scene3D/Cube3D.h"
 #include "Engine/Dev/Scene3D/Cylinder3D.h"
+#include "Engine/Dev/Scene3D/MeshProvider.h"
 #include "Engine/Dev/Scene3D/ReadAlembicCamera.h"
 #include "Engine/Dev/Scene3D/ReadAlembicTransform.h"
 #include "Engine/Dev/Scene3D/CameraMath.h"
@@ -2912,9 +2913,9 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
         if (!node) return;
         EffectInstancePtr effect = node->getEffectInstance();
         if (!effect) return;
-        ReadGeo* readGeo = dynamic_cast<ReadGeo*>(effect.get());
-        if (!readGeo) return;
-        mesh = readGeo->getMeshData(-1);
+        MeshProvider* meshProv = dynamic_cast<MeshProvider*>(effect.get());
+        if (!meshProv) return;
+        mesh = meshProv->getMeshData(-1);
     }
     if (!mesh || mesh->numVertices == 0) return;
 

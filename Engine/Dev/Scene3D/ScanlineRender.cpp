@@ -54,6 +54,7 @@
 #include "Volume3D.h"
 #include "Cube3D.h"
 #include "Cylinder3D.h"
+#include "MeshProvider.h"
 #include "Scene3D.h"
 #include "../../GPUContextPool.h"
 #include "../../Image.h"
@@ -1927,9 +1928,9 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         return true;
     }
 
-    ReadGeo* readGeo = dynamic_cast<ReadGeo*>(effect.get());
-    if (readGeo) {
-        MeshDataPtr mesh = readGeo->getMeshData(time);
+    MeshProvider* meshProv = dynamic_cast<MeshProvider*>(effect.get());   // ReadGeo, GeoBuilder, ...
+    if (meshProv) {
+        MeshDataPtr mesh = meshProv->getMeshData(time);
         if (!mesh || mesh->numVertices == 0) return false;
         out.verts = mesh->vertices;
         fanTriangulate(mesh->faceIndices, mesh->faceCounts, out.triIndices);
@@ -1971,7 +1972,7 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         // embedded matrix only. localMatrix = userTRS * embedded so user
         // edits move the whole imported geo regardless of its baked xform.
         auto readDouble = [&](const char* name, float fallback) -> float {
-            KnobIPtr k = readGeo->getKnobByName(name);
+            KnobIPtr k = effect->getKnobByName(name);
             if (!k) return fallback;
             KnobDouble* kd = dynamic_cast<KnobDouble*>(k.get());
             return kd ? (float)kd->getValueAtTime(time) : fallback;
@@ -1994,7 +1995,8 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         mat4Mul(out.localMatrix, userTRS, embedded);
 
         // Optional Image input (input 1) — per-mesh texture for the scanline.
-        if (readGeo->getInput(1)) {
+        ReadGeo* readGeo = dynamic_cast<ReadGeo*>(effect.get());   // only ReadGeo has an Image input
+        if (readGeo && readGeo->getInput(1)) {
             RectI roi;
             out.texImg = readGeo->getImage(1, time, RenderScale(), view, NULL, NULL, false, true, eStorageModeRAM, 0, &roi);
         }

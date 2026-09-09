@@ -17,6 +17,28 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **GeoBuilder, slice 1 (2026-09-09)** — a new node for building simple
+  geometry for a shot, our take on Nuke's ModelBuilder (research + slice plan in
+  `Engine/Dev/Research_GeoBuilder.md`). It owns a list of primitive shapes —
+  card, cube, sphere, cylinder — each with rows/cols, size (+ height for the
+  cylinder) and its own T/R/S; Add buttons append one, the Shape dropdown picks
+  which one the "Shape" knobs edit, Duplicate/Delete manage the list, and the
+  node-level Transform page moves the whole model. The list is the node's state,
+  serialised one-shape-per-line in a hidden `shapesData` knob, so it saves,
+  undoes and scripts like any knob. The union of the visible shapes is one mesh
+  (quads + triangle pole fans and caps, CCW-from-outside winding, per-face-vertex
+  UVs, wireframe edges), rebuilt on every edit and published as an immutable
+  snapshot. To make it render everywhere without four new branches, a
+  `MeshProvider` interface (`getMeshData(time)`) now sits in front of ReadGeo, and
+  SceneGraph, ScanlineRender, Cycles (mesh build + motion-blur fetch) and the
+  3D viewport's fallback cast to it instead of to ReadGeo — so GeoBuilder, and
+  any future mesh source, plugs in with the interface plus the usual
+  translate/rotate/scale/uniformScale knobs. One material (same knobs as ReadGeo,
+  `mat` input override). Inputs cam / src / geo are reserved for the next
+  slices (bake to OBJ / Project3D, vertex-edge-face editing, plate alignment).
+  Verified headlessly through Cycles: four shapes added and edited through the
+  knobs render as a cube, sphere and cylinder standing on a card.
+
 - **Primitives in Cycles: img input with alpha, own meshes (2026-09-08)** — a
   Card3D fed from its img input rendered in Cycles as an opaque, square,
   base-colour quad while the 3D viewport and ScanlineRender showed the image
