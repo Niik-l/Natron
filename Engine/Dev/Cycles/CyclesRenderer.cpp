@@ -1138,6 +1138,10 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     bool hasDome = false;
     bool hasDomeCameraVisible = false;
     unsigned int domeBgVisibility = ccl::PATH_RAY_ALL_VISIBILITY;  // dome ray-visibility (overridable)
+    // A dome is the Cycles background, not a light object, so its Light Group
+    // goes on the background node. Clear it first: the scene is reused across
+    // renders and a dome removed (or unticked) must not keep feeding a group.
+    scene->background->set_lightgroup(ccl::ustring());
     {
         // === First pass: find dome lights and set background ===
         const std::vector<SceneNode>& lightScan = sg.nodes();
@@ -1157,6 +1161,12 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             }
             // "Renderable" controls camera visibility only (like Arnold's skydome Camera flag).
             bool domeVisibleInCamera = light3d->isRenderable();
+            {
+                const std::string domeGroup = light3d->getLightGroup();
+                if (!domeGroup.empty()) {
+                    scene->background->set_lightgroup(ccl::ustring(domeGroup));
+                }
+            }
 
             // Per-light ray-visibility override (from the CyclesRenderPass Active Lights rows):
             // untick Refl/Diff/Trans to drop the dome ENVIRONMENT from that ray type
@@ -1264,6 +1274,16 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
             hasDome = true;
             hasDomeCameraVisible = domeVisibleInCamera;
+            if (!domeVisibleInCamera) {
+                // Transparent film alone is not enough: the kernel still
+                // evaluates the background for camera rays when the
+                // Background (Env) pass is on and writes it into the dome's
+                // light-group layer (and Env), so a non-Renderable dome showed
+                // its HDRI there. Excluding camera rays on the background
+                // shader (Blender's World > Ray Visibility > Camera) makes
+                // that evaluation return black; alpha is untouched.
+                domeBgVisibility &= ~ccl::PATH_RAY_CAMERA;
+            }
             break; // only one dome light
         }
 
@@ -1553,6 +1573,12 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         for (size_t li = 0; li < lgScan.size(); ++li) {
             const SceneNode& lsn = lgScan[li];
             if (lsn.type != eSceneNodeLight || !lsn.visible) continue;
+            // A light dropped by the Active Lights filter contributes nothing,
+            // so its group would only be an all-black layer in the EXR.
+            if (activeLights && !activeLights->empty() &&
+                activeLights->find(lsn.name) == activeLights->end()) {
+                continue;
+            }
             NodePtr lgNode = lsn.sourceNode.lock();
             if (!lgNode) continue;
             Light3D* lg3d = dynamic_cast<Light3D*>(lgNode->getEffectInstance().get());

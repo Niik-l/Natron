@@ -17,6 +17,35 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **CyclesRenderPass: light-group AOVs viewable, no layers for inactive lights
+  (2026-09-09)** — audit of light groups against the pass node. The renderer
+  already makes one `Combined_<group>` buffer per Light3D *Light Group* and
+  the plain CyclesRender exposed them as `LightGroup <group>` planes, and
+  Render to Disk wrote them as `LightGroup_<group>` EXR layers (verified:
+  key + fill layers sum exactly to the beauty). But the pass node's own
+  output declared only the tickbox AOVs, so the viewer's layer menu never
+  showed the groups — rendered, then dropped. `activeLightGroupsRP()` now
+  declares a plane per group of every light ticked under Active Lights
+  (scene input walk via `enumerateSceneLights`), `passNameToPlaneRP` maps
+  `Combined_<g>` -> `LightGroup_<g>` like CyclesRender, and the plane fill
+  matches those buffers by name. Renderer side: the group scan now honours
+  the Active Lights filter, so an unticked light no longer yields an
+  all-black `LightGroup_` layer in the EXR (and no wasted pass buffer).
+  Verified headlessly: planes `LightGroup key`/`fill` appear once ticked,
+  key-only pass writes only `LightGroup_key`. Dome lights (user report, same day): a
+  dome is the Cycles *background*, not a light object, so its Light Group
+  never reached the kernel and its layer stayed black; the dome setup now
+  puts the group on `scene->background` (cleared at every scene sync so a
+  removed dome stops feeding it). Verified: dome + key layers sum exactly to
+  the beauty. Second report: a dome with **Renderable** off still showed its
+  HDRI in the layer. Transparent film only skips the background in the
+  beauty; the kernel still evaluates it for camera rays when the Env
+  (Background) pass is on and writes it to the dome's group. The background
+  now drops camera-ray visibility when the dome is not renderable (Blender's
+  World > Ray Visibility > Camera), so the evaluation returns black; the
+  layer keeps the dome's lighting on objects and the alpha is unchanged
+  (verified: background corner all zero, dome + key = beauty).
+
 - **DeepToPoints keeps HDR colour; 3D viewport shows points display-encoded
   (2026-09-09)** — audit of the Blender-deep -> DeepToPoints -> points chain.
   Colour is scene-linear end to end (DeepRead converts nothing, DeepToPoints

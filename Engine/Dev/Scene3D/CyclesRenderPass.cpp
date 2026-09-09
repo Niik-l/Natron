@@ -222,7 +222,32 @@ passNameToPlaneRP(const std::string& name)
         static const char* rgba4[] = {"R", "G", "B", "A"};
         return ImagePlaneDesc("ReflectionMatte", "Reflection Matte", "", rgba4, 4);
     }
+    // Light group passes (Combined_<group>) -> same plane as CyclesRender and
+    // the same layer name the Render-to-Disk EXR carries (LightGroup_<group>).
+    if (name.compare(0, 9, "Combined_") == 0) {
+        const std::string grp = name.substr(9);
+        return ImagePlaneDesc("LightGroup_" + grp, "LightGroup " + grp, "", rgb3, 3);
+    }
     return ImagePlaneDesc::getRGBAComponents();
+}
+
+// Light groups this pass will produce: the Light Group of every light on the
+// scene input that is ticked under Active Lights (the renderer makes one
+// Combined_<group> buffer per group, so declaring them here is what lets the
+// viewer's layer menu show them; before this they were rendered and dropped).
+static std::vector<std::string>
+activeLightGroupsRP(CyclesRenderPass* self, double time)
+{
+    std::vector<std::string> out;
+    std::vector<SceneLightInfo> lights;
+    enumerateSceneLights(self, time, lights, /*sceneInputSlot=*/0);
+    const std::set<std::string> active = self->getActiveLights();
+    std::set<std::string> seen;
+    for (const SceneLightInfo& li : lights) {
+        if (li.lightGroup.empty() || !active.count(li.scriptName)) continue;
+        if (seen.insert(li.lightGroup).second) out.push_back(li.lightGroup);
+    }
+    return out;
 }
 #endif // NATRON_CYCLES
 
@@ -1090,6 +1115,9 @@ CyclesRenderPass::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view
     for (const std::string& p : passes) {
         produced.push_back( passNameToPlaneRP(p) );
     }
+    for (const std::string& g : activeLightGroupsRP(this, 0.0)) {
+        produced.push_back( passNameToPlaneRP("Combined_" + g) );
+    }
 #else
     produced.push_back( ImagePlaneDesc::getRGBAComponents() );
 #endif
@@ -1291,6 +1319,17 @@ CyclesRenderPass::render(const RenderActionArgs& args)
             if ( passNameToPlaneRP(req.requestedPasses[pi]).getPlaneID() == pd.getPlaneID() ) {
                 passName = req.requestedPasses[pi];
                 break;
+            }
+        }
+        // Light group buffers are not in requestedPasses (the renderer adds
+        // them on its own): match the plane against those by name.
+        if ( passName.empty() ) {
+            for (const auto& kv : passBuffers) {
+                if ( kv.first.compare(0, 9, "Combined_") == 0 &&
+                     passNameToPlaneRP(kv.first).getPlaneID() == pd.getPlaneID() ) {
+                    passName = kv.first;
+                    break;
+                }
             }
         }
         if ( passName.empty() && pd.getNumComponents() == 4 ) passName = "Combined";
