@@ -488,14 +488,39 @@ static void generateQuadMesh(std::vector<ccl::float3>& verts,
 
 template <class V>
 static void nodeMeshToCycles(const std::vector<V>& cv,
+                             std::vector<int>& triVerts,
                              std::vector<ccl::float3>& verts,
-                             std::vector<ccl::float2>& uvs)
+                             std::vector<ccl::float2>& uvs,
+                             std::vector<ccl::float3>& normals)
 {
     verts.resize(cv.size());
     uvs.resize(cv.size());
+    normals.resize(cv.size());
     for (size_t i = 0; i < cv.size(); ++i) {
         verts[i] = ccl::make_float3(cv[i].x, cv[i].y, cv[i].z);
         uvs[i] = ccl::make_float2(cv[i].u, cv[i].v);
+        // The generators' analytic normals. Left to Cycles, smooth normals get
+        // averaged per vertex, and these lat/long meshes duplicate the pole and
+        // seam vertices (one per column at a pole, one extra column at u=1),
+        // so the averages disagree there: a dark pinch at the pole and a seam
+        // line down the sphere. Passing N through avoids that, and gives the
+        // cube its flat faces and the cylinder its flat caps for free.
+        normals[i] = ccl::make_float3(cv[i].nx, cv[i].ny, cv[i].nz);
+    }
+    // Make each triangle's winding agree with its normals. Cycles takes the
+    // geometric normal from the winding and flips the shading normal on
+    // back-facing hits, so a triangle wound clockwise-from-outside with an
+    // outward N renders black. The generators are not consistent even within
+    // one mesh (Cylinder3D winds its caps opposite to its wall), so decide per
+    // triangle, not per mesh. Degenerate triangles (pole fans) are left alone.
+    for (size_t t = 0; t + 2 < triVerts.size(); t += 3) {
+        const int a = triVerts[t], b = triVerts[t + 1], c = triVerts[t + 2];
+        if (a < 0 || b < 0 || c < 0 || a >= (int)verts.size() || b >= (int)verts.size() || c >= (int)verts.size()) continue;
+        const ccl::float3 ng = ccl::cross(verts[b] - verts[a], verts[c] - verts[a]);
+        const ccl::float3 n = normals[a] + normals[b] + normals[c];
+        if (ccl::dot(ng, n) < 0.f) {
+            std::swap(triVerts[t + 1], triVerts[t + 2]);
+        }
     }
 }
 
@@ -2377,13 +2402,14 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         std::vector<ccl::float3> verts;
         std::vector<int> triVerts;
         std::vector<ccl::float2> uvs; // per-vertex UVs
+        std::vector<ccl::float3> normals; // per-vertex normals from a primitive's generator (empty: Cycles averages)
 
         switch (sn.type) {
             case eSceneNodeSphere: {
                 if (Sphere3D* n = sceneNodeAs<Sphere3D>(sn)) {
                     std::vector<Sphere3D::SphereVertex> cv;
                     n->generateSphereMesh(time, cv, triVerts);
-                    nodeMeshToCycles(cv, verts, uvs);
+                    nodeMeshToCycles(cv, triVerts, verts, uvs, normals);
                 } else {
                     generateSphereMesh(verts, triVerts);
                     uvs.resize(verts.size());
@@ -2401,7 +2427,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 if (Cube3D* n = sceneNodeAs<Cube3D>(sn)) {
                     std::vector<Cube3D::CubeVertex> cv;
                     n->generateCubeMesh(time, cv, triVerts);
-                    nodeMeshToCycles(cv, verts, uvs);
+                    nodeMeshToCycles(cv, triVerts, verts, uvs, normals);
                 } else {
                     generateBoxMesh(verts, triVerts);
                     uvs.resize(verts.size());
@@ -2418,7 +2444,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 if (Card3D* n = sceneNodeAs<Card3D>(sn)) {
                     std::vector<Card3D::CardVertex> cv;
                     n->generateCardMesh(time, cv, triVerts);
-                    nodeMeshToCycles(cv, verts, uvs);
+                    nodeMeshToCycles(cv, triVerts, verts, uvs, normals);
                 } else {
                     generateQuadMesh(verts, triVerts);
                     uvs = { ccl::make_float2(0.0f, 0.0f), ccl::make_float2(1.0f, 0.0f),
@@ -2431,7 +2457,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 if (Cylinder3D* n = sceneNodeAs<Cylinder3D>(sn)) {
                     std::vector<Cylinder3D::CylinderVertex> cv;
                     n->generateCylinderMesh(time, cv, triVerts);
-                    nodeMeshToCycles(cv, verts, uvs);
+                    nodeMeshToCycles(cv, triVerts, verts, uvs, normals);
                 } else {
                     generateBoxMesh(verts, triVerts);
                 }
@@ -2574,6 +2600,16 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         }
         for (int t = 0; t < numTris; ++t) {
             mesh->add_triangle(triVerts[t * 3 + 0], triVerts[t * 3 + 1], triVerts[t * 3 + 2], 0, true);
+        }
+
+        // Per-vertex normals supplied by the primitive generators (see
+        // nodeMeshToCycles). When present Cycles skips its own averaging.
+        if (normals.size() == verts.size() && !normals.empty()) {
+            ccl::Attribute* nAttr = mesh->attributes.add(ccl::ATTR_STD_VERTEX_NORMAL);
+            ccl::float3* nDst = nAttr->data_float3();
+            for (size_t v = 0; v < normals.size(); ++v) {
+                nDst[v] = normals[v];
+            }
         }
 
         // Add UV attribute (per-corner, 3 per triangle)
