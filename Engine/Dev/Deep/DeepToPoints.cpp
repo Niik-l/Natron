@@ -301,10 +301,10 @@ DeepToPoints::render(const RenderActionArgs& args)
                     g /= alpha;
                     b /= alpha;
                 }
-                // Clamp colors
-                r = std::max(0.0f, std::min(1.0f, r));
-                g = std::max(0.0f, std::min(1.0f, g));
-                b = std::max(0.0f, std::min(1.0f, b));
+                // No clamp: the colour stays scene-linear and keeps its HDR
+                // range (emission, highlights) for PointsToParticles ->
+                // ScanlineRender/Cycles. The 3D viewport clamps + encodes its
+                // own display copy (Viewport3D::drawPointCloud).
 
                 // The running sample index is the point's source ID — Blast
                 // chains carry it through so the surviving set can be mapped

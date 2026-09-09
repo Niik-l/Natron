@@ -818,6 +818,13 @@ struct Viewport3DPrivate
     mutable QMutex cloudMutex;
     PointCloudDataPtr pointCloud;
     float pointSize;
+    // Display copy of the point colours: the provider's buffer is scene-linear
+    // (and shared with PointsToParticles), so the sRGB encoding the geo
+    // textures get (uploadPreviewTextureSRGB) is applied to this copy instead.
+    // Rebuilt lazily in drawPointCloud when the cloud changes; the shared_ptr
+    // keeps the source alive so a recycled address can't alias a stale copy.
+    mutable std::vector<float> cloudDisplayColors;
+    mutable PointCloudDataPtr cloudDisplayColorsSrc;
 
     // Gizmo drag undo state
     bool gizmoDragging;
@@ -2793,11 +2800,29 @@ Viewport3D::drawPointCloud() const
     glEnable(GL_POINT_SMOOTH);
     glEnable(GL_DEPTH_TEST);
 
+    // Encode the colours for display (clamp + sRGB OETF, matching the geo
+    // textures) so the points read like the same pixels in the 2D viewer.
+    if (_imp->cloudDisplayColorsSrc != _imp->pointCloud ||
+        _imp->cloudDisplayColors.size() != numPoints * 3) {
+        std::vector<float>& dc = _imp->cloudDisplayColors;
+        dc.resize(numPoints * 3);
+        for (std::size_t i = 0; i < numPoints; ++i) {
+            for (int c = 0; c < 3; ++c) {
+                float v = data[i * 6 + 3 + c];
+                if (!(v > 0.0f)) { dc[i * 3 + c] = 0.0f; continue; } // also catches NaN
+                if (v > 1.0f) v = 1.0f;
+                dc[i * 3 + c] = (v <= 0.0031308f) ? (v * 12.92f)
+                                                  : (1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f);
+            }
+        }
+        _imp->cloudDisplayColorsSrc = _imp->pointCloud;
+    }
+
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_COLOR_ARRAY);
 
     glVertexPointer(3, GL_FLOAT, PointCloudData::stride(), data);
-    glColorPointer(3, GL_FLOAT, PointCloudData::stride(), data + 3);
+    glColorPointer(3, GL_FLOAT, 3 * sizeof(float), _imp->cloudDisplayColors.data());
 
     glDrawArrays(GL_POINTS, 0, (GLsizei)numPoints);
 
