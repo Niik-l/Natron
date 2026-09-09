@@ -17,6 +17,22 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **DeepToPoints keeps HDR colour; 3D viewport shows points display-encoded
+  (2026-09-09)** — audit of the Blender-deep -> DeepToPoints -> points chain.
+  Colour is scene-linear end to end (DeepRead converts nothing, DeepToPoints
+  unpremultiplies, PointsToParticles/ScanlineRender/Cycles pass it through),
+  which is right. Two fixes: DeepToPoints no longer clamps colour to [0,1]
+  (emission/highlights from a deep render were flattened to 1.0 before they
+  reached PointsToParticles; verified headlessly: a 5.0 constant now renders
+  as 5.0 through Cycles particles, was 1.0). And Viewport3D::drawPointCloud
+  drew the raw linear floats while geo textures get the sRGB OETF
+  (`uploadPreviewTextureSRGB`), so clouds read dark next to the 2D viewer and
+  next to textured geo; it now builds a display copy of the colours (clamp +
+  same OETF, cached per cloud, the provider's shared buffer is untouched).
+  Under the ACES config DeepRead still tags nothing, so deep data is taken as
+  the reference space rather than converted from linear Rec.709 like a Read
+  would — small primaries mismatch, noted, not fixed.
+
 - **GeoBuilder: 2D grids drawn in the viewer, projected through the camera
   (2026-09-09)** — the part the user actually wanted first (the slice-1 shape
   panel below was built before that was clear; it stays, parked). With the
