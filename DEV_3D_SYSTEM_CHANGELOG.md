@@ -57,6 +57,18 @@ Recent milestones:
   disagree. Verified headlessly: a ground grid drawn over pixels x 400–1500,
   y 150–500 renders through Cycles as a trapezoid whose alpha bbox is exactly
   1100 x 350 pixels in the same place.
+  Same-day follow-ups after the user's first GUI session: a **Status** line on
+  the Grid page says why nothing projects (no cam, no grid, not planar) and
+  the mesh re-solves lazily — `getMeshData` compares a hash of the cam/src
+  inputs and rebuilds when the camera moved, so the 3D viewport and renders
+  follow without an edit; an **Extend** slider (0.25–10, per grid, serialised
+  as a 16th field) scales the card about its centre so a ground grid can grow
+  into a shadow catcher while the corner handles stay where they were drawn
+  (the overlay draws the extended card plus a dim outline of the drawn quad);
+  and the slice-1 **Shapes** page is parked behind `kShowShapesTab = false`
+  (its knobs are not created — a secret page still shows its tab — every
+  code path tolerates the missing knobs, and `shapesData` moved to the Grid
+  page hidden so old projects still load).
 
 - **GeoBuilder, slice 1 (2026-09-09)** — a new node for building simple
   geometry for a shot, our take on Nuke's ModelBuilder (research + slice plan in

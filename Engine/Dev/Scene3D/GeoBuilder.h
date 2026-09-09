@@ -135,6 +135,7 @@ public:
         int plane = 0;                // 0 ground (XZ, y=offset) 1 front (XY, z=offset) 2 side (YZ, x=offset) 3 facing camera at distance `offset`
         double offset = 0.0;
         double frame = 1.0;           // the frame the corners were placed on
+        double extend = 1.0;          // scale of the card about its centre (grow it for shadow catching)
     };
     std::vector<Grid> getGrids() const;
     int getSelectedGridIndex() const;
@@ -191,6 +192,7 @@ private:
     void loadSelectedGridIntoKnobs();
     void storeKnobsIntoSelectedGrid();
     void setGridStatus(const std::string& text);
+    void refreshProjectionStatus();
 
     // Camera projection of grids (cam input, plate size from src / project).
     struct CamView
@@ -218,10 +220,15 @@ private:
     void storeKnobsIntoSelectedShape();
     void addShape(int type);
     void rebuildMesh();
+    /** Pure mesh build from the shape + grid lists (no knob writes, safe from
+     *  any thread). Records the input hashes it was built against. */
+    MeshDataPtr buildMeshSnapshot(unsigned long long* inputsHash) const;
+    unsigned long long currentInputsHash() const;
 
     std::unique_ptr<GeoBuilderPrivate> _imp;
     mutable std::mutex _meshMutex;
-    MeshDataPtr _mesh;   // published snapshot, replaced whole on rebuild
+    mutable MeshDataPtr _mesh;                 // published snapshot, replaced whole on rebuild
+    mutable unsigned long long _meshInputsHash = 0;   // cam + src hashes the snapshot was solved with
 };
 
 NATRON_NAMESPACE_EXIT

@@ -68,6 +68,7 @@ struct GeoBuilderPrivate
     KnobBoolWPtr gridPlanar;
     KnobChoiceWPtr gridPlane;
     KnobDoubleWPtr gridOffset;
+    KnobDoubleWPtr gridExtend;
     KnobStringWPtr gridStatus;      // label: what to do next / what is selected
     int gridCounter = 0;
     // Overlay interaction
@@ -264,6 +265,10 @@ GeoBuilder::initializeKnobs()
     }
     _imp->gridOffset = makeDouble(this, gridPage, tr("Offset"), "gridOffset", 0.0, -100.0, 100.0, false);
     _imp->gridOffset.lock()->setHintToolTip(tr("Position of the plane along its normal (world units). For Facing camera: the distance in front of the camera."));
+    _imp->gridExtend = makeDouble(this, gridPage, tr("Extend"), "gridExtend", 1.0, 0.25, 10.0, false, 0.01);
+    _imp->gridExtend.lock()->setHintToolTip(tr("Scale the card about its centre. 1 = exactly the four corners you drew; "
+                                               "3 = three times as wide and deep, for a shadow catcher or ground "
+                                               "extension. The corner handles stay where you drew them."));
     {
         KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Grids Data"));
         k->setName("gridsData");
@@ -271,8 +276,27 @@ GeoBuilder::initializeKnobs()
         k->setSecret(true);
         gridPage->addKnob(k); _imp->gridsData = k;
     }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Info"));
+        k->setName("info"); k->setAsLabel(); k->setIsPersistent(false); k->setEvaluateOnChange(false);
+        gridPage->addKnob(k); _imp->info = k;
+    }
+    {
+        // Primitive-shape state (see the parked Shapes page below). Kept so a
+        // project that used it still loads; hidden.
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Shapes Data"));
+        k->setName("shapesData");
+        k->setAsMultiLine();
+        k->setSecret(true);
+        gridPage->addKnob(k); _imp->shapesData = k;
+    }
 
     // ---------------- Shapes page ----------------
+    // Parked at the user's request (2026-09-09): the grids are the workflow.
+    // Not created at all - a secret page still shows its tab - but every
+    // code path tolerates the missing knobs, so flipping this brings it back.
+    static const bool kShowShapesTab = false;
+    if (kShowShapesTab) {
     KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Shapes"));
 
     {
@@ -355,19 +379,7 @@ GeoBuilder::initializeKnobs()
     _imp->shapeSY = makeDouble(this, page, tr("Shape Scale Y"), "shapeScaleY", 1.0, 0.1, 10.0, false, 0.0001);
     _imp->shapeSZ = makeDouble(this, page, tr("Shape Scale Z"), "shapeScaleZ", 1.0, 0.1, 10.0, false, 0.0001);
 
-    {
-        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Info"));
-        k->setName("info"); k->setAsLabel(); k->setIsPersistent(false); k->setEvaluateOnChange(false);
-        page->addKnob(k); _imp->info = k;
-    }
-    {
-        // The state. Hidden; one line per shape (see saveShapesToKnob).
-        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Shapes Data"));
-        k->setName("shapesData");
-        k->setAsMultiLine();
-        k->setSecret(true);
-        page->addKnob(k); _imp->shapesData = k;
-    }
+    } // kShowShapesTab
 
     // ---------------- Transform page (whole model) ----------------
     KnobPagePtr xformPage = AppManager::createKnob<KnobPage>(this, tr("Transform"));
@@ -452,6 +464,7 @@ GeoBuilder::saveGridsToKnob()
         ss << nm << '|' << g.rows << '|' << g.cols;
         for (int c = 0; c < 4; ++c) ss << '|' << g.x[c] << '|' << g.y[c];
         ss << '|' << (g.planar ? 1 : 0) << '|' << g.plane << '|' << g.offset << '|' << g.frame;
+        ss << '|' << g.extend;
         ss << '\n';
     }
     KnobStringPtr k = _imp->gridsData.lock();
@@ -489,6 +502,10 @@ GeoBuilder::loadGridsFromKnob()
             g.plane = std::max(0, std::min(3, std::atoi(f[12].c_str())));
             g.offset = std::atof(f[13].c_str());
             g.frame = std::atof(f[14].c_str());
+        }
+        if (f.size() >= 16) {
+            g.extend = std::atof(f[15].c_str());
+            if (g.extend < 0.01) g.extend = 1.0;
         }
         _imp->grids.push_back(g);
         ++_imp->gridCounter;
@@ -538,6 +555,8 @@ GeoBuilder::loadSelectedGridIntoKnobs()
     if (plane) { plane->setValue(has ? _imp->grids[i].plane : 0); plane->setEnabled(0, has); }
     KnobDoublePtr off = _imp->gridOffset.lock();
     if (off) { off->setValue(has ? _imp->grids[i].offset : 0.0); off->setEnabled(0, has); }
+    KnobDoublePtr ext = _imp->gridExtend.lock();
+    if (ext) { ext->setValue(has ? _imp->grids[i].extend : 1.0); ext->setEnabled(0, has); }
     KnobButtonPtr del = _imp->deleteGrid.lock();
     if (del) del->setEnabled(0, has);
     _imp->syncing = false;
@@ -568,6 +587,22 @@ GeoBuilder::storeKnobsIntoSelectedGrid()
     }
     KnobDoublePtr off = _imp->gridOffset.lock();
     if (off) _imp->grids[i].offset = off->getValue();
+    KnobDoublePtr ext = _imp->gridExtend.lock();
+    if (ext) _imp->grids[i].extend = std::max(0.01, ext->getValue());
+}
+
+// Scale four corners about their centroid (3D and 2D flavours).
+static void extendCorners3(const double in[4][3], double k, double out[4][3])
+{
+    double c[3] = {0, 0, 0};
+    for (int i = 0; i < 4; ++i) for (int a = 0; a < 3; ++a) c[a] += in[i][a] * 0.25;
+    for (int i = 0; i < 4; ++i) for (int a = 0; a < 3; ++a) out[i][a] = c[a] + (in[i][a] - c[a]) * k;
+}
+static void extendCorners2(const double in[4][2], double k, double out[4][2])
+{
+    double c[2] = {0, 0};
+    for (int i = 0; i < 4; ++i) for (int a = 0; a < 2; ++a) c[a] += in[i][a] * 0.25;
+    for (int i = 0; i < 4; ++i) for (int a = 0; a < 2; ++a) out[i][a] = c[a] + (in[i][a] - c[a]) * k;
 }
 
 // ---------------------------------------------------------------------------
@@ -688,8 +723,57 @@ GeoBuilder::onInputChanged(int inputNb)
     EffectInstance::onInputChanged(inputNb);
     if (inputNb == 1 || inputNb == 2) {   // cam or src: the projection changes
         rebuildMesh();
+        refreshProjectionStatus();
         redrawOverlayInteract();
     }
+}
+
+// Explain, for the selected grid, why it is or isn't a 3D card yet.
+void
+GeoBuilder::refreshProjectionStatus()
+{
+    const int i = getSelectedGridIndex();
+    if (i < 0) {
+        setGridStatus(_imp->grids.empty() ? "Add Grid, then click four corners in the viewer."
+                                          : "Select a grid.");
+        return;
+    }
+    const Grid& g = _imp->grids[i];
+    EffectInstancePtr camEff = skipDots(getInput(1));
+    const bool hasCam = camEff && dynamic_cast<const CameraProvider*>(camEff.get()) != nullptr;
+    if (!g.planar) {
+        setGridStatus(g.name + ": Planar is off - 2D grid only.");
+        return;
+    }
+    if (!hasCam) {
+        setGridStatus(g.name + ": 2D - connect a camera to cam to project it onto the plane.");
+        return;
+    }
+    double c3[4][3];
+    if (solveGrid3D(g, c3)) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "%s: projected onto the plane at frame %g - a %dx%d card. Drag corners to adjust.",
+                      g.name.c_str(), g.frame, g.rows, g.cols);
+        setGridStatus(buf);
+        return;
+    }
+    // Camera there but no card: say which corner misses.
+    CamView cv;
+    if (!cameraAt(g.frame, cv)) {
+        setGridStatus(g.name + ": camera has no usable focal/aperture.");
+        return;
+    }
+    for (int c = 0; c < 4; ++c) {
+        double p[3];
+        if (!unprojectToPlane(cv, g, g.x[c], g.y[c], p)) {
+            char buf[200];
+            std::snprintf(buf, sizeof(buf), "%s: corner %d misses the plane (it is at or above the horizon). Raise the camera above the ground (Translate Y), tilt it down (Rotate X), or move that corner lower.",
+                          g.name.c_str(), c + 1);
+            setGridStatus(buf);
+            return;
+        }
+    }
+    setGridStatus(g.name + ": could not project.");
 }
 
 void
@@ -746,19 +830,37 @@ GeoBuilder::drawOverlay(double time, const RenderScale& /*renderScale*/, ViewIdx
         const bool isSel = ((int)gi == sel);
         // Corners in click order: 0 -> 1 -> 2 -> 3 around the shape. Rows run
         // between edge 0-3 and edge 1-2, columns between edge 0-1 and edge 3-2.
-        double cd[4][2];
-        double c3[4][3];
+        double cd[4][2];      // drawn corners (handles)
+        double c3base[4][3], c3[4][3];
         CamView cv;
         // Planar + camera: subdivide the flat 3D card and re-project every
         // line end through the camera at this frame, so the grid reads in true
         // perspective (and follows a moving camera). Else a plain 2D lerp.
-        const bool persp = displayCorners(g, time, cd) && solveGrid3D(g, c3) && cameraAt(time, cv);
+        const bool persp = displayCorners(g, time, cd) && solveGrid3D(g, c3base) && cameraAt(time, cv);
+        if (persp) extendCorners3(c3base, g.extend, c3);
+        // The card the mesh actually gets: the drawn quad scaled by Extend.
+        double ce[4][2];
+        if (persp) {
+            bool ok = true;
+            for (int c = 0; c < 4 && ok; ++c) ok = projectPoint(cv, c3[c], ce[c][0], ce[c][1]);
+            if (!ok) extendCorners2(cd, g.extend, ce);
+        } else {
+            extendCorners2(cd, g.extend, ce);
+        }
 
         if (isSel) glColor4f(1.0f, 0.85f, 0.2f, 0.9f); else glColor4f(0.3f, 0.9f, 1.0f, 0.7f);
         glLineWidth(isSel ? 1.8f : 1.2f);
         glBegin(GL_LINE_LOOP);
-        for (int c = 0; c < 4; ++c) glVertex2d(cd[c][0], cd[c][1]);
+        for (int c = 0; c < 4; ++c) glVertex2d(ce[c][0], ce[c][1]);
         glEnd();
+        if (std::fabs(g.extend - 1.0) > 1e-6) {
+            // The quad as drawn, inside (or outside) the extended card.
+            glLineWidth(1.0f);
+            if (isSel) glColor4f(1.0f, 0.85f, 0.2f, 0.5f); else glColor4f(0.3f, 0.9f, 1.0f, 0.4f);
+            glBegin(GL_LINE_LOOP);
+            for (int c = 0; c < 4; ++c) glVertex2d(cd[c][0], cd[c][1]);
+            glEnd();
+        }
 
         glLineWidth(1.0f);
         if (isSel) glColor4f(1.0f, 0.85f, 0.2f, 0.45f); else glColor4f(0.3f, 0.9f, 1.0f, 0.35f);
@@ -774,8 +876,8 @@ GeoBuilder::drawOverlay(double time, const RenderScale& /*renderScale*/, ViewIdx
                 lerp3(c3[0], c3[3], t, l3); lerp3(c3[1], c3[2], t, r3);
                 if (!projectPoint(cv, l3, lx, ly) || !projectPoint(cv, r3, rx, ry)) continue;
             } else {
-                lerp2(cd[0][0], cd[0][1], cd[3][0], cd[3][1], t, lx, ly);
-                lerp2(cd[1][0], cd[1][1], cd[2][0], cd[2][1], t, rx, ry);
+                lerp2(ce[0][0], ce[0][1], ce[3][0], ce[3][1], t, lx, ly);
+                lerp2(ce[1][0], ce[1][1], ce[2][0], ce[2][1], t, rx, ry);
             }
             glVertex2d(lx, ly); glVertex2d(rx, ry);
         }
@@ -787,8 +889,8 @@ GeoBuilder::drawOverlay(double time, const RenderScale& /*renderScale*/, ViewIdx
                 lerp3(c3[0], c3[1], t, b3); lerp3(c3[3], c3[2], t, t3);
                 if (!projectPoint(cv, b3, bx, by) || !projectPoint(cv, t3, tx, ty)) continue;
             } else {
-                lerp2(cd[0][0], cd[0][1], cd[1][0], cd[1][1], t, bx, by);
-                lerp2(cd[3][0], cd[3][1], cd[2][0], cd[2][1], t, tx, ty);
+                lerp2(ce[0][0], ce[0][1], ce[1][0], ce[1][1], t, bx, by);
+                lerp2(ce[3][0], ce[3][1], ce[2][0], ce[2][1], t, tx, ty);
             }
             glVertex2d(bx, by); glVertex2d(tx, ty);
         }
@@ -860,12 +962,7 @@ GeoBuilder::onOverlayPenDown(double time, const RenderScale& /*renderScale*/, Vi
         if (choice) { _imp->syncing = true; choice->setValue((int)_imp->grids.size() - 1); _imp->syncing = false; }
         loadSelectedGridIntoKnobs();
         rebuildMesh();
-        {
-            double c3[4][3];
-            const bool solved = solveGrid3D(g, c3);
-            setGridStatus(g.name + (solved ? " created and projected onto the plane - drag its corners, or Add Grid for another."
-                                           : " created (2D: connect a camera to cam to project it) - drag its corners, or Add Grid for another."));
-        }
+        refreshProjectionStatus();
         redrawOverlayInteract();
         return true;
     }
@@ -939,6 +1036,7 @@ GeoBuilder::onOverlayPenUp(double /*time*/, const RenderScale& /*renderScale*/, 
         _imp->dragGrid = -1;
         _imp->dragCorner = -1;
         saveGridsToKnob();   // one undo step per drag
+        refreshProjectionStatus();
         return true;
     }
     return false;
@@ -1270,9 +1368,51 @@ void emitCylinder(Builder& b, const GeoBuilder::Shape& s)
 
 } // namespace
 
+unsigned long long
+GeoBuilder::currentInputsHash() const
+{
+    // The projected grids depend on the camera (input 1) and the plate size
+    // (input 2). Mixed like Material3D::getMaterialInputsHash.
+    auto mix = [](unsigned long long seed, unsigned long long val) -> unsigned long long {
+        return seed ^ (val * 0x9e3779b97f4a7c15ULL + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+    };
+    unsigned long long h = 0;
+    for (int i = 1; i <= 2; ++i) {
+        EffectInstancePtr in = const_cast<GeoBuilder*>(this)->getInput(i);
+        h = mix(h, (unsigned long long)i);
+        h = mix(h, in ? (unsigned long long)in->getHash() : 0ULL);
+    }
+    return h;
+}
+
 void
 GeoBuilder::rebuildMesh()
 {
+    unsigned long long inputsHash = 0;
+    MeshDataPtr mesh = buildMeshSnapshot(&inputsHash);
+    {
+        std::lock_guard<std::mutex> lk(_meshMutex);
+        _mesh = mesh;
+        _meshInputsHash = inputsHash;
+    }
+    // Info line: shapes + projected grids, and what the mesh came to.
+    if (KnobStringPtr info = _imp->info.lock()) {
+        int projected = 0;
+        for (size_t gi = 0; gi < _imp->grids.size(); ++gi) { double c3[4][3]; if (solveGrid3D(_imp->grids[gi], c3)) ++projected; }
+        std::ostringstream ss;
+        ss << _imp->shapes.size() << " shape" << (_imp->shapes.size() == 1 ? "" : "s") << ", "
+           << _imp->grids.size() << " grid" << (_imp->grids.size() == 1 ? "" : "s") << " (" << projected << " projected), "
+           << mesh->numVertices << " vertices, " << mesh->numFaces << " faces";
+        _imp->syncing = true;
+        info->setValue(ss.str());
+        _imp->syncing = false;
+    }
+}
+
+MeshDataPtr
+GeoBuilder::buildMeshSnapshot(unsigned long long* inputsHash) const
+{
+    if (inputsHash) *inputsHash = currentInputsHash();
     MeshDataPtr mesh = std::make_shared<MeshData>();
     Builder b(*mesh);
     for (size_t i = 0; i < _imp->shapes.size(); ++i) {
@@ -1296,8 +1436,9 @@ GeoBuilder::rebuildMesh()
         static const float ident[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
         for (size_t gi = 0; gi < _imp->grids.size(); ++gi) {
             const Grid& g = _imp->grids[gi];
-            double c3[4][3];
-            if (!solveGrid3D(g, c3)) continue;
+            double base[4][3], c3[4][3];
+            if (!solveGrid3D(g, base)) continue;
+            extendCorners3(base, g.extend, c3);
             b.beginShape(ident);
             const int R = std::max(1, g.rows), C = std::max(1, g.cols);
             std::vector<int> idx((R + 1) * (C + 1));
@@ -1328,28 +1469,24 @@ GeoBuilder::rebuildMesh()
     mesh->numFaces = mesh->faceCounts.size();
     mesh->texCoordComponents = 2;
     mesh->hasUVs = !mesh->uvs.empty();
-    {
-        std::lock_guard<std::mutex> lk(_meshMutex);
-        _mesh = mesh;
-    }
-    // Info line: shapes + projected grids, and what the mesh came to.
-    if (KnobStringPtr info = _imp->info.lock()) {
-        int projected = 0;
-        for (size_t gi = 0; gi < _imp->grids.size(); ++gi) { double c3[4][3]; if (solveGrid3D(_imp->grids[gi], c3)) ++projected; }
-        std::ostringstream ss;
-        ss << _imp->shapes.size() << " shape" << (_imp->shapes.size() == 1 ? "" : "s") << ", "
-           << _imp->grids.size() << " grid" << (_imp->grids.size() == 1 ? "" : "s") << " (" << projected << " projected), "
-           << mesh->numVertices << " vertices, " << mesh->numFaces << " faces";
-        _imp->syncing = true;
-        info->setValue(ss.str());
-        _imp->syncing = false;
-    }
+    return mesh;
 }
 
 MeshDataPtr
 GeoBuilder::getMeshData(double /*time*/) const
 {
+    // The projected grids depend on the camera and the plate, which change
+    // without this node hearing about it (the user moves the camera after
+    // drawing the grid). Re-solve whenever their hashes moved since the
+    // snapshot was built, so the viewport, ScanlineRender and Cycles always
+    // see a card matching the current camera.
+    const unsigned long long h = currentInputsHash();
     std::lock_guard<std::mutex> lk(_meshMutex);
+    if (!_mesh || h != _meshInputsHash) {
+        unsigned long long built = 0;
+        _mesh = buildMeshSnapshot(&built);
+        _meshInputsHash = built;
+    }
     return _mesh;
 }
 
@@ -1387,14 +1524,17 @@ GeoBuilder::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     }
     if (k == _imp->gridChoice.lock().get()) {
         loadSelectedGridIntoKnobs();
+        refreshProjectionStatus();
         redrawOverlayInteract();
         return true;
     }
     if (k == _imp->gridRows.lock().get() || k == _imp->gridCols.lock().get() ||
-        k == _imp->gridPlanar.lock().get() || k == _imp->gridPlane.lock().get() || k == _imp->gridOffset.lock().get()) {
+        k == _imp->gridPlanar.lock().get() || k == _imp->gridPlane.lock().get() || k == _imp->gridOffset.lock().get() ||
+        k == _imp->gridExtend.lock().get()) {
         storeKnobsIntoSelectedGrid();
         saveGridsToKnob();
         rebuildMesh();
+        refreshProjectionStatus();
         redrawOverlayInteract();
         return true;
     }
