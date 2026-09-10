@@ -215,6 +215,28 @@ resolveOutputSize(int formatChoice, int customW, int customH, int srcW, int srcH
     if (outH < 1) outH = 1;
 }
 
+bool
+DeepReformat::knobChanged(KnobI* k,
+                          ValueChangedReasonEnum /*reason*/,
+                          ViewSpec /*view*/,
+                          double /*time*/,
+                          bool /*originatedFromMainThread*/)
+{
+    // The output FORMAT (display window) comes from getPreferredMetadata, and
+    // Natron only re-runs that on a metadata refresh — a knob change alone
+    // updates the RoD and the render, not the format. The viewer clips what it
+    // shows to the format, so after picking HD on a 1280x720 input the deep
+    // and the preview were rendered at 1920x1080 but only the bottom-left
+    // 1280x720 of them was visible (user report 2026-09-10). Refresh it here,
+    // the way CyclesRenderPass / ReadGeo do for their size knobs.
+    if (k == _imp->format.lock().get() || k == _imp->outputWidth.lock().get() ||
+        k == _imp->outputHeight.lock().get() || k == _imp->resizeType.lock().get()) {
+        refreshMetadata_public(true);
+        return true;
+    }
+    return false;
+}
+
 StatusEnum
 DeepReformat::getPreferredMetadata(NodeMetadata& metadata)
 {
