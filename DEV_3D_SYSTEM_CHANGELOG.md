@@ -17,6 +17,35 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **DeepReformat: output format follows the size knobs (2026-09-10)** — user
+  report: DeepReformat after DeepRecolor "didn't reformat", the viewer showed
+  the bottom-left 1280x720 of the result inside an HD format box. The deep
+  and the RoD were right (headless: 320x180 -> 640x360 and 1920x1080 data
+  windows, content scaled), but the output FORMAT comes from
+  `getPreferredMetadata`, which Natron only re-runs on a metadata refresh —
+  a knob change alone never triggered one, so the format stayed at the
+  input's and the viewer clipped the picture to it. A `knobChanged` on
+  format / width / height / resize type now calls `refreshMetadata_public`,
+  like CyclesRenderPass and ReadGeo do for their size knobs. Verified:
+  `getOutputFormat()` follows the knob (640x360, then 1920x1080). The
+  user's workaround (a Reformat on the beauty Read before the DeepRecolor)
+  worked because the input's format change did trigger the refresh.
+
+- **DeepRead holds outside the sequence range (Deep Merge button check,
+  2026-09-09)** — user report: the CyclesRenderPass *Deep Merge* button
+  "didn't load the deep". Headless check: the button builds Read + DeepRead
+  -> DeepRecolor -> DeepMerge correctly, DeepRead probes the `_deep.####.exr`
+  sequence (frames on disk, channels) and the flattened DeepRead and
+  DeepMerge match the beauty exactly. The real gap: the beauty Read holds
+  before/after its range and loads the nearest frame when one is missing (its
+  defaults), while DeepRead substituted the timeline frame verbatim and failed
+  "Cannot open file" — so with the timeline anywhere outside the rendered
+  frames (project at 1001, pass rendered 1..N) the beauty showed and the deep
+  did not. `resolveRenderPath()` now clamps to the frames on disk and falls
+  back to the nearest existing frame (render + RoD); verified at frames 50
+  and -3 of a 1..2 sequence. If the button says "no deep sequence in vNNN",
+  Deep was not ticked on the AOV tab when that version was rendered.
+
 - **CyclesRenderPass: light-group AOVs viewable, no layers for inactive lights
   (2026-09-09)** — audit of light groups against the pass node. The renderer
   already makes one `Combined_<group>` buffer per Light3D *Light Group* and
