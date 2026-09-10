@@ -27,6 +27,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <stdexcept>
 #include <sstream>
@@ -99,6 +100,33 @@ seqFrameRangeOnDisk(const std::string& pattern, int* first, int* last)
     if (first) *first = mn;
     if (last) *last = mx;
     return true;
+}
+
+// Resolve the pattern for rendering at a frame, the way the beauty Read does
+// by default (Before/After = Hold, Missing Frame = Load nearest): the frame's
+// own file when it exists, else the sequence clamped to the frames on disk,
+// else the nearest existing frame. Without this the Deep Merge tree showed
+// the held beauty but the DeepRead errored "Cannot open file" whenever the
+// timeline sat outside the rendered range (e.g. project at 1001, pass
+// rendered 1..N) — reported as "the deep didn't load".
+static std::string
+resolveRenderPath(const std::string& pattern, int frame)
+{
+    const std::string exact = resolveSeqPath(pattern, frame);
+    if (pattern.find('#') == std::string::npos || QFileInfo::exists(QString::fromStdString(exact))) {
+        return exact;
+    }
+    int first = 0, last = 0;
+    if (!seqFrameRangeOnDisk(pattern, &first, &last)) {
+        return exact;
+    }
+    int f = std::max(first, std::min(last, frame));   // hold before / after
+    for (int d = 0; d <= last - first; ++d) {         // nearest within a gap
+        const int lo = f - d, hi = f + d;
+        if (lo >= first && QFileInfo::exists(QString::fromStdString(resolveSeqPath(pattern, lo)))) return resolveSeqPath(pattern, lo);
+        if (hi <= last && QFileInfo::exists(QString::fromStdString(resolveSeqPath(pattern, hi)))) return resolveSeqPath(pattern, hi);
+    }
+    return exact;
 }
 
 // Resolve the pattern for probing (info display, metadata): current path if it
@@ -306,7 +334,7 @@ DeepRead::getRegionOfDefinition(U64 /*hash*/,
     if (path.empty()) {
         return eStatusFailed;
     }
-    path = resolveSeqPath(path, (int)std::floor(time + 0.5));
+    path = resolveRenderPath(path, (int)std::floor(time + 0.5));
 
     auto input = OIIO::ImageInput::open(path);
     if (!input) {
@@ -359,13 +387,14 @@ DeepRead::render(const RenderActionArgs& args)
     if (path.empty()) {
         return eStatusFailed;
     }
-    path = resolveSeqPath(path, (int)std::floor(args.time + 0.5));
+    path = resolveRenderPath(path, (int)std::floor(args.time + 0.5));
 
     // Open the deep EXR file
     auto input = OIIO::ImageInput::open(path);
     if (!input) {
         setPersistentMessage(eMessageTypeError,
-                             "Cannot open file: " + path);
+                             "Cannot open file: " + path
+                             + " (no frame of the sequence exists on disk)");
         return eStatusFailed;
     }
 
