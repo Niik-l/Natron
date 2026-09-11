@@ -54,6 +54,14 @@ struct BakedInputTexture
  *  hash changes when anything upstream of the image is edited. */
 unsigned long long materialInputChainHash(const EffectInstancePtr& input, int slot);
 
+// Key for a shape's / material's viewport preview texture: the img input's
+// hash, the frame, and (for a shape) the connected material and its diffuse
+// input. updateCachedTexture() skips the input render + downscale when this
+// has not changed since the last build - the 3D viewport asks for it on
+// every paint, for every shape, and a full-res input fetch each time made
+// the viewport crawl as soon as an image was attached to geometry.
+unsigned long long materialTextureCacheKey(const EffectInstancePtr& input, double time, EffectInstance* material);
+
 /** Render `input` at full resolution, time `time`, to
  *  <TEMP>/natron_<tag>_<owner>.exr (RGBA half, zip, premultiplied).
  *  Returns the path, or an empty string when the render or write failed. */

@@ -156,6 +156,8 @@ private:
     std::unique_ptr<Material3DPrivate> _imp;
     mutable std::mutex _texMutex;
     CachedTexturePtr _cachedTexture = std::make_shared<CachedTexture>();
+    unsigned long long _texKey = 0;      // materialTextureCacheKey() of _cachedTexture
+    bool _texKeyValid = false;
 };
 
 NATRON_NAMESPACE_EXIT

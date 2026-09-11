@@ -18,6 +18,7 @@
  * ***** END LICENSE BLOCK ***** */
 
 #include "Project3D.h"
+#include "MaterialTextureBake.h"
 
 #include <algorithm>
 
@@ -313,6 +314,13 @@ Project3D::getProjectorViewProj(double time, float outVP[16]) const
 void
 Project3D::updateCachedTexture(double time)
 {
+    // Nothing feeding the texture changed since the last build: keep it. The
+    // 3D viewport calls this on every paint for every geo using this node.
+    const unsigned long long key = materialTextureCacheKey(getInput(0), time, nullptr);
+    {
+        std::lock_guard<std::mutex> lk(_texMutex);
+        if (_texKeyValid && _texKey == key) return;
+    }
     // Build into a local and publish an immutable snapshot on every exit path
     // — the previously published texture is shared with concurrent readers
     // (GUI paint / render workers) and must never be mutated in place.
@@ -320,6 +328,8 @@ Project3D::updateCachedTexture(double time)
     auto publish = [&]() {
         std::lock_guard<std::mutex> lk(_texMutex);
         _cachedTexture = tex;
+        _texKey = key;
+        _texKeyValid = true;
     };
     // Render the plate (input 0) at a preview size so a geo this material is on can show
     // the projection live in the 3D viewport. Mirrors Material3D::updateCachedTexture.

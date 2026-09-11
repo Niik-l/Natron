@@ -22,6 +22,8 @@
 
 #include "Material3D.h"
 #include "MaterialTextureBake.h"
+#include <cstdint>
+#include <cmath>
 
 #include "../../AppManager.h"
 #include "../../Image.h"
@@ -420,6 +422,12 @@ Material3D::getMaterialBaseColor(double time, double& r, double& g, double& b) c
 void
 Material3D::updateCachedTexture(double time)
 {
+    // Nothing feeding the texture changed since the last build: keep it.
+    const unsigned long long key = materialTextureCacheKey(getInput(0), time, nullptr);
+    {
+        std::lock_guard<std::mutex> lk(_texMutex);
+        if (_texKeyValid && _texKey == key) return;
+    }
     // Build into a local and publish an immutable snapshot on every exit path
     // — the previously published texture is shared with concurrent readers
     // (GUI paint / render workers) and must never be mutated in place.
@@ -427,6 +435,8 @@ Material3D::updateCachedTexture(double time)
     auto publish = [&]() {
         std::lock_guard<std::mutex> lk(_texMutex);
         _cachedTexture = tex;
+        _texKey = key;
+        _texKeyValid = true;
     };
     // Render the Diffuse input (input 0) at a preview size, so a geo shape this
     // material is connected to can display the texture in the 3D viewport. Mirrors
@@ -738,6 +748,21 @@ materialInputChainHash(const EffectInstancePtr& input, int slot)
     };
     unsigned long long h = mix(0ULL, (unsigned long long)(slot + 1));
     return mix(h, input ? (unsigned long long)input->getHash() : 0ULL);
+}
+
+unsigned long long
+materialTextureCacheKey(const EffectInstancePtr& input, double time, EffectInstance* material)
+{
+    auto mix = [](unsigned long long seed, unsigned long long val) -> unsigned long long {
+        return seed ^ (val * 0x9e3779b97f4a7c15ULL + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+    };
+    unsigned long long h = materialInputChainHash(input, 0);
+    h = mix(h, (unsigned long long)(std::llround(time * 1000.0) + 0x7fffffffLL));
+    if (material) {
+        h = mix(h, (unsigned long long)(uintptr_t)material);
+        h = mix(h, materialInputChainHash(material->getInput(0), 0));
+    }
+    return h;
 }
 
 std::string
