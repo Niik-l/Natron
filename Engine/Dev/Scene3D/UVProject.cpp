@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "UVProject.h"
+#include "MaterialTextureBake.h"
 
 #include <cassert>
 #include <cmath>
@@ -460,6 +461,13 @@ UVProject::render(const RenderActionArgs& /*args*/)
 void
 UVProject::updateCachedTexture(double time)
 {
+    // Nothing feeding the texture changed since the last build: keep it. The
+    // 3D viewport calls this on every paint for every geo using this node.
+    const unsigned long long key = materialTextureCacheKey(getInput(2), time, nullptr);
+    {
+        std::lock_guard<std::mutex> lk(_texMutex);
+        if (_texKeyValid && _texKey == key) return;
+    }
     // Build into a local and publish an immutable snapshot on every exit path
     // — the previously published texture is shared with concurrent readers
     // (GUI paint / render workers) and must never be mutated in place.
@@ -467,6 +475,8 @@ UVProject::updateCachedTexture(double time)
     auto publish = [&]() {
         std::lock_guard<std::mutex> lk(_texMutex);
         _cachedTexture = tex;
+        _texKey = key;
+        _texKeyValid = true;
     };
     // Render the projection image (input 2, "img") at preview size so the 3D
     // viewport can display the projected texture on the geo. Empty => no img.

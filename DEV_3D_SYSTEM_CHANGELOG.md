@@ -17,6 +17,42 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **3D viewport: shape / material preview textures are cached by key
+  (2026-09-11)** — user report: the 3D viewport crawls as soon as an image
+  is attached to geometry (CheckerBoard on the img input of Sphere3D,
+  Cube3D and Card3D). `updateCachedTexture()` on the four primitives and on
+  Material3D fetched the img input at full resolution (`getImage`, a
+  1920x1080 render or cache pull) and downscaled it to 512 on *every*
+  viewport paint, for every shape — three full-frame fetches per redraw in
+  that scene. Nothing in the recent commits touched that path; the cost was
+  there all along and shows the moment several shapes share a plate. They
+  now compute `materialTextureCacheKey()` (img-input hash + frame +
+  connected Material3D and its diffuse input) and return early when it
+  matches the published texture, so a paint with nothing changed costs no
+  input fetch at all; editing the input, scrubbing, or reconnecting a
+  material rebuilds it. Cycles img-input bake path unchanged (Card3D
+  regression render still a 1036x1036 circle in the alpha). That alone was
+  not enough: a paint-timing readout on the user's machine still showed
+  ~70 ms per textured shape per paint, all of it in the draw — every paint
+  re-encoded the 512x512 preview to sRGB, uploaded a brand-new GL texture
+  (driver-side float -> 8-bit conversion) and deleted it. The viewport now
+  keeps the uploaded GL textures across paints (`bindPreviewTextureCached`,
+  keyed by pixel pointer, validated by size + sparse content checksum, idle
+  entries freed, cache dropped on GL context recreation), used by all five
+  textured draw paths (mesh / card / sphere / cube / cylinder, incl. the
+  Project3D / MergeMat layers). User-verified: idle paints 0.3 ms with three
+  textured shapes (was 210 ms); ~30 ms per shape only while the CheckerBoard
+  is animating, i.e. when the texture really changes. ReadGeo / ReadAlembicArchive /
+  GeoBuilder go through the shared mesh path, whose textures come from
+  Material3D (keyed above), UVProject or Project3D — the latter two got the
+  same key (input 2 / input 0 hash + frame), so a projection setup on a
+  large mesh no longer re-fetches its plate every paint either. And for textures that DO change every
+  frame (a projected plate sequence): `uploadPreviewTextureSRGB` now encodes
+  through a 4096-entry sRGB lookup and uploads 8-bit RGBA8, instead of a
+  per-pixel pow into a float buffer that the driver then converted, so a
+  changed 512x512 texture costs a couple of ms rather than ~30. Same look:
+  the driver's float->8-bit clamp is what the LUT does explicitly.
+
 - **DeepReformat: output format follows the size knobs (2026-09-10)** — user
   report: DeepReformat after DeepRecolor "didn't reformat", the viewer showed
   the bottom-left 1280x720 of the result inside an HD format box. The deep

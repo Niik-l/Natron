@@ -428,17 +428,34 @@ static void
 uploadPreviewTextureSRGB(const float* pixels, int w, int h, GLint wrapS, GLint wrapT,
                          const float* borderColor = NULL)
 {
-    static std::vector<float> tmp;
+    // Encode to 8-bit here and upload bytes. The previous float upload into an
+    // 8-bit texture made the driver convert every pixel (~30 ms per 512x512 on
+    // the dev machine, paid on every texture change - every frame of a
+    // projected plate), and the per-pixel pow was not free either. A 4096-entry
+    // sRGB lookup does the same encode; values above 1 clamp to white exactly
+    // as the driver did.
+    static std::vector<unsigned char> lut;   // linear [0,1] in 1/4095 steps -> sRGB byte
+    if (lut.empty()) {
+        lut.resize(4096);
+        for (int i = 0; i < 4096; ++i) {
+            const float v = (float)i / 4095.0f;
+            const float e = (v <= 0.0031308f) ? (v * 12.92f)
+                                              : (1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f);
+            lut[i] = (unsigned char)std::min(255, std::max(0, (int)(e * 255.0f + 0.5f)));
+        }
+    }
+    static std::vector<unsigned char> tmp;
     const size_t n = (size_t)w * (size_t)h;
     tmp.resize(n * 4);
     for (size_t i = 0; i < n; ++i) {
+        const float* src = pixels + i * 4;
+        unsigned char* dst = &tmp[i * 4];
         for (int c = 0; c < 3; ++c) {
-            float v = pixels[i * 4 + c];
-            if (v <= 0.0f) { tmp[i * 4 + c] = 0.0f; continue; }
-            tmp[i * 4 + c] = (v <= 0.0031308f) ? (v * 12.92f)
-                                               : (1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f);
+            const float v = src[c];
+            dst[c] = (v <= 0.0f || !(v == v)) ? 0 : (v >= 1.0f ? 255 : lut[(int)(v * 4095.0f + 0.5f)]);
         }
-        tmp[i * 4 + 3] = pixels[i * 4 + 3]; // alpha unchanged
+        const float a = src[3];
+        dst[3] = (a <= 0.0f || !(a == a)) ? 0 : (a >= 1.0f ? 255 : (unsigned char)(a * 255.0f + 0.5f));
     }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -447,7 +464,80 @@ uploadPreviewTextureSRGB(const float* pixels, int w, int h, GLint wrapS, GLint w
     if ( borderColor && (wrapS == GL_CLAMP_TO_BORDER || wrapT == GL_CLAMP_TO_BORDER) ) {
         glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
     }
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_FLOAT, tmp.data());
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, tmp.data());
+}
+
+// GL preview-texture cache. The shapes' / materials' preview textures are
+// immutable snapshots that only change when their source does, yet every paint
+// re-encoded them to sRGB and uploaded a brand-new GL texture, then deleted it:
+// ~70 ms per 512x512 texture on the dev machine (the float -> 8-bit conversion
+// runs driver-side), so three textured shapes made the viewport crawl. Entries
+// are keyed by the pixel pointer and validated by size + a sparse content
+// checksum, so a recycled address holding different pixels can never alias a
+// stale texture; entries idle for a few hundred paints are freed.
+struct PreviewGlTexture
+{
+    GLuint tex = 0;
+    int w = 0, h = 0;
+    unsigned long long sum = 0;
+    int lastPaint = 0;
+};
+typedef std::map<const float*, PreviewGlTexture> PreviewGlTextureCache;
+
+static unsigned long long
+previewTextureChecksum(const float* px, int w, int h)
+{
+    const size_t n = (size_t)w * (size_t)h * 4;
+    const size_t step = std::max<size_t>(1, n / 1024);
+    unsigned long long sum = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; i += step) {
+        unsigned int bits;
+        std::memcpy(&bits, &px[i], sizeof(bits));
+        sum = (sum ^ bits) * 1099511628211ULL;
+    }
+    return sum ^ ((unsigned long long)w << 32) ^ (unsigned long long)h;
+}
+
+// Bind the cached GL texture for these pixels, (re)uploading only when the
+// content changed. Wrap / border are texture state, so they are re-applied
+// on every bind (the same pixels may be drawn with different wrapping).
+static GLuint
+bindPreviewTextureCached(PreviewGlTextureCache& cache, int paintSerial,
+                         const float* pixels, int w, int h,
+                         GLint wrapS, GLint wrapT, const float* borderColor)
+{
+    const unsigned long long sum = previewTextureChecksum(pixels, w, h);
+    PreviewGlTexture& e = cache[pixels];
+    if (e.tex && e.w == w && e.h == h && e.sum == sum) {
+        glBindTexture(GL_TEXTURE_2D, e.tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapS);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapT);
+        if ( borderColor && (wrapS == GL_CLAMP_TO_BORDER || wrapT == GL_CLAMP_TO_BORDER) ) {
+            glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+        }
+    } else {
+        if (e.tex) glDeleteTextures(1, &e.tex);
+        glGenTextures(1, &e.tex);
+        glBindTexture(GL_TEXTURE_2D, e.tex);
+        uploadPreviewTextureSRGB(pixels, w, h, wrapS, wrapT, borderColor);
+        e.w = w; e.h = h; e.sum = sum;
+    }
+    e.lastPaint = paintSerial;
+    return e.tex;
+}
+
+static void
+purgePreviewTextures(PreviewGlTextureCache& cache, int paintSerial, int maxIdlePaints)
+{
+    for (PreviewGlTextureCache::iterator it = cache.begin(); it != cache.end(); ) {
+        if (maxIdlePaints < 0 || paintSerial - it->second.lastPaint > maxIdlePaints) {
+            if (maxIdlePaints >= 0 && it->second.tex) glDeleteTextures(1, &it->second.tex);
+            it = cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // Find a UVProject whose geo input (through Dots) resolves to `geoNode`, i.e. a
@@ -814,6 +904,10 @@ struct Viewport3DPrivate
     // Scene graph (rebuilt each frame)
     SceneGraph sceneGraph;
 
+    // GL preview textures reused across paints (see bindPreviewTextureCached).
+    mutable PreviewGlTextureCache previewGlTextures;
+    mutable int paintSerial = 0;
+
     // Point cloud (keep for DeepToPoints)
     mutable QMutex cloudMutex;
     PointCloudDataPtr pointCloud;
@@ -990,6 +1084,9 @@ Viewport3D::initializeGL()
         glDeleteTextures(1, &g_DevImGuiFontTexture);
         g_DevImGuiFontTexture = 0;
     }
+    // Same for the cached preview textures: their names belong to the previous
+    // context, so forget them (no delete) and let the next paint re-upload.
+    purgePreviewTextures(_imp->previewGlTextures, _imp->paintSerial, -1);
     ImGui_ImplOpenGL2_CreateFontsTexture();
 
     // Compile particle point-sprite shader. Also a per-context GL resource, so
@@ -1338,6 +1435,8 @@ applyDollyToCamera3D(Camera3DNode* cam, double time, const float pivot[3], int d
 void
 Viewport3D::paintGL()
 {
+    ++_imp->paintSerial;
+    purgePreviewTextures(_imp->previewGlTextures, _imp->paintSerial, 600);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     // 1. Build camera matrices.
@@ -3106,10 +3205,9 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
                                 const std::vector<unsigned char>& vCulled, bool hasTexPass, int blendOp) {
             GLuint glTex = 0;
             if (hasTexPass) {
-                glGenTextures(1, &glTex);
-                glBindTexture(GL_TEXTURE_2D, glTex);
                 const GLint meshWrap = wrapRep ? GL_REPEAT : (border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE);
-                uploadPreviewTextureSRGB(tPix, tW, tH, meshWrap, meshWrap, border);
+                glTex = bindPreviewTextureCached(_imp->previewGlTextures, _imp->paintSerial,
+                                                 tPix, tW, tH, meshWrap, meshWrap, border);
                 glEnable(GL_TEXTURE_2D);
                 glEnable(GL_BLEND);
                 if (blendOp == 1) glBlendFunc(GL_ONE, GL_ZERO);
@@ -3180,7 +3278,7 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
                 glDisable(GL_TEXTURE_2D);
                 if (border) glDisable(GL_ALPHA_TEST);
                 glDisable(GL_BLEND);
-                glDeleteTextures(1, &glTex);
+                glBindTexture(GL_TEXTURE_2D, 0);   // texture stays cached (see bindPreviewTextureCached)
             }
         };
         if (!projLayers.empty()) {
@@ -3363,10 +3461,9 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
                                 int pComp, const std::vector<float>& pUVs, const std::vector<float>& pSTW,
                                 const std::vector<unsigned char>& vCulled, int blendOp) {
             GLuint glTex = 0;
-            glGenTextures(1, &glTex);
-            glBindTexture(GL_TEXTURE_2D, glTex);
             const GLint wrap = wrapRep ? GL_REPEAT : (border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE);
-            uploadPreviewTextureSRGB(tPix, tW, tH, wrap, wrap, border);
+            glTex = bindPreviewTextureCached(_imp->previewGlTextures, _imp->paintSerial,
+                                             tPix, tW, tH, wrap, wrap, border);
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
             if (blendOp == 1) glBlendFunc(GL_ONE, GL_ZERO);
@@ -3392,7 +3489,7 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
             glDisable(GL_TEXTURE_2D);
             if (border) glDisable(GL_ALPHA_TEST);
             glDisable(GL_BLEND);
-            glDeleteTextures(1, &glTex);
+            glBindTexture(GL_TEXTURE_2D, 0);   // texture stays cached (see bindPreviewTextureCached)
         };
         if (!projLayers.empty()) {
             glDepthFunc(GL_LEQUAL);
@@ -3631,10 +3728,9 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
                                int pComp, const std::vector<float>& pUVs, const std::vector<float>& pSTW,
                                const std::vector<unsigned char>& vCulled, int blendOp) {
             GLuint glTex = 0;
-            glGenTextures(1, &glTex);
-            glBindTexture(GL_TEXTURE_2D, glTex);
             const GLint wrap = wrapRep ? GL_REPEAT : (border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE);
-            uploadPreviewTextureSRGB(tPix, tW, tH, wrap, wrap, border);
+            glTex = bindPreviewTextureCached(_imp->previewGlTextures, _imp->paintSerial,
+                                             tPix, tW, tH, wrap, wrap, border);
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
             // MergeMat op -> GL blend. 'over' is exact; replace/plus approximated; others -> over.
@@ -3670,7 +3766,7 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
             glDisable(GL_TEXTURE_2D);
             if (border) glDisable(GL_ALPHA_TEST);
             glDisable(GL_BLEND);
-            glDeleteTextures(1, &glTex);
+            glBindTexture(GL_TEXTURE_2D, 0);   // texture stays cached (see bindPreviewTextureCached)
         };
         if (!projLayers.empty()) {
             // Multi-pass: paint each projection layer back-to-front, blended. LEQUAL lets each
@@ -3925,10 +4021,9 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
                                int pComp, const std::vector<float>& pUVs, const std::vector<float>& pSTW,
                                const std::vector<unsigned char>& vCulled, int blendOp) {
             GLuint glTex = 0;
-            glGenTextures(1, &glTex);
-            glBindTexture(GL_TEXTURE_2D, glTex);
             const GLint wrap = wrapRep ? GL_REPEAT : (border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE);
-            uploadPreviewTextureSRGB(tPix, tW, tH, wrap, wrap, border);
+            glTex = bindPreviewTextureCached(_imp->previewGlTextures, _imp->paintSerial,
+                                             tPix, tW, tH, wrap, wrap, border);
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
             if (blendOp == 1) glBlendFunc(GL_ONE, GL_ZERO);
@@ -3963,7 +4058,7 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
             glDisable(GL_TEXTURE_2D);
             if (border) glDisable(GL_ALPHA_TEST);
             glDisable(GL_BLEND);
-            glDeleteTextures(1, &glTex);
+            glBindTexture(GL_TEXTURE_2D, 0);   // texture stays cached (see bindPreviewTextureCached)
         };
         if (!projLayers.empty()) {
             glDepthFunc(GL_LEQUAL);
@@ -4120,10 +4215,9 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
                                int pComp, const std::vector<float>& pUVs, const std::vector<float>& pSTW,
                                const std::vector<unsigned char>& vCulled, int blendOp) {
             GLuint glTex = 0;
-            glGenTextures(1, &glTex);
-            glBindTexture(GL_TEXTURE_2D, glTex);
             const GLint wrap = wrapRep ? GL_REPEAT : (border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE);
-            uploadPreviewTextureSRGB(tPix, tW, tH, wrap, wrap, border);
+            glTex = bindPreviewTextureCached(_imp->previewGlTextures, _imp->paintSerial,
+                                             tPix, tW, tH, wrap, wrap, border);
             glEnable(GL_TEXTURE_2D);
             glEnable(GL_BLEND);
             if (blendOp == 1) glBlendFunc(GL_ONE, GL_ZERO);
@@ -4158,7 +4252,7 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
             glDisable(GL_TEXTURE_2D);
             if (border) glDisable(GL_ALPHA_TEST);
             glDisable(GL_BLEND);
-            glDeleteTextures(1, &glTex);
+            glBindTexture(GL_TEXTURE_2D, 0);   // texture stays cached (see bindPreviewTextureCached)
         };
         if (!projLayers.empty()) {
             glDepthFunc(GL_LEQUAL);
