@@ -36,7 +36,7 @@ index 0b2a2a2..c16ba34 100644
      if (!avFrameOut->data[0]) {
          int res = av_image_alloc(avFrameOut->data, avFrameOut->linesize, avFrameOut->width, avFrameOut->height, dstPixFmt, 32);
 diff --git a/IOSupport/GenericOCIO.cpp b/IOSupport/GenericOCIO.cpp
-index 30ffb3b..df92eac 100644
+index 30ffb3b..fd0addd 100644
 --- a/IOSupport/GenericOCIO.cpp
 +++ b/IOSupport/GenericOCIO.cpp
 @@ -42,6 +42,7 @@
@@ -47,7 +47,23 @@ index 30ffb3b..df92eac 100644
  #ifdef DEBUG
  #include <cstdio>
  #define DBG(x) x
-@@ -202,6 +203,99 @@ colorSpaceName(OCIO::ConstConfigRcPtr config,
+@@ -118,6 +119,15 @@ colorSpaceName(OCIO::ConstConfigRcPtr config,
+         } else if ((cs = config->getColorSpace("sRGB D65"))) {
+             // blender-cycles
+             return cs->getName();
++        } else if ((cs = config->getColorSpace("sRGB - Texture"))) {
++            // aces 1.1-1.3 (cg/studio configs also alias it as srgb_tx)
++            return cs->getName();
++        } else if ((cs = config->getColorSpace("srgb_rec709_scene"))) {
++            // aces 2.0 cg/studio configs ("sRGB Encoded Rec.709 (sRGB)")
++            return cs->getName();
++        } else if ((cs = config->getColorSpace("Utility - sRGB - Texture"))) {
++            // aces 1.0.x
++            return cs->getName();
+         } else if ((cs = config->getColorSpace("sRGB (D60 sim.)"))) {
+             // out_srgbd60sim or "sRGB (D60 sim.)" in aces 1.0.0
+             return cs->getName();
+@@ -202,6 +212,107 @@ colorSpaceName(OCIO::ConstConfigRcPtr config,
      return colorSpaceNameDefault;
  } // colorSpaceName
  
@@ -96,12 +112,20 @@ index 30ffb3b..df92eac 100644
 +
 +// The stored name if the config knows it (or is missing), else its known twin
 +// from kColorSpaceSynonyms, else the stored name unchanged.
++static string fallbackColorSpaceName(OCIO::ConstConfigRcPtr config);
++
 +static string
 +resolveColorSpaceName(OCIO::ConstConfigRcPtr config,
 +                      const string& name)
 +{
 +    if (!config || name.empty() || config->getColorSpace(name.c_str())) {
 +        return name;
++    }
++    if (name == OCIO::ROLE_DEFAULT) {
++        // The literal "default" written by older builds under a config that
++        // has no such role: use what that config falls back to.
++        const string fb = fallbackColorSpaceName(config);
++        return fb.empty() ? name : fb;
 +    }
 +    for (std::size_t g = 0; g < sizeof(kColorSpaceSynonyms) / sizeof(kColorSpaceSynonyms[0]); ++g) {
 +        const char* const* group = kColorSpaceSynonyms[g];
@@ -147,7 +171,19 @@ index 30ffb3b..df92eac 100644
  static string
  canonicalizeColorSpace(OCIO::ConstConfigRcPtr config,
                         const string& csname)
-@@ -928,16 +1022,10 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
+@@ -219,6 +330,11 @@ canonicalizeColorSpace(OCIO::ConstConfigRcPtr config,
+     const int texturepaintcs = config->getIndexForColorSpace(OCIO::ROLE_TEXTURE_PAINT);
+     const int mattepaintcs = config->getIndexForColorSpace(OCIO::ROLE_MATTE_PAINT);
+     int inputSpaceIndex = config->getIndexForColorSpace(csname.c_str());
++    if (inputSpaceIndex < 0) {
++        // Unknown name: never equate it with a role the config lacks (both
++        // are -1), which turned every unknown name into "default".
++        return csname;
++    }
+     if (inputSpaceIndex == scenelinearcs) {
+         return OCIO::ROLE_SCENE_LINEAR;
+     } else if (inputSpaceIndex == defaultcs) {
+@@ -928,16 +1044,10 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
              getInputColorspaceAtTime(args.time, inputSpaceName);
              int inputSpaceIndex = _config->getIndexForColorSpace(inputSpaceName.c_str());
              if (inputSpaceIndex < 0) {
@@ -167,27 +203,27 @@ index 30ffb3b..df92eac 100644
              }
          }
          inputCheck(args.time);
-@@ -946,16 +1034,10 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
+@@ -946,16 +1056,10 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
              getOutputColorspaceAtTime(args.time, outputSpaceName);
              int outputSpaceIndex = _config->getIndexForColorSpace(outputSpaceName.c_str());
              if (outputSpaceIndex < 0) {
 -                OCIO::ConstColorSpaceRcPtr cs;
 -                if (!cs) {
 -                    cs = _config->getColorSpace(OCIO::ROLE_DEFAULT);
--                }
--                if (!cs) {
--                    // no default colorspace, fallback to the first one
--                    cs = _config->getColorSpace(_config->getColorSpaceNameByIndex(0));
 +                outputSpaceName = fallbackColorSpaceName(_config);
 +                if (!outputSpaceName.empty()) {
 +                    _outputSpace->setValue(outputSpaceName);
                  }
+-                if (!cs) {
+-                    // no default colorspace, fallback to the first one
+-                    cs = _config->getColorSpace(_config->getColorSpaceNameByIndex(0));
+-                }
 -                outputSpaceName = cs ? cs->getName() : OCIO::ROLE_DEFAULT;
 -                _outputSpace->setValue(OCIO::ROLE_DEFAULT);
              }
          }
          outputCheck(args.time);
-@@ -1120,6 +1202,16 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
+@@ -1120,6 +1224,16 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
          return;
      } else if (paramName == kOCIOParamInputSpace) {
          assert(_inputSpace);
@@ -204,23 +240,23 @@ index 30ffb3b..df92eac 100644
          if (args.reason == eChangeUserEdit) {
              // if the inputspace doesn't correspond to a valid one, reset to default.
              // first, canonicalize.
-@@ -1135,18 +1227,12 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
+@@ -1135,18 +1249,12 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
                  if (args.reason == eChangeUserEdit) {
                      _parent->sendMessage(Message::eMessageWarning, "", string("Unknown OCIO colorspace \"") + inputSpace + "\"");
                  }
 -                OCIO::ConstColorSpaceRcPtr cs;
 -                if (!cs) {
 -                    cs = _config->getColorSpace(OCIO::ROLE_DEFAULT);
+-                }
+-                if (!cs) {
+-                    // no default colorspace, fallback to the first one
+-                    cs = _config->getColorSpace(_config->getColorSpaceNameByIndex(0));
 +                const string fb = fallbackColorSpaceName(_config);
 +                if (!fb.empty()) {
 +                    inputSpace = fb;
 +                    _inputSpace->setValue(inputSpace);
 +                    inputSpaceIndex = _config->getIndexForColorSpace(inputSpace.c_str());
                  }
--                if (!cs) {
--                    // no default colorspace, fallback to the first one
--                    cs = _config->getColorSpace(_config->getColorSpaceNameByIndex(0));
--                }
 -                inputSpace = cs ? cs->getName() : OCIO::ROLE_DEFAULT;
 -                _inputSpace->setValue(inputSpace);
 -                inputSpaceIndex = _config->getIndexForColorSpace(inputSpace.c_str());
@@ -228,7 +264,7 @@ index 30ffb3b..df92eac 100644
              }
          }
          inputCheck(args.time);
-@@ -1167,6 +1253,14 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
+@@ -1167,6 +1275,14 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
  #endif
      else if (paramName == kOCIOParamOutputSpace) {
          assert(_outputSpace);
@@ -243,7 +279,7 @@ index 30ffb3b..df92eac 100644
          if (args.reason == eChangeUserEdit) {
              // if the outputspace doesn't correspond to a valid one, reset to default.
              // first, canonicalize.
-@@ -1182,18 +1276,12 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
+@@ -1182,18 +1298,12 @@ GenericOCIO::changedParam(const InstanceChangedArgs& args,
                  if (args.reason == eChangeUserEdit) {
                      _parent->sendMessage(Message::eMessageWarning, "", string("Unknown OCIO colorspace \"") + outputSpace + "\"");
                  }
@@ -267,7 +303,15 @@ index 30ffb3b..df92eac 100644
              }
          }
          outputCheck(args.time);
-@@ -1229,6 +1317,7 @@ GenericOCIO::getInputColorspace(string& v) const
+@@ -1222,6 +1332,7 @@ GenericOCIO::getInputColorspaceDefault(string& v) const
+ {
+     assert(_inputSpace);
+     _inputSpace->getDefault(v);
++    v = resolveColorSpaceName(_config, v);
+ }
+ 
+ void
+@@ -1229,6 +1340,7 @@ GenericOCIO::getInputColorspace(string& v) const
  {
      assert(_inputSpace);
      _inputSpace->getValue(v);
@@ -275,7 +319,7 @@ index 30ffb3b..df92eac 100644
  }
  
  void
-@@ -1237,6 +1326,7 @@ GenericOCIO::getInputColorspaceAtTime(double time,
+@@ -1237,6 +1349,7 @@ GenericOCIO::getInputColorspaceAtTime(double time,
  {
      assert(_inputSpace);
      _inputSpace->getValueAtTime(time, v);
@@ -283,7 +327,15 @@ index 30ffb3b..df92eac 100644
  }
  
  void
-@@ -1251,6 +1341,7 @@ GenericOCIO::getOutputColorspace(string& v) const
+@@ -1244,6 +1357,7 @@ GenericOCIO::getOutputColorspaceDefault(string& v) const
+ {
+     assert(_outputSpace);
+     _outputSpace->getDefault(v);
++    v = resolveColorSpaceName(_config, v);
+ }
+ 
+ void
+@@ -1251,6 +1365,7 @@ GenericOCIO::getOutputColorspace(string& v) const
  {
      assert(_outputSpace);
      _outputSpace->getValue(v);
@@ -291,7 +343,7 @@ index 30ffb3b..df92eac 100644
  }
  
  void
-@@ -1259,6 +1350,7 @@ GenericOCIO::getOutputColorspaceAtTime(double time,
+@@ -1259,6 +1374,7 @@ GenericOCIO::getOutputColorspaceAtTime(double time,
  {
      assert(_outputSpace);
      _outputSpace->getValueAtTime(time, v);
