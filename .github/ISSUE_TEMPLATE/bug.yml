@@ -1,117 +1,85 @@
-name: New issue for bug report
-description: Got a glitch, crash, or some other problem? If you're sure your issue is reproducible, feel free to report the issue to Natron's development team.
+name: Bug report
+description: A crash, a wrong result, or something that does not work in this fork's Windows build (Qt6 / Cycles / 3D / deep / particles).
 title: "(Bug): "
 labels: ["type:bug"]
 body:
-  # Greeter message
   - type: markdown
     attributes:
       value: |
-        Thank you for reporting a bug! Please first check the boxes below to ensure that your bug report meets our requirements.
-  # Requirements checks
+        Thanks for reporting. This tracker is for **this fork** (the Windows Qt6/Cycles build with the 3D, deep and particle nodes). Bugs in stock Natron nodes that also happen in the official release belong on the [upstream tracker](https://github.com/NatronGitHub/Natron/issues).
   - type: checkboxes
     attributes:
-      label: Make sure to follow our issue report guidelines
+      label: Before you post
       options:
-        - label: I'm using the latest version of Natron (not required but recommended)
-        - label: I've restarted Natron and the issue persists
+        - label: I'm on the latest release from this fork's [Releases page](https://github.com/Niik-l/Natron/releases), or a build of the current RB-2.6
           required: true
-        - label: I've run Natron via the [command line](https://natron.readthedocs.io/en/rb-2.4/devel/natronexecution.html) and the issue persists
-        - label: I've followed the [contributing guidelines](https://github.com/NatronGitHub/Natron/blob/RB-2.4/CONTRIBUTING.md) to the best of my understanding
+        - label: I've restarted Natron and the problem persists
           required: true
-        - label: My issue is not on the [issue tracker](https://github.com/NatronGitHub/Natron/issues?q=is%3Aissue+type%3Abug) or in a [pull request](https://github.com/NatronGitHub/Natron/pulls) already (go search for it and dig around a little bit!)
+        - label: I searched the [open issues](https://github.com/Niik-l/Natron/issues) and this is not a duplicate
           required: true
-        - label: This bug is reproducible
-          required: true
-  # Natron & OS versions
   - type: input
-    id: natron-version
+    id: build-version
     attributes:
-      label: Natron version
-      description: Natron version/commit (they can be retrieved from the about window or with `natron --about`)
-      placeholder: "Natron 2.4.0"
+      label: Build version
+      description: The release date from the archive name or the Releases page, or the commit if you built it yourself.
+      placeholder: "natron-2.6-2026.09.07"
     validations:
       required: true
   - type: input
     id: os-version
     attributes:
-      label: Operating system
-      description: The name and version of your operating system
-      placeholder: "macOS 10.15 Catalina"
+      label: Operating system and GPU
+      placeholder: "Windows 11 23H2, NVIDIA RTX 4070 (driver 560)"
     validations:
       required: true
-  # System (hardware) info
-  - type: textarea
+  - type: dropdown
+    id: area
     attributes:
-      label: System specs
-      description: |
-        Please input the following (if you know them):
-          - Your system's RAM
-          - The model of your CPU(s)
-          - The model of your GPU(s)
-      placeholder: |
-        RAM: 15.6 GB
-        CPU: Intel Core i7-7700HQ @ 2.80GHz
-        GPU: NVIDIA GeForce GTX 1070
-    validations:
-      required: false
-  # Did the user install via the official installer?
-  - type: checkboxes
-    attributes:
-      label: Did you install Natron using the official installer?
-      description: If you installed Natron via another method, please add your installation method in the \"additional details\" section at the bottom of this form
+      label: Which part is involved?
+      multiple: true
       options:
-        - label: Yes, I used the official installer
-        - label: No, I installed from a binary archive
-        - label: No, I compiled Natron from sources
-        - label: No, I installed Natron via another method
+        - 3D system (Scene3D, Card3D / geo nodes, Camera3D, 3D viewport)
+        - Cycles (CyclesRender, CyclesRenderPass, materials, lights, AOVs)
+        - ScanlineRender
+        - Deep (DeepRead, DeepToPoints, DeepMerge, DeepReformat, ...)
+        - Particles
+        - Volumes (ReadVDB, Volume3D, FastVolumeRender)
+        - Read / Write / colorspace
+        - Viewer / GUI / project loading
+        - Stock Natron node (also happens in official Natron)
+        - Not sure
     validations:
       required: true
-  # At which location did the user install Natron?
   - type: input
+    id: ocio
     attributes:
-      label: Custom installation path
-      description: |
-        If you've installed Natron to a custom (non-default) location please include it here:
-      placeholder: '`/opt/Natron-2.4.0`'
+      label: OCIO config in use
+      description: From Preferences > Color. Matters for any Read / Write / colorspace / material texture problem.
+      placeholder: "ACES 2.0 studio config (custom path) / blender / nuke-default"
     validations:
       required: false
-  # What was the user trying to do?
   - type: textarea
     attributes:
-      label: What were you trying to do?
-      placeholder: While working on a project in Natron I tried to...
-    validations:
-      required: true
-  # What did the user expect to happen? What was the actual behavior?
-  - type: textarea
-    attributes:
-      label: What did you expect to happen? What happened instead?
+      label: What happened, and what did you expect?
       description: |
-        You may submit a link to any screenshots/videos that can be used to understand how to reproduce the issue. Additionally, depending on situation, you should also submit one of the following:
-          - If your problem can be reproduced using a Natron project, please include a link to the project on a file sharing service, or attach the project as a zip file to this issue, if possible.
-          - If your problem is a crash in an official release/snapshot, please include verbose output from the application from a terminal if possible.  If you also submitted a crash report, indicate the Crash ID if possible.
-          - If you need to report a compilation issue, please create a [gist](https://gist.github.com) that contains the _full_ verbose build log.
-          - If your problem is a crash in a build that you made yourself, please create a [gist](https://gist.github.com) that contains a _full_ backtrace.
+        Screenshots help a lot. For a crash, paste the text from the terminal if you launched from one, or attach the `natron_crash_*.log` file from your `%TEMP%` folder. For a wrong render, a small project (.ntp) that reproduces it is the fastest way to get it fixed.
 
-        Tip: You can attach images or log files by clicking this area to highlight it and then dragging files in.
+        Tip: drag images, logs or a zipped project into this box to attach them.
     validations:
       required: true
-  # Step-by-step reproduction instructions
   - type: textarea
     attributes:
-      label: Step-by-step reproduction instructions
+      label: Steps to reproduce
       placeholder: |
-        1. Start Natron...
-        2. Open attached project...
-        3. Run "..."
-        4. See error...
+        1. New project, add a Card3D and a Camera3D...
+        2. Connect to CyclesRender...
+        3. Set ... to ...
+        4. See ...
     validations:
       required: true
-  # Additional details
   - type: textarea
     attributes:
-      label: Additional details
-      description: Add any other relevant information here
+      label: Anything else
+      description: Node graph, custom plugin paths, whether it worked in an earlier release, etc.
     validations:
       required: false
