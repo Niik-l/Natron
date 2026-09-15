@@ -1,77 +1,88 @@
-# Natron
+# Natron fork — 3D / Cycles / Deep / Particles / Volumes
 
-## Fork: Natron 3D + Cycles
+[![GPL2 License](http://img.shields.io/:license-gpl2-blue.svg?)](LICENSE.txt)
 
-This fork extends Natron with a full 3D system, Cycles renderer, deep compositing pipeline, and particle system — 49 new built-in nodes.
+A fork of [Natron](https://github.com/NatronGitHub/Natron), the open-source node-based compositor, that adds a 3D system, the Cycles renderer + Cycles deep, a deep-compositing pipeline, a particle system, volumes, and an early 3D camera tracker — **69 new built-in nodes** — on a Qt6 / Python 3.14 / OpenGL 4.3 base. Windows builds only.
 
-**Highlights:**
-- 3D viewport with ImGuizmo gizmos (translate/rotate/scale)
-- Cycles renderer integration
-- PBR materials with texture maps (diffuse, normal, roughness, metallic, emission)
-- Alembic mesh + camera import
-- HDRI environment lighting with importance sampling
-- Motion blur, depth of field, AOV render passes
-- Native OCIO colour management — GPU-accelerated ACES views in the viewer (real-time, full float), config-aware material/output colourspaces; tested end-to-end on the ACES reference config **v4.0.0** (ACES 2.0)
-- Deep compositing (16 nodes)
-- Particle system (12 nodes: emitter, gravity, drag, turbulence, wind, attract, vortex, spawn, collide, killbox, merge)
-- SphericalTransform (8 projection types)
-- ColorChartMatch (color chart matching with matrix export)
+- **Download:** [Releases](https://github.com/Niik-l/Natron/releases) (portable archive, no installer)
+- **Node list:** [wiki](https://github.com/Niik-l/Natron/wiki) · developer notes in [NODE_REGISTRY.md](NODE_REGISTRY.md)
+- **Bugs / ideas:** [Issues](https://github.com/Niik-l/Natron/issues)
+- **Build it yourself:** [BUILDING.md](BUILDING.md) · change history in [DEV_3D_SYSTEM_CHANGELOG.md](DEV_3D_SYSTEM_CHANGELOG.md)
 
-**Underlying upgrades:**
-- Qt5 to Qt6 + PySide6/Shiboken6
-- Python 3.14
-- OpenGL 2.0 to OpenGL 4.3 (compatibility profile)
-- Eigen 3.3.7 to 3.4.0
-- C++17
+## A disclaimer
 
-**Platform note:** The OpenGL 4.3 upgrade means this fork currently requires Windows or Linux. macOS is limited to OpenGL 4.1 and is not supported at this time.
+This project is 100% vibe coded. I don't have a background in computer science or programming, and I don't consider myself a TD. I'm an artist who wanted a free way to clean up and grade HDRIs, and it grew from there. Expect rough edges, and please report them.
 
-See [NODE_REGISTRY.md](NODE_REGISTRY.md) for the full node list, [DEV_3D_SYSTEM_CHANGELOG.md](DEV_3D_SYSTEM_CHANGELOG.md) for technical details, and [BUILDING.md](BUILDING.md) for build instructions.
+If you've found this fork useful, consider buying me a beer :) **[Ko-fi](KOFI_LINK)** · **[PayPal](PAYPAL_LINK)**
+
+## What the fork adds
+
+| Area | Nodes | Highlights |
+|---|---|---|
+| 3D scene | 9 geometry + 9 scene/render + 4 camera/light + 3 material | 3D viewport with gizmos, Card / Sphere / Cube / Cylinder, ReadGeo (.obj / .abc), Alembic archives and cameras, **GeoBuilder** (draw grids over the plate, projected through the camera), Project3D / UVProject / MergeMat, PBR Material3D with texture maps, Megascans loader |
+| Cycles | in the scene/render set | Blender's Cycles path tracer as a node: materials, lights with **light-group AOVs**, HDRI domes, motion blur, DOF, AOV passes, shadow catcher and holdout, **CyclesRenderPass** that renders passes to versioned multi-layer EXR (deep EXR too) and builds the comp tree |
+| ScanlineRender | in the scene/render set | GLSL scanline renderer with AOVs and particle modes, for fast previews |
+| Deep compositing | 17 (+19 unreleased) | DeepRead / Write / Merge / Recolor / Flatten / Reformat / Expression …, deep to point cloud and back (**Blast** editing), Cycles native deep output |
+| Particles | 18 | Emitter, solver, forces, spawn, collisions, ParticleMaterial, instancing on geo, rendered in ScanlineRender and Cycles |
+| Volumes | in the geometry/render set | ReadVDB (fire / smoke), procedural Volume3D, **FastVolumeRender** real-time GPU preview |
+| Matchmove | 2 | CameraTracker (detect / track / solve) and PointCloudGenerator |
+| Colour + transform | 5 | GPU OCIO ACES views in the viewer (tested on the ACES 2.0 reference config), ColorChartMatch, SphericalTransform (8 projections), LensWarp |
+
+Templates menu: ready-made graphs for a basic 3D scene, the Megascans loader, Fast Volume Render, particle presets, and an HDRI face-edit rig.
+
+**Underlying upgrades:** Qt5 → Qt6 + PySide6, Python 3.14, OpenGL 2.0 → 4.3 (compatibility profile), Eigen 3.4, C++17.
+
+## Requirements
+
+- Windows 10 or 11, 64-bit. (The OpenGL 4.3 requirement rules out macOS; Linux is untested.)
+- A GPU with OpenGL 4.3 for the 3D viewport, ScanlineRender and FastVolumeRender.
+- Cycles renders on the CPU in the shipped builds.
+
+## Installing
+
+Download the `.7z` from the [Releases page](https://github.com/Niik-l/Natron/releases), extract it anywhere, and run `bin/Natron.exe`. The archive contains Natron, the bundled OpenFX plugins (openfx-io, openfx-misc, openfx-arena, openfx-gmic) and `NatronRenderer.exe` for command-line rendering. Nothing is written outside the folder except Natron's own settings.
+
+**Optional, but recommended:**
+
+- **An ACES OCIO config.** The archive bundles Natron's classic configs (nuke-default, blender, natron, spi, aces 0.x). For a modern ACES pipeline — the one this fork is tested on — download the ACES 2.0 studio config from the [OpenColorIO-Config-ACES releases](https://github.com/AcademySoftwareFoundation/OpenColorIO-Config-ACES/releases) and point Natron at it: Preferences → Color → OpenColorIO config → Custom, then choose the `.ocio` file. (Setting the `OCIO` environment variable works too, but it also affects other apps such as Blender.)
+- **OpenRV** for the *Open in RV* buttons on Write and CyclesRenderPass. Get a build from the [OpenRV releases](https://github.com/AcademySoftwareFoundation/OpenRV/releases), then either set the `NATRON_RV_PATH` environment variable to `rv.exe` or fill in the RV Executable knob on the node.
+
+To build from source, see [BUILDING.md](BUILDING.md) (MSYS2 / MinGW, with an automated script set under `tools/win-build/`).
+
+## Contributing
+
+Bugs and feature requests go to this fork's [issue tracker](https://github.com/Niik-l/Natron/issues) — the forms ask for the build version, the area involved and your OCIO config, which is usually what's needed to reproduce a report. Bugs that also happen in official Natron belong [upstream](https://github.com/NatronGitHub/Natron/issues).
+
+Development happens on `RB-2.6`; see [GIT_WORKFLOW.md](GIT_WORKFLOW.md) for the branch and commit conventions. Pull requests are welcome against `RB-2.6`.
+
+There's a `.git-hooks` directory in the root with a `pre-commit` hook that checks code style (`astyle`):
+
+```shell
+cd Natron
+mkdir .git/hooks
+ln -s ../../.git-hooks/pre-commit .git/hooks/pre-commit
+```
 
 ---
 
-[![GPL2 License](http://img.shields.io/:license-gpl2-blue.svg?)](https://github.com/NatronGitHub/Natron/blob/master/LICENSE.txt) [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-v1.4%20adopted-ff69b4.svg)](CODE_OF_CONDUCT.md) [![Build Status](https://api.travis-ci.org/NatronGitHub/Natron.svg?branch=RB-2.4)](https://travis-ci.org/NatronGitHub/Natron) [![Coverage Status](https://coveralls.io/repos/NatronGitHub/Natron/badge.svg?branch=master)](https://coveralls.io/r/NatronGitHub/Natron?branch=master) [![Documentation Status](https://readthedocs.org/projects/natron/badge/?version=rb-2.4)](http://natron.readthedocs.io/en/rb-2.4/) [![Packaging status](https://repology.org/badge/tiny-repos/natron.svg)](https://repology.org/project/natron/badges) [![OpenHub](https://www.openhub.net/p/natron/widgets/project_thin_badge?format=gif&ref=Thin+badge)](https://www.openhub.net/p/Natron)
+## About Natron
 
----
-
-Natron is a free, open-source (GPLv2 license) video compositor, similar in functionality to Adobe After Effects, Foundry's Nuke, or Blackmagic Fusion. It is portable and cross-platform (GNU/Linux, macOS, and Microsoft Windows).
+Natron is a free, open-source (GPLv2) video compositor, similar in functionality to Adobe After Effects, Foundry's Nuke, or Blackmagic Fusion. This fork is based on the NatronGitHub project; everything below is theirs.
 
 - Website: https://natrongithub.github.io
 - Source code: https://github.com/NatronGitHub/Natron
-- This fork (3D / Cycles / deep / particles / volumes): [node list](https://github.com/Niik-l/Natron/wiki) · [Windows builds](https://github.com/Niik-l/Natron/releases) · [issues](https://github.com/Niik-l/Natron/issues)
 - Forum: https://discuss.pixls.us/c/software/natron
 - Discord: https://discord.gg/cpMj5p3Fv5
 - User documentation: https://natron.readthedocs.io/
 
-## Help wanted
-
-Natron is looking for developers and maintainers! You can help develop and maintain Natron if you have the following skills:
-
-- [Git](https://en.wikipedia.org/wiki/Git) and [GitHub](https://en.wikipedia.org/wiki/GitHub)
-- [C++](https://en.wikipedia.org/wiki/C%2B%2B) (Natron uses C++17)
-- [Design patterns](https://en.wikipedia.org/wiki/Software_design_pattern)
-- [Qt](https://www.qt.io/) (Natron builds with Qt5 or Qt6 — see [BUILDING.md](BUILDING.md) for build instructions)
-- Basic knowledge of [OpenGL](https://en.wikipedia.org/wiki/OpenGL)
-- Basic knowledge of [Python](<https://en.wikipedia.org/wiki/Python_(programming_language)>)
-
-For more information, see the "Contributing" section below.
-
-If you are willing to help, please contact the development team on the [pixls.us Natron forum](https://discuss.pixls.us/c/software/natron).
-
-## Features
+### Features
 
 - 32-bit floating-point linear color processing pipeline.
 - Color management handled by [OpenColorIO](https://opencolorio.org/).
 - Dozens of video and image formats supported such as: H264, DNxHR, EXR, DPX, TIFF, JPG, PNG through [OpenImageIO](https://github.com/OpenImageIO/oiio) and [FFmpeg](https://ffmpeg.org/).
-- Support for many free, open-source, and commercial OpenFX plugins—currently almost all features of OpenFX v1.4 are supported. Those marked with (+) are included in the binary releases.
-  - [OpenFX-IO](https://github.com/NatronGitHub/openfx-io) (+)
-  - [OpenFX-Misc](https://github.com/NatronGitHub/openfx-misc) (+)
-  - [OpenFX-G'MIC](https://github.com/NatronGitHub/openfx-gmic) (+)
-  - [OpenFX-Arena](https://github.com/NatronGitHub/openfx-arena) (+)
-  - [All OFX products from RevisionFX](http://www.revisionfx.com)
-  - [Boris FX](https://borisfx.com/) OpenFX plugins, including Sapphire
-  - [Furnace by The Foundry](http://www.thefoundry.co.uk/products/furnace/)
-  - ...And many more! Please tell us if you successfully tested other commercial plugins.
+- Support for many free, open-source, and commercial OpenFX plugins—currently almost all features of OpenFX v1.4 are supported.
+  - [OpenFX-IO](https://github.com/NatronGitHub/openfx-io), [OpenFX-Misc](https://github.com/NatronGitHub/openfx-misc), [OpenFX-G'MIC](https://github.com/NatronGitHub/openfx-gmic), [OpenFX-Arena](https://github.com/NatronGitHub/openfx-arena) (all bundled in the releases)
+  - [All OFX products from RevisionFX](http://www.revisionfx.com), [Boris FX](https://borisfx.com/) OpenFX plugins including Sapphire, [Furnace by The Foundry](http://www.thefoundry.co.uk/products/furnace/), and many more.
 - Intuitive user interface: Natron aims not to break habits by providing an intuitive and familiar user interface. It is possible to customize and separate the graphical user interface on any number of screens. You can re-use your layouts and share your layout files (.nl).
 - Performance: In Natron, anything you do produces real-time feedback in the viewer thanks to the optimized multi-threaded rendering pipeline and support for proxy rendering (computing at a lower resolution to speed up rendering).
 - Multi-task: Natron can render multiple graphs at the same time. It can also be used as a background process in headless mode.
@@ -83,100 +94,5 @@ If you are willing to help, please contact the development team on the [pixls.us
 - Command-line rendering: Natron is capable of running without a GUI for batch rendering with scripts or on a render farm.
 - Rotoscoping, rotopainting, and tracking support
 - Multi-view workflow: Natron saves time by keeping all the views in the same stream. You can separate the views at any time with the OneView node.
-- Python scripting integration:
-
-  - Parameters expressions
-  - User-defined parameters
-  - Nodes groups as Python scripts
-  - Script editor to control the application overall
-  - User-defined python callbacks to respond to particular checkpoints of the internals of the software (change of a parameter, before rendering a frame, etc…)
-  - Integration of Pyside to the GUI so that the interface is extensible with new menus and windows
-
+- Python scripting integration: parameter expressions, user-defined parameters, node groups as Python scripts, a script editor, Python callbacks on internal events, and PySide integration so the interface is extensible with new menus and windows.
 - Multi-channel compositing: Natron can manipulate multi-layered EXR files thanks to OpenImageIO. Users can choose to work with any layer or channel on any node, new custom layers can also be created.
-
-## Requirements
-
-A machine running one of the supported operating systems (GNU/Linux, macOS, Microsoft Windows), and a 32-bits x86 or 64-bits x86-64 processor.
-
-An OpenGL 2.0 compatible graphics card is needed to run Natron (2.1+) with hardware-accelerated rendering. Other graphics cards work with software-only rendering (see below).
-
-The following graphics cards are supported for hardware-accelerated rendering:
-
-- Intel GMA 3150 (Linux-only)
-- Intel GMA X3xxx (Linux-only)
-- Intel GMA X4xxx (Windows 7 & Linux)
-- Intel HD (Ironlake) (Windows 7 & Linux)
-- Intel HD 2000/3000 (Sandy Bridge) (Windows 7/Linux/Mac)
-- Intel HD 4000 and greater (All platforms)
-- Nvidia GeForce 6 series and greater
-- Nvidia Quadro FX and greater
-- Nvidia Quadro NVS 285 and greater
-- ATI/AMD Radeon R300 and greater
-- ATI/AMD FireGL T2-64 and greater (FirePro)
-
-On Windows and Linux you can enable software rendering. On Linux, enable the environment variable LIBGL_ALWAYS_SOFTWARE=1 before running Natron. On Windows, enable the legacy hardware package in the installer.
-
-## Installing
-
-### Binary distribution
-
-Standalone binary distributions of Natron are available for GNU/Linux, Windows, and macOS on [GitHub](https://github.com/NatronGitHub/Natron/releases), or from [the Natron web site](https://natrongithub.github.io/#download). These distributions contain Natron and four included sets of OpenFX plugins:
-
-- [openfx-io](https://github.com/NatronGitHub/openfx-io/)
-- [openfx-misc](https://github.com/NatronGitHub/openfx-misc)
-- [openfx-arena](https://github.com/NatronGitHub/openfx-arena)
-- [openfx-gmic](https://github.com/NatronGitHub/openfx-gmic)
-
-Alternatively, on Linux systems you can install Natron through flatpak: ``` flatpak install fr.natron.Natron ```
-
-For each architecture / operating system, you can either download a stable release, a release candidate (if available), or one of the latest snapshots. Note that snapshots contain the latest features and bug fixes, but may be unstable.
-
-### Building and installing from source
-
-There are instructions for building Natron and the basic plugins from source is this directory on various architectures / operating systems:
-
-- [GNU/Linux](INSTALL_LINUX.md)
-- [macOS](INSTALL_MACOS.md)
-- [FreeBSD](INSTALL_FREEBSD.md)
-- [Windows](INSTALL_WINDOWS.md)
-
-This documentation may be slightly outdated, so do not hesitate to submit updated build instructions, especially for the various GNU/Linux distributions.
-
-### Automatic build scripts & other development tools
-
-These can be found in [tools/README.md](tools/README.MD)
-
-These scripts run on virtual machines running a specific operating system, setting these up is more complicated than the basic build process linked above.
-
-## Contributing
-
-### Low hanging fruits
-
-You should start contributing to the Natron project by first picking an easy task, and then gradually taking more difficult tasks. Here are a few sample tasks, by order of difficulty (from 0 to 10):
-
-- 2: Pyplugs, Shadertoy scripts (there are still developers for these, see https://github.com/NatronGitHub/natron-plugins )
-- 4: Write an OpenFX plugin, starting from an example in [openfx-misc](https://github.com/NatronGitHub/openfx-misc) or from the [official OpenFX](https://github.com/NatronGitHub/openfx) examples, for example try to make an OpenFX plugin from a widely-used PyPlug. There are a few OFX plugin developers in the community.
-- 5: Build Natron locally (on any system)
-- 7: Compile a redistributable Natron binary (Linux is easier since we build and ship most dependencies using the build scripts)
-- 9: Fix a simple Natron bug
-- 10: Add new functionality to Natron (see issues)
-
-### Logistics
-
-We coordinate development through the [GitHub issue tracker](https://github.com/NatronGitHub/Natron/issues).
-
-The main development branch is called ["master"](https://github.com/NatronGitHub/Natron/tree/master). The stable version is on branch RB-2.5.
-
-Additionally, each stable release supported has a branch on its own. For example, the stable release of the v1.0. and all its bug fixes should go into that branch. At some point, a version that is no longer supported will get removed from GitHub's branches and only a release tag will be available to get the source code at that point.
-
-Feel free to report bugs, discuss tasks, or pick up work there. If you want to make changes, please fork, edit, and [send us a pull request](https://github.com/NatronGitHub/Natron/pull/new/RB-2.5), preferably on the ["RB-2.5"](https://github.com/NatronGitHub/Natron/tree/RB-2.5) branch.
-
-There's a `.git-hooks` directory in the root. This contains a `pre-commit` hook that verifies code styling before accepting changes. You can add this to your local repository's `.git/hooks/` directory by doing the following:
-
-```shell
-cd Natron
-mkdir .git/hooks
-ln -s ../../.git-hooks/pre-commit .git/hooks/pre-commit
-```
-
-Pull requests that don't match the project code style are still likely to be accepted after manually formatting and amending your changeset. The formatting tool (`astyle`) is completely automated; please try to use it.
