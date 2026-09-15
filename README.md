@@ -38,6 +38,7 @@ Natron is a free, open-source (GPLv2 license) video compositor, similar in funct
 
 - Website: https://natrongithub.github.io
 - Source code: https://github.com/NatronGitHub/Natron
+- This fork (3D / Cycles / deep / particles / volumes): [node list](https://github.com/Niik-l/Natron/wiki) · [Windows builds](https://github.com/Niik-l/Natron/releases) · [issues](https://github.com/Niik-l/Natron/issues)
 - Forum: https://discuss.pixls.us/c/software/natron
 - Discord: https://discord.gg/cpMj5p3Fv5
 - User documentation: https://natron.readthedocs.io/
