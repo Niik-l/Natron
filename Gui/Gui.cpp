@@ -749,9 +749,11 @@ Gui::createMenuActions()
         QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateMegascansAsset()));
         menu3D->addAction(a);
 
-        a = new QAction(tr("VDB Fire / Smoke"), this);
-        a->setStatusTip(tr("Create ReadVDB + Dome Light + Scene + Camera + CyclesRender + Viewer"));
-        QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateVDBFire()));
+        a = new QAction(tr("Fast Volume Render (procedural cloud)"), this);
+        a->setStatusTip(tr("Real-time GPU volume preview: a procedural Volume3D cumulus lit by a blue key and "
+                           "a red fill -> Scene -> FastVolumeRender -> Viewer, plus an unconnected ReadVDB "
+                           "slot for a fire/smoke .vdb sequence"));
+        QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateFastVolume()));
         menu3D->addAction(a);
 
         a = new QAction(tr("Temp - Basic Particle System"), this);

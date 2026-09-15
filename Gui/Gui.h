@@ -587,7 +587,7 @@ public Q_SLOTS:
 
     // Templates
     void createTemplate3DBasic();
-    void createTemplateVDBFire();
+    void createTemplateFastVolume();
     void createTemplateParticles();
     void createTemplateParticleSparks();
     void createTemplateParticleJetExhaust();

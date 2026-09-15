@@ -17,6 +17,19 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Templates > 3D > Fast Volume Render (procedural cloud) (2026-09-15)** —
+  the user's fastVolume.ntp reference scene as a menu template, so it ships
+  with the build instead of living in the local demo_scenes folder: Volume3D
+  cumulus (resolution 200, density 35, noise + erosion, flattened) lit by a
+  blue key and a red fill → Scene → FastVolumeRender (sigma 0.486, light
+  factor 2) → Viewer, camera at z 14.4. A pathless ReadVDB beside the cloud
+  marks where a fire/smoke .vdb sequence goes (none shipped). Same
+  runTemplatePython pattern as the other templates; graph verified headlessly.
+  (demo_scenes/Act5_FastVolume.ntp, local only, is the same rig as a project.)
+  The old **VDB Fire / Smoke** template (ReadVDB + dome + CyclesRender, no
+  file) is removed at the user's request — the new one carries the ReadVDB
+  slot, and Cycles volume rendering is a knob change away from it.
+
 - **3D viewport: shape / material preview textures are cached by key
   (2026-09-11)** — user report: the 3D viewport crawls as soon as an image
   is attached to geometry (CheckerBoard on the img input of Sphere3D,

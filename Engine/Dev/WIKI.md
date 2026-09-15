@@ -471,9 +471,16 @@ ParticleEmitter → Gravity → Wind → ParticleSolver (Cube3D geo)
 ## Templates Menu
 
 The **Templates** menubar builds ready-to-play example graphs, organised by
-category: **3D** (Basic 3D Scene, VDB Fire/Smoke), **Particles** (below),
+category: **3D** (Basic 3D Scene, Fast Volume Render), **Particles** (below),
 **HDRI** (below), and **Project3D / Deep** (placeholders, templates to come).
 Each template is a starting point — refine knobs to taste.
+
+3D templates:
+
+| Template | What it builds |
+|----------|----------------|
+| Basic 3D Scene | Sphere + Light + Scene + Camera + CyclesRender + Viewer |
+| Fast Volume Render (procedural cloud) | Procedural **Volume3D** cumulus (noise on, dense, flattened base/top) lit by a blue key + red fill point light → Scene → **FastVolumeRender** → Viewer: real-time GPU volume preview, no Cycles. A pathless **ReadVDB** sits beside the cloud as the slot for a fire/smoke sequence — set its file and wire it to Scene input 4 to swap the procedural volume for a real one (no .vdb is shipped) |
 
 HDRI templates:
 
