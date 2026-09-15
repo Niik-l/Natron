@@ -13,7 +13,7 @@ A fork of [Natron](https://github.com/NatronGitHub/Natron), the open-source node
 
 This project is 100% vibe coded. I don't have a background in computer science or programming, and I don't consider myself a TD. I'm an artist who wanted a free way to clean up and grade HDRIs, and it grew from there. Expect rough edges, and please report them.
 
-If you've found this fork useful, consider buying me a beer :) **[Ko-fi](KOFI_LINK)** · **[PayPal](PAYPAL_LINK)**
+If you've found this fork useful, consider buying me a beer :) **[Ko-fi](https://ko-fi.com/niikl)** · **[PayPal](https://paypal.me/niikl)**
 
 ## What the fork adds
 
