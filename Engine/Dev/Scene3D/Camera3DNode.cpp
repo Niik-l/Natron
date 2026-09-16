@@ -35,6 +35,7 @@
 #include "../../Node.h"
 #include "../../Project.h"
 #include "../../ViewIdx.h"
+#include "RotationConventions.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -71,7 +72,69 @@ struct Camera3DNodePrivate
     // Sensor / project-format aspect info — discoverable mismatch + 1-click fix.
     KnobStringWPtr aspectInfo;
     KnobButtonWPtr matchAspectButton;
+
+    // Motion page
+    KnobBoolWPtr   handheldEnable;
+    KnobDoubleWPtr handheldAmount, handheldRotation, handheldTranslation;
+    KnobDoubleWPtr handheldFrequency, handheldRoughness, handheldRoll;
+    KnobIntWPtr    handheldSeed;
+    KnobBoolWPtr   pushEnable;
+    KnobChoiceWPtr pushMode;        // 0 dolly (move along the view axis), 1 zoom (focal length)
+    KnobDoubleWPtr pushDistance, pushFocalDelta;
+    KnobIntWPtr    pushStart, pushEnd;
+    KnobChoiceWPtr pushEase;        // 0 linear, 1 ease in-out, 2 ease in, 3 ease out
 };
+
+// ==================== Motion layer helpers ====================
+
+// Value noise (same construction as Volume3D's smoothNoise3D), used 1-D along
+// time with a per-channel offset so pan / tilt / roll / x / y / z decorrelate.
+static float motionHash3D(float x, float y, float z)
+{
+    float n = sinf(x * 127.1f + y * 311.7f + z * 74.7f) * 43758.5453f;
+    return n - floorf(n);
+}
+static float motionSmoothNoise(float x, float y, float z)
+{
+    float ix = floorf(x), iy = floorf(y), iz = floorf(z);
+    float fx = x - ix, fy = y - iy, fz = z - iz;
+    fx = fx * fx * (3.0f - 2.0f * fx);
+    fy = fy * fy * (3.0f - 2.0f * fy);
+    fz = fz * fz * (3.0f - 2.0f * fz);
+    float v000 = motionHash3D(ix, iy, iz),         v100 = motionHash3D(ix + 1, iy, iz);
+    float v010 = motionHash3D(ix, iy + 1, iz),     v110 = motionHash3D(ix + 1, iy + 1, iz);
+    float v001 = motionHash3D(ix, iy, iz + 1),     v101 = motionHash3D(ix + 1, iy, iz + 1);
+    float v011 = motionHash3D(ix, iy + 1, iz + 1), v111 = motionHash3D(ix + 1, iy + 1, iz + 1);
+    float v00 = v000 + fx * (v100 - v000), v10 = v010 + fx * (v110 - v010);
+    float v01 = v001 + fx * (v101 - v001), v11 = v011 + fx * (v111 - v011);
+    float v0 = v00 + fy * (v10 - v00),     v1 = v01 + fy * (v11 - v01);
+    return v0 + fz * (v1 - v0);
+}
+// Three-octave fBm in [-1, 1]: octave 0 is the slow drift, the higher octaves
+// the jitter; `roughness` (0..1) is the weight ratio between octaves, so 0 is
+// pure drift and 1 is equal-weight jitter.
+static double motionFbm(double t, double channel, double roughness)
+{
+    static const float kFreq[3] = { 1.0f, 2.17f, 4.73f };
+    double n = 0.0, wsum = 0.0, w = 1.0;
+    for (int o = 0; o < 3; ++o) {
+        const float v = motionSmoothNoise((float)(t * kFreq[o]) + 17.3f * o, (float)channel * 7.31f + 3.7f * o, 0.5f);
+        n += w * ((double)v - 0.5) * 2.0;
+        wsum += w;
+        w *= roughness;
+    }
+    return wsum > 0.0 ? n / wsum : 0.0;
+}
+static double motionEase(double s, int mode)
+{
+    s = std::max(0.0, std::min(1.0, s));
+    switch (mode) {
+        case 1: return s * s * (3.0 - 2.0 * s);       // ease in-out
+        case 2: return s * s;                         // ease in
+        case 3: return 1.0 - (1.0 - s) * (1.0 - s);   // ease out
+        default: return s;                            // linear
+    }
+}
 
 
 Camera3DNode::Camera3DNode(NodePtr node)
@@ -284,6 +347,93 @@ Camera3DNode::initializeKnobs()
         lensPage->addKnob(k); _imp->matchAspectButton = k;
     }
 
+    // --- Motion page: procedural layers on top of the keyframes ---
+    KnobPagePtr motionPage = AppManager::createKnob<KnobPage>(this, tr("Motion"));
+    auto mkDouble = [&](const char* name, const QString& label, double def, double dmin, double dmax,
+                        const QString& hint) -> KnobDoublePtr {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, label);
+        k->setName(name); k->setDefaultValue(def); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(dmin); k->setDisplayMaximum(dmax);
+        k->setHintToolTip(hint);
+        motionPage->addKnob(k);
+        return k;
+    };
+    {
+        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Handheld"));
+        sep->setName("sepHandheld"); motionPage->addKnob(sep);
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Handheld"));
+        k->setName("handheldEnable"); k->setDefaultValue(false); k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Add operator-style shake on top of the keyframed camera: layered noise on "
+                             "pan / tilt / roll and a little on position, in camera space. The keyframes "
+                             "are not changed; every renderer and the 3D viewport see the result."));
+        motionPage->addKnob(k); _imp->handheldEnable = k;
+    }
+    _imp->handheldAmount = mkDouble("handheldAmount", tr("Amount"), 1.0, 0.0, 2.0,
+        tr("Master scale for the shake. Animate it to ramp the shake in and out."));
+    _imp->handheldRotation = mkDouble("handheldRotation", tr("Rotation (deg)"), 0.5, 0.0, 5.0,
+        tr("Peak pan / tilt in degrees. 0.2-0.5 reads as a steady operator, 1-2 as walking."));
+    _imp->handheldTranslation = mkDouble("handheldTranslation", tr("Translation"), 0.02, 0.0, 1.0,
+        tr("Peak position drift in world units, applied sideways / up-down / forward in camera space."));
+    _imp->handheldFrequency = mkDouble("handheldFrequency", tr("Frequency (Hz)"), 1.0, 0.1, 10.0,
+        tr("Speed of the slowest layer of the shake, in cycles per second at the project frame rate."));
+    _imp->handheldRoughness = mkDouble("handheldRoughness", tr("Roughness"), 0.5, 0.0, 1.0,
+        tr("Mix of fast jitter over the slow drift. 0 = smooth float, 1 = nervous."));
+    _imp->handheldRoll = mkDouble("handheldRoll", tr("Roll Weight"), 0.3, 0.0, 1.0,
+        tr("How much of the rotation amount goes into roll. Real handheld rolls less than it pans."));
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Seed"));
+        k->setName("handheldSeed"); k->setDefaultValue(0); k->setDisplayMinimum(0); k->setDisplayMaximum(100);
+        k->setHintToolTip(tr("Different seeds give different shakes of the same character."));
+        motionPage->addKnob(k); _imp->handheldSeed = k;
+    }
+    {
+        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Push-in"));
+        sep->setName("sepPush"); motionPage->addKnob(sep);
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Push-in"));
+        k->setName("pushEnable"); k->setDefaultValue(false); k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Move the camera along its own view axis (or change the focal length) between "
+                             "two frames, with an ease, on top of the keyframes."));
+        motionPage->addKnob(k); _imp->pushEnable = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Mode"));
+        k->setName("pushMode");
+        std::vector<ChoiceOption> e;
+        e.push_back(ChoiceOption("Dolly", "", "Move the camera forward along its view axis"));
+        e.push_back(ChoiceOption("Zoom", "", "Change the focal length instead (dolly-zoom when combined with keyed position)"));
+        k->populateChoices(e); k->setDefaultValue(0);
+        motionPage->addKnob(k); _imp->pushMode = k;
+    }
+    _imp->pushDistance = mkDouble("pushDistance", tr("Distance"), 1.0, -20.0, 20.0,
+        tr("Dolly: how far the camera has moved along its view axis by the end frame. Positive pushes in."));
+    _imp->pushFocalDelta = mkDouble("pushFocalDelta", tr("Focal Change (mm)"), 15.0, -50.0, 100.0,
+        tr("Zoom: focal length added by the end frame. Positive zooms in."));
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Start Frame"));
+        k->setName("pushStart"); k->setDefaultValue(1); k->setDisplayMinimum(0); k->setDisplayMaximum(500);
+        motionPage->addKnob(k); _imp->pushStart = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("End Frame"));
+        k->setName("pushEnd"); k->setDefaultValue(50); k->setDisplayMinimum(0); k->setDisplayMaximum(500);
+        motionPage->addKnob(k); _imp->pushEnd = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Ease"));
+        k->setName("pushEase");
+        std::vector<ChoiceOption> e;
+        e.push_back(ChoiceOption("Linear", "", ""));
+        e.push_back(ChoiceOption("Ease In-Out", "", "Slow start and end"));
+        e.push_back(ChoiceOption("Ease In", "", "Slow start"));
+        e.push_back(ChoiceOption("Ease Out", "", "Slow end"));
+        k->populateChoices(e); k->setDefaultValue(1);
+        motionPage->addKnob(k); _imp->pushEase = k;
+    }
+
     refreshAspectInfo();
 }
 
@@ -420,12 +570,79 @@ Camera3DNode::getCameraPosition(double time,
     rx = _imp->rotateX.lock()->getValueAtTime(time);
     ry = _imp->rotateY.lock()->getValueAtTime(time);
     rz = _imp->rotateZ.lock()->getValueAtTime(time);
+    double focal = 0.0;   // unused here; the focal getter applies its own layer
+    applyMotionLayers(time, tx, ty, tz, rx, ry, rz, focal);
 }
 
 double
 Camera3DNode::getCameraFocalLength(double time) const
 {
-    return _imp->focalLength.lock()->getValueAtTime(time);
+    double focal = _imp->focalLength.lock()->getValueAtTime(time);
+    double tx = 0, ty = 0, tz = 0, rx = 0, ry = 0, rz = 0;
+    applyMotionLayers(time, tx, ty, tz, rx, ry, rz, focal);
+    return focal;
+}
+
+void
+Camera3DNode::applyMotionLayers(double time, double& tx, double& ty, double& tz,
+                                double& rx, double& ry, double& rz, double& focal) const
+{
+    KnobBoolPtr hh = _imp->handheldEnable.lock();
+    KnobBoolPtr pu = _imp->pushEnable.lock();
+    const bool handheld = hh && hh->getValueAtTime(time);
+    const bool push = pu && pu->getValue();
+    if (!handheld && !push) return;
+
+    // Camera-space axes at the keyframed rotation: column-vector R = Rz*Ry*Rx,
+    // camera looks down its local -Z.
+    double R[3][3];
+    RotationConventions::compose(rx, ry, rz, R);
+    const double fwd[3] = { -R[0][2], -R[1][2], -R[2][2] };
+
+    if (push) {
+        const int f0 = _imp->pushStart.lock()->getValue();
+        const int f1 = _imp->pushEnd.lock()->getValue();
+        const double span = (double)(f1 - f0);
+        const double s = motionEase(span > 0.0 ? (time - f0) / span : (time >= f1 ? 1.0 : 0.0),
+                                    _imp->pushEase.lock()->getValue());
+        if (_imp->pushMode.lock()->getValue() == 0) {
+            const double d = _imp->pushDistance.lock()->getValueAtTime(time) * s;
+            tx += fwd[0] * d; ty += fwd[1] * d; tz += fwd[2] * d;
+        } else {
+            focal += _imp->pushFocalDelta.lock()->getValueAtTime(time) * s;
+        }
+    }
+
+    if (handheld) {
+        const double amount = _imp->handheldAmount.lock()->getValueAtTime(time);
+        if (amount != 0.0) {
+            double fps = 24.0;
+            if (AppInstancePtr app = getApp()) {
+                if (ProjectPtr proj = app->getProject()) {
+                    const double f = proj->getProjectFrameRate();
+                    if (f > 0.0) fps = f;
+                }
+            }
+            const double freq = _imp->handheldFrequency.lock()->getValueAtTime(time);
+            const double rough = std::max(0.0, std::min(1.0, _imp->handheldRoughness.lock()->getValueAtTime(time)));
+            const double seed = (double)_imp->handheldSeed.lock()->getValue() * 13.37;
+            const double t = time / fps * freq + seed;
+            const double rotAmp = _imp->handheldRotation.lock()->getValueAtTime(time) * amount;
+            const double trAmp  = _imp->handheldTranslation.lock()->getValueAtTime(time) * amount;
+            const double roll   = _imp->handheldRoll.lock()->getValueAtTime(time);
+            // Rotation: tilt (x), pan (y), roll (z, weighted).
+            rx += rotAmp * motionFbm(t, 1.0, rough);
+            ry += rotAmp * motionFbm(t, 2.0, rough);
+            rz += rotAmp * roll * motionFbm(t, 3.0, rough);
+            // Translation in camera space (sideways, up, forward) -> world.
+            const double ox = trAmp * motionFbm(t, 4.0, rough);
+            const double oy = trAmp * motionFbm(t, 5.0, rough);
+            const double oz = trAmp * 0.5 * motionFbm(t, 6.0, rough);
+            tx += R[0][0] * ox + R[0][1] * oy + R[0][2] * oz;
+            ty += R[1][0] * ox + R[1][1] * oy + R[1][2] * oz;
+            tz += R[2][0] * ox + R[2][1] * oy + R[2][2] * oz;
+        }
+    }
 }
 
 double

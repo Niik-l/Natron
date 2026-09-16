@@ -17,6 +17,27 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Camera3D Motion page: Handheld + Push-in layers (2026-09-16)** — step 2
+  of the camera-controls plan. `applyMotionLayers()` runs inside
+  `getCameraPosition` and `getCameraFocalLength`, so the 3D viewport,
+  ScanlineRender (including its sub-frame motion-blur samples), Cycles,
+  CyclesRenderPass and GeoBuilder all see the same modified pose while the
+  keyframes stay untouched. **Handheld**: three-octave value-noise fBm along
+  time (same construction as Volume3D's noise; per-channel offsets
+  decorrelate pan / tilt / roll / x / y / z) with Amount (animatable, ramp
+  it), Rotation (deg), Translation (camera-space, forward at half weight),
+  Frequency (Hz at the project fps), Roughness (octave weight ratio: 0 =
+  slow drift, 1 = nervous), Roll Weight, Seed. **Push-in**: Dolly moves the
+  camera along its own view axis (-Z through RotationConventions::compose)
+  by Distance between Start and End frame with a Linear / Ease In-Out /
+  Ease In / Ease Out curve; Zoom adds Focal Change (mm) instead, so a
+  dolly-zoom is Zoom + keyed position. All renderers already declare
+  frame-varying, so the time-dependent noise renders per frame. Verified
+  headlessly through Cycles: layers off -> frames 1/2 identical; handheld
+  -> frames differ from each other and from off; dolly and zoom -> the card
+  grows from 1160 px wide at frame 1 to the full frame at frame 50.
+  Look-at (target + damping) and the Path3D rail are the remaining steps.
+
 - **Camera3D motion trail in the 3D viewport (2026-09-16)** — step 1 of the
   camera-controls plan (survey: AE wiggle / Blender noise modifier + Follow
   Path / C4D Motion Camera / Maya editable motion trails). When a Camera3D is

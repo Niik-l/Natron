@@ -126,6 +126,14 @@ private:
     // Called from knobChanged and re-applied on project load (onKnobsLoaded).
     void applyTransformLock();
 
+    // Motion page: procedural layers (handheld noise, push-in) applied on top
+    // of the keyframed pose. Every consumer goes through getCameraPosition /
+    // getCameraFocalLength, so this reaches the viewport, ScanlineRender (incl.
+    // its sub-frame motion-blur samples), Cycles and GeoBuilder alike, and the
+    // keyframes themselves stay untouched.
+    void applyMotionLayers(double time, double& tx, double& ty, double& tz,
+                           double& rx, double& ry, double& rz, double& focal) const;
+
     std::unique_ptr<Camera3DNodePrivate> _imp;
 };
 
