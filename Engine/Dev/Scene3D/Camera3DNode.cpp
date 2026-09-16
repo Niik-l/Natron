@@ -36,6 +36,7 @@
 #include "../../Project.h"
 #include "../../ViewIdx.h"
 #include "RotationConventions.h"
+#include "../DotUtils.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -83,6 +84,9 @@ struct Camera3DNodePrivate
     KnobDoubleWPtr pushDistance, pushFocalDelta;
     KnobIntWPtr    pushStart, pushEnd;
     KnobChoiceWPtr pushEase;        // 0 linear, 1 ease in-out, 2 ease in, 3 ease out
+    KnobBoolWPtr   lookAtEnable;
+    KnobChoiceWPtr lookAtMode;      // 0 target input, 1 point
+    KnobDoubleWPtr lookAtX, lookAtY, lookAtZ, lookAtWeight;
 };
 
 // ==================== Motion layer helpers ====================
@@ -433,6 +437,34 @@ Camera3DNode::initializeKnobs()
         k->populateChoices(e); k->setDefaultValue(1);
         motionPage->addKnob(k); _imp->pushEase = k;
     }
+    {
+        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Look-at"));
+        sep->setName("sepLookAt"); motionPage->addKnob(sep);
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Look-at"));
+        k->setName("lookAtEnable"); k->setDefaultValue(false); k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Aim the camera at a target instead of using the keyed rotation: the node on "
+                             "the target input (its position, through Dots), or the Point below. The keyed "
+                             "roll is kept; the keyed pan / tilt are ignored while this is on. Handheld "
+                             "shake is added after the aim, so the camera drifts around the subject."));
+        motionPage->addKnob(k); _imp->lookAtEnable = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Target"));
+        k->setName("lookAtMode");
+        std::vector<ChoiceOption> e;
+        e.push_back(ChoiceOption("Target input", "", "Aim at the node connected to the target input (falls back to the Point when nothing is connected)"));
+        e.push_back(ChoiceOption("Point", "", "Aim at the X / Y / Z below"));
+        k->populateChoices(e); k->setDefaultValue(0);
+        motionPage->addKnob(k); _imp->lookAtMode = k;
+    }
+    _imp->lookAtX = mkDouble("lookAtX", tr("Point X"), 0.0, -100.0, 100.0, tr("World-space aim point (Point mode)."));
+    _imp->lookAtY = mkDouble("lookAtY", tr("Point Y"), 0.0, -100.0, 100.0, tr("World-space aim point (Point mode)."));
+    _imp->lookAtZ = mkDouble("lookAtZ", tr("Point Z"), 0.0, -100.0, 100.0, tr("World-space aim point (Point mode)."));
+    _imp->lookAtWeight = mkDouble("lookAtWeight", tr("Weight"), 1.0, 0.0, 1.0,
+        tr("1 = locked on the target; lower values blend towards the keyed rotation, so the aim "
+           "only partly follows the subject. Animate it to pick up or let go of a target."));
 
     refreshAspectInfo();
 }
@@ -583,20 +615,88 @@ Camera3DNode::getCameraFocalLength(double time) const
     return focal;
 }
 
+bool
+Camera3DNode::lookAtTarget(double time, double out[3]) const
+{
+    const int mode = _imp->lookAtMode.lock() ? _imp->lookAtMode.lock()->getValue() : 0;
+    if (mode == 0) {
+        EffectInstancePtr tgt = skipDots(const_cast<Camera3DNode*>(this)->getInput(0));
+        if (tgt) {
+            if (CameraProvider* cp = dynamic_cast<CameraProvider*>(tgt.get())) {
+                double rx, ry, rz;
+                cp->getCameraPosition(time, out[0], out[1], out[2], rx, ry, rz);
+                return true;
+            }
+            static const char* const kT[3] = { "translateX", "translateY", "translateZ" };
+            bool ok = true;
+            for (int i = 0; i < 3 && ok; ++i) {
+                KnobIPtr k = tgt->getKnobByName(kT[i]);
+                KnobDouble* kd = k ? dynamic_cast<KnobDouble*>(k.get()) : NULL;
+                if (kd) out[i] = kd->getValueAtTime(time); else ok = false;
+            }
+            if (ok) return true;
+        }
+        // nothing usable connected: fall through to the point
+    }
+    out[0] = _imp->lookAtX.lock()->getValueAtTime(time);
+    out[1] = _imp->lookAtY.lock()->getValueAtTime(time);
+    out[2] = _imp->lookAtZ.lock()->getValueAtTime(time);
+    return true;
+}
+
 void
 Camera3DNode::applyMotionLayers(double time, double& tx, double& ty, double& tz,
                                 double& rx, double& ry, double& rz, double& focal) const
 {
     KnobBoolPtr hh = _imp->handheldEnable.lock();
     KnobBoolPtr pu = _imp->pushEnable.lock();
+    KnobBoolPtr la = _imp->lookAtEnable.lock();
     const bool handheld = hh && hh->getValueAtTime(time);
     const bool push = pu && pu->getValue();
-    if (!handheld && !push) return;
+    const bool lookAt = la && la->getValueAtTime(time);
+    if (!handheld && !push && !lookAt) return;
 
     // Camera-space axes at the keyframed rotation: column-vector R = Rz*Ry*Rx,
     // camera looks down its local -Z.
     double R[3][3];
     RotationConventions::compose(rx, ry, rz, R);
+
+    if (lookAt) {
+        double target[3];
+        const double w = std::max(0.0, std::min(1.0, _imp->lookAtWeight.lock()->getValueAtTime(time)));
+        if (w > 0.0 && lookAtTarget(time, target)) {
+            // Aimed forward, blended with the keyed forward by Weight.
+            double f[3] = { target[0] - tx, target[1] - ty, target[2] - tz };
+            double len = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+            if (len > 1e-9) {
+                for (int i = 0; i < 3; ++i) f[i] = f[i] / len * w + (-R[i][2]) * (1.0 - w);
+                len = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+            }
+            if (len > 1e-9) {
+                for (int i = 0; i < 3; ++i) f[i] /= len;
+                // Camera frame: z = -forward, x = up x z, y = z x x (world Y up,
+                // world Z as the up hint when looking straight up / down).
+                const double z[3] = { -f[0], -f[1], -f[2] };
+                double up[3] = { 0.0, 1.0, 0.0 };
+                if (std::fabs(z[1]) > 0.999) { up[0] = 0.0; up[1] = 0.0; up[2] = 1.0; }
+                double x[3] = { up[1] * z[2] - up[2] * z[1], up[2] * z[0] - up[0] * z[2], up[0] * z[1] - up[1] * z[0] };
+                const double xl = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+                for (int i = 0; i < 3; ++i) x[i] /= xl;
+                const double y[3] = { z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0] };
+                // Keep the keyed roll: post-rotate about the camera's own z.
+                const double rr = rz * M_PI / 180.0, c = std::cos(rr), sn = std::sin(rr);
+                double L[3][3];
+                for (int i = 0; i < 3; ++i) {
+                    L[i][0] = x[i] * c + y[i] * sn;
+                    L[i][1] = -x[i] * sn + y[i] * c;
+                    L[i][2] = z[i];
+                }
+                RotationConventions::decompose(L, rx, ry, rz);
+                for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) R[i][j] = L[i][j];
+            }
+        }
+    }
+
     const double fwd[3] = { -R[0][2], -R[1][2], -R[2][2] };
 
     if (push) {

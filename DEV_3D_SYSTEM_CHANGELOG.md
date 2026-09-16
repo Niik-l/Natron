@@ -36,7 +36,18 @@ Recent milestones:
   headlessly through Cycles: layers off -> frames 1/2 identical; handheld
   -> frames differ from each other and from off; dolly and zoom -> the card
   grows from 1160 px wide at frame 1 to the full frame at frame 50.
-  Look-at (target + damping) and the Path3D rail are the remaining steps.
+  **Look-at** (same day): Camera3D gains one optional input, **target**; the
+  Look-at group aims the camera at that node's position (a CameraProvider's
+  pose or its translate knobs, through Dots) or at Point X/Y/Z, with
+  **Weight** blending the aimed forward against the keyed forward (1 =
+  locked on; animate it to pick up / let go). The keyed roll is kept by
+  post-rotating the aimed frame about the camera's own z; world Y is the up
+  hint (world Z when looking straight up or down). Order inside
+  applyMotionLayers: look-at (rotation) -> push-in along the *aimed* axis ->
+  handheld, so the shake drifts around the subject. Verified headlessly:
+  a camera keyed 90 deg away frames nothing; Point and Target-input modes
+  both frame the card identically (930x620 alpha bbox). The Path3D rail
+  and dragging keys on the trail are the remaining steps.
 
 - **Camera3D motion trail in the 3D viewport (2026-09-16)** — step 1 of the
   camera-controls plan (survey: AE wiggle / Blender noise modifier + Follow

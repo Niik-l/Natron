@@ -63,7 +63,9 @@ public:
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
+    // One optional input: "target", the node the Look-at layer aims at.
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
+    virtual std::string getInputLabel(int /*inputNb*/) const OVERRIDE FINAL WARN_UNUSED_RETURN { return "target"; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
@@ -133,6 +135,9 @@ private:
     // keyframes themselves stay untouched.
     void applyMotionLayers(double time, double& tx, double& ty, double& tz,
                            double& rx, double& ry, double& rz, double& focal) const;
+    // World position of the Look-at target at `time`: the target input's
+    // camera pose or translate knobs, else the Point knobs. False = nothing to aim at.
+    bool lookAtTarget(double time, double out[3]) const;
 
     std::unique_ptr<Camera3DNodePrivate> _imp;
 };
