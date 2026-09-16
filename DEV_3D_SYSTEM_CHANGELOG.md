@@ -17,6 +17,22 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Camera3D motion trail in the 3D viewport (2026-09-16)** — step 1 of the
+  camera-controls plan (survey: AE wiggle / Blender noise modifier + Follow
+  Path / C4D Motion Camera / Maya editable motion trails). When a Camera3D is
+  selected, `Viewport3D::drawCameraMotionTrail` draws the path its keyframes
+  produce: the six transform knobs' curves give the key span, the camera is
+  sampled once per frame through `getCameraPosition`, drawn as a line strip
+  with a small dot per frame, a large white dot on every translate keyframe
+  and a green marker at the current frame; depth test off so it reads
+  through geometry. World space (drawn before the node's matrix push); a
+  camera under a Group3D uses the parent's world matrix at the current
+  frame only. New display-only knob **Show Motion Trail** (Lens page, default
+  on); cameras without it (ReadAlembicCamera) draw none. Next steps in the
+  plan: drag keyframe dots on the trail; a Path3D rail + position-along-path;
+  a Camera Motion tab (handheld noise / push-in / look-at) layered inside
+  getCameraPosition so every consumer and motion blur pick it up.
+
 - **Templates > 3D > Fast Volume Render (procedural cloud) (2026-09-15)** —
   the user's fastVolume.ntp reference scene as a menu template, so it ships
   with the build instead of living in the local demo_scenes folder: Volume3D

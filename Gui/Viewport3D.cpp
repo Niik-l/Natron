@@ -27,6 +27,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 #include <algorithm>
 #include <map>
 
@@ -85,6 +86,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/CreateNodeArgs.h"
 #include "Engine/Knob.h"
 #include "Engine/KnobTypes.h"
+#include "Engine/Curve.h"
 #include "Engine/Node.h"
 #include "Engine/NodeGroup.h"
 #include "Engine/Project.h"
@@ -1680,6 +1682,9 @@ Viewport3D::paintGL()
         // ReadAlembicArchive) where many SceneNodes share one Natron source —
         // reading knobs from the source would draw them all at the same place.
         // Also picks up Group3D parent transforms correctly.
+        if (sn.type == eSceneNodeCamera && sn.name == _imp->selectedNodeName) {
+            drawCameraMotionTrail(sn, sceneNodes);   // world space: before the push
+        }
         glPushMatrix();
         glMultMatrixf(sn.worldMatrix);
 
@@ -3619,6 +3624,118 @@ Viewport3D::drawCameraNode(const SceneNode& sn) const
     glEnd();
 
     glLineWidth(1.0f);
+}
+
+// Motion trail: the path the selected camera's keyframes produce, sampled once
+// per frame between its first and last key (Maya / Blender "motion path").
+// Display only; the Camera3D "Show Motion Trail" knob turns it off. A camera
+// under a Group3D is drawn through the parent's world matrix at the CURRENT
+// frame - an animated parent would need a per-frame graph rebuild, not done.
+void
+Viewport3D::drawCameraMotionTrail(const SceneNode& sn, const std::vector<SceneNode>& all) const
+{
+    NodePtr node = sn.sourceNode.lock();
+    if (!node) return;
+    EffectInstancePtr effect = node->getEffectInstance();
+    if (!effect) return;
+    CameraProvider* cam = dynamic_cast<CameraProvider*>(effect.get());
+    if (!cam) return;
+    {
+        KnobIPtr k = effect->getKnobByName("showMotionTrail");
+        KnobBool* kb = k ? dynamic_cast<KnobBool*>(k.get()) : NULL;
+        if (!kb || !kb->getValue()) return;   // no knob (Alembic camera) = no trail
+    }
+    Gui* gui = getGui();
+    if (!gui) return;
+    GuiAppInstancePtr app = gui->getApp();
+    if (!app) return;
+
+    // Key span across the six transform knobs; keyframe times on the translates
+    // get the larger dots (a rotation-only key does not move the trail).
+    static const char* const kTranslate[] = { "translateX", "translateY", "translateZ" };
+    static const char* const kRotate[]    = { "rotateX", "rotateY", "rotateZ" };
+    double first = 0, last = 0;
+    bool any = false;
+    std::set<int> keyFrames;
+    for (int pass = 0; pass < 2; ++pass) {
+        const char* const* names = pass == 0 ? kTranslate : kRotate;
+        for (int i = 0; i < 3; ++i) {
+            KnobIPtr k = effect->getKnobByName(names[i]);
+            if (!k) continue;
+            std::shared_ptr<Curve> c = k->getCurve(ViewIdx(0), 0);
+            if (!c) continue;
+            KeyFrameSet keys = c->getKeyFrames_mt_safe();
+            for (KeyFrameSet::const_iterator it = keys.begin(); it != keys.end(); ++it) {
+                const double t = it->getTime();
+                if (!any || t < first) first = t;
+                if (!any || t > last) last = t;
+                any = true;
+                if (pass == 0) keyFrames.insert((int)std::floor(t + 0.5));
+            }
+        }
+    }
+    if (!any || last - first < 0.5) return;   // static camera: nothing to draw
+
+    // Parent transform (Group3D) at the current frame; identity at the root.
+    const float* parentW = NULL;
+    if (sn.parentIndex >= 0 && sn.parentIndex < (int)all.size()) {
+        parentW = all[sn.parentIndex].worldMatrix;
+    }
+    auto worldPos = [&](double t, float out[3]) {
+        double tx, ty, tz, rx, ry, rz;
+        cam->getCameraPosition(t, tx, ty, tz, rx, ry, rz);
+        if (!parentW) { out[0] = (float)tx; out[1] = (float)ty; out[2] = (float)tz; return; }
+        const float* m = parentW;   // column-major
+        out[0] = (float)(m[0] * tx + m[4] * ty + m[8]  * tz + m[12]);
+        out[1] = (float)(m[1] * tx + m[5] * ty + m[9]  * tz + m[13]);
+        out[2] = (float)(m[2] * tx + m[6] * ty + m[10] * tz + m[14]);
+    };
+
+    const int f0 = (int)std::floor(first), f1 = (int)std::ceil(last);
+    const int nFrames = f1 - f0 + 1;
+    if (nFrames > 100000) return;   // absurd range: refuse rather than stall the GUI
+    std::vector<float> pts((size_t)nFrames * 3);
+    for (int f = f0; f <= f1; ++f) worldPos((double)f, &pts[(size_t)(f - f0) * 3]);
+
+    GLProtectAttrib a(GL_ENABLE_BIT | GL_LINE_BIT | GL_POINT_BIT | GL_CURRENT_BIT | GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);        // always readable, like a Maya motion trail
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_LINE_SMOOTH);
+    glEnable(GL_POINT_SMOOTH);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Path: one line strip through every frame.
+    glColor4f(1.0f, 0.8f, 0.2f, 0.85f);
+    glLineWidth(1.5f);
+    glBegin(GL_LINE_STRIP);
+    for (int i = 0; i < nFrames; ++i) glVertex3fv(&pts[(size_t)i * 3]);
+    glEnd();
+
+    // Frame ticks (small), keyframes (large, white), current frame (green).
+    glPointSize(3.0f);
+    glColor4f(1.0f, 0.8f, 0.2f, 0.6f);
+    glBegin(GL_POINTS);
+    for (int i = 0; i < nFrames; ++i) glVertex3fv(&pts[(size_t)i * 3]);
+    glEnd();
+    glPointSize(7.0f);
+    glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+    glBegin(GL_POINTS);
+    for (std::set<int>::const_iterator it = keyFrames.begin(); it != keyFrames.end(); ++it) {
+        if (*it >= f0 && *it <= f1) glVertex3fv(&pts[(size_t)(*it - f0) * 3]);
+    }
+    glEnd();
+    const double now = app->getTimeLine()->currentFrame();
+    if (now >= f0 && now <= f1) {
+        float cur[3];
+        worldPos(now, cur);
+        glPointSize(9.0f);
+        glColor4f(0.2f, 1.0f, 0.3f, 1.0f);
+        glBegin(GL_POINTS);
+        glVertex3fv(cur);
+        glEnd();
+    }
 }
 
 void

@@ -192,6 +192,7 @@ private:
     void drawMeshNode(const SceneNode& sn) const;
     void drawCardNode(const SceneNode& sn) const;
     void drawCameraNode(const SceneNode& sn) const;
+    void drawCameraMotionTrail(const SceneNode& sn, const std::vector<SceneNode>& all) const;
     void drawPointCloudNode(const SceneNode& sn) const;
     void drawGroupNode(const SceneNode& sn) const;
     void drawSphereNode(const SceneNode& sn) const;

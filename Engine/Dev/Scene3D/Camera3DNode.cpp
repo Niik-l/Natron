@@ -66,6 +66,7 @@ struct Camera3DNodePrivate
 
     // Viewport display only — length of the frustum gizmo drawn in the 3D viewport.
     KnobDoubleWPtr frustumDisplayLength;
+    KnobBoolWPtr showMotionTrail;
 
     // Sensor / project-format aspect info — discoverable mismatch + 1-click fix.
     KnobStringWPtr aspectInfo;
@@ -252,6 +253,17 @@ Camera3DNode::initializeKnobs()
         k->setHintToolTip(tr("Length of the camera frustum drawn in the 3D viewport. "
                              "Display only — does not affect rendering or the camera itself."));
         lensPage->addKnob(k); _imp->frustumDisplayLength = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Show Motion Trail"));
+        k->setName("showMotionTrail");
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false); // viewport only
+        k->setHintToolTip(tr("Draw the path this camera's keyframes produce in the 3D viewport when the "
+                             "camera is selected: one dot per frame, larger dots on keyframes, a marker at "
+                             "the current frame. Display only."));
+        lensPage->addKnob(k); _imp->showMotionTrail = k;
     }
 
     // --- Aspect info (informational, refreshed live) ---
