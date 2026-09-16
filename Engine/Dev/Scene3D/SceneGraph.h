@@ -50,7 +50,8 @@ enum SceneNodeType {
     eSceneNodeParticles,
     eSceneNodeVolume,
     eSceneNodeLight,
-    eSceneNodeTransform
+    eSceneNodeTransform,
+    eSceneNodePath          // Path3D rail: control points are world space, local = identity
 };
 
 /**

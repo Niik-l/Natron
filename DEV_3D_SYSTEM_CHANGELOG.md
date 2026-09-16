@@ -17,6 +17,32 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Path3D rail + Camera3D "path" input (2026-09-16)** — step 3 of the
+  camera-controls plan. New node **Path3D** (3D menu; `PathProvider`
+  interface in `Engine/Dev/Scene3D/PathProvider.h`): a Catmull-Rom curve
+  through control points kept in a hidden `pointsData` knob ("x y z" per
+  line); Add Point continues the last direction, Delete Point, Selected
+  Point, Closed. The selected point's position is mirrored into
+  translateX/Y/Z — the names the viewport gizmo reads and writes — so the
+  stock gizmo drags control points with no gizmo changes (undo works through
+  the existing GizmoTransformUndoCommand). The viewport draws the curve, the
+  dim control polygon, the points (selected = white) and a direction arrow
+  at u = 0 (`drawPathNode`, new `eSceneNodePath` scene-node type, identity
+  local matrix); clicking a point of the selected Path3D sets Selected Point
+  (`pickPathPointAtPosition`, tried before the point-cloud pick).
+  `evalPath(u)` is arc-length parametrised (32 samples per segment,
+  cumulative table cached by the points string), so keying u 0 -> 1 gives
+  constant speed; closed paths wrap. Camera3D gains a second optional
+  input, **path**, and a Path group on the Motion page: **Follow Path**
+  (position from the rail at **Position Along Path**, keyed translate
+  ignored) and **Align To Path** (aim along the tangent, keyed roll kept;
+  Look-at overrides it). Layer order: path -> look-at -> push-in ->
+  handheld. `cameraFrameFromForward()` now serves both look-at and align.
+  Verified headlessly: Add/Delete/translate edits round-trip through
+  pointsData; a camera riding a 3-point rail with look-at at the origin
+  frames the card from three different positions at u = 0 / 0.5 / 1.
+  Remaining step: dragging keyframe dots on the motion trail.
+
 - **Camera3D Motion page: Handheld + Push-in layers (2026-09-16)** — step 2
   of the camera-controls plan. `applyMotionLayers()` runs inside
   `getCameraPosition` and `getCameraFocalLength`, so the 3D viewport,

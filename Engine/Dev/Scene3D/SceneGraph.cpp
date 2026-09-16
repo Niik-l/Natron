@@ -30,6 +30,7 @@
 #include <map>
 
 #include "Camera3DNode.h"
+#include "Path3D.h"
 #include "Card3D.h"
 #include "Cube3D.h"
 #include "Cylinder3D.h"
@@ -366,6 +367,17 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
                      (float)crx, (float)cry, (float)crz,
                      1, 1, 1, sn.localMatrix);
 
+            nameToIndex[nodeName] = (int)_nodes.size();
+            _nodes.push_back(sn);
+            continue;
+        }
+
+        // --- Path3D (rail) ---
+        if (dynamic_cast<Path3D*>(effect.get())) {
+            SceneNode sn;
+            sn.type = eSceneNodePath;
+            sn.name = nodeName;
+            sn.sourceNode = node;
             nameToIndex[nodeName] = (int)_nodes.size();
             _nodes.push_back(sn);
             continue;

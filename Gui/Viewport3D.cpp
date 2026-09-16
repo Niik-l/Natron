@@ -61,6 +61,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/Cube3D.h"
 #include "Engine/Dev/Scene3D/Cylinder3D.h"
 #include "Engine/Dev/Scene3D/MeshProvider.h"
+#include "Engine/Dev/Scene3D/Path3D.h"
 #include "Engine/Dev/Scene3D/ReadAlembicCamera.h"
 #include "Engine/Dev/Scene3D/ReadAlembicTransform.h"
 #include "Engine/Dev/Scene3D/CameraMath.h"
@@ -1730,6 +1731,7 @@ Viewport3D::paintGL()
             case eSceneNodeVolume:     drawVolumeNode(sn); break;
             case eSceneNodeLight:      drawLightNode(sn); break;
             case eSceneNodeTransform:  drawTransformNode(sn); break;
+            case eSceneNodePath:       drawPathNode(sn); break;
         }
 
         glPopMatrix();
@@ -2071,8 +2073,9 @@ Viewport3D::mousePressEvent(QMouseEvent* e)
         if (e->modifiers() & Qt::AltModifier) {
             _imp->orbiting = true;
         } else {
-            // Try point picking first, then start box select drag
-            if (!pickPointAtPosition(e->x(), e->y())) {
+            // Try point picking first (a Path3D control point, then the point
+            // cloud), then start box select drag
+            if (!pickPathPointAtPosition(e->x(), e->y()) && !pickPointAtPosition(e->x(), e->y())) {
                 // Start potential box select — if drag is small, treat as click select
                 _imp->boxSelecting = true;
                 _imp->boxStartX = _imp->boxEndX = e->x();
@@ -3736,6 +3739,100 @@ Viewport3D::drawCameraMotionTrail(const SceneNode& sn, const std::vector<SceneNo
         glVertex3fv(cur);
         glEnd();
     }
+}
+
+// Path3D rail: the Catmull-Rom curve through the control points, the points
+// themselves (selected one white), and a small arrow at u = 0 for direction.
+// World space; the node's local matrix is identity.
+void
+Viewport3D::drawPathNode(const SceneNode& sn) const
+{
+    NodePtr node = sn.sourceNode.lock();
+    if (!node) return;
+    Path3D* path = dynamic_cast<Path3D*>(node->getEffectInstance().get());
+    if (!path) return;
+    const int n = path->pathPointCount();
+    if (n == 0) return;
+    const bool isSel = (sn.name == _imp->selectedNodeName);
+    const int selPt = path->selectedPointIndex();
+
+    GLProtectAttrib a(GL_ENABLE_BIT | GL_LINE_BIT | GL_POINT_BIT | GL_CURRENT_BIT);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_LINE_SMOOTH);
+    glEnable(GL_POINT_SMOOTH);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    if (n >= 2) {
+        const int steps = std::max(64, n * 24);
+        if (isSel) glColor4f(1.0f, 0.75f, 0.25f, 0.95f); else glColor4f(0.85f, 0.55f, 0.2f, 0.7f);
+        glLineWidth(isSel ? 2.0f : 1.3f);
+        glBegin(GL_LINE_STRIP);
+        for (int i = 0; i <= steps; ++i) {
+            double pos[3], tan[3];
+            if (path->evalPath((double)i / steps, pos, tan)) glVertex3d(pos[0], pos[1], pos[2]);
+        }
+        glEnd();
+        // direction arrow at the start
+        double p0[3], t0[3];
+        if (path->evalPath(0.0, p0, t0)) {
+            glLineWidth(2.0f);
+            glBegin(GL_LINES);
+            glVertex3d(p0[0], p0[1], p0[2]);
+            glVertex3d(p0[0] + t0[0] * 0.6, p0[1] + t0[1] * 0.6, p0[2] + t0[2] * 0.6);
+            glEnd();
+        }
+    }
+    // control polygon (dim) + points
+    glColor4f(0.6f, 0.6f, 0.6f, 0.35f);
+    glLineWidth(1.0f);
+    glBegin(path->pathClosed() ? GL_LINE_LOOP : GL_LINE_STRIP);
+    for (int i = 0; i < n; ++i) { double q[3]; if (path->pathPoint(i, q)) glVertex3d(q[0], q[1], q[2]); }
+    glEnd();
+    glPointSize(7.0f);
+    glBegin(GL_POINTS);
+    for (int i = 0; i < n; ++i) {
+        double q[3];
+        if (!path->pathPoint(i, q)) continue;
+        if (isSel && i == selPt) glColor4f(1.0f, 1.0f, 1.0f, 1.0f); else glColor4f(0.3f, 0.9f, 1.0f, 0.9f);
+        glVertex3d(q[0], q[1], q[2]);
+    }
+    glEnd();
+}
+
+// Click on a control point of the selected Path3D: make it the Selected Point
+// (which the gizmo then moves). False when no path is selected / no point hit.
+bool
+Viewport3D::pickPathPointAtPosition(int screenX, int screenY)
+{
+    if (_imp->selectedNodeName.empty()) return false;
+    const std::vector<SceneNode>& nodes = _imp->sceneGraph.nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const SceneNode& sn = nodes[i];
+        if (sn.type != eSceneNodePath || sn.name != _imp->selectedNodeName) continue;
+        NodePtr node = sn.sourceNode.lock();
+        if (!node) return false;
+        Path3D* path = dynamic_cast<Path3D*>(node->getEffectInstance().get());
+        if (!path) return false;
+        const int n = path->pathPointCount();
+        float best = 12.0f;
+        int bestIdx = -1;
+        for (int p = 0; p < n; ++p) {
+            double q[3];
+            if (!path->pathPoint(p, q)) continue;
+            float sx, sy;
+            if (!worldToScreenDev(_imp->cameraView, _imp->cameraProjection, _imp->viewW, _imp->viewH,
+                                  (float)q[0], (float)q[1], (float)q[2], sx, sy)) continue;
+            const float d = std::sqrt((sx - screenX) * (sx - screenX) + (sy - screenY) * (sy - screenY));
+            if (d < best) { best = d; bestIdx = p; }
+        }
+        if (bestIdx < 0) return false;
+        path->setSelectedPointIndex(bestIdx);
+        update();
+        return true;
+    }
+    return false;
 }
 
 void

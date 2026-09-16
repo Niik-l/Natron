@@ -63,9 +63,11 @@ public:
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    // One optional input: "target", the node the Look-at layer aims at.
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
-    virtual std::string getInputLabel(int /*inputNb*/) const OVERRIDE FINAL WARN_UNUSED_RETURN { return "target"; }
+    // Two optional inputs: "target" (Look-at aims at it) and "path" (a Path3D
+    // rail the camera rides along, Position Along Path on the Motion page).
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 2; }
+    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN
+    { return inputNb == 0 ? "target" : "path"; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN

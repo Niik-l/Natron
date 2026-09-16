@@ -37,6 +37,7 @@
 #include "../../ViewIdx.h"
 #include "RotationConventions.h"
 #include "../DotUtils.h"
+#include "PathProvider.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -87,7 +88,32 @@ struct Camera3DNodePrivate
     KnobBoolWPtr   lookAtEnable;
     KnobChoiceWPtr lookAtMode;      // 0 target input, 1 point
     KnobDoubleWPtr lookAtX, lookAtY, lookAtZ, lookAtWeight;
+    KnobBoolWPtr   pathEnable, pathAlign;
+    KnobDoubleWPtr pathPosition;
 };
+
+// Camera frame from a world forward direction: z = -forward, world Y up (Z when
+// looking straight up/down), then the given roll about the camera's own z.
+// Writes both the matrix and the Euler angles our knobs use.
+static void cameraFrameFromForward(const double f[3], double rollDeg, double R[3][3],
+                                   double& rxDeg, double& ryDeg, double& rzDeg)
+{
+    const double z[3] = { -f[0], -f[1], -f[2] };
+    double up[3] = { 0.0, 1.0, 0.0 };
+    if (std::fabs(z[1]) > 0.999) { up[0] = 0.0; up[1] = 0.0; up[2] = 1.0; }
+    double x[3] = { up[1] * z[2] - up[2] * z[1], up[2] * z[0] - up[0] * z[2], up[0] * z[1] - up[1] * z[0] };
+    const double xl = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+    if (xl < 1e-12) return;
+    for (int i = 0; i < 3; ++i) x[i] /= xl;
+    const double y[3] = { z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0] };
+    const double rr = rollDeg * M_PI / 180.0, c = std::cos(rr), sn = std::sin(rr);
+    for (int i = 0; i < 3; ++i) {
+        R[i][0] = x[i] * c + y[i] * sn;
+        R[i][1] = -x[i] * sn + y[i] * c;
+        R[i][2] = z[i];
+    }
+    RotationConventions::decompose(R, rxDeg, ryDeg, rzDeg);
+}
 
 // ==================== Motion layer helpers ====================
 
@@ -362,6 +388,28 @@ Camera3DNode::initializeKnobs()
         motionPage->addKnob(k);
         return k;
     };
+    {
+        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Path"));
+        sep->setName("sepPath"); motionPage->addKnob(sep);
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Follow Path"));
+        k->setName("pathEnable"); k->setDefaultValue(false); k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Ride the Path3D connected to the path input: the camera's position comes "
+                             "from the rail at Position Along Path (the keyed Translate is ignored while "
+                             "this is on). Look-at, Push-in and Handheld still layer on top."));
+        motionPage->addKnob(k); _imp->pathEnable = k;
+    }
+    _imp->pathPosition = mkDouble("pathPosition", tr("Position Along Path"), 0.0, 0.0, 1.0,
+        tr("0 = start of the rail, 1 = end. Arc-length based, so keying 0 -> 1 linearly moves at constant speed. "
+           "On a closed path values wrap."));
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Align To Path"));
+        k->setName("pathAlign"); k->setDefaultValue(true); k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Point the camera along the rail's direction of travel (the keyed roll is kept). "
+                             "Off = keep the keyed rotation. Look-at overrides this when it is on."));
+        motionPage->addKnob(k); _imp->pathAlign = k;
+    }
     {
         KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Handheld"));
         sep->setName("sepHandheld"); motionPage->addKnob(sep);
@@ -651,15 +699,30 @@ Camera3DNode::applyMotionLayers(double time, double& tx, double& ty, double& tz,
     KnobBoolPtr hh = _imp->handheldEnable.lock();
     KnobBoolPtr pu = _imp->pushEnable.lock();
     KnobBoolPtr la = _imp->lookAtEnable.lock();
+    KnobBoolPtr pe = _imp->pathEnable.lock();
     const bool handheld = hh && hh->getValueAtTime(time);
     const bool push = pu && pu->getValue();
     const bool lookAt = la && la->getValueAtTime(time);
-    if (!handheld && !push && !lookAt) return;
+    const bool onPath = pe && pe->getValueAtTime(time);
+    if (!handheld && !push && !lookAt && !onPath) return;
 
     // Camera-space axes at the keyframed rotation: column-vector R = Rz*Ry*Rx,
     // camera looks down its local -Z.
     double R[3][3];
     RotationConventions::compose(rx, ry, rz, R);
+
+    if (onPath) {
+        EffectInstancePtr pin = skipDots(const_cast<Camera3DNode*>(this)->getInput(1));
+        PathProvider* rail = pin ? dynamic_cast<PathProvider*>(pin.get()) : NULL;
+        double pos[3], tan[3];
+        if (rail && rail->evalPath(_imp->pathPosition.lock()->getValueAtTime(time), pos, tan)) {
+            tx = pos[0]; ty = pos[1]; tz = pos[2];
+            KnobBoolPtr al = _imp->pathAlign.lock();
+            if (al && al->getValueAtTime(time)) {
+                cameraFrameFromForward(tan, rz, R, rx, ry, rz);
+            }
+        }
+    }
 
     if (lookAt) {
         double target[3];
@@ -674,25 +737,7 @@ Camera3DNode::applyMotionLayers(double time, double& tx, double& ty, double& tz,
             }
             if (len > 1e-9) {
                 for (int i = 0; i < 3; ++i) f[i] /= len;
-                // Camera frame: z = -forward, x = up x z, y = z x x (world Y up,
-                // world Z as the up hint when looking straight up / down).
-                const double z[3] = { -f[0], -f[1], -f[2] };
-                double up[3] = { 0.0, 1.0, 0.0 };
-                if (std::fabs(z[1]) > 0.999) { up[0] = 0.0; up[1] = 0.0; up[2] = 1.0; }
-                double x[3] = { up[1] * z[2] - up[2] * z[1], up[2] * z[0] - up[0] * z[2], up[0] * z[1] - up[1] * z[0] };
-                const double xl = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
-                for (int i = 0; i < 3; ++i) x[i] /= xl;
-                const double y[3] = { z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0] };
-                // Keep the keyed roll: post-rotate about the camera's own z.
-                const double rr = rz * M_PI / 180.0, c = std::cos(rr), sn = std::sin(rr);
-                double L[3][3];
-                for (int i = 0; i < 3; ++i) {
-                    L[i][0] = x[i] * c + y[i] * sn;
-                    L[i][1] = -x[i] * sn + y[i] * c;
-                    L[i][2] = z[i];
-                }
-                RotationConventions::decompose(L, rx, ry, rz);
-                for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) R[i][j] = L[i][j];
+                cameraFrameFromForward(f, rz, R, rx, ry, rz);   // keyed roll kept
             }
         }
     }
