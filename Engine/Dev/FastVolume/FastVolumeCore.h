@@ -41,7 +41,7 @@ struct CameraParams {
 //   Width/Height define the beam cross-section (use a long thin rectangle for a
 //   laser / light shaft). Only smoke inside the rectangle is lit.
 enum LightKind { LIGHT_POINT = 0, LIGHT_DISTANT = 1, LIGHT_SPOT = 2, LIGHT_AREA = 3 };
-static const int MAX_LIGHTS = 8;
+static const int MAX_LIGHTS = 128;
 
 struct LightDesc {
     int type = LIGHT_DISTANT;
@@ -56,6 +56,7 @@ struct LightDesc {
     float vax[3] = {0, 1, 0};        // beam height axis (light local Y)
     float halfU = 1.0f;              // half Width  (world units)
     float halfV = 1.0f;              // half Height (world units)
+    float range = 0.0f;              // POINT only: half-intensity distance (world); 0 = volume diagonal
 };
 
 struct LookParams {

@@ -6,6 +6,7 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ## My TODO (user priorities)
 
+- [ ] **TEST the FastVolumeRender particle light** (quick commit 2026-09-17, NOT GUI-tested): Particle Light knobs + Particles As Lights / Max Particle Lights / Intensity / Range; the light budget went 8 → 128 for every scene, so also re-check an ordinary lit VDB/Volume3D scene renders as before. Test rig: emitter → solver → Scene3D beside a Volume3D haze, camera in front; compare with a Light3D point light in the same fog.
 - [ ] DeepExpression 2.0 follow-up polish (2026-07-25): iterate on the Nuke-style expression node after first day of use
 - [ ] Refine the particle template presets (Sparks / Jet Exhaust / Heat Distortion / Rain — values are a first pass, 2026-07-25)
 - [ ] Fill the Project3D / Deep / HDRI template categories (placeholders in the menu; candidate list in session notes — projection patch rig, DCM comp starter, Blast cleanup rig, look-dev spheres, HDRI backplate starter)

@@ -17,6 +17,31 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **FastVolumeRender particle light (2026-09-17, QUICK COMMIT — needs proper
+  testing; the user had not GUI-tested it when committed)** — sparks / tracers
+  passing through fog. Particles from any `ParticleProvider` wired directly
+  into a Scene3D/Group3D upstream of the node are (1) splatted into the flames
+  grid as emission (kernel `(1-q)^2`, amplitude intensity x emission x alpha x
+  luminance) so the fire path draws the glowing core and lights nearby smoke,
+  with **Emission Detail** giving the emission grid its own finer transform
+  (the core bakes an affine density-index -> flames-index map `fidx()` into
+  the WGSL, so the two grids no longer have to share a resolution), and
+  **Particle Motion Blur** streaking each particle from `p - v*shutter` to `p`
+  as N sub-splats of 1/N energy; and (2) optionally made real point lights
+  (**Particles As Lights**): `MAX_LIGHTS` 8 -> 128 (uniform block 144+80*128 B,
+  shadow-grid buffer capped to the 128 MiB storage binding by dropping trailing
+  lights), per-light **Range** (`LightDesc::range` -> `GpuLight.dir.w`,
+  half-intensity distance, hard window at 8x range) with an out-of-reach cull
+  in both the light-grid pass and the march so hundreds of small lights stay
+  interactive, **Particle Light Intensity** normalised so 1 = one Light3D at
+  intensity 1 shared across all particles by weight, and the light slots spread
+  evenly along the stream (stride pick, skipped neighbours' energy folded into
+  the kept light) rather than the brightest particles, which were all the
+  newborns at the emitter. Scene lights keep priority; particle lights are
+  beauty-only (not in light-group planes); colour is luminance-only through
+  the fire ramp. Headless spark-through-haze frames looked right; GUI test,
+  AMD/Intel shader compile, and a look pass against the emissive-only path are
+  still open. Plan in the local `Engine/Dev/Research_ParticleLasers_FastVolume.md`.
 - **Path3D rail + Camera3D "path" input (2026-09-16)** — step 3 of the
   camera-controls plan. New node **Path3D** (3D menu; `PathProvider`
   interface in `Engine/Dev/Scene3D/PathProvider.h`): a Catmull-Rom curve

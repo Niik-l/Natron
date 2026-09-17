@@ -10,6 +10,7 @@
 #include "FastVolumeRender.h"
 
 #include <cmath>
+#include <algorithm>
 #include <cstring>
 #include <map>
 #include <set>
@@ -26,6 +27,10 @@
 #include "../../Project.h"
 #include "../DotUtils.h"
 #include "../Scene3D/CameraProvider.h"
+#include "../Scene3D/Scene3D.h"
+#include "../Scene3D/Group3D.h"
+#include "../Particles/ParticleProvider.h"
+#include "../Particles/ParticleData.h"
 #include "../Scene3D/Light3D.h"
 #include "../Scene3D/ReadVDB.h"
 #include "../Scene3D/SceneGraph.h"
@@ -53,12 +58,13 @@ struct VolumeKey {
     int frameOff = 0, gridIdx = -1;
     float vol[16] = {0};
     uint64_t v3hash = 0;            // procedural Volume3D shape hash (0 for ReadVDB)
+    uint64_t pHash = 0;             // particle-light splat (positions, colours, radius, intensity); 0 = off
     bool valid = false;
     bool operator==(const VolumeKey& o) const {
         return valid && o.valid && time == o.time && frameOff == o.frameOff
             && gridIdx == o.gridIdx && path == o.path && bindD == o.bindD
             && bindF == o.bindF && bindT == o.bindT && v3hash == o.v3hash
-            && memcmp(vol, o.vol, sizeof vol) == 0;
+            && pHash == o.pHash && memcmp(vol, o.vol, sizeof vol) == 0;
     }
 };
 
@@ -71,6 +77,12 @@ struct FastVolumeRenderPrivate {
     // Light3D — neither has knobs. The rest are pure look controls.
     KnobDoubleWPtr sigma, albedo, hgG, fireK, fireMax, fireLight;
     KnobIntWPtr steps, lightFactor;
+    // Particle light: particles wired into the scene splatted into the fire
+    // channel, so they glow through the smoke (dimmed by the haze in front)
+    // and light the smoke around them (the fire-glow path).
+    KnobBoolWPtr particleLight, particleBlur, particleAsLights;
+    KnobDoubleWPtr particleIntensity, particleRadius, particleShutter, particleLightIntensity, particleLightRange;
+    KnobIntWPtr particleRes, particleLightMax;
     // AOV enable toggles (AOVs page). Beauty is always produced.
     KnobBoolWPtr aovEmission, aovAmbient, aovDepth, aovTemperature, aovShadow, aovLightGroups;
 };
@@ -195,6 +207,98 @@ FastVolumeRender::initializeKnobs()
         k->setAnimationEnabled(true);
         page->addKnob(k);
         _imp->fireLight = k;
+    }
+    {
+        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr("Particle Light"));
+        sep->setName("sepParticleLight"); page->addKnob(sep);
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Particle Light"));
+        k->setName("particleLight"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Treat the particles wired into the Scene (emitter / solver chains) as "
+                             "light sources inside the volume: each particle is splatted into the "
+                             "fire channel, so it glows through the smoke - dimmed by the haze in "
+                             "front of it - and lights the smoke around it (see Fire Light). Fire "
+                             "Intensity / Fire Max shape the look; particle colour is taken as "
+                             "brightness (the fire ramp colours it) for now."));
+        page->addKnob(k); _imp->particleLight = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Particle Intensity"));
+        k->setName("particleIntensity"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(10.0);
+        k->setHintToolTip(tr("Brightness of each particle in the fire channel (x the particle's own "
+                             "emission attribute and colour luminance)."));
+        page->addKnob(k); _imp->particleIntensity = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Particle Radius"));
+        k->setName("particleRadius"); k->setDefaultValue(0.15); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(2.0);
+        k->setHintToolTip(tr("Splat radius in world units. The core cannot be sharper than one voxel "
+                             "of the emission grid (see Emission Detail)."));
+        page->addKnob(k); _imp->particleRadius = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Emission Detail"));
+        k->setName("particleRes"); k->setDefaultValue(2); k->setMinimum(1); k->setMaximum(4);
+        k->setDisplayMinimum(1); k->setDisplayMaximum(4);
+        k->setHintToolTip(tr("Resolution of the particle emission grid relative to the smoke: 2 = twice "
+                             "as many voxels per axis (8x the memory), so sparks stay small and round "
+                             "in a coarse volume. 1 = same grid as the smoke."));
+        page->addKnob(k); _imp->particleRes = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Particle Motion Blur"));
+        k->setName("particleBlur"); k->setDefaultValue(true);
+        k->setHintToolTip(tr("Streak each particle along its motion over the shutter: the light is "
+                             "spread from where the particle was to where it is, so fast sparks read "
+                             "as trails. Same energy as the still particle."));
+        page->addKnob(k); _imp->particleBlur = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Particle Shutter"));
+        k->setName("particleShutter"); k->setDefaultValue(0.5); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(2.0);
+        k->setHintToolTip(tr("Shutter length in frames for the streak: 0.5 = a 180-degree shutter, 1 = "
+                             "the whole frame's travel, more for a stylised long trail."));
+        page->addKnob(k); _imp->particleShutter = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Particles As Lights"));
+        k->setName("particleAsLights"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Also make the brightest particles real point lights, with their own "
+                             "shadowed scattering through the whole volume like a Light3D. The glow "
+                             "splat above still draws the visible core and streak. Costs one light "
+                             "each; scene lights take priority."));
+        page->addKnob(k); _imp->particleAsLights = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Particle Lights"));
+        k->setName("particleLightMax"); k->setDefaultValue(64); k->setMinimum(1); k->setMaximum(FastVolume::MAX_LIGHTS);
+        k->setDisplayMinimum(1); k->setDisplayMaximum(FastVolume::MAX_LIGHTS);
+        k->setHintToolTip(tr("How many particles may become lights (the brightest win), out of the "
+                             "renderer's total light budget shared with scene lights. Render time "
+                             "grows with the count."));
+        page->addKnob(k); _imp->particleLightMax = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Particle Light Intensity"));
+        k->setName("particleLightIntensity"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(10.0);
+        k->setHintToolTip(tr("Total light of all particle lights together: 1 equals one Light3D point "
+                             "light at intensity 1, shared across the particles by their colour, alpha "
+                             "and emission. Raise it for many sparks."));
+        page->addKnob(k); _imp->particleLightIntensity = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Particle Light Range"));
+        k->setName("particleLightRange"); k->setDefaultValue(0.5); k->setAnimationEnabled(true);
+        k->setMinimum(0.01); k->setDisplayMinimum(0.01); k->setDisplayMaximum(5.0);
+        k->setHintToolTip(tr("Distance in world units at which a particle light has fallen to half. "
+                             "Scene point lights fall off over the whole volume; a spark or tracer "
+                             "should only light the smoke around it."));
+        page->addKnob(k); _imp->particleLightRange = k;
     }
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Steps"));
@@ -485,6 +589,48 @@ FastVolumeRender::render(const RenderActionArgs& args)
             "FastVolumeRender: no volume in the connected scene (add a ReadVDB or Volume3D).");
         return eStatusFailed;
     }
+    // ---- particle light: the particle providers wired DIRECTLY into a Scene3D
+    // or Group3D upstream (the terminal of each chain - an emitter feeding a
+    // solver would otherwise be counted twice).
+    std::vector<ParticleDataPtr> particleSets;
+    const bool wantParticleLight = _imp->particleLight.lock() && _imp->particleLight.lock()->getValue();
+    const float pIntensity = _imp->particleIntensity.lock() ? (float)_imp->particleIntensity.lock()->getValueAtTime(args.time) : 1.0f;
+    const float pRadius = _imp->particleRadius.lock() ? (float)_imp->particleRadius.lock()->getValueAtTime(args.time) : 0.15f;
+    const int pRes = _imp->particleRes.lock() ? std::max(1, std::min(4, _imp->particleRes.lock()->getValue())) : 2;
+    const bool pBlur = _imp->particleBlur.lock() && _imp->particleBlur.lock()->getValue();
+    const float pShutter = pBlur && _imp->particleShutter.lock() ? (float)_imp->particleShutter.lock()->getValueAtTime(args.time) : 0.0f;
+    uint64_t pHash = 0;
+    if (wantParticleLight) {
+        std::set<const Node*> seenProviders;
+        for (const Node* un : upstream) {
+            EffectInstancePtr ue = const_cast<Node*>(un)->getEffectInstance();
+            if (!ue) continue;
+            if (!dynamic_cast<Scene3D*>(ue.get()) && !dynamic_cast<Group3D*>(ue.get())) continue;
+            const int ni = ue->getNInputs();
+            for (int i = 0; i < ni; ++i) {
+                EffectInstancePtr inp = skipDots(ue->getInput(i));
+                if (!inp || inp->getNode()->isNodeDisabled()) continue;
+                ParticleProvider* pp = dynamic_cast<ParticleProvider*>(inp.get());
+                if (!pp || !seenProviders.insert(inp->getNode().get()).second) continue;
+                ParticleDataPtr pd = pp->getParticleData(args.time);
+                if (pd && pd->numParticles() > 0) particleSets.push_back(pd);
+            }
+        }
+        // FNV-1a over the data that shapes the splat.
+        uint64_t h = 1469598103934665603ULL;
+        auto mix = [&h](const void* bytes, size_t n) {
+            const unsigned char* b = (const unsigned char*)bytes;
+            for (size_t k = 0; k < n; ++k) { h ^= b[k]; h *= 1099511628211ULL; }
+        };
+        mix(&pIntensity, sizeof pIntensity); mix(&pRadius, sizeof pRadius);
+        mix(&pRes, sizeof pRes); mix(&pShutter, sizeof pShutter);
+        for (const ParticleDataPtr& pd : particleSets) {
+            for (const Particle& pt : pd->particles) {
+                mix(&pt.px, sizeof(float) * 3); mix(&pt.vx, sizeof(float) * 3); mix(&pt.r, sizeof(float) * 4); mix(&pt.emission, sizeof pt.emission);
+            }
+        }
+        pHash = h ? h : 1;
+    }
     // No lights is fine: the volume renders unlit (a fire sim still shows its
     // emission + fire self-light; plain smoke renders dark until a light is added).
 
@@ -517,6 +663,7 @@ FastVolumeRender::render(const RenderActionArgs& args)
     } else {  // Volume3D: one hash of all shape params (re-upload when it changes)
         key.v3hash = vol3d->getShapeHash(args.time);
     }
+    key.pHash = pHash;
 
     // ---- camera input
     FastVolume::CameraParams cam;
@@ -575,6 +722,65 @@ FastVolumeRender::render(const RenderActionArgs& args)
             ld.vax[0] = wm[4]; ld.vax[1] = wm[5]; ld.vax[2] = wm[6];   // local Y
             ld.halfU = 0.5f * (float)L->getAreaSizeU(args.time);
             ld.halfV = 0.5f * (float)L->getAreaSizeV(args.time);
+        }
+    }
+    // ---- particles as lights: the brightest particles (colour * alpha *
+    // emission) fill the light slots left after the scene lights, as point
+    // lights at the streak midpoint when motion blur is on.
+    if (wantParticleLight && _imp->particleAsLights.lock() && _imp->particleAsLights.lock()->getValue()
+        && !particleSets.empty() && nKey < FastVolume::MAX_LIGHTS) {
+        const int maxP = std::max(1, std::min(FastVolume::MAX_LIGHTS - nKey,
+                                              _imp->particleLightMax.lock() ? _imp->particleLightMax.lock()->getValue() : 64));
+        const float plk = (_imp->particleLightIntensity.lock() ? (float)_imp->particleLightIntensity.lock()->getValueAtTime(args.time) : 1.0f) * kSunScale;
+        const float plRange = _imp->particleLightRange.lock() ? (float)_imp->particleLightRange.lock()->getValueAtTime(args.time) : 0.5f;
+        struct Cand { float w; float pos[3]; float col[3]; };
+        std::vector<Cand> cands;
+        for (const ParticleDataPtr& pd : particleSets) {
+            for (const Particle& pt : pd->particles) {
+                const float lum = 0.3f * pt.r + 0.59f * pt.g + 0.11f * pt.b;
+                const float w = pt.emission * pt.a * lum;
+                if (w <= 0.0f) continue;
+                Cand c;
+                c.w = w;
+                const float half = 0.5f * pShutter;
+                c.pos[0] = pt.px - pt.vx * half; c.pos[1] = pt.py - pt.vy * half; c.pos[2] = pt.pz - pt.vz * half;
+                const float k = pt.emission * pt.a * plk;   // normalised by the total weight below
+                c.col[0] = pt.r * k; c.col[1] = pt.g * k; c.col[2] = pt.b * k;
+                cands.push_back(c);
+            }
+        }
+        {
+            float wAll = 0.0f;
+            for (const Cand& cd : cands) wAll += cd.w;
+            const float norm = wAll > 0.0f ? 1.0f / wAll : 0.0f;
+            for (Cand& cd : cands) for (int k = 0; k < 3; ++k) cd.col[k] *= norm;
+        }
+        if ((int)cands.size() > maxP) {
+            // Spread the budget along the stream (particle order = birth order)
+            // instead of taking the brightest, which are all the newborns at
+            // the emitter: pick every k-th, with the skipped neighbours' energy
+            // folded into the kept light so the total stays the same.
+            std::vector<Cand> kept;
+            kept.reserve(maxP);
+            const double stride = (double)cands.size() / maxP;
+            for (int i = 0; i < maxP; ++i) {
+                const size_t a = (size_t)(i * stride), b = std::min(cands.size(), (size_t)((i + 1) * stride));
+                Cand c = cands[a];
+                float wsum = 0.0f;
+                for (size_t j = a; j < b; ++j) wsum += cands[j].w;
+                const float scale = c.w > 0.0f ? wsum / c.w : 1.0f;
+                for (int k = 0; k < 3; ++k) c.col[k] *= scale;
+                kept.push_back(c);
+            }
+            cands.swap(kept);
+        }
+        for (const Cand& c : cands) {
+            FastVolume::LightDesc& ld = look.lights[look.numLights];
+            ld = FastVolume::LightDesc();
+            ld.type = FastVolume::LIGHT_POINT;
+            ld.range = plRange;
+            for (int i = 0; i < 3; ++i) { ld.pos[i] = c.pos[i]; ld.color[i] = c.col[i]; }
+            ++look.numLights;
         }
     }
     // Ambient fill comes solely from a Dome (Environment) Light3D: solid
@@ -662,6 +868,87 @@ FastVolumeRender::render(const RenderActionArgs& args)
             if (!density) {
                 setPersistentMessage(eMessageTypeError, "FastVolumeRender: no density grid.");
                 return eStatusFailed;
+            }
+            // ---- particle light: splat the particles into the fire channel.
+            // Index space of the volume: world -> volume-local (inverse of the
+            // node matrix) -> grid index (the grid's own transform). The
+            // emission grid shares the density grid's transform so the core
+            // samples it in the same index space; the march bounds are the
+            // union of both, so sparks in clear air outside the smoke still
+            // render as bright points.
+            if (density && !particleSets.empty() && pRadius > 0.0f && pIntensity > 0.0f) {
+                openvdb::FloatGrid::Ptr emis = flames ? flames->deepCopy() : openvdb::FloatGrid::create(0.0f);
+                if (!flames) {
+                    // Same world box as the smoke, pRes x the voxels per axis: the
+                    // core maps density index -> emission index through FMAP.
+                    openvdb::math::Transform::Ptr xfp = density->transform().copy();
+                    if (pRes > 1) xfp->preScale(1.0 / pRes);
+                    emis->setTransform(xfp);
+                }
+                // inverse of the column-major node matrix (affine)
+                double M[3][4];
+                for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) M[r][c] = volMatrix[c * 4 + r];
+                for (int r = 0; r < 3; ++r) M[r][3] = volMatrix[12 + r];
+                double inv[3][3]; bool invOk = true;
+                {
+                    const double a = M[0][0], b = M[0][1], c = M[0][2], d = M[1][0], e = M[1][1], f = M[1][2], g = M[2][0], hh = M[2][1], ii = M[2][2];
+                    const double det = a * (e * ii - f * hh) - b * (d * ii - f * g) + c * (d * hh - e * g);
+                    if (std::fabs(det) < 1e-12) invOk = false;
+                    else {
+                        const double id = 1.0 / det;
+                        inv[0][0] = (e * ii - f * hh) * id; inv[0][1] = (c * hh - b * ii) * id; inv[0][2] = (b * f - c * e) * id;
+                        inv[1][0] = (f * g - d * ii) * id;  inv[1][1] = (a * ii - c * g) * id;  inv[1][2] = (c * d - a * f) * id;
+                        inv[2][0] = (d * hh - e * g) * id;  inv[2][1] = (b * g - a * hh) * id;  inv[2][2] = (a * e - b * d) * id;
+                    }
+                }
+                if (invOk) {
+                    const openvdb::math::Transform& xf = emis->transform();
+                    const double vox = xf.voxelSize()[0];
+                    const double nodeScale = std::cbrt(std::fabs(M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0])));
+                    const double rIdx = std::max(0.75, pRadius / (vox * (nodeScale > 1e-9 ? nodeScale : 1.0)));
+                    const int rc = (int)std::ceil(rIdx);
+                    openvdb::FloatGrid::Accessor acc = emis->getAccessor();
+                    for (const ParticleDataPtr& pd : particleSets) {
+                        for (const Particle& pt : pd->particles) {
+                            const double wx = pt.px - M[0][3], wy = pt.py - M[1][3], wz = pt.pz - M[2][3];
+                            const openvdb::Vec3d local(inv[0][0] * wx + inv[0][1] * wy + inv[0][2] * wz,
+                                                       inv[1][0] * wx + inv[1][1] * wy + inv[1][2] * wz,
+                                                       inv[2][0] * wx + inv[2][1] * wy + inv[2][2] * wz);
+                            const openvdb::Vec3d ip = xf.worldToIndex(local);
+                            const float lum = 0.3f * pt.r + 0.59f * pt.g + 0.11f * pt.b;
+                            const float amp = pIntensity * pt.emission * pt.a * (lum > 0.0f ? lum : 0.0f);
+                            if (amp <= 0.0f) continue;
+                            // Motion blur: streak from where the particle was `shutter`
+                            // frames ago (velocity is per frame) to where it is, as N
+                            // sub-splats of 1/N energy, spaced about half a radius.
+                            openvdb::Vec3d ip0 = ip;
+                            int nsub = 1;
+                            if (pShutter > 0.0f) {
+                                const double bx = pt.px - pt.vx * pShutter - M[0][3], by = pt.py - pt.vy * pShutter - M[1][3], bz = pt.pz - pt.vz * pShutter - M[2][3];
+                                ip0 = xf.worldToIndex(openvdb::Vec3d(inv[0][0] * bx + inv[0][1] * by + inv[0][2] * bz,
+                                                                     inv[1][0] * bx + inv[1][1] * by + inv[1][2] * bz,
+                                                                     inv[2][0] * bx + inv[2][1] * by + inv[2][2] * bz));
+                                const double streak = (ip - ip0).length();
+                                nsub = std::max(1, std::min(64, (int)std::ceil(streak / (rIdx * 0.5))));
+                            }
+                            const float ampSub = amp / (float)nsub;
+                            for (int si = 0; si < nsub; ++si) {
+                                const double tt = nsub > 1 ? (double)si / (nsub - 1) : 1.0;
+                                const openvdb::Vec3d sp = ip0 + (ip - ip0) * tt;
+                                const openvdb::Coord c0((int)std::floor(sp.x()), (int)std::floor(sp.y()), (int)std::floor(sp.z()));
+                                for (int dz = -rc; dz <= rc; ++dz) for (int dy = -rc; dy <= rc; ++dy) for (int dx = -rc; dx <= rc; ++dx) {
+                                    const openvdb::Coord cc(c0.x() + dx, c0.y() + dy, c0.z() + dz);
+                                    const double ex = cc.x() + 0.5 - sp.x(), ey = cc.y() + 0.5 - sp.y(), ez = cc.z() + 0.5 - sp.z();
+                                    const double q = (ex * ex + ey * ey + ez * ez) / (rIdx * rIdx);
+                                    if (q >= 1.0) continue;
+                                    const float w = (float)((1.0 - q) * (1.0 - q));
+                                    acc.setValue(cc, acc.getValue(cc) + ampSub * w);
+                                }
+                            }
+                        }
+                    }
+                }
+                flames = emis;
             }
             if (density->empty()) {
                 emptyVolume = true;

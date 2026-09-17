@@ -252,8 +252,8 @@ struct Uniforms {
     float    fire_light; float _fp0, _fp1, _fp2; // fire->smoke illumination scale
     GpuLight lights[MAX_LIGHTS];
 };
-static_assert(MAX_LIGHTS == 8, "WGSL array size below is hard-coded to 8");
-static_assert(sizeof(Uniforms) == 144 + 80 * 8, "Uniforms must match WGSL std140 layout");
+static_assert(MAX_LIGHTS == 128, "WGSL array size below is hard-coded to 128");
+static_assert(sizeof(Uniforms) == 144 + 80 * 128, "Uniforms must match WGSL std140 layout");
 
 // WGSL declaration of the uniform block (same field order/packing as above).
 const char* UNI_STRUCT =
@@ -270,7 +270,7 @@ const char* UNI_STRUCT =
     "  hg_g: f32, fire_k: f32, fire_max: f32, num_lights: i32,\n"
     "  w: u32, h: u32, npix: u32, ref2: f32,\n"
     "  fire_light: f32, fp0: f32, fp1: f32, fp2: f32,\n"
-    "  lights: array<Light, 8>,\n"
+    "  lights: array<Light, 128>,\n"
     "};\n";
 
 // Resident compressed volume on the GPU — the cached product of upload().
@@ -415,14 +415,38 @@ bool Renderer::upload(const openvdb::FloatGrid::ConstPtr& density,
     Mat34 w2i;
     if (!invert(i2w, w2i)) { _p->error = "singular volume transform"; return false; }
 
-    // march bounds: union of density and flames index bboxes
+    // The flames grid may live in its own index space (a finer particle-light
+    // emission grid): FMAP = density index -> flames index (affine), baked into
+    // the shaders as consts. Identity when the transforms match or no flames.
+    double fm[3][3] = {{1,0,0},{0,1,0},{0,0,1}}, ft[3] = {0,0,0};
+    double fmInv[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+    if (!f.empty()) {
+        const openvdb::math::Transform& td = density->transform();
+        const openvdb::math::Transform& tf = flames->transform();
+        auto map = [&](double x, double y, double z) { return tf.worldToIndex(td.indexToWorld(openvdb::Vec3d(x, y, z))); };
+        const openvdb::Vec3d o = map(0, 0, 0), ex = map(1, 0, 0) - o, ey = map(0, 1, 0) - o, ez = map(0, 0, 1) - o;
+        for (int i = 0; i < 3; ++i) { fm[i][0] = ex[i]; fm[i][1] = ey[i]; fm[i][2] = ez[i]; ft[i] = o[i]; }
+        Mat34 fwd{}; for (int i = 0; i < 3; ++i) { for (int j = 0; j < 3; ++j) fwd.m[i][j] = fm[i][j]; fwd.t[i] = ft[i]; }
+        Mat34 inv{};
+        if (invert(fwd, inv)) { for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) fmInv[i][j] = inv.m[i][j]; }
+    }
+    // march bounds (density index space): density bbox, union the flames bbox
+    // mapped back through FMAP^-1.
     double gmin[3], gmax[3];
     for (int i = 0; i < 3; ++i) {
         gmin[i] = d.off[i];
         gmax[i] = d.off[i] + d.dims[i];
-        if (!f.empty()) {
-            gmin[i] = std::min(gmin[i], (double)f.off[i]);
-            gmax[i] = std::max(gmax[i], (double)f.off[i] + f.dims[i]);
+    }
+    if (!f.empty()) {
+        for (int c = 0; c < 8; ++c) {
+            const double fx = f.off[0] + ((c & 1) ? f.dims[0] : 0) - ft[0];
+            const double fy = f.off[1] + ((c & 2) ? f.dims[1] : 0) - ft[1];
+            const double fz = f.off[2] + ((c & 4) ? f.dims[2] : 0) - ft[2];
+            for (int i = 0; i < 3; ++i) {
+                const double v = fmInv[i][0] * fx + fmInv[i][1] * fy + fmInv[i][2] * fz;
+                gmin[i] = std::min(gmin[i], v);
+                gmax[i] = std::max(gmax[i], v);
+            }
         }
     }
 
@@ -456,6 +480,12 @@ bool Renderer::upload(const openvdb::FloatGrid::ConstPtr& density,
           + ";\nconst D_NB = " + vec3i(d.nb) + ";\n";
     geom += "const F_OFF = " + vec3i(fb.off) + ";\nconst F_DIMS = "
           + vec3i(f.empty() ? kZero3 : fb.dims) + ";\nconst F_NB = " + vec3i(fb.nb) + ";\n";
+    {
+        double r0[3] = {fm[0][0], fm[0][1], fm[0][2]}, r1[3] = {fm[1][0], fm[1][1], fm[1][2]}, r2[3] = {fm[2][0], fm[2][1], fm[2][2]};
+        geom += "const FM0 = " + vec3(r0) + ";\nconst FM1 = " + vec3(r1) + ";\nconst FM2 = " + vec3(r2)
+              + ";\nconst FT = " + vec3(ft) + ";\n"
+              "fn fidx(p: vec3<f32>) -> vec3<f32> { return vec3<f32>(dot(FM0, p), dot(FM1, p), dot(FM2, p)) + FT; }\n";
+    }
     {
         double m0[3] = {i2w.m[0][0], i2w.m[0][1], i2w.m[0][2]};
         double m1[3] = {i2w.m[1][0], i2w.m[1][1], i2w.m[1][2]};
@@ -493,6 +523,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             dir = normalize(L.dir.xyz);
         } else {                            // point/spot: march toward the position
             let dd = L.pos.xyz - cell;
+            // Reach cull: a light too weak to matter here (many small particle
+            // lights) is not marched; the slot reads as unshadowed.
+            let ddw = vec3<f32>(dot(M0, dd), dot(M1, dd), dot(M2, dd));
+            let peak = max(L.col.x, max(L.col.y, L.col.z));
+            var r2 = U.ref2;
+            var win = 1.0;
+            let d2 = dot(ddw, ddw);
+            if (lt == 0 && L.dir.w > 0.0) { r2 = L.dir.w; win = clamp(1.0 - d2 / (64.0 * r2), 0.0, 1.0); }
+            if (r2 / (r2 + d2) * win * peak < 0.002) {
+                lgrid[u32(l) * cells + idx] = 1.0;
+                continue;
+            }
             maxd = length(dd);
             dir = dd / max(maxd, 1.0e-6);
         }
@@ -513,20 +555,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // WITHOUT dimming the core (a box blur would). Inner ring at full strength,
     // outer ring attenuated. tri_f is 0 when there is no flames grid.
     let R = U.lfacf * 1.5;
-    var glow = tri_f(cell);
-    glow = max(glow, tri_f(cell + vec3<f32>( R, 0.0, 0.0)));
-    glow = max(glow, tri_f(cell + vec3<f32>(-R, 0.0, 0.0)));
-    glow = max(glow, tri_f(cell + vec3<f32>(0.0,  R, 0.0)));
-    glow = max(glow, tri_f(cell + vec3<f32>(0.0, -R, 0.0)));
-    glow = max(glow, tri_f(cell + vec3<f32>(0.0, 0.0,  R)));
-    glow = max(glow, tri_f(cell + vec3<f32>(0.0, 0.0, -R)));
+    var glow = tri_f(fidx(cell));
+    glow = max(glow, tri_f(fidx(cell + vec3<f32>( R, 0.0, 0.0))));
+    glow = max(glow, tri_f(fidx(cell + vec3<f32>(-R, 0.0, 0.0))));
+    glow = max(glow, tri_f(fidx(cell + vec3<f32>(0.0,  R, 0.0))));
+    glow = max(glow, tri_f(fidx(cell + vec3<f32>(0.0, -R, 0.0))));
+    glow = max(glow, tri_f(fidx(cell + vec3<f32>(0.0, 0.0,  R))));
+    glow = max(glow, tri_f(fidx(cell + vec3<f32>(0.0, 0.0, -R))));
     let R2 = R * 2.0;
-    var outer = tri_f(cell + vec3<f32>( R2, 0.0, 0.0));
-    outer = max(outer, tri_f(cell + vec3<f32>(-R2, 0.0, 0.0)));
-    outer = max(outer, tri_f(cell + vec3<f32>(0.0,  R2, 0.0)));
-    outer = max(outer, tri_f(cell + vec3<f32>(0.0, -R2, 0.0)));
-    outer = max(outer, tri_f(cell + vec3<f32>(0.0, 0.0,  R2)));
-    outer = max(outer, tri_f(cell + vec3<f32>(0.0, 0.0, -R2)));
+    var outer = tri_f(fidx(cell + vec3<f32>( R2, 0.0, 0.0)));
+    outer = max(outer, tri_f(fidx(cell + vec3<f32>(-R2, 0.0, 0.0))));
+    outer = max(outer, tri_f(fidx(cell + vec3<f32>(0.0,  R2, 0.0))));
+    outer = max(outer, tri_f(fidx(cell + vec3<f32>(0.0, -R2, 0.0))));
+    outer = max(outer, tri_f(fidx(cell + vec3<f32>(0.0, 0.0,  R2))));
+    outer = max(outer, tri_f(fidx(cell + vec3<f32>(0.0, 0.0, -R2))));
     glow = max(glow, outer * 0.5);
     lgrid[u32(U.num_lights) * cells + idx] = glow;
 }
@@ -615,9 +657,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             iter = iter + 1u;
             let p = U.cam + rd * (t + 0.5 * dt);
             let vw = vec3<i32>(floor(p));
-            if (occupied_d(vw) || occupied_f(vw)) {
+            if (occupied_d(vw) || occupied_f(vec3<i32>(floor(fidx(p))))) {
                 let den = tri_d(p);
-                let fl = tri_f(p);
+                let fl = tri_f(fidx(p));
                 if (den > 0.0001 || fl > 0.001) {
                     let ext = max(den, 0.0) * U.sigma;
                     let t_step = exp(-ext * dtw);
@@ -634,7 +676,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         } else {                    // point / spot
                             let dd = L.pos.xyz - p;
                             let ddw = vec3<f32>(dot(M0, dd), dot(M1, dd), dot(M2, dd));
-                            falloff = U.ref2 / (U.ref2 + dot(ddw, ddw));  // 0.5 at ref dist
+                            var r2 = U.ref2;                        // 0.5 at ref dist
+                            var win = 1.0;
+                            let d2 = dot(ddw, ddw);
+                            if (lt == 0 && L.dir.w > 0.0) {         // per-light range: bounded reach
+                                r2 = L.dir.w;
+                                win = clamp(1.0 - d2 / (64.0 * r2), 0.0, 1.0);
+                            }
+                            falloff = r2 / (r2 + d2) * win;
+                            if (falloff * max(L.col.x, max(L.col.y, L.col.z)) < 0.002) {
+                                if (l == 0) { vis0 = 1.0; }
+                                continue;   // out of reach (see the grid pass)
+                            }
                             diri = dd / max(length(dd), 1.0e-6);
                         }
                         let dirw = normalize(vec3<f32>(dot(M0, diri), dot(M1, diri), dot(M2, diri)));
@@ -806,6 +859,8 @@ bool Renderer::draw(const CameraParams& cam, const LookParams& look,
             G.type = (float)L.type;
             for (int c = 0; c < 3; ++c) G.col[c] = L.color[c];
             G.cosInner = L.cosInner; G.cosOuter = L.cosOuter;
+            if (L.type == LIGHT_POINT)   // dir.w carries the per-light falloff ref dist^2 (0 = global)
+                G.cosInner = L.range > 0.0f ? L.range * L.range : 0.0f;
             if (L.type == LIGHT_DISTANT) {
                 toIndexDir(L.dir, G.dir);          // to-light direction
             } else {
@@ -874,6 +929,13 @@ bool Renderer::draw(const CameraParams& cam, const LookParams& look,
 
     // ---- per-draw GPU resources (brick buffers + pipelines are resident in v).
     // Light grid holds one transmittance slice per light + 1 fire-glow slice.
+    {
+        // Default wgpu storage binding limit is 128 MiB: drop trailing lights
+        // (particle lights come last) rather than fail the frame.
+        const size_t cells = (size_t)lg[0] * lg[1] * lg[2];
+        const size_t maxCells = ((size_t)128 << 20) / 4;
+        while (nL > 0 && cells * (size_t)(nL + 1) > maxCells) --nL;
+    }
     const size_t lgN = (size_t)lg[0] * lg[1] * lg[2] * (size_t)(nL + 1);
     WGPUBuffer lgrid = g.storage(nullptr, lgN * 4);
     const size_t outBytes = (size_t)W * H * 16 * 4;  // 4 layers
