@@ -65,7 +65,7 @@ jobs:
             python3-pyside6-devel python3-shiboken6-devel pyside6-tools shiboken6 \
             clang-devel llvm-devel \
             libX11-devel wayland-devel extra-cmake-modules \
-            mesa-libGL-devel mesa-libEGL-devel \
+            mesa-libGL-devel mesa-libEGL-devel mesa-libGLU-devel \
             openexr-devel imath-devel alembic-devel \
             OpenImageIO-devel OpenColorIO-devel openvdb-devel tbb-devel \
             embree-devel oidn-devel opensubdiv-devel openpgl-devel \
@@ -254,6 +254,11 @@ jobs:
               echo "$repo: applied $repo.patch"
             fi
           done
+          # openfx-io forces C++14 when it detects OIIO >= 2.3, but OIIO 3's
+          # headers need C++17 (std::byte). MSYS2's find module doesn't report
+          # the version, so Windows keeps GCC's C++17 default; Fedora's does.
+          sed -i 's/set(CMAKE_CXX_STANDARD 14)/set(CMAKE_CXX_STANDARD 17)/' openfx-io/CMakeLists.txt
+          grep -q 'set(CMAKE_CXX_STANDARD 17)' openfx-io/CMakeLists.txt
           # openfx-misc fetches its pinned CImg.h at build time.
           make -C openfx-misc/CImg CImg.h
           # CMAKE_POLICY_VERSION_MINIMUM: the plugin CMakeLists predate CMake 4.
