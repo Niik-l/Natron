@@ -102,7 +102,9 @@ done < <(find "$PYDST" -name '*.so*' -type f)
 
 echo "== Runtime-loaded libraries"
 # OIDN loads its CPU device module with dlopen, so no dependency scan finds it.
-cp -a /usr/lib64/libOpenImageDenoise_device_cpu.so* "$APPDIR/usr/lib/"
+oidn_cpu="$(find /usr/lib64 /usr/lib -maxdepth 1 -name 'libOpenImageDenoise_device_cpu.so*' 2>/dev/null)"
+[ -n "$oidn_cpu" ] || { echo "error: OIDN CPU device module not found (Cycles denoising would fail)"; exit 1; }
+echo "$oidn_cpu" | xargs -I{} cp -a {} "$APPDIR/usr/lib/"
 
 echo "== Desktop entry, icon, environment hook"
 cp "$REPO/Gui/Resources/Applications/fr.natron.Natron.desktop" "$WORK/fr.natron.Natron.desktop"
