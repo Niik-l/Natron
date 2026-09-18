@@ -9,6 +9,9 @@ A step-by-step guide to building Natron from source with Qt6, PySide6, and Pytho
 > - **Manual (this document):** full control, and the place to start if you want to
 >   understand each step or debug a failure. The scripts are generated from these
 >   instructions — so when something breaks, come back here.
+>
+> **Linux:** built on GitHub Actions (`.github/workflows/linux-build.yml`) rather than by
+> hand. See [Linux Build (GitHub Actions)](#linux-build-github-actions) near the end.
 
 **Disk space:** A core Natron build (`build-qt6/`, no Cycles/plugins/DLL bundling) is ~4 GB with debug info (`Natron.exe` is ~819 MB, or ~1.2 GB once Cycles is statically linked). The **full** setup in this guide — Cycles + OFX plugins + community PyPlugs + OCIO configs + DLLs bundled into both `App/` and `Renderer/` — totals **~12 GB** for the Natron tree itself, or **~14 GB** including the sibling source repos (`cycles/`, `openfx-misc/`, `openfx-io/`, `natron-plugins/`) cloned next to it. Biggest contributors: debug symbols in the two executables, ~1.1 GB of bundled DLLs per binary, build intermediates, and ~940 MB of OCIO configs. **Stripping debug symbols** (`strip Natron.exe NatronRenderer.exe` or building with `-DCMAKE_BUILD_TYPE=RelWithDebInfo`) cuts each executable from ~1 GB to roughly 100-200 MB — worth doing for distribution, but keep an unstripped copy if you want usable crash backtraces.
 
@@ -205,7 +208,18 @@ You should see output ending with:
 
 > **GPU note:** verified on NVIDIA only; cross-vendor via DX12/Vulkan, so AMD/Intel should
 > work but are untested. With no compatible GPU/driver the node shows an error and skips the
-> render (no crash). Windows-only as built. See the FastVolumeRender row in `NODE_REGISTRY.md`.
+> render (no crash). See the FastVolumeRender row in `NODE_REGISTRY.md`.
+
+> **Which wgpu-native:** **v27.0.4.0** — its `webgpu.h` + `wgpu.h` are byte-identical to the
+> headers this node was developed against (other v27 releases differ). Keep the headers and
+> the library from the same release.
+
+> **Linux:** `Engine/CMakeLists.txt` links the release's **static** `libwgpu_native.a`
+> instead of the DLL (the release's `libwgpu_native.so` has no SONAME, so linking it would
+> bake the build path into Natron). wgpu is then compiled into Natron — nothing extra to
+> ship. At runtime it uses **Vulkan**, so the machine needs a Vulkan driver (the NVIDIA
+> driver, or Mesa's `mesa-vulkan-drivers`). The Linux CI build does all of this; see
+> [Linux Build (GitHub Actions)](#linux-build-github-actions).
 
 ---
 
@@ -865,6 +879,52 @@ mingw32-make -j2  # usually works (recommended)
 mingw32-make -j1  # single-threaded fallback, slower but always reliable
 ```
 Note: `-j4` or higher generally works fine for the main Natron build on 16GB+ machines, but can cause issues during the autogen/moc phase.
+
+---
+
+## Linux Build (GitHub Actions)
+
+The Linux build runs on GitHub's hosted runners, inside a `fedora:44` container:
+`.github/workflows/linux-build.yml`. It mirrors the `tools/win-build/` phases (Cycles →
+Natron → OFX plugins → install layout) using Fedora's system packages instead of MSYS2.
+
+**Run it:** Actions tab → **Linux Build** → **Run workflow** (manual trigger only). Inputs:
+`cycles` (default on), `fastvolume` (default on), `build_type` (default `RelWithDebInfo`).
+After pushing a fix, start a **new** run — *Re-run jobs* replays the old commit.
+
+**What it builds:** Natron, NatronRenderer and natron-python with Cycles, FastVolumeRender
+and everything under `Engine/Dev`; plus `Misc.ofx`, `CImg.ofx` and `IO.ofx` at the commits
+pinned in `tools/win-build/config.sh`, with the same `tools/win-build/patches/`. Cycles is the
+`Niik-l/cycles` `feature/cycles-deep` branch, built with the same flags as `03-cycles.sh`.
+
+**Downloads (run page → Artifacts):**
+- `Natron-fedora44-<type>` — stripped install, same layout as `06-install.sh`:
+  `bin/` (Natron, NatronRenderer, natron-python),
+  `Plugins/OFX/Natron/*.ofx.bundle/Contents/Linux-x86-64/`, `Plugins/PyPlugs/`
+  (built-in + community), `Resources/OpenColorIO-Configs/`. Kept 14 days.
+- `…-debug-symbols` — the stripped debug info as `.debug` files (gnu-debuglink), for
+  symbolicating crash backtraces. Kept 7 days.
+
+**Runs only on Fedora 44** — it links Fedora's shared libraries. It needs a Vulkan driver for
+FastVolumeRender.
+
+Built against (2026-09-18): GCC 16.2.1, CMake 4.3.0, Python 3.14.7, Qt / PySide6 / Shiboken6
+6.11.2, OpenVDB from Fedora + matching NanoVDB headers, wgpu-native v27.0.4.0.
+
+### Linux-specific gotchas (all handled by the workflow)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Cycles configure: `'PYTHON_VERSION=3.11' not found` | `WITH_CYCLES_HYDRA_RENDER_DELEGATE` defaults ON and forces `WITH_USD` back on, which wants Python 3.11. Windows skips that check. | `-DWITH_CYCLES_HYDRA_RENDER_DELEGATE=OFF` |
+| Cycles configure: `Could NOT find NanoVDB` | Fedora's `openvdb-devel` doesn't ship the header-only NanoVDB (MSYS2's does) | Download `nanovdb/` headers from the OpenVDB release matching Fedora's version |
+| Qt errors in `qvariant.h` / `qtextstream.h` (`Status`, `Bool`) | Xlib `#define`s `Status` and `Bool`; X11 was included before Qt in `OSGLContext_x11.cpp` | Include Natron/Qt headers before X11 (fixed in source) |
+| Natron link: `tbb12` not found | MSYS2 names TBB `tbb12`; Fedora names it `tbb` | `-DTBB_LIB=/usr/lib64/libtbb.so` |
+| openfx-io: `'byte' is not a member of 'std'` | openfx-io forces C++14 when it detects OIIO ≥ 2.3; OIIO 3 needs C++17. MSYS2's find module doesn't report the version, so Windows never hit it | Switch that `CMAKE_CXX_STANDARD` line to 17 after patching |
+| openfx-io: `GL/glu.h: No such file` | GLU is a separate Fedora package | `mesa-libGLU-devel` |
+
+Fedora's FFmpeg is the `-free` build, so some patented video codecs (e.g. H.264/H.265
+encoding) are unavailable in the Linux IO.ofx; image formats are unaffected. SeExpr isn't
+packaged, so its node is omitted (optional).
 
 ---
 
