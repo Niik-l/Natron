@@ -1,0 +1,226 @@
+# Linux build of the Qt6 fork (Natron + Cycles), in a Fedora container on a
+# GitHub-hosted runner. Mirrors tools/win-build (03-cycles.sh / 04-natron.sh)
+# with Fedora's system packages instead of MSYS2.
+#
+# Manual trigger only for now (Actions tab -> "Linux Build" -> Run workflow)
+# until the build is green; add a `push:` trigger after that.
+#
+# The artifact is built against Fedora's shared libraries, so it runs on a
+# matching Fedora install, not on any distro. A portable AppImage (see
+# tools/appimage) is a later step.
+
+name: Linux Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      cycles:
+        description: 'Build Cycles + CyclesRender'
+        type: boolean
+        default: true
+      build_type:
+        description: 'CMake build type'
+        type: choice
+        options: [RelWithDebInfo, Release, Debug]
+        default: RelWithDebInfo
+
+concurrency:
+  group: linux-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FEDORA: '44'
+  # Same fork branch the Windows build pins (tools/win-build/config.sh CYCLES_REF):
+  # Natron's CyclesRenderer needs the deep-EXR output API that only exists there.
+  CYCLES_REPO: Niik-l/cycles
+  CYCLES_REF: feature/cycles-deep
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 3G
+
+jobs:
+  linux:
+    name: Fedora ${{ inputs.build_type }}${{ inputs.cycles && ' + Cycles' || '' }}
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 340
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          # git must exist before actions/checkout, or it falls back to a
+          # tarball download without submodules.
+          dnf install -y git
+          # --skip-unavailable: a wrong/renamed package name must not abort
+          # the whole install; the next step reports anything missing.
+          dnf install -y --skip-unavailable \
+            cmake ninja-build gcc-c++ ccache pkgconf-pkg-config findutils zstd \
+            python3-devel boost-devel expat-devel cairo-devel fontconfig-devel \
+            qt6-qtbase-devel qt6-qtbase-private-devel \
+            python3-pyside6-devel python3-shiboken6-devel pyside6-tools shiboken6 \
+            clang-devel llvm-devel \
+            libX11-devel wayland-devel extra-cmake-modules \
+            mesa-libGL-devel mesa-libEGL-devel \
+            openexr-devel imath-devel alembic-devel \
+            OpenImageIO-devel OpenColorIO-devel openvdb-devel tbb-devel \
+            embree-devel oidn-devel opensubdiv-devel openpgl-devel \
+            pugixml-devel libzstd-devel libpng-devel libjpeg-turbo-devel libtiff-devel
+
+      - name: Report toolchain + missing pieces
+        run: |
+          set +e
+          gcc --version | head -1; cmake --version | head -1; python3 --version
+          echo "--- installed Qt/PySide/Shiboken packages"
+          rpm -qa | grep -iE '^(qt6-qtbase|python3-pyside6|python3-shiboken6|pyside6|shiboken6)' | sort
+          echo "--- CMake package configs the build needs"
+          for cfg in Qt6Config Shiboken6Config Shiboken6ToolsConfig PySide6Config \
+                     OpenImageIOConfig OpenColorIOConfig ECMConfig; do
+            hit=$(find /usr/lib64/cmake /usr/lib/cmake /usr/share -name "$cfg.cmake" 2>/dev/null | head -1)
+            printf '%-24s %s\n' "$cfg" "${hit:-MISSING}"
+          done
+          echo "--- libraries the Cycles link needs"
+          for lib in embree4 OpenImageDenoise tbb osdCPU osdGPU pugixml openpgl openvdb Alembic; do
+            hit=$(ls /usr/lib64/lib$lib.so* 2>/dev/null | head -1)
+            printf '%-20s %s\n' "$lib" "${hit:-MISSING}"
+          done
+          exit 0
+
+      - name: Checkout Natron
+        uses: actions/checkout@v4
+        with:
+          path: natron
+          submodules: recursive
+
+      - name: Checkout Cycles fork
+        if: inputs.cycles
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CYCLES_REPO }}
+          ref: ${{ env.CYCLES_REF }}
+          path: cycles
+
+      - name: Cycles cache key
+        if: inputs.cycles
+        id: cycles-key
+        run: echo "sha=$(git -C cycles rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Cycles is the long pole and rarely changes: cache its whole build dir
+      # per (Fedora, cycles commit, build type).
+      - name: Restore Cycles build
+        if: inputs.cycles
+        id: cycles-cache
+        uses: actions/cache@v4
+        with:
+          path: cycles/build
+          key: cycles-f${{ env.FEDORA }}-${{ steps.cycles-key.outputs.sha }}-${{ inputs.build_type }}
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-f${{ env.FEDORA }}-${{ inputs.build_type }}-${{ github.sha }}
+          restore-keys: ccache-f${{ env.FEDORA }}-${{ inputs.build_type }}-
+
+      - name: Build Cycles
+        if: inputs.cycles && steps.cycles-cache.outputs.cache-hit != 'true'
+        working-directory: cycles
+        run: |
+          # Flags match tools/win-build/03-cycles.sh (CPU only, system libs).
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DWITH_CYCLES_STANDALONE=ON -DWITH_CYCLES_STANDALONE_GUI=OFF \
+            -DWITH_CYCLES_USD=OFF -DWITH_USD=OFF -DWITH_CYCLES_OSL=OFF \
+            -DWITH_CYCLES_DEVICE_CUDA=OFF -DWITH_CYCLES_DEVICE_OPTIX=OFF \
+            -DWITH_CYCLES_DEVICE_HIP=OFF -DWITH_CYCLES_DEVICE_ONEAPI=OFF \
+            -DWITH_CYCLES_EMBREE=ON -DWITH_CYCLES_OPENIMAGEDENOISE=ON \
+            -DWITH_CYCLES_OPENCOLORIO=ON -DWITH_CYCLES_OPENSUBDIV=ON \
+            -DWITH_CYCLES_OPENVDB=ON -DWITH_CYCLES_ALEMBIC=OFF \
+            -DWITH_CYCLES_LOGGING=OFF -DWITH_LIBS_PRECOMPILED=OFF
+          ninja -C build -j"$(nproc)"
+          test -f build/lib/libcycles_subd.a || { echo "::error::Cycles build incomplete (libcycles_subd.a missing)"; exit 1; }
+
+      - name: Configure Natron
+        working-directory: natron
+        run: |
+          # App/CMakeLists.txt looks for TBB as "tbb12" (MSYS2's name); Fedora
+          # ships libtbb.so.12 as plain "tbb". A preset cache var wins over
+          # find_library, so no source change is needed.
+          TBB=$(ls /usr/lib64/libtbb.so | head -1)
+          # Engine hard-codes MSYS2's Imath/OpenEXR include dirs; add Fedora's.
+          export CXXFLAGS="-isystem /usr/include/Imath -isystem /usr/include/OpenEXR"
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DNATRON_QT6=ON \
+            -DNATRON_BUILD_TESTS=OFF \
+            -DNATRON_FASTVOLUME=OFF \
+            -DNATRON_CYCLES=${{ inputs.cycles && 'ON' || 'OFF' }} \
+            -DNATRON_CYCLES_DIR="$GITHUB_WORKSPACE/cycles" \
+            -DNATRON_CYCLES_BUILD_DIR="$GITHUB_WORKSPACE/cycles/build" \
+            -DNATRON_LLVM_INSTALL_DIR=/usr \
+            -DTBB_LIB="$TBB" \
+            2>&1 | tee "$GITHUB_WORKSPACE/configure.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Build Natron
+        working-directory: natron
+        run: |
+          # -k 0: keep going past errors so one run shows every file that fails
+          # on Linux, not just the first.
+          set -o pipefail
+          ninja -C build -k 0 -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Check the binary links
+        working-directory: natron/build
+        run: |
+          file App/Natron
+          if ldd App/Natron | grep 'not found'; then
+            echo "::error::Natron has unresolved shared libraries"; exit 1
+          fi
+          ccache --show-stats || true
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-f${{ env.FEDORA }}-${{ inputs.build_type }}-${{ github.sha }}
+
+      - name: Collect error summary
+        if: failure()
+        run: |
+          # First lines of every distinct compiler/linker error, for a quick read
+          # in the job summary; the full logs are in the artifact.
+          {
+            echo '### Build errors (first 60)'
+            echo '```'
+            grep -hE 'error:|undefined reference|CMake Error|not found' configure.log build.log 2>/dev/null | sort -u | head -60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-fedora${{ env.FEDORA }}-${{ inputs.build_type }}
+          path: |
+            configure.log
+            build.log
+            natron/build/CMakeCache.txt
+          if-no-files-found: ignore
+
+      - name: Package
+        working-directory: natron/build
+        run: |
+          mkdir -p dist/Natron/bin
+          cp App/Natron dist/Natron/bin/
+          [ -f Renderer/NatronRenderer ] && cp Renderer/NatronRenderer dist/Natron/bin/ || true
+          cp -r Plugins dist/Natron/ 2>/dev/null || true
+          tar -C dist -czf "$GITHUB_WORKSPACE/Natron-fedora${FEDORA}-${{ inputs.build_type }}.tar.gz" Natron
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}
+          path: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}.tar.gz
+          retention-days: 14
