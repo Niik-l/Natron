@@ -57,7 +57,7 @@ jobs:
           # --skip-unavailable: a wrong/renamed package name must not abort
           # the whole install; the next step reports anything missing.
           dnf install -y --skip-unavailable \
-            cmake ninja-build gcc-c++ ccache pkgconf-pkg-config findutils zstd \
+            cmake ninja-build gcc-c++ ccache pkgconf-pkg-config findutils zstd file \
             python3-devel boost-devel expat-devel cairo-devel fontconfig-devel \
             qt6-qtbase-devel qt6-qtbase-private-devel \
             python3-pyside6-devel python3-shiboken6-devel pyside6-tools shiboken6 \
