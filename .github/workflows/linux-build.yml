@@ -70,7 +70,7 @@ jobs:
           dnf install -y --skip-unavailable \
             cmake ninja-build gcc-c++ ccache pkgconf-pkg-config findutils zstd file \
             python3-devel boost-devel expat-devel cairo-devel fontconfig-devel \
-            python3-qtpy python3-packaging \
+            python3-QtPy python3-packaging \
             qt6-qtbase-devel qt6-qtbase-private-devel \
             python3-pyside6-devel python3-shiboken6-devel pyside6-tools shiboken6 \
             clang-devel llvm-devel \
@@ -122,6 +122,11 @@ jobs:
           done
           hit=$(find /usr/include /usr/local/include -path '*nanovdb/NanoVDB.h' 2>/dev/null | head -1)
           printf '%-20s %s\n' "nanovdb/NanoVDB.h" "${hit:-MISSING}"
+          echo "--- Python modules the AppImage bundles"
+          for mod in PySide6 shiboken6 qtpy packaging; do
+            hit=$(python3 -c "import $mod, os; print(os.path.dirname($mod.__file__))" 2>/dev/null)
+            printf '%-20s %s\n' "$mod" "${hit:-MISSING}"
+          done
           exit 0
 
       - name: Checkout Natron
