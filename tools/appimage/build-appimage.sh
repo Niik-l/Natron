@@ -125,6 +125,10 @@ EOF
 
 echo "== linuxdeploy"
 export QMAKE="$(command -v qmake6 || echo /usr/lib64/qt6/bin/qmake)"
+# linuxdeploy's bundled strip is too old for current distro libraries (it
+# can't parse .relr.dyn and fails). Nothing needs it: distro libraries ship
+# stripped, and Natron + the plugins are stripped before this script runs.
+export NO_STRIP=1
 args=( --appdir "$APPDIR"
        --executable "$APPDIR/usr/bin/Natron"
        --executable "$APPDIR/usr/bin/NatronRenderer"
