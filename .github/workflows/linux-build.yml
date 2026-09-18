@@ -7,9 +7,10 @@
 # Manual trigger only for now (Actions tab -> "Linux Build" -> Run workflow)
 # until the build is green; add a `push:` trigger after that.
 #
-# The artifact is built against Fedora's shared libraries, so it runs on a
-# matching Fedora install, not on any distro. A portable AppImage (see
-# tools/appimage) is a later step.
+# Two downloads: a tarball built against Fedora's shared libraries (runs on
+# Fedora 44), and an AppImage that bundles them (tools/appimage/build-appimage.sh),
+# which runs on any distro whose glibc is at least Fedora 44's. The
+# appimage-test job verifies the bundling on Arch Linux.
 
 name: Linux Build
 
@@ -69,6 +70,7 @@ jobs:
           dnf install -y --skip-unavailable \
             cmake ninja-build gcc-c++ ccache pkgconf-pkg-config findutils zstd file \
             python3-devel boost-devel expat-devel cairo-devel fontconfig-devel \
+            python3-qtpy python3-packaging \
             qt6-qtbase-devel qt6-qtbase-private-devel \
             python3-pyside6-devel python3-shiboken6-devel pyside6-tools shiboken6 \
             clang-devel llvm-devel \
@@ -404,3 +406,61 @@ jobs:
           name: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}-debug-symbols
           path: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}-debug-symbols.tar.gz
           retention-days: 7
+
+      # Bundles Qt, Python + PySide6 and every needed library; see the script.
+      - name: Build AppImage
+        run: |
+          bash natron/tools/appimage/build-appimage.sh dist/Natron appimage \
+            "Natron-fedora${FEDORA}-${{ inputs.build_type }}-x86_64.AppImage"
+          echo "Minimum glibc: $(cat appimage/*.glibc.txt)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}-AppImage
+          path: appimage/
+          retention-days: 14
+
+  # Unpacks the AppImage on a different distro that has none of Natron's
+  # dependencies installed, only what a desktop normally provides (GL, X11,
+  # fonts). Any library the AppImage failed to bundle shows up here.
+  appimage-test:
+    name: AppImage on Arch Linux
+    needs: linux
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - name: Install a desktop baseline
+        run: |
+          pacman -Syu --noconfirm --needed \
+            file binutils mesa libglvnd fontconfig freetype2 harfbuzz \
+            libx11 libxcb libxkbcommon libxkbcommon-x11 xcb-util-cursor \
+            xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm \
+            alsa-lib e2fsprogs libgpg-error
+          ldd --version | head -1
+
+      - name: Download AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}-AppImage
+
+      - name: Check every bundled binary resolves
+        run: |
+          cat *.glibc.txt | sed 's/^/AppImage needs /'
+          chmod +x *.AppImage
+          ./*.AppImage --appimage-extract >/dev/null
+          bad=0
+          while IFS= read -r f; do
+            missing=$(LD_LIBRARY_PATH=squashfs-root/usr/lib ldd "$f" 2>/dev/null | awk '/not found/ {print $1}')
+            if [ -n "$missing" ]; then echo "$f: $missing"; bad=1; fi
+          done < <(find squashfs-root/usr -type f -exec sh -c 'file -b "$1" | grep -q ELF' _ {} \; -print)
+          [ "$bad" -eq 0 ] && echo "All bundled binaries resolve on Arch Linux"
+          exit $bad
+
+      - name: Start Natron headless
+        continue-on-error: true
+        run: |
+          QT_QPA_PLATFORM=offscreen timeout 120 squashfs-root/AppRun --version
