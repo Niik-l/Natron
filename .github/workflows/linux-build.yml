@@ -68,7 +68,20 @@ jobs:
             OpenImageIO-devel OpenColorIO-devel openvdb-devel tbb-devel \
             embree-devel oidn-devel opensubdiv-devel openpgl-devel \
             pugixml-devel libzstd-devel libpng-devel libjpeg-turbo-devel libtiff-devel \
-            openjpeg2-devel libwebp-devel nanovdb-devel
+            openjpeg2-devel libwebp-devel
+
+      # NanoVDB is header-only and part of the OpenVDB source tree. Fedora's
+      # openvdb-devel doesn't ship it (MSYS2's does), so fetch the headers of
+      # the exact OpenVDB version Fedora installed.
+      - name: Install NanoVDB headers
+        run: |
+          ver=$(rpm -q --qf '%{VERSION}' openvdb-devel)
+          echo "OpenVDB $ver"
+          curl -fsSL "https://github.com/AcademySoftwareFoundation/openvdb/archive/refs/tags/v$ver.tar.gz" \
+            | tar -xz -C /tmp "openvdb-$ver/nanovdb/nanovdb"
+          mkdir -p /usr/local/include
+          cp -r "/tmp/openvdb-$ver/nanovdb/nanovdb" /usr/local/include/
+          test -f /usr/local/include/nanovdb/NanoVDB.h
 
       - name: Report toolchain + missing pieces
         run: |
@@ -92,7 +105,7 @@ jobs:
             hit=$(ls /usr/lib64/lib$lib.so* 2>/dev/null | head -1)
             printf '%-20s %s\n' "$lib" "${hit:-MISSING}"
           done
-          hit=$(find /usr/include -path '*nanovdb/NanoVDB.h' 2>/dev/null | head -1)
+          hit=$(find /usr/include /usr/local/include -path '*nanovdb/NanoVDB.h' 2>/dev/null | head -1)
           printf '%-20s %s\n' "nanovdb/NanoVDB.h" "${hit:-MISSING}"
           exit 0
 
