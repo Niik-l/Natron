@@ -1,6 +1,8 @@
-# Linux build of the Qt6 fork (Natron + Cycles), in a Fedora container on a
-# GitHub-hosted runner. Mirrors tools/win-build (03-cycles.sh / 04-natron.sh)
-# with Fedora's system packages instead of MSYS2.
+# Linux build of the Qt6 fork (Natron + Cycles + the OFX plugins), in a Fedora
+# container on a GitHub-hosted runner. Mirrors tools/win-build (03-cycles,
+# 04-natron, 05-plugins, 06-install) with Fedora's system packages instead of
+# MSYS2. Plugin refs and patches come from tools/win-build, so both platforms
+# build the same pinned plugin sources.
 #
 # Manual trigger only for now (Actions tab -> "Linux Build" -> Run workflow)
 # until the build is green; add a `push:` trigger after that.
@@ -68,7 +70,10 @@ jobs:
             OpenImageIO-devel OpenColorIO-devel openvdb-devel tbb-devel \
             embree-devel oidn-devel opensubdiv-devel openpgl-devel \
             pugixml-devel libzstd-devel libpng-devel libjpeg-turbo-devel libtiff-devel \
-            openjpeg2-devel libwebp-devel
+            openjpeg2-devel libwebp-devel \
+            make curl binutils LibRaw-devel \
+            libavcodec-free-devel libavformat-free-devel libavutil-free-devel \
+            libswscale-free-devel libswresample-free-devel
 
       # NanoVDB is header-only and part of the OpenVDB source tree. Fedora's
       # openvdb-devel doesn't ship it (MSYS2's does), so fetch the headers of
@@ -114,6 +119,42 @@ jobs:
         with:
           path: natron
           submodules: recursive
+
+      # Same pinned commits as the Windows build (tools/win-build/config.sh),
+      # so the patches in tools/win-build/patches apply on both platforms.
+      - name: Read pinned plugin refs
+        id: refs
+        run: |
+          cfg=natron/tools/win-build/config.sh
+          misc=$(grep -m1 '^OPENFX_MISC_REF=' "$cfg" | cut -d'"' -f2)
+          io=$(grep -m1 '^OPENFX_IO_REF=' "$cfg" | cut -d'"' -f2)
+          echo "openfx-misc @ $misc"; echo "openfx-io   @ $io"
+          [ -n "$misc" ] && [ -n "$io" ] || { echo "::error::could not read plugin refs from $cfg"; exit 1; }
+          echo "misc=$misc" >> "$GITHUB_OUTPUT"
+          echo "io=$io" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout openfx-misc
+        uses: actions/checkout@v4
+        with:
+          repository: NatronGitHub/openfx-misc
+          ref: ${{ steps.refs.outputs.misc }}
+          path: openfx-misc
+          submodules: recursive
+
+      - name: Checkout openfx-io
+        uses: actions/checkout@v4
+        with:
+          repository: NatronGitHub/openfx-io
+          ref: ${{ steps.refs.outputs.io }}
+          path: openfx-io
+          submodules: recursive
+
+      # Community PyPlugs (content only; the Windows build also tracks tip).
+      - name: Checkout natron-plugins
+        uses: actions/checkout@v4
+        with:
+          repository: NatronGitHub/natron-plugins
+          path: natron-plugins
 
       - name: Checkout Cycles fork
         if: inputs.cycles
@@ -199,14 +240,51 @@ jobs:
           set -o pipefail
           ninja -C build -k 0 -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
-      - name: Check the binary links
-        working-directory: natron/build
+      # Mirrors tools/win-build/02-patch.sh + 05-plugins.sh. Runs even if the
+      # Natron build failed, so one run reports errors from both.
+      - name: Build OFX plugins
+        if: ${{ !cancelled() }}
         run: |
-          file App/Natron
-          if ldd App/Natron | grep 'not found'; then
-            echo "::error::Natron has unresolved shared libraries"; exit 1
-          fi
+          P="$GITHUB_WORKSPACE/natron/tools/win-build/patches"
+          for repo in openfx-misc openfx-io; do
+            if git -C "$repo" apply --reverse --check "$P/$repo.patch" 2>/dev/null; then
+              echo "$repo: patch already applied"
+            else
+              git -C "$repo" apply "$P/$repo.patch"
+              echo "$repo: applied $repo.patch"
+            fi
+          done
+          # openfx-misc fetches its pinned CImg.h at build time.
+          make -C openfx-misc/CImg CImg.h
+          # CMAKE_POLICY_VERSION_MINIMUM: the plugin CMakeLists predate CMake 4.
+          fail=0
+          for repo in openfx-misc openfx-io; do
+            { cmake -S "$repo" -B "$repo/build" -G Ninja \
+                -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
+                -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+                -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+              && ninja -C "$repo/build" -k 0 -j"$(nproc)"; } 2>&1 \
+              | tee -a "$GITHUB_WORKSPACE/plugins.log" || fail=1
+          done
+          for p in Misc CImg IO; do
+            find openfx-misc/build openfx-io/build -name "$p.ofx" -type f | grep -q . \
+              || { echo "::error::$p.ofx was not built"; fail=1; }
+          done
+          exit $fail
+
+      - name: Check the binaries link
+        run: |
+          B=natron/build
+          bad=0
+          for f in $B/App/Natron $B/Renderer/NatronRenderer $B/PythonBin/natron-python \
+                   $(find openfx-misc/build openfx-io/build -name '*.ofx' -type f); do
+            file "$f"
+            if ldd "$f" | grep 'not found'; then
+              echo "::error::$f has unresolved shared libraries"; bad=1
+            fi
+          done
           ccache --show-stats || true
+          exit $bad
 
       - name: Save ccache
         if: always()
@@ -223,7 +301,7 @@ jobs:
           {
             echo '### Build errors (first 60)'
             echo '```'
-            grep -hE 'error:|undefined reference|CMake Error|not found' configure.log build.log 2>/dev/null | sort -u | head -60 || true
+            grep -hE 'error:|undefined reference|CMake Error|not found' configure.log build.log plugins.log 2>/dev/null | sort -u | head -60 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -235,17 +313,47 @@ jobs:
           path: |
             configure.log
             build.log
+            plugins.log
             natron/build/CMakeCache.txt
           if-no-files-found: ignore
 
+      # Layout mirrors tools/win-build/06-install.sh. Natron resolves bundled
+      # plugins as <exe dir>/../Plugins/{OFX/Natron,PyPlugs}.
       - name: Package
-        working-directory: natron/build
         run: |
-          mkdir -p dist/Natron/bin
-          cp App/Natron dist/Natron/bin/
-          [ -f Renderer/NatronRenderer ] && cp Renderer/NatronRenderer dist/Natron/bin/ || true
-          cp -r Plugins dist/Natron/ 2>/dev/null || true
-          tar -C dist -czf "$GITHUB_WORKSPACE/Natron-fedora${FEDORA}-${{ inputs.build_type }}.tar.gz" Natron
+          R="$GITHUB_WORKSPACE"; B="$R/natron/build"; D="$R/dist/Natron"; G="$R/dist/debug"
+          rm -rf "$R/dist"
+          mkdir -p "$D/bin" "$D/Plugins/OFX/Natron" "$D/Plugins/PyPlugs" "$D/Resources" "$G"
+          cp "$B/App/Natron" "$B/Renderer/NatronRenderer" "$B/PythonBin/natron-python" "$D/bin/"
+
+          for p in Misc CImg IO; do
+            src=$(find openfx-misc/build openfx-io/build -name "$p.ofx" -type f | head -1)
+            d="$D/Plugins/OFX/Natron/$p.ofx.bundle/Contents/Linux-x86-64"
+            mkdir -p "$d"; cp "$src" "$d/"
+          done
+
+          cp -r "$B/Plugins/PyPlugs/." "$D/Plugins/PyPlugs/"
+          cp -r natron-plugins/. "$D/Plugins/PyPlugs/"
+          rm -rf "$D/Plugins/PyPlugs/.git" "$D/Plugins/PyPlugs/.github"
+
+          curl -fsSL https://github.com/NatronGitHub/OpenColorIO-Configs/archive/Natron-v2.4.tar.gz \
+            | tar -xz -C "$D/Resources"
+          mv "$D/Resources/OpenColorIO-Configs-Natron-v2.4" "$D/Resources/OpenColorIO-Configs"
+
+          # Strip every binary; keep its debug info in a separate .debug file
+          # linked back by name (gdb finds it if placed next to the binary).
+          while IFS= read -r f; do
+            n=$(basename "$f")
+            objcopy --only-keep-debug "$f" "$G/$n.debug"
+            strip --strip-debug --strip-unneeded "$f"
+            objcopy --add-gnu-debuglink="$G/$n.debug" "$f"
+          done < <(find "$D/bin" "$D/Plugins/OFX" -type f \( -path '*/bin/*' -o -name '*.ofx' \))
+          du -sh "$D" "$G"
+
+          V="fedora${FEDORA}-${{ inputs.build_type }}"
+          tar -C "$R/dist" -czf "$R/Natron-$V.tar.gz" Natron
+          tar -C "$R/dist" -czf "$R/Natron-$V-debug-symbols.tar.gz" debug
+          ls -la "$R"/Natron-*.tar.gz
 
       - name: Upload build
         uses: actions/upload-artifact@v4
@@ -253,3 +361,10 @@ jobs:
           name: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}
           path: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}.tar.gz
           retention-days: 14
+
+      - name: Upload debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}-debug-symbols
+          path: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}-debug-symbols.tar.gz
+          retention-days: 7
