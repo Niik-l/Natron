@@ -124,11 +124,15 @@ jobs:
         if: inputs.cycles && steps.cycles-cache.outputs.cache-hit != 'true'
         working-directory: cycles
         run: |
-          # Flags match tools/win-build/03-cycles.sh (CPU only, system libs).
+          # Flags match tools/win-build/03-cycles.sh (CPU only, system libs),
+          # plus HYDRA_RENDER_DELEGATE=OFF: it defaults ON and forces WITH_USD
+          # back on, which then demands Python 3.11 on Linux (Windows skips
+          # that check, so the Windows scripts never needed it).
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DWITH_CYCLES_STANDALONE=ON -DWITH_CYCLES_STANDALONE_GUI=OFF \
+            -DWITH_CYCLES_HYDRA_RENDER_DELEGATE=OFF \
             -DWITH_CYCLES_USD=OFF -DWITH_USD=OFF -DWITH_CYCLES_OSL=OFF \
             -DWITH_CYCLES_DEVICE_CUDA=OFF -DWITH_CYCLES_DEVICE_OPTIX=OFF \
             -DWITH_CYCLES_DEVICE_HIP=OFF -DWITH_CYCLES_DEVICE_ONEAPI=OFF \
