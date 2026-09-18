@@ -220,9 +220,17 @@ if(NATRON_FASTVOLUME)
     if(WIN32)
         target_compile_definitions(NatronEngine PRIVATE _USE_MATH_DEFINES)
     endif()
-    # MinGW links the DLL directly (no import lib needed). PRIVATE on a STATIC
-    # lib still propagates to the final executable link.
-    target_link_libraries(NatronEngine PRIVATE ${NATRON_WGPU_DIR}/wgpu_native.dll)
+    # PRIVATE on a STATIC lib still propagates to the final executable link.
+    if(WIN32)
+        # MinGW links the DLL directly (no import lib needed).
+        target_link_libraries(NatronEngine PRIVATE ${NATRON_WGPU_DIR}/wgpu_native.dll)
+    else()
+        # Linux: link the release's static archive. Its libwgpu_native.so has
+        # no SONAME, so linking that would bake the build path into Natron.
+        # The Rust runtime inside the archive needs dl/pthread/m/rt.
+        target_link_libraries(NatronEngine PRIVATE
+            ${NATRON_WGPU_DIR}/libwgpu_native.a ${CMAKE_DL_LIBS} pthread m rt)
+    endif()
     # Only supply the OpenVDB stack ourselves when Cycles isn't already linking
     # its own (bundled) copy — otherwise the system and bundled OpenVDB/TBB
     # would clash at link time. Matches the validated standalone build.
