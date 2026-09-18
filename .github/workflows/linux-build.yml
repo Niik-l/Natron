@@ -43,6 +43,10 @@ jobs:
     runs-on: ubuntu-24.04
     container: fedora:44
     timeout-minutes: 340
+    # The container's default is `sh -e`; the steps use pipefail/PIPESTATUS.
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
 
     steps:
       - name: Install build dependencies
@@ -63,7 +67,8 @@ jobs:
             openexr-devel imath-devel alembic-devel \
             OpenImageIO-devel OpenColorIO-devel openvdb-devel tbb-devel \
             embree-devel oidn-devel opensubdiv-devel openpgl-devel \
-            pugixml-devel libzstd-devel libpng-devel libjpeg-turbo-devel libtiff-devel
+            pugixml-devel libzstd-devel libpng-devel libjpeg-turbo-devel libtiff-devel \
+            openjpeg2-devel libwebp-devel nanovdb-devel
 
       - name: Report toolchain + missing pieces
         run: |
@@ -82,6 +87,13 @@ jobs:
             hit=$(ls /usr/lib64/lib$lib.so* 2>/dev/null | head -1)
             printf '%-20s %s\n' "$lib" "${hit:-MISSING}"
           done
+          echo "--- libraries/headers the Cycles configure needs"
+          for lib in openjp2 webp; do
+            hit=$(ls /usr/lib64/lib$lib.so* 2>/dev/null | head -1)
+            printf '%-20s %s\n' "$lib" "${hit:-MISSING}"
+          done
+          hit=$(find /usr/include -path '*nanovdb/NanoVDB.h' 2>/dev/null | head -1)
+          printf '%-20s %s\n' "nanovdb/NanoVDB.h" "${hit:-MISSING}"
           exit 0
 
       - name: Checkout Natron
@@ -198,7 +210,7 @@ jobs:
           {
             echo '### Build errors (first 60)'
             echo '```'
-            grep -hE 'error:|undefined reference|CMake Error|not found' configure.log build.log 2>/dev/null | sort -u | head -60
+            grep -hE 'error:|undefined reference|CMake Error|not found' configure.log build.log 2>/dev/null | sort -u | head -60 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
