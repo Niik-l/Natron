@@ -71,7 +71,7 @@ jobs:
             embree-devel oidn-devel opensubdiv-devel openpgl-devel \
             pugixml-devel libzstd-devel libpng-devel libjpeg-turbo-devel libtiff-devel \
             openjpeg2-devel libwebp-devel \
-            make curl binutils LibRaw-devel \
+            make curl patch binutils LibRaw-devel \
             libavcodec-free-devel libavformat-free-devel libavutil-free-devel \
             libswscale-free-devel libswresample-free-devel
 
