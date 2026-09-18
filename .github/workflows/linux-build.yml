@@ -20,6 +20,10 @@ on:
         description: 'Build Cycles + CyclesRender'
         type: boolean
         default: true
+      fastvolume:
+        description: 'Build FastVolumeRender (wgpu-native)'
+        type: boolean
+        default: true
       build_type:
         description: 'CMake build type'
         type: choice
@@ -36,6 +40,10 @@ env:
   # Natron's CyclesRenderer needs the deep-EXR output API that only exists there.
   CYCLES_REPO: Niik-l/cycles
   CYCLES_REF: feature/cycles-deep
+  # wgpu-native release whose headers are byte-identical to the local
+  # Windows wgpu/ (webgpu.h + wgpu.h); the zip checksum pins the download.
+  WGPU_VERSION: v27.0.4.0
+  WGPU_SHA256: 271481ef76fbf3ea09631a6079e9493636ecf813cd9c92306c44a1a452991ba1
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_MAXSIZE: 3G
 
@@ -71,7 +79,7 @@ jobs:
             embree-devel oidn-devel opensubdiv-devel openpgl-devel \
             pugixml-devel libzstd-devel libpng-devel libjpeg-turbo-devel libtiff-devel \
             openjpeg2-devel libwebp-devel \
-            make curl patch binutils LibRaw-devel \
+            make curl patch unzip binutils LibRaw-devel \
             libavcodec-free-devel libavformat-free-devel libavutil-free-devel \
             libswscale-free-devel libswresample-free-devel
 
@@ -209,6 +217,20 @@ jobs:
           ninja -C build -j"$(nproc)"
           test -f build/lib/libcycles_subd.a || { echo "::error::Cycles build incomplete (libcycles_subd.a missing)"; exit 1; }
 
+      # Same flat layout as the Windows wgpu/ folder (headers + library side
+      # by side). Linux links the static archive; see Engine/CMakeLists.txt.
+      - name: Fetch wgpu-native
+        if: inputs.fastvolume
+        run: |
+          curl -fsSL -o wgpu.zip \
+            "https://github.com/gfx-rs/wgpu-native/releases/download/$WGPU_VERSION/wgpu-linux-x86_64-release.zip"
+          echo "$WGPU_SHA256  wgpu.zip" | sha256sum -c -
+          unzip -q wgpu.zip -d wgpu-release
+          mkdir -p wgpu
+          cp wgpu-release/include/webgpu/webgpu.h wgpu-release/include/webgpu/wgpu.h \
+             wgpu-release/lib/libwgpu_native.a wgpu/
+          ls -la wgpu
+
       - name: Configure Natron
         working-directory: natron
         run: |
@@ -223,7 +245,8 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DNATRON_QT6=ON \
             -DNATRON_BUILD_TESTS=OFF \
-            -DNATRON_FASTVOLUME=OFF \
+            -DNATRON_FASTVOLUME=${{ inputs.fastvolume && 'ON' || 'OFF' }} \
+            -DNATRON_WGPU_DIR="$GITHUB_WORKSPACE/wgpu" \
             -DNATRON_CYCLES=${{ inputs.cycles && 'ON' || 'OFF' }} \
             -DNATRON_CYCLES_DIR="$GITHUB_WORKSPACE/cycles" \
             -DNATRON_CYCLES_BUILD_DIR="$GITHUB_WORKSPACE/cycles/build" \
@@ -288,6 +311,14 @@ jobs:
               echo "::error::$f has unresolved shared libraries"; bad=1
             fi
           done
+          # The node's plugin ID string only exists if FastVolume compiled in.
+          if ${{ inputs.fastvolume }}; then
+            for f in $B/App/Natron $B/Renderer/NatronRenderer; do
+              grep -q 'built-in.FastVolumeRender' "$f" \
+                && echo "FastVolumeRender present in $f" \
+                || { echo "::error::FastVolumeRender missing from $f"; bad=1; }
+            done
+          fi
           ccache --show-stats || true
           exit $bad
 
