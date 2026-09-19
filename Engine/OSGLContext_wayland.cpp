@@ -32,14 +32,17 @@
 
 #include <dlfcn.h>
 
+// Natron/Qt headers must come before EGL: older EGL headers (e.g. Rocky 8's)
+// include Xlib, which #defines Status, Bool, None, etc. and breaks Qt's own
+// declarations (QTextStream::Status, QVariant::Bool). Same as OSGLContext_x11.
+#include "Engine/AppManager.h"
+#include "Engine/OSGLContext.h"
+#include "Global/GLIncludes.h"
+
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <wayland-client.h>
 #include <wayland-egl.h>
-
-#include "Engine/AppManager.h"
-#include "Engine/OSGLContext.h"
-#include "Global/GLIncludes.h"
 
 NATRON_NAMESPACE_ENTER
 
