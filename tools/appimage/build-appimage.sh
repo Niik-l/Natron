@@ -103,7 +103,9 @@ done < <(find "$PYDST" -name '*.so*' -type f)
 
 echo "== Runtime-loaded libraries"
 # OIDN loads its CPU device module with dlopen, so no dependency scan finds it.
-oidn_cpu="$(find /usr/lib64 /usr/lib -maxdepth 1 -name 'libOpenImageDenoise_device_cpu.so*' 2>/dev/null)"
+# Distro builds install to /usr/lib64; the ASWF image (portable build) to /usr/local/lib.
+oidn_cpu="$(find /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib -maxdepth 1 \
+            -name 'libOpenImageDenoise_device_cpu.so*' 2>/dev/null)"
 [ -n "$oidn_cpu" ] || { echo "error: OIDN CPU device module not found (Cycles denoising would fail)"; exit 1; }
 echo "$oidn_cpu" | xargs -I{} cp -a {} "$APPDIR/usr/lib/"
 
@@ -131,7 +133,7 @@ EOF
 chmod +x "$WORK/AppRun"
 
 echo "== linuxdeploy"
-export QMAKE="$(command -v qmake6 || echo /usr/lib64/qt6/bin/qmake)"
+export QMAKE="$(command -v qmake6 || command -v qmake || echo /usr/lib64/qt6/bin/qmake)"
 # linuxdeploy's bundled strip is too old for current distro libraries (it
 # can't parse .relr.dyn and fails). Nothing needs it: distro libraries ship
 # stripped, and Natron + the plugins are stripped before this script runs.
