@@ -113,19 +113,12 @@ cp "$REPO/Gui/Resources/Images/natronIcon256_linux.png" "$WORK/natronIcon256_lin
 mkdir -p "$APPDIR/usr/share/metainfo" "$APPDIR/usr/share/mime/packages"
 cp "$REPO/Gui/Resources/Metainfo/fr.natron.Natron.appdata.xml" "$APPDIR/usr/share/metainfo/"
 cp "$REPO/Gui/Resources/Mime/x-natron.xml" "$APPDIR/usr/share/mime/packages/"
-# OFX plugins and Python extension modules are dlopen'd; their dependencies
-# live in usr/lib. linuxdeploy's AppRun sources every script in apprun-hooks/.
-mkdir -p "$APPDIR/apprun-hooks"
-# $APPDIR is set by the AppImage runtime; fall back to AppRun's own location
-# when the extracted AppDir is run directly.
-cat > "$APPDIR/apprun-hooks/natron-env.sh" <<'EOF'
-_natron_appdir="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
-export LD_LIBRARY_PATH="$_natron_appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-unset _natron_appdir
-EOF
+# No LD_LIBRARY_PATH: linuxdeploy gives every deployed ELF file (executables,
+# OFX plugins, Python extension modules) a relative RPATH to usr/lib, and an
+# LD_LIBRARY_PATH would leak into every program Natron launches.
 
 # Our own AppRun: linuxdeploy otherwise makes AppRun a plain symlink to
-# Natron, and the apprun-hooks (ours + linuxdeploy-plugin-qt's) never run.
+# Natron, and linuxdeploy-plugin-qt's apprun-hook would never run.
 cat > "$WORK/AppRun" <<'EOF'
 #!/bin/sh
 this_dir="$(dirname "$(readlink -f "$0")")"
@@ -160,21 +153,12 @@ done < <(find "$APPDIR/usr/Plugins/OFX" -name '*.ofx' -type f
          ls "$APPDIR"/usr/lib/libOpenImageDenoise_device_cpu.so*)
 linuxdeploy-x86_64.AppImage "${args[@]}"
 
-# This only proves nothing is missing on the build machine, where the system
-# copies are also present; the workflow's appimage-test job checks the real
-# thing on a different distro.
-echo "== Unresolved libraries on the build machine (should be none)"
-bad=0
-while IFS= read -r f; do
-    missing="$(LD_LIBRARY_PATH="$APPDIR/usr/lib" unresolved "$f")"
-    if [ -n "$missing" ]; then echo "  $f: $missing"; bad=1; fi
-done < <(find "$APPDIR/usr" -type f \( -name '*.so*' -o -name '*.ofx' -o -perm -u+x \) -exec sh -c 'file -b "$1" | grep -q ELF' _ {} \; -print)
-[ "$bad" -eq 0 ] || { echo "error: unresolved libraries in the AppDir"; exit 1; }
-
+# Whether everything is bundled can't be checked here (the system copies
+# would mask gaps); the workflow's appimage-test job checks it on another distro.
 echo "== Minimum glibc"
-find "$APPDIR/usr" -type f -exec sh -c 'file -b "$1" | grep -q ELF' _ {} \; -print0 \
-    | xargs -0 objdump -T 2>/dev/null | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1 \
-    | tee "$OUT/$NAME.glibc.txt"
+{ find "$APPDIR/usr" -type f -exec sh -c 'file -b "$1" | grep -q ELF' _ {} \; -print0 \
+    | xargs -0 objdump -T 2>/dev/null || true; } \
+    | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1 | tee "$OUT/$NAME.glibc.txt"
 
 echo "== appimagetool"
 ARCH=x86_64 appimagetool-x86_64.AppImage --runtime-file "$TOOLS/runtime-x86_64" \
