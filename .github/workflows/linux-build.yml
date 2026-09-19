@@ -445,7 +445,7 @@ jobs:
             libx11 libxcb libxkbcommon libxkbcommon-x11 xcb-util-cursor \
             xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm \
             alsa-lib e2fsprogs libgpg-error
-          ldd --version | head -1
+          ldd --version | sed -n 1p   # not head: it closes the pipe early (SIGPIPE under pipefail)
 
       - name: Download AppImage
         uses: actions/download-artifact@v4
