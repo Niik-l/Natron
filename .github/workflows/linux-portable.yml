@@ -1,28 +1,64 @@
-# Portable Linux build: the same Natron + Cycles + plugins as linux-build.yml,
-# but built inside the Academy Software Foundation's VFX Reference Platform
-# image (Rocky Linux 8, glibc 2.28), so the AppImage runs on Rocky/RHEL/Alma 8+
-# and practically every other current distro.
+# Portable Linux build: the same Natron + Cycles + FastVolume + OFX plugins as
+# linux-build.yml, but built inside the Academy Software Foundation's VFX
+# Reference Platform image (Rocky Linux 8, glibc 2.28), so the AppImage runs
+# on Rocky/RHEL/Alma 8+ and practically every other current distro.
 #
-# Stage 1 (this version): probe the image and report where every dependency
-# lives and what's missing, before writing the build itself.
+# The image provides Qt/PySide6 6.8.3, Python 3.13, OIIO 3.1, OCIO 2.5,
+# OpenVDB 13, Embree, OIDN, OpenSubdiv, oneTBB, Boost, Alembic and GCC 14
+# (all under /usr/local). Added here: NanoVDB headers and OpenPGL (built),
+# OpenJPEG/WebP (Rocky packages), qtpy/packaging/patchelf (pip).
+# Not yet: FFmpeg, so IO.ofx has no video Read/Write.
+#
+# The image is ~5 GB compressed, so the job frees runner disk space and runs
+# it as a long-lived container (`docker exec` per step) instead of via
+# `container:`, which would pull before any step could free space.
+# The workspace is mounted at /w inside the container.
 
 name: Linux Portable
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      cycles:
+        description: 'Build Cycles + CyclesRender'
+        type: boolean
+        default: true
+      fastvolume:
+        description: 'Build FastVolumeRender (wgpu-native)'
+        type: boolean
+        default: true
+      build_type:
+        description: 'CMake build type'
+        type: choice
+        options: [RelWithDebInfo, Release, Debug]
+        default: RelWithDebInfo
+
+concurrency:
+  group: linux-portable-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  # VFX Reference Platform CY2026: Qt/PySide6 6.8.3, Python 3.13, OIIO 3.1,
-  # OCIO 2.5, OpenVDB 13, GCC 14. Pinned to a dated build.
+  # VFX Reference Platform CY2026, pinned to a dated build (2026-08-31).
   ASWF_IMAGE: aswf/ci-vfxall:2026-clang19.6
+  ASWF_TAG: 2026-clang19.6
+  OPENVDB_VERSION: 13.0.0    # the image's OpenVDB; NanoVDB headers must match
+  OPENPGL_VERSION: v0.7.1    # same as Fedora 44 ships
+  CYCLES_REPO: Niik-l/cycles
+  CYCLES_REF: feature/cycles-deep
+  WGPU_VERSION: v27.0.4.0
+  WGPU_SHA256: 271481ef76fbf3ea09631a6079e9493636ecf813cd9c92306c44a1a452991ba1
+  NAME: portable-rocky8-${{ inputs.build_type }}
 
 jobs:
-  probe:
-    name: Probe the ASWF image
+  portable:
+    name: Rocky 8 (ASWF) ${{ inputs.build_type }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+
     steps:
-      # The image is ~5 GB compressed, ~15-20 GB unpacked. Free space first;
-      # this is why the image is pulled by hand rather than via `container:`.
       - name: Free disk space
         run: |
           df -h /
@@ -31,67 +67,338 @@ jobs:
           sudo docker image prune --all --force >/dev/null
           df -h /
 
-      - name: Pull image
-        run: docker pull "$ASWF_IMAGE"
+      - name: Checkout Natron
+        uses: actions/checkout@v4
+        with:
+          path: natron
+          submodules: recursive
 
-      - name: Probe
+      # Same pinned plugin commits as the Windows and Fedora builds.
+      - name: Read pinned plugin refs
+        id: refs
         run: |
-          docker run --rm "$ASWF_IMAGE" bash -lc '
-            set +e
-            hr() { echo; echo "=== $*"; }
-            hr OS / toolchain
-            grep PRETTY_NAME /etc/os-release; ldd --version | sed -n 1p
-            gcc --version | sed -n 1p; g++ --version | sed -n 1p
-            cmake --version | sed -n 1p; ninja --version
-            which python python3; python3 --version
-            echo "CC=$CC CXX=$CXX"; echo "PATH=$PATH"
+          cfg=natron/tools/win-build/config.sh
+          misc=$(grep -m1 '^OPENFX_MISC_REF=' "$cfg" | cut -d'"' -f2)
+          io=$(grep -m1 '^OPENFX_IO_REF=' "$cfg" | cut -d'"' -f2)
+          [ -n "$misc" ] && [ -n "$io" ] || { echo "::error::could not read plugin refs from $cfg"; exit 1; }
+          echo "misc=$misc" >> "$GITHUB_OUTPUT"
+          echo "io=$io" >> "$GITHUB_OUTPUT"
 
-            hr CMake package configs
-            for cfg in Qt6Config Shiboken6Config Shiboken6ToolsConfig PySide6Config \
-                       OpenImageIOConfig OpenColorIOConfig OpenEXRConfig ImathConfig \
-                       OpenVDBConfig embree-config OpenImageDenoiseConfig OpenSubdivConfig \
-                       TBBConfig BoostConfig AlembicConfig openpglConfig pugixmlConfig \
-                       CeresConfig Eigen3Config ECMConfig LibRawConfig; do
-              hit=$(find / -xdev \( -path /proc -o -path /sys \) -prune -o \
-                    -name "$cfg.cmake" -print 2>/dev/null | head -2 | tr "\n" " ")
-              printf "%-26s %s\n" "$cfg" "${hit:-MISSING}"
+      - name: Checkout openfx-misc
+        uses: actions/checkout@v4
+        with:
+          repository: NatronGitHub/openfx-misc
+          ref: ${{ steps.refs.outputs.misc }}
+          path: openfx-misc
+          submodules: recursive
+
+      - name: Checkout openfx-io
+        uses: actions/checkout@v4
+        with:
+          repository: NatronGitHub/openfx-io
+          ref: ${{ steps.refs.outputs.io }}
+          path: openfx-io
+          submodules: recursive
+
+      - name: Checkout natron-plugins
+        uses: actions/checkout@v4
+        with:
+          repository: NatronGitHub/natron-plugins
+          path: natron-plugins
+
+      - name: Checkout Cycles fork
+        if: inputs.cycles
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CYCLES_REPO }}
+          ref: ${{ env.CYCLES_REF }}
+          path: cycles
+
+      - name: Cycles cache key
+        if: inputs.cycles
+        id: cycles-key
+        run: echo "sha=$(git -C cycles rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Cycles build
+        if: inputs.cycles
+        id: cycles-cache
+        uses: actions/cache@v4
+        with:
+          path: cycles/build
+          key: portable-cycles-${{ env.ASWF_TAG }}-${{ steps.cycles-key.outputs.sha }}-${{ inputs.build_type }}
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: portable-ccache-${{ env.ASWF_TAG }}-${{ inputs.build_type }}-${{ github.sha }}
+          restore-keys: portable-ccache-${{ env.ASWF_TAG }}-${{ inputs.build_type }}-
+
+      - name: Fetch wgpu-native
+        if: inputs.fastvolume
+        run: |
+          curl -fsSL -o wgpu.zip \
+            "https://github.com/gfx-rs/wgpu-native/releases/download/$WGPU_VERSION/wgpu-linux-x86_64-release.zip"
+          echo "$WGPU_SHA256  wgpu.zip" | sha256sum -c -
+          unzip -q wgpu.zip -d wgpu-release
+          mkdir -p wgpu
+          cp wgpu-release/include/webgpu/webgpu.h wgpu-release/include/webgpu/wgpu.h \
+             wgpu-release/lib/libwgpu_native.a wgpu/
+
+      - name: Start the build container
+        run: |
+          docker pull "$ASWF_IMAGE"
+          docker run -d --name b -v "$GITHUB_WORKSPACE:/w" -w /w \
+            -e CCACHE_DIR=/w/.ccache -e CCACHE_MAXSIZE=3G \
+            -e BT="${{ inputs.build_type }}" \
+            "$ASWF_IMAGE" sleep infinity
+          df -h /
+
+      - name: Install the missing dependencies
+        run: |
+          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION b bash -eo pipefail -c '
+            # The checkouts belong to the runner user, not the container root;
+            # without this git refuses to touch them ("dubious ownership").
+            git config --global --add safe.directory "*"
+            # Rocky 8 packages for what the image lacks.
+            dnf install -y -q openjpeg2-devel libwebp-devel patch file unzip gdb
+            # qtpy + packaging: Natron imports qtpy at startup. patchelf: the AppImage script.
+            python3 -m pip install -q qtpy packaging patchelf
+            # The image installs to /usr/local; make sure ldd/ld.so see it
+            # (linuxdeploy resolves dependencies through ldd).
+            printf "/usr/local/lib\n/usr/local/lib64\n" > /etc/ld.so.conf.d/zz-usr-local.conf
+            ldconfig
+
+            echo "== NanoVDB headers (OpenVDB $OPENVDB_VERSION)"
+            curl -fsSL "https://github.com/AcademySoftwareFoundation/openvdb/archive/refs/tags/v$OPENVDB_VERSION.tar.gz" \
+              | tar -xz -C /tmp "openvdb-$OPENVDB_VERSION/nanovdb/nanovdb"
+            cp -r "/tmp/openvdb-$OPENVDB_VERSION/nanovdb/nanovdb" /usr/local/include/
+            test -f /usr/local/include/nanovdb/NanoVDB.h
+
+            echo "== OpenPGL $OPENPGL_VERSION (Cycles path guiding)"
+            git clone -q --depth 1 --branch "$OPENPGL_VERSION" https://github.com/RenderKit/openpgl /tmp/openpgl
+            cmake -S /tmp/openpgl -B /tmp/openpgl/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DTBB_ROOT=/usr/local -DOPENPGL_BUILD_STATIC=OFF > /tmp/openpgl.log 2>&1 \
+              || { tail -40 /tmp/openpgl.log; exit 1; }
+            ninja -C /tmp/openpgl/build install > /tmp/openpgl-build.log 2>&1 \
+              || { tail -60 /tmp/openpgl-build.log; exit 1; }
+            ldconfig
+
+            echo "== Toolchain"
+            gcc --version | sed -n 1p; cmake --version | sed -n 1p; python3 --version
+            echo "qmake: $(command -v qmake6 || command -v qmake || echo MISSING)"
+            echo "oneTBB: $(ls /usr/local/lib*/libtbb.so 2>/dev/null | head -1)"
+            echo "openpgl: $(ls /usr/local/lib*/libopenpgl.so* 2>/dev/null | head -1)"
+          '
+
+      - name: Build Cycles
+        if: inputs.cycles && steps.cycles-cache.outputs.cache-hit != 'true'
+        run: |
+          docker exec b bash -eo pipefail -c '
+            cd /w/cycles
+            # Flags as tools/win-build/03-cycles.sh and linux-build.yml, plus
+            # TBB_ROOT_DIR / OPENVDB_ROOT_DIR so the image copies in /usr/local
+            # win over Rocky 8s old system TBB (libtbb.so.2).
+            cmake -S . -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=$BT \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DWITH_CYCLES_STANDALONE=ON -DWITH_CYCLES_STANDALONE_GUI=OFF \
+              -DWITH_CYCLES_HYDRA_RENDER_DELEGATE=OFF \
+              -DWITH_CYCLES_USD=OFF -DWITH_USD=OFF -DWITH_CYCLES_OSL=OFF \
+              -DWITH_CYCLES_DEVICE_CUDA=OFF -DWITH_CYCLES_DEVICE_OPTIX=OFF \
+              -DWITH_CYCLES_DEVICE_HIP=OFF -DWITH_CYCLES_DEVICE_ONEAPI=OFF \
+              -DWITH_CYCLES_EMBREE=ON -DWITH_CYCLES_OPENIMAGEDENOISE=ON \
+              -DWITH_CYCLES_OPENCOLORIO=ON -DWITH_CYCLES_OPENSUBDIV=ON \
+              -DWITH_CYCLES_OPENVDB=ON -DWITH_CYCLES_ALEMBIC=OFF \
+              -DWITH_CYCLES_LOGGING=OFF -DWITH_LIBS_PRECOMPILED=OFF \
+              -DTBB_ROOT_DIR=/usr/local -DOPENVDB_ROOT_DIR=/usr/local
+            ninja -C build -j"$(nproc)"
+            test -f build/lib/libcycles_subd.a || { echo "::error::Cycles build incomplete"; exit 1; }
+          '
+
+      - name: Configure Natron
+        run: |
+          docker exec b bash -eo pipefail -c '
+            cd /w/natron
+            # Link the images oneTBB, not Rocky 8s old system libtbb.so.2.
+            TBB=$(ls /usr/local/lib*/libtbb.so 2>/dev/null | head -1)
+            [ -n "$TBB" ] || { echo "::error::oneTBB libtbb.so not found in /usr/local"; exit 1; }
+            export CXXFLAGS="-isystem /usr/local/include/Imath -isystem /usr/local/include/OpenEXR"
+            cmake -S . -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=$BT \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DNATRON_QT6=ON \
+              -DNATRON_BUILD_TESTS=OFF \
+              -DNATRON_FASTVOLUME=${{ inputs.fastvolume && 'ON' || 'OFF' }} \
+              -DNATRON_WGPU_DIR=/w/wgpu \
+              -DNATRON_CYCLES=${{ inputs.cycles && 'ON' || 'OFF' }} \
+              -DNATRON_CYCLES_DIR=/w/cycles \
+              -DNATRON_CYCLES_BUILD_DIR=/w/cycles/build \
+              -DNATRON_LLVM_INSTALL_DIR=/usr/local \
+              -DTBB_LIB="$TBB" \
+              2>&1 | tee /w/configure.log
+          '
+
+      - name: Build Natron
+        run: |
+          docker exec b bash -eo pipefail -c '
+            ninja -C /w/natron/build -k 0 -j"$(nproc)" 2>&1 | tee /w/build.log
+          '
+
+      - name: Build OFX plugins
+        if: ${{ !cancelled() }}
+        run: docker exec b bash /w/natron/tools/linux/build-plugins.sh /w "${{ inputs.build_type }}"
+
+      - name: Check the binaries link
+        run: |
+          docker exec -e FV="${{ inputs.fastvolume }}" b bash -eo pipefail -c '
+            cd /w; B=natron/build; bad=0
+            for f in $B/App/Natron $B/Renderer/NatronRenderer $B/PythonBin/natron-python \
+                     $(find openfx-misc/build openfx-io/build -name "*.ofx" -type f); do
+              file "$f"
+              if ldd "$f" | grep "not found"; then echo "::error::$f has unresolved libraries"; bad=1; fi
             done
+            if [ "$FV" = true ]; then
+              for f in $B/App/Natron $B/Renderer/NatronRenderer; do
+                grep -q built-in.FastVolumeRender "$f" && echo "FastVolumeRender present in $f" \
+                  || { echo "::error::FastVolumeRender missing from $f"; bad=1; }
+              done
+            fi
+            ccache --show-stats || true
+            exit $bad
+          '
 
-            hr pkg-config modules
-            for pc in cairo fontconfig expat libavcodec libavformat libswscale libraw \
-                      x11 xcb wayland-client wayland-egl egl gl glew zlib libpng libjpeg libtiff-4 openjp2; do
-              if pkg-config --exists $pc 2>/dev/null; then
-                printf "%-16s %s  (%s)\n" "$pc" "$(pkg-config --modversion $pc)" "$(pkg-config --variable=libdir $pc)"
-              else
-                printf "%-16s MISSING\n" "$pc"
-              fi
-            done
+      - name: Start Natron headless (build tree)
+        continue-on-error: true
+        run: |
+          docker exec b bash -c '
+            QT_QPA_PLATFORM=offscreen timeout 300 gdb -q -batch -ex run -ex "thread apply all bt 30" \
+              --args /w/natron/build/App/Natron --version 2>&1 | tail -150
+          '
 
-            hr Headers
-            for h in nanovdb/NanoVDB.h ofxCore.h GL/glu.h X11/Xlib.h cairo/cairo.h; do
-              hit=$(find /usr /opt -path "*$h" 2>/dev/null | head -1)
-              printf "%-20s %s\n" "$h" "${hit:-MISSING}"
-            done
+      - name: Package
+        run: docker exec b bash /w/natron/tools/linux/package.sh /w "$NAME"
 
-            hr Python modules
-            for m in PySide6 shiboken6 qtpy packaging numpy; do
-              python3 -c "import $m, os; print(\"%-12s %s\" % (\"$m\", os.path.dirname($m.__file__)))" 2>/dev/null \
-                || printf "%-12s MISSING\n" "$m"
-            done
+      - name: Build AppImage
+        run: |
+          docker exec -e NAME b bash -eo pipefail -c '
+            cd /w
+            bash natron/tools/appimage/build-appimage.sh dist/Natron appimage "Natron-$NAME-x86_64.AppImage"
+          '
+          echo "Minimum glibc: $(cat appimage/*.glibc.txt)" >> "$GITHUB_STEP_SUMMARY"
 
-            hr Shiboken generator / libclang
-            which shiboken6; find / -xdev -name "libclang.so*" 2>/dev/null | head -3
-            find / -xdev -name "llvm-config" 2>/dev/null | head -3
+      # Files written in the container are root-owned; hand them back to the
+      # runner user so the cache and upload steps can read them.
+      - name: Fix workspace ownership
+        if: always()
+        run: docker exec b chown -R "$(id -u):$(id -g)" /w || true
 
-            hr Libraries by name
-            for l in libembree4 libOpenImageDenoise libopenpgl libtbb libosdCPU libpugixml \
-                     libAlembic libopenvdb libOpenImageIO libOpenColorIO libavcodec libraw libcairo \
-                     libQt6Core libpyside6 libshiboken6 libpython3.13; do
-              hit=$(find / -xdev \( -path /proc -o -path /sys \) -prune -o -name "$l.so*" -print 2>/dev/null | head -1)
-              printf "%-22s %s\n" "$l" "${hit:-MISSING}"
-            done
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: portable-ccache-${{ env.ASWF_TAG }}-${{ inputs.build_type }}-${{ github.sha }}
 
-            hr dnf: can the gaps come from Rocky 8 packages?
-            dnf -q list --available cairo-devel libX11-devel mesa-libGLU-devel wayland-devel \
-              fontconfig-devel expat-devel patchelf 2>&1 | tail -n +1 | head -20
+      - name: Collect error summary
+        if: failure()
+        run: |
+          {
+            echo '### Build errors (first 60)'
+            echo '```'
+            grep -hE 'error:|undefined reference|CMake Error|not found' configure.log build.log plugins.log 2>/dev/null | sort -u | head -60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ env.NAME }}
+          path: |
+            configure.log
+            build.log
+            plugins.log
+            natron/build/CMakeCache.txt
+          if-no-files-found: ignore
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Natron-${{ env.NAME }}
+          path: Natron-${{ env.NAME }}.tar.gz
+          retention-days: 14
+
+      - name: Upload debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: Natron-${{ env.NAME }}-debug-symbols
+          path: Natron-${{ env.NAME }}-debug-symbols.tar.gz
+          retention-days: 7
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: Natron-${{ env.NAME }}-AppImage
+          path: appimage/
+          retention-days: 14
+
+      - name: Stop the build container
+        if: always()
+        run: docker rm -f b || true
+
+  # The target platform itself: a plain Rocky Linux 8 container with only what
+  # a desktop provides (GL, X11, fonts, and the libraries on the AppImage
+  # excludelist). Any library the AppImage failed to bundle shows up here.
+  # Artifacts are downloaded on the host and the checks run via `docker run`,
+  # so the GitHub actions themselves don't need to run on Rocky 8.
+  appimage-test:
+    name: AppImage on Rocky Linux 8
+    needs: portable
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - name: Download AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: Natron-${{ env.NAME }}-AppImage
+          path: t
+
+      - name: Download debug symbols
+        uses: actions/download-artifact@v4
+        with:
+          name: Natron-${{ env.NAME }}-debug-symbols
+          path: t
+
+      - name: Test on Rocky Linux 8
+        run: |
+          docker run --rm -v "$PWD/t:/t" -w /t rockylinux/rockylinux:8 bash -o pipefail -c '
+            echo "== Desktop baseline"
+            dnf install -y -q --setopt=install_weak_deps=False --skip-broken               file binutils findutils tar gzip gdb               mesa-libGL mesa-libEGL libglvnd-glx libglvnd-egl fontconfig freetype harfbuzz               libX11 libxcb libxkbcommon libxkbcommon-x11 xcb-util-wm xcb-util-image               xcb-util-keysyms xcb-util-renderutil libSM libICE fribidi alsa-lib >/dev/null
+            ldd --version | sed -n 1p
+            sed "s/^/AppImage needs /" *.glibc.txt
+
+            echo "== Every bundled binary resolves"
+            chmod +x *.AppImage
+            ./*.AppImage --appimage-extract >/dev/null
+            bad=0
+            while IFS= read -r f; do
+              # Plain ldd resolves through the bundled RPATHs, as a launch does.
+              missing=$({ ldd "$f" 2>/dev/null || true; } | awk "/not found/ {print \$1}")
+              if [ -n "$missing" ]; then echo "$f: $missing"; bad=1; fi
+            done < <(find squashfs-root/usr -type f -exec sh -c "file -b \"\$1\" | grep -q ELF" _ {} \; -print)
+            [ "$bad" -eq 0 ] && echo "All bundled binaries resolve on Rocky Linux 8"
+
+            echo "== Headless start (informational)"
+            QT_QPA_PLATFORM=offscreen timeout 120 squashfs-root/AppRun --version               || echo "headless start exited with $?"
+
+            echo "== Backtrace of the headless start (informational)"
+            tar -xzf Natron-*-debug-symbols.tar.gz
+            cp debug/Natron.debug squashfs-root/usr/bin/
+            APPDIR="$PWD/squashfs-root" QT_QPA_PLATFORM=offscreen timeout 300               gdb -q -batch -ex run -ex "thread apply all bt 30"               --args squashfs-root/usr/bin/Natron --version 2>&1 | tail -150 || true
+
+            exit $bad
           '
