@@ -377,7 +377,11 @@ jobs:
         run: |
           docker run --rm -v "$PWD/t:/t" -w /t rockylinux/rockylinux:8 bash -o pipefail -c '
             echo "== Desktop baseline"
-            dnf install -y -q --setopt=install_weak_deps=False --skip-broken               file binutils findutils tar gzip gdb               mesa-libGL mesa-libEGL libglvnd-glx libglvnd-egl fontconfig freetype harfbuzz               libX11 libxcb libxkbcommon libxkbcommon-x11 xcb-util-wm xcb-util-image               xcb-util-keysyms xcb-util-renderutil libSM libICE fribidi alsa-lib >/dev/null
+            dnf install -y -q --setopt=install_weak_deps=False --skip-broken \
+              file binutils findutils tar gzip gdb \
+              mesa-libGL mesa-libEGL libglvnd-glx libglvnd-egl fontconfig freetype harfbuzz \
+              libX11 libxcb libxkbcommon libxkbcommon-x11 xcb-util-wm xcb-util-image \
+              xcb-util-keysyms xcb-util-renderutil libSM libICE fribidi alsa-lib >/dev/null
             ldd --version | sed -n 1p
             sed "s/^/AppImage needs /" *.glibc.txt
 
@@ -393,12 +397,18 @@ jobs:
             [ "$bad" -eq 0 ] && echo "All bundled binaries resolve on Rocky Linux 8"
 
             echo "== Headless start (informational)"
-            QT_QPA_PLATFORM=offscreen timeout 120 squashfs-root/AppRun --version               || echo "headless start exited with $?"
+            QT_QPA_PLATFORM=offscreen timeout 120 squashfs-root/AppRun --version \
+              || echo "headless start exited with $?"
 
             echo "== Backtrace of the headless start (informational)"
             tar -xzf Natron-*-debug-symbols.tar.gz
             cp debug/Natron.debug squashfs-root/usr/bin/
-            APPDIR="$PWD/squashfs-root" QT_QPA_PLATFORM=offscreen timeout 300               gdb -q -batch -ex run -ex "thread apply all bt 30"               --args squashfs-root/usr/bin/Natron --version 2>&1 | tail -150 || true
+            # "info symbol" names the library holding the crash address;
+            # "info sharedlibrary" shows which copies (bundled or host) loaded.
+            APPDIR="$PWD/squashfs-root" QT_QPA_PLATFORM=offscreen timeout 300 \
+              gdb -q -batch -ex run -ex "thread apply all bt 30" \
+              -ex "info symbol \$pc" -ex "info sharedlibrary" \
+              --args squashfs-root/usr/bin/Natron --version 2>&1 | tail -250 || true
 
             exit $bad
           '
