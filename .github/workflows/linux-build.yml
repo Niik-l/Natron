@@ -81,7 +81,7 @@ jobs:
             embree-devel oidn-devel opensubdiv-devel openpgl-devel \
             pugixml-devel libzstd-devel libpng-devel libjpeg-turbo-devel libtiff-devel \
             openjpeg2-devel libwebp-devel \
-            make curl patch unzip binutils appstream LibRaw-devel \
+            make curl patch unzip binutils appstream patchelf LibRaw-devel \
             libavcodec-free-devel libavformat-free-devel libavutil-free-devel \
             libswscale-free-devel libswresample-free-devel
 
@@ -428,7 +428,8 @@ jobs:
 
   # Unpacks the AppImage on a different distro that has none of Natron's
   # dependencies installed, only what a desktop normally provides (GL, X11,
-  # fonts). Any library the AppImage failed to bundle shows up here.
+  # fonts, and the libraries on the AppImage excludelist such as libSM/libICE
+  # and fribidi). Any library the AppImage failed to bundle shows up here.
   appimage-test:
     name: AppImage on Arch Linux
     needs: linux
@@ -444,7 +445,7 @@ jobs:
             file binutils mesa libglvnd fontconfig freetype2 harfbuzz \
             libx11 libxcb libxkbcommon libxkbcommon-x11 xcb-util-cursor \
             xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm \
-            alsa-lib e2fsprogs libgpg-error
+            alsa-lib e2fsprogs libgpg-error libsm libice fribidi
           ldd --version | sed -n 1p   # not head: it closes the pipe early (SIGPIPE under pipefail)
 
       - name: Download AppImage
@@ -467,7 +468,9 @@ jobs:
           [ "$bad" -eq 0 ] && echo "All bundled binaries resolve on Arch Linux"
           exit $bad
 
+      # Runs even if the library check failed, so each run reports both.
       - name: Start Natron headless
+        if: ${{ !cancelled() }}
         continue-on-error: true
         run: |
           QT_QPA_PLATFORM=offscreen timeout 120 squashfs-root/AppRun --version

@@ -153,6 +153,13 @@ done < <(find "$APPDIR/usr/Plugins/OFX" -name '*.ofx' -type f
          ls "$APPDIR"/usr/lib/libOpenImageDenoise_device_cpu.so*)
 linuxdeploy-x86_64.AppImage "${args[@]}"
 
+# linuxdeploy-plugin-qt leaves some Qt plugins (e.g. platformthemes/
+# libqxdgdesktopportal.so) without an RPATH; point all of them at usr/lib.
+echo "== Qt plugin RPATHs"
+find "$APPDIR/usr/plugins" -name '*.so' -type f | while IFS= read -r f; do
+    patchelf --set-rpath '$ORIGIN/../../lib' "$f"
+done
+
 # Whether everything is bundled can't be checked here (the system copies
 # would mask gaps); the workflow's appimage-test job checks it on another distro.
 echo "== Minimum glibc"
