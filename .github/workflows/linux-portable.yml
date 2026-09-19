@@ -418,7 +418,7 @@ jobs:
             echo "== Desktop baseline"
             dnf install -y -q --setopt=install_weak_deps=False --skip-broken \
               file binutils findutils tar gzip gdb \
-              mesa-libGL mesa-libEGL libglvnd-glx libglvnd-egl fontconfig freetype harfbuzz \
+              mesa-libGL mesa-libEGL libglvnd-glx libglvnd-egl libglvnd-opengl fontconfig freetype harfbuzz \
               libX11 libxcb libxkbcommon libxkbcommon-x11 xcb-util-wm xcb-util-image \
               xcb-util-keysyms xcb-util-renderutil libSM libICE fribidi alsa-lib >/dev/null
             ldd --version | sed -n 1p
