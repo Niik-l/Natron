@@ -234,7 +234,16 @@ jobs:
             # Cairo (Rocky only) pulls freetype2 in by full path via pkg-config,
             # so pkg-config must prefer the images .pc files; rpath-link covers
             # the libraries only other libraries depend on.
-            export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+            # The image ships libfreetype 2.13 but no freetype2.pc, so describe
+            # it ourselves (its headers if present, else Rocky: a newer
+            # FreeType library accepts older headers).
+            ftinc=$(dirname "$(find /usr/local/include /usr/include -name ft2build.h 2>/dev/null | head -1)")
+            mkdir -p /tmp/pc
+            printf "%s\n" "libdir=/usr/local/lib" "includedir=$ftinc" "" \
+              "Name: FreeType 2" "Description: FreeType 2.13 from the ASWF image" \
+              "Version: 26.1.20" "Libs: -L\${libdir} -lfreetype" "Cflags: -I\${includedir}" \
+              > /tmp/pc/freetype2.pc
+            export PKG_CONFIG_PATH="/tmp/pc:/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
             ft=$(pkg-config --variable=libdir freetype2 2>/dev/null)
             echo "freetype2 $(pkg-config --modversion freetype2 2>/dev/null) from ${ft:-nowhere}"
             case "$ft" in /usr/local/*) ;; *)
