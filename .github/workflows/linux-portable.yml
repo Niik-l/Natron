@@ -225,7 +225,12 @@ jobs:
             TBB=$(ls /usr/local/lib*/libtbb.so 2>/dev/null | head -1)
             [ -n "$TBB" ] || { echo "::error::oneTBB libtbb.so not found in /usr/local"; exit 1; }
             export CXXFLAGS="-isystem /usr/local/include/Imath -isystem /usr/local/include/OpenEXR"
+            # No native Wayland GL context: Rocky 8s EGL headers predate the
+            # PFNEGL*PROC typedefs OSGLContext_wayland.cpp uses. Nothing is lost:
+            # the AppImage ships only Qts X11 (xcb) plugin, so Wayland desktops
+            # run it through XWayland anyway. The Fedora build keeps Wayland.
             cmake -S . -B build -G Ninja \
+              -DCMAKE_DISABLE_FIND_PACKAGE_Wayland=TRUE \
               -DCMAKE_BUILD_TYPE=$BT \
               -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
               -DNATRON_QT6=ON \
