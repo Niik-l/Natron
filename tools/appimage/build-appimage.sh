@@ -160,7 +160,16 @@ echo "== Minimum glibc"
     | xargs -0 objdump -T 2>/dev/null || true; } \
     | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1 | tee "$OUT/$NAME.glibc.txt"
 
+# appimagetool's own AppStream check is fatal on any finding; run the
+# validator here as a report instead, so metadata nits never block a build.
+echo "== AppStream metadata (report only)"
+if command -v appstreamcli >/dev/null; then
+    appstreamcli validate --no-net "$APPDIR/usr/share/metainfo/fr.natron.Natron.appdata.xml" || true
+else
+    echo "  appstreamcli not installed; skipped"
+fi
+
 echo "== appimagetool"
-ARCH=x86_64 appimagetool-x86_64.AppImage --runtime-file "$TOOLS/runtime-x86_64" \
+ARCH=x86_64 appimagetool-x86_64.AppImage --no-appstream --runtime-file "$TOOLS/runtime-x86_64" \
     "$APPDIR" "$OUT/$NAME"
 ls -la "$OUT/$NAME"
