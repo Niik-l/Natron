@@ -1,0 +1,97 @@
+# Portable Linux build: the same Natron + Cycles + plugins as linux-build.yml,
+# but built inside the Academy Software Foundation's VFX Reference Platform
+# image (Rocky Linux 8, glibc 2.28), so the AppImage runs on Rocky/RHEL/Alma 8+
+# and practically every other current distro.
+#
+# Stage 1 (this version): probe the image and report where every dependency
+# lives and what's missing, before writing the build itself.
+
+name: Linux Portable
+
+on:
+  workflow_dispatch: {}
+
+env:
+  # VFX Reference Platform CY2026: Qt/PySide6 6.8.3, Python 3.13, OIIO 3.1,
+  # OCIO 2.5, OpenVDB 13, GCC 14. Pinned to a dated build.
+  ASWF_IMAGE: aswf/ci-vfxall:2026-clang19.6
+
+jobs:
+  probe:
+    name: Probe the ASWF image
+    runs-on: ubuntu-24.04
+    steps:
+      # The image is ~5 GB compressed, ~15-20 GB unpacked. Free space first;
+      # this is why the image is pulled by hand rather than via `container:`.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force >/dev/null
+          df -h /
+
+      - name: Pull image
+        run: docker pull "$ASWF_IMAGE"
+
+      - name: Probe
+        run: |
+          docker run --rm "$ASWF_IMAGE" bash -lc '
+            set +e
+            hr() { echo; echo "=== $*"; }
+            hr OS / toolchain
+            grep PRETTY_NAME /etc/os-release; ldd --version | sed -n 1p
+            gcc --version | sed -n 1p; g++ --version | sed -n 1p
+            cmake --version | sed -n 1p; ninja --version
+            which python python3; python3 --version
+            echo "CC=$CC CXX=$CXX"; echo "PATH=$PATH"
+
+            hr CMake package configs
+            for cfg in Qt6Config Shiboken6Config Shiboken6ToolsConfig PySide6Config \
+                       OpenImageIOConfig OpenColorIOConfig OpenEXRConfig ImathConfig \
+                       OpenVDBConfig embree-config OpenImageDenoiseConfig OpenSubdivConfig \
+                       TBBConfig BoostConfig AlembicConfig openpglConfig pugixmlConfig \
+                       CeresConfig Eigen3Config ECMConfig LibRawConfig; do
+              hit=$(find / -xdev \( -path /proc -o -path /sys \) -prune -o \
+                    -name "$cfg.cmake" -print 2>/dev/null | head -2 | tr "\n" " ")
+              printf "%-26s %s\n" "$cfg" "${hit:-MISSING}"
+            done
+
+            hr pkg-config modules
+            for pc in cairo fontconfig expat libavcodec libavformat libswscale libraw \
+                      x11 xcb wayland-client wayland-egl egl gl glew zlib libpng libjpeg libtiff-4 openjp2; do
+              if pkg-config --exists $pc 2>/dev/null; then
+                printf "%-16s %s  (%s)\n" "$pc" "$(pkg-config --modversion $pc)" "$(pkg-config --variable=libdir $pc)"
+              else
+                printf "%-16s MISSING\n" "$pc"
+              fi
+            done
+
+            hr Headers
+            for h in nanovdb/NanoVDB.h ofxCore.h GL/glu.h X11/Xlib.h cairo/cairo.h; do
+              hit=$(find /usr /opt -path "*$h" 2>/dev/null | head -1)
+              printf "%-20s %s\n" "$h" "${hit:-MISSING}"
+            done
+
+            hr Python modules
+            for m in PySide6 shiboken6 qtpy packaging numpy; do
+              python3 -c "import $m, os; print(\"%-12s %s\" % (\"$m\", os.path.dirname($m.__file__)))" 2>/dev/null \
+                || printf "%-12s MISSING\n" "$m"
+            done
+
+            hr Shiboken generator / libclang
+            which shiboken6; find / -xdev -name "libclang.so*" 2>/dev/null | head -3
+            find / -xdev -name "llvm-config" 2>/dev/null | head -3
+
+            hr Libraries by name
+            for l in libembree4 libOpenImageDenoise libopenpgl libtbb libosdCPU libpugixml \
+                     libAlembic libopenvdb libOpenImageIO libOpenColorIO libavcodec libraw libcairo \
+                     libQt6Core libpyside6 libshiboken6 libpython3.13; do
+              hit=$(find / -xdev \( -path /proc -o -path /sys \) -prune -o -name "$l.so*" -print 2>/dev/null | head -1)
+              printf "%-22s %s\n" "$l" "${hit:-MISSING}"
+            done
+
+            hr dnf: can the gaps come from Rocky 8 packages?
+            dnf -q list --available cairo-devel libX11-devel mesa-libGLU-devel wayland-devel \
+              fontconfig-devel expat-devel patchelf 2>&1 | tail -n +1 | head -20
+          '
