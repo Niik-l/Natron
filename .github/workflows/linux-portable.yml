@@ -5,9 +5,9 @@
 #
 # The image provides Qt/PySide6 6.8.3, Python 3.13, OIIO 3.1, OCIO 2.5,
 # OpenVDB 13, Embree, OIDN, OpenSubdiv, oneTBB, Boost, Alembic and GCC 14
-# (all under /usr/local). Added here: NanoVDB headers and OpenPGL (built),
-# OpenJPEG/WebP (Rocky packages), qtpy/packaging/patchelf (pip).
-# Not yet: FFmpeg, so IO.ofx has no video Read/Write.
+# (all under /usr/local). Added here: NanoVDB headers; OpenPGL, x264, x265
+# and FFmpeg built from source (cached); OpenJPEG/WebP (Rocky packages);
+# qtpy/packaging/patchelf (pip).
 #
 # The image is ~5 GB compressed, so the job frees runner disk space and runs
 # it as a long-lived container (`docker exec` per step) instead of via
@@ -42,7 +42,12 @@ env:
   ASWF_IMAGE: aswf/ci-vfxall:2026-clang19.6
   ASWF_TAG: 2026-clang19.6
   OPENVDB_VERSION: 13.0.0    # the image's OpenVDB; NanoVDB headers must match
+  # Built from source into /usr/local and cached (see "extra deps" below).
   OPENPGL_VERSION: v0.7.1    # same as Fedora 44 ships
+  FFMPEG_VERSION: n8.0.3     # FFmpeg 8 (libavcodec 62) is what the Fedora build uses
+  X264_COMMIT: b35605ace3ddf7c1a5d67a2eb553f034aef41d55   # stable branch, 2026-09
+  X265_VERSION: 4.1
+  DEPS_KEY: openpgl-v0.7.1_ffmpeg-n8.0.3_x264-b35605a_x265-4.1
   CYCLES_REPO: Niik-l/cycles
   CYCLES_REF: feature/cycles-deep
   WGPU_VERSION: v27.0.4.0
@@ -134,6 +139,15 @@ jobs:
           key: portable-ccache-${{ env.ASWF_TAG }}-${{ inputs.build_type }}-${{ github.sha }}
           restore-keys: portable-ccache-${{ env.ASWF_TAG }}-${{ inputs.build_type }}-
 
+      # Source-built extras (OpenPGL, x264, x265, FFmpeg) as an install tree
+      # staged under extra-deps/, cached per image tag + versions.
+      - name: Restore extra deps
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: extra-deps
+          key: portable-deps-${{ env.ASWF_TAG }}-${{ env.DEPS_KEY }}
+
       - name: Fetch wgpu-native
         if: inputs.fastvolume
         run: |
@@ -156,12 +170,13 @@ jobs:
 
       - name: Install the missing dependencies
         run: |
-          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION natron-build bash -eo pipefail -c '
+          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION -e FFMPEG_VERSION -e X264_COMMIT -e X265_VERSION \
+            -e DEPS_HIT="${{ steps.deps-cache.outputs.cache-hit }}" natron-build bash -eo pipefail -c '
             # The checkouts belong to the runner user, not the container root;
             # without this git refuses to touch them ("dubious ownership").
             git config --global --add safe.directory "*"
-            # Rocky 8 packages for what the image lacks.
-            dnf install -y -q openjpeg2-devel libwebp-devel patch file unzip gdb
+            # Rocky 8 packages for what the image lacks (nasm: x264/FFmpeg asm).
+            dnf install -y -q openjpeg2-devel libwebp-devel patch file unzip gdb nasm
             # qtpy + packaging: Natron imports qtpy at startup. patchelf: the AppImage script.
             python3 -m pip install -q qtpy packaging patchelf
             # The image installs to /usr/local; make sure ldd/ld.so see it
@@ -175,21 +190,65 @@ jobs:
             cp -r "/tmp/openvdb-$OPENVDB_VERSION/nanovdb/nanovdb" /usr/local/include/
             test -f /usr/local/include/nanovdb/NanoVDB.h
 
-            echo "== OpenPGL $OPENPGL_VERSION (Cycles path guiding)"
-            git clone -q --depth 1 --branch "$OPENPGL_VERSION" https://github.com/RenderKit/openpgl /tmp/openpgl
-            cmake -S /tmp/openpgl -B /tmp/openpgl/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-              -DTBB_ROOT=/usr/local -DOPENPGL_BUILD_STATIC=OFF > /tmp/openpgl.log 2>&1 \
-              || { tail -40 /tmp/openpgl.log; exit 1; }
-            ninja -C /tmp/openpgl/build install > /tmp/openpgl-build.log 2>&1 \
-              || { tail -60 /tmp/openpgl-build.log; exit 1; }
-            ldconfig
+            # Source-built extras. Each installs into the staging tree
+            # /w/extra-deps (DESTDIR) and is then copied into /, so later
+            # packages find earlier ones and the tree can be cached whole.
+            export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+            D=/w/extra-deps
+            stage() { cp -a "$D/." / && ldconfig; }
+            run() { # name log-file command...
+              local n=$1 l=/tmp/$2; shift 2
+              "$@" > "$l" 2>&1 || { echo "::error::$n failed; last 60 lines of $l:"; tail -60 "$l"; exit 1; }
+            }
+            if [ "$DEPS_HIT" = "true" ] && [ -f "$D/.complete" ]; then
+              echo "== Extra deps: restored from cache"
+              stage
+            else
+              rm -rf "$D"; mkdir -p "$D"
+
+              echo "== OpenPGL $OPENPGL_VERSION (Cycles path guiding)"
+              git clone -q --depth 1 --branch "$OPENPGL_VERSION" https://github.com/RenderKit/openpgl /tmp/openpgl
+              run "OpenPGL configure" openpgl-cfg.log cmake -S /tmp/openpgl -B /tmp/openpgl/build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DTBB_ROOT=/usr/local -DOPENPGL_BUILD_STATIC=OFF
+              run "OpenPGL build" openpgl-build.log env DESTDIR=$D ninja -C /tmp/openpgl/build install
+              stage
+
+              echo "== x264 (stable @ ${X264_COMMIT:0:7})"
+              git clone -q https://code.videolan.org/videolan/x264.git /tmp/x264
+              git -C /tmp/x264 checkout -q "$X264_COMMIT"
+              ( cd /tmp/x264 && run "x264 configure" x264-cfg.log ./configure --prefix=/usr/local \
+                  --enable-shared --disable-static --disable-cli --enable-pic \
+                && run "x264 build" x264-build.log make -j"$(nproc)" \
+                && run "x264 install" x264-install.log make install DESTDIR=$D )
+              stage
+
+              echo "== x265 $X265_VERSION"
+              git clone -q --depth 1 --branch "$X265_VERSION" https://bitbucket.org/multicoreware/x265_git.git /tmp/x265
+              run "x265 configure" x265-cfg.log cmake -S /tmp/x265/source -B /tmp/x265/build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DENABLE_SHARED=ON -DENABLE_CLI=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+              run "x265 build" x265-build.log env DESTDIR=$D ninja -C /tmp/x265/build install
+              stage
+
+              echo "== FFmpeg $FFMPEG_VERSION (+x264/x265, GPL)"
+              git clone -q --depth 1 --branch "$FFMPEG_VERSION" https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg
+              ( cd /tmp/ffmpeg && run "FFmpeg configure" ffmpeg-cfg.log ./configure --prefix=/usr/local \
+                  --enable-shared --disable-static --enable-pic --disable-programs --disable-doc \
+                  --enable-gpl --enable-libx264 --enable-libx265 \
+                && run "FFmpeg build" ffmpeg-build.log make -j"$(nproc)" \
+                && run "FFmpeg install" ffmpeg-install.log make install DESTDIR=$D )
+              stage
+              touch "$D/.complete"
+            fi
 
             echo "== Toolchain"
             gcc --version | sed -n 1p; cmake --version | sed -n 1p; python3 --version
             echo "qmake: $(command -v qmake6 || command -v qmake || echo MISSING)"
             echo "oneTBB: $(ls /usr/local/lib*/libtbb.so 2>/dev/null | head -1)"
             echo "openpgl: $(ls /usr/local/lib*/libopenpgl.so* 2>/dev/null | head -1)"
+            echo "ffmpeg:  $(pkg-config --modversion libavcodec 2>/dev/null || echo MISSING) (libavcodec)"
+            echo "x264/x265: $(pkg-config --modversion x264 2>/dev/null || echo MISSING) / $(pkg-config --modversion x265 2>/dev/null || echo MISSING)"
           '
 
       - name: Build Cycles
@@ -283,7 +342,10 @@ jobs:
 
       - name: Build OFX plugins
         if: ${{ !cancelled() }}
-        run: docker exec natron-build bash /w/natron/tools/linux/build-plugins.sh /w "${{ inputs.build_type }}"
+        # PKG_CONFIG_PATH: openfx-io finds FFmpeg through pkg-config; it lives in /usr/local.
+        run: |
+          docker exec -e PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig \
+            natron-build bash /w/natron/tools/linux/build-plugins.sh /w "${{ inputs.build_type }}"
 
       - name: Check the binaries link
         run: |
@@ -294,6 +356,9 @@ jobs:
               file "$f"
               if ldd "$f" | grep "not found"; then echo "::error::$f has unresolved libraries"; bad=1; fi
             done
+            # IO.ofx must have picked up FFmpeg (else it silently builds without video nodes).
+            io=$(find openfx-io/build -name IO.ofx -type f | head -1)
+            ldd "$io" | grep -E "libavcodec|libx264|libx265" || { echo "::error::IO.ofx was built without FFmpeg"; bad=1; }
             if [ "$FV" = true ]; then
               for f in $B/App/Natron $B/Renderer/NatronRenderer; do
                 grep -q built-in.FastVolumeRender "$f" && echo "FastVolumeRender present in $f" \
@@ -332,6 +397,13 @@ jobs:
       - name: Fix workspace ownership
         if: always()
         run: docker exec natron-build chown -R "$(id -u):$(id -g)" /w || true
+
+      - name: Save extra deps
+        if: always() && steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: extra-deps
+          key: portable-deps-${{ env.ASWF_TAG }}-${{ env.DEPS_KEY }}
 
       - name: Save ccache
         if: always()
