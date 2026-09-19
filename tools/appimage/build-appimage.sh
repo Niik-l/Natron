@@ -56,8 +56,9 @@ fetch "$APPIMAGETOOL_URL" "$APPIMAGETOOL_SHA" "$TOOLS/appimagetool-x86_64.AppIma
 fetch "$RUNTIME_URL"      "$RUNTIME_SHA"      "$TOOLS/runtime-x86_64"
 export PATH="$TOOLS:$PATH"   # linuxdeploy finds its plugins on PATH
 
-# unresolved <elf>: prints the libraries ldd can't find (empty if none)
-unresolved() { ldd "$1" 2>/dev/null | awk '/not found/ {print $1}'; }
+# unresolved <elf>: prints the libraries ldd can't find (empty if none).
+# ldd can itself crash on some ELF files; that must not abort the script.
+unresolved() { { ldd "$1" 2>/dev/null || true; } | awk '/not found/ {print $1}'; }
 
 echo "== Natron tree"
 cp -a "$SRC/." "$APPDIR/usr/"
@@ -123,6 +124,19 @@ export LD_LIBRARY_PATH="$_natron_appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_P
 unset _natron_appdir
 EOF
 
+# Our own AppRun: linuxdeploy otherwise makes AppRun a plain symlink to
+# Natron, and the apprun-hooks (ours + linuxdeploy-plugin-qt's) never run.
+cat > "$WORK/AppRun" <<'EOF'
+#!/bin/sh
+this_dir="$(dirname "$(readlink -f "$0")")"
+export APPDIR="${APPDIR:-$this_dir}"
+for hook in "$this_dir"/apprun-hooks/*.sh; do
+    [ -f "$hook" ] && . "$hook"
+done
+exec "$this_dir/usr/bin/Natron" "$@"
+EOF
+chmod +x "$WORK/AppRun"
+
 echo "== linuxdeploy"
 export QMAKE="$(command -v qmake6 || echo /usr/lib64/qt6/bin/qmake)"
 # linuxdeploy's bundled strip is too old for current distro libraries (it
@@ -135,6 +149,7 @@ args=( --appdir "$APPDIR"
        --executable "$APPDIR/usr/bin/natron-python"
        --desktop-file "$WORK/fr.natron.Natron.desktop"
        --icon-file "$WORK/natronIcon256_linux.png"
+       --custom-apprun "$WORK/AppRun"
        --plugin qt )
 # Everything loaded at runtime rather than linked: OFX plugins, Python
 # extension modules, the OIDN device module.

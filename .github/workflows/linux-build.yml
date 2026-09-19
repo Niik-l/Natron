@@ -459,7 +459,8 @@ jobs:
           ./*.AppImage --appimage-extract >/dev/null
           bad=0
           while IFS= read -r f; do
-            missing=$(LD_LIBRARY_PATH=squashfs-root/usr/lib ldd "$f" 2>/dev/null | awk '/not found/ {print $1}')
+            # ldd can crash on some ELF files; that must not end the scan.
+            missing=$({ LD_LIBRARY_PATH=squashfs-root/usr/lib ldd "$f" 2>/dev/null || true; } | awk '/not found/ {print $1}')
             if [ -n "$missing" ]; then echo "$f: $missing"; bad=1; fi
           done < <(find squashfs-root/usr -type f -exec sh -c 'file -b "$1" | grep -q ELF' _ {} \; -print)
           [ "$bad" -eq 0 ] && echo "All bundled binaries resolve on Arch Linux"
