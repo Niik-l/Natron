@@ -230,8 +230,18 @@ jobs:
             # the AppImage ships only Qts X11 (xcb) plugin, so Wayland desktops
             # run it through XWayland anyway. The Fedora build keeps Wayland.
             # The images Qt and HarfBuzz need FreeType 2.13 (in /usr/local);
-            # without rpath-link the linker resolves Rocky 8s FreeType 2.9 in
-            # /usr/lib64, which lacks FT_Get_Paint & co.
+            # Rocky 8s FreeType 2.9 in /usr/lib64 lacks FT_Get_Paint & co.
+            # Cairo (Rocky only) pulls freetype2 in by full path via pkg-config,
+            # so pkg-config must prefer the images .pc files; rpath-link covers
+            # the libraries only other libraries depend on.
+            export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+            ft=$(pkg-config --variable=libdir freetype2 2>/dev/null)
+            echo "freetype2 $(pkg-config --modversion freetype2 2>/dev/null) from ${ft:-nowhere}"
+            case "$ft" in /usr/local/*) ;; *)
+              echo "::error::pkg-config resolves freetype2 to ${ft:-nothing}, not the images /usr/local copy"
+              ls -l /usr/local/lib*/libfreetype* /usr/local/lib*/pkgconfig/freetype2.pc 2>&1 || true
+              exit 1 ;;
+            esac
             LINK="-Wl,-rpath-link,/usr/local/lib:/usr/local/lib64"
             cmake -S . -B build -G Ninja \
               -DCMAKE_EXE_LINKER_FLAGS="$LINK" -DCMAKE_SHARED_LINKER_FLAGS="$LINK" \
