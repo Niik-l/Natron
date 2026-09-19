@@ -146,6 +146,13 @@ args=( --appdir "$APPDIR"
        --icon-file "$WORK/natronIcon256_linux.png"
        --custom-apprun "$WORK/AppRun"
        --plugin qt )
+# FORCE_BUNDLE_LIBS: space-separated libraries to bundle even though they're
+# on the AppImage excludelist (--library bypasses it). The portable build
+# needs this for FreeType/HarfBuzz: its Qt requires newer ones than old hosts have.
+for f in ${FORCE_BUNDLE_LIBS:-}; do
+    echo "  force-bundling $f"
+    args+=( --library "$f" )
+done
 # Everything loaded at runtime rather than linked: OFX plugins, Python
 # extension modules, the OIDN device module.
 while IFS= read -r f; do

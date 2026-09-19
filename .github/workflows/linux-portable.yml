@@ -229,7 +229,12 @@ jobs:
             # PFNEGL*PROC typedefs OSGLContext_wayland.cpp uses. Nothing is lost:
             # the AppImage ships only Qts X11 (xcb) plugin, so Wayland desktops
             # run it through XWayland anyway. The Fedora build keeps Wayland.
+            # The images Qt and HarfBuzz need FreeType 2.13 (in /usr/local);
+            # without rpath-link the linker resolves Rocky 8s FreeType 2.9 in
+            # /usr/lib64, which lacks FT_Get_Paint & co.
+            LINK="-Wl,-rpath-link,/usr/local/lib:/usr/local/lib64"
             cmake -S . -B build -G Ninja \
+              -DCMAKE_EXE_LINKER_FLAGS="$LINK" -DCMAKE_SHARED_LINKER_FLAGS="$LINK" \
               -DCMAKE_DISABLE_FIND_PACKAGE_Wayland=TRUE \
               -DCMAKE_BUILD_TYPE=$BT \
               -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -289,6 +294,10 @@ jobs:
         run: |
           docker exec -e NAME natron-build bash -eo pipefail -c '
             cd /w
+            # The images Qt needs FreeType 2.13 + its HarfBuzz; both are on the
+            # AppImage excludelist, and Rocky 8 hosts have FreeType 2.9. Bundle them.
+            export FORCE_BUNDLE_LIBS="$(ls /usr/local/lib*/libfreetype.so.6 /usr/local/lib*/libharfbuzz.so.0 2>/dev/null | tr "\n" " ")"
+            [ -n "$FORCE_BUNDLE_LIBS" ] || { echo "::error::image FreeType/HarfBuzz not found in /usr/local"; exit 1; }
             bash natron/tools/appimage/build-appimage.sh dist/Natron appimage "Natron-$NAME-x86_64.AppImage"
           '
           echo "Minimum glibc: $(cat appimage/*.glibc.txt)" >> "$GITHUB_STEP_SUMMARY"
