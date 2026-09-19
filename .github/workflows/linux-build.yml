@@ -412,6 +412,16 @@ jobs:
           path: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}-debug-symbols.tar.gz
           retention-days: 7
 
+      # Same headless start as the AppImage test, but from the unstripped build
+      # on the build machine itself: a crash here too is a Natron startup bug,
+      # not a packaging one.
+      - name: Start Natron headless (build tree)
+        continue-on-error: true
+        run: |
+          dnf install -y -q gdb >/dev/null
+          QT_QPA_PLATFORM=offscreen timeout 300 gdb -q -batch -ex run -ex 'thread apply all bt 30' \
+            --args natron/build/App/Natron --version 2>&1 | tail -150
+
       # Bundles Qt, Python + PySide6 and every needed library; see the script.
       - name: Build AppImage
         run: |
@@ -474,3 +484,23 @@ jobs:
         continue-on-error: true
         run: |
           QT_QPA_PLATFORM=offscreen timeout 120 squashfs-root/AppRun --version
+
+      # If the start crashes, show where: gdb with the debug symbols placed
+      # next to the binaries (found through their gnu-debuglink).
+      - name: Download debug symbols
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: Natron-fedora${{ env.FEDORA }}-${{ inputs.build_type }}-debug-symbols
+
+      - name: Backtrace of the headless start
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          pacman -S --noconfirm --needed gdb >/dev/null
+          tar -xzf Natron-*-debug-symbols.tar.gz
+          cp debug/Natron.debug squashfs-root/usr/bin/
+          export APPDIR="$PWD/squashfs-root" QT_QPA_PLATFORM=offscreen
+          timeout 300 gdb -q -batch -ex run -ex 'thread apply all bt 30' \
+            --args squashfs-root/usr/bin/Natron --version 2>&1 | tail -150
