@@ -252,7 +252,13 @@ jobs:
               exit 1 ;;
             esac
             LINK="-Wl,-rpath-link,/usr/local/lib:/usr/local/lib64"
+            # CMake turns pkg-config -l flags into files by searching every -L
+            # dir in order; Cairos -L/usr/lib64 comes first, so -lfreetype
+            # matched Rockys copy. Preset those lookups to the images FreeType
+            # (Qt6s own FreeType lookup already finds /usr/local).
+            FT_LIB=/usr/local/lib/libfreetype.so
             cmake -S . -B build -G Ninja \
+              -Dpkgcfg_lib_Cairo_freetype=$FT_LIB -Dpkgcfg_lib_PKG_FONTCONFIG_freetype=$FT_LIB \
               -DCMAKE_EXE_LINKER_FLAGS="$LINK" -DCMAKE_SHARED_LINKER_FLAGS="$LINK" \
               -DCMAKE_DISABLE_FIND_PACKAGE_Wayland=TRUE \
               -DCMAKE_BUILD_TYPE=$BT \
