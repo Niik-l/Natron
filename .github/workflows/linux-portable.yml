@@ -148,7 +148,7 @@ jobs:
       - name: Start the build container
         run: |
           docker pull "$ASWF_IMAGE"
-          docker run -d --name b -v "$GITHUB_WORKSPACE:/w" -w /w \
+          docker run -d --name natron-build -v "$GITHUB_WORKSPACE:/w" -w /w \
             -e CCACHE_DIR=/w/.ccache -e CCACHE_MAXSIZE=3G \
             -e BT="${{ inputs.build_type }}" \
             "$ASWF_IMAGE" sleep infinity
@@ -156,7 +156,7 @@ jobs:
 
       - name: Install the missing dependencies
         run: |
-          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION b bash -eo pipefail -c '
+          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION natron-build bash -eo pipefail -c '
             # The checkouts belong to the runner user, not the container root;
             # without this git refuses to touch them ("dubious ownership").
             git config --global --add safe.directory "*"
@@ -195,7 +195,7 @@ jobs:
       - name: Build Cycles
         if: inputs.cycles && steps.cycles-cache.outputs.cache-hit != 'true'
         run: |
-          docker exec b bash -eo pipefail -c '
+          docker exec natron-build bash -eo pipefail -c '
             cd /w/cycles
             # Flags as tools/win-build/03-cycles.sh and linux-build.yml, plus
             # TBB_ROOT_DIR / OPENVDB_ROOT_DIR so the image copies in /usr/local
@@ -219,7 +219,7 @@ jobs:
 
       - name: Configure Natron
         run: |
-          docker exec b bash -eo pipefail -c '
+          docker exec natron-build bash -eo pipefail -c '
             cd /w/natron
             # Link the images oneTBB, not Rocky 8s old system libtbb.so.2.
             TBB=$(ls /usr/local/lib*/libtbb.so 2>/dev/null | head -1)
@@ -242,17 +242,17 @@ jobs:
 
       - name: Build Natron
         run: |
-          docker exec b bash -eo pipefail -c '
+          docker exec natron-build bash -eo pipefail -c '
             ninja -C /w/natron/build -k 0 -j"$(nproc)" 2>&1 | tee /w/build.log
           '
 
       - name: Build OFX plugins
         if: ${{ !cancelled() }}
-        run: docker exec b bash /w/natron/tools/linux/build-plugins.sh /w "${{ inputs.build_type }}"
+        run: docker exec natron-build bash /w/natron/tools/linux/build-plugins.sh /w "${{ inputs.build_type }}"
 
       - name: Check the binaries link
         run: |
-          docker exec -e FV="${{ inputs.fastvolume }}" b bash -eo pipefail -c '
+          docker exec -e FV="${{ inputs.fastvolume }}" natron-build bash -eo pipefail -c '
             cd /w; B=natron/build; bad=0
             for f in $B/App/Natron $B/Renderer/NatronRenderer $B/PythonBin/natron-python \
                      $(find openfx-misc/build openfx-io/build -name "*.ofx" -type f); do
@@ -272,17 +272,17 @@ jobs:
       - name: Start Natron headless (build tree)
         continue-on-error: true
         run: |
-          docker exec b bash -c '
+          docker exec natron-build bash -c '
             QT_QPA_PLATFORM=offscreen timeout 300 gdb -q -batch -ex run -ex "thread apply all bt 30" \
               --args /w/natron/build/App/Natron --version 2>&1 | tail -150
           '
 
       - name: Package
-        run: docker exec b bash /w/natron/tools/linux/package.sh /w "$NAME"
+        run: docker exec natron-build bash /w/natron/tools/linux/package.sh /w "$NAME"
 
       - name: Build AppImage
         run: |
-          docker exec -e NAME b bash -eo pipefail -c '
+          docker exec -e NAME natron-build bash -eo pipefail -c '
             cd /w
             bash natron/tools/appimage/build-appimage.sh dist/Natron appimage "Natron-$NAME-x86_64.AppImage"
           '
@@ -292,7 +292,7 @@ jobs:
       # runner user so the cache and upload steps can read them.
       - name: Fix workspace ownership
         if: always()
-        run: docker exec b chown -R "$(id -u):$(id -g)" /w || true
+        run: docker exec natron-build chown -R "$(id -u):$(id -g)" /w || true
 
       - name: Save ccache
         if: always()
@@ -346,7 +346,7 @@ jobs:
 
       - name: Stop the build container
         if: always()
-        run: docker rm -f b || true
+        run: docker rm -f natron-build || true
 
   # The target platform itself: a plain Rocky Linux 8 container with only what
   # a desktop provides (GL, X11, fonts, and the libraries on the AppImage
