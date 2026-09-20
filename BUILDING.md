@@ -892,7 +892,7 @@ jobs* replays the old commit). Inputs on both: `cycles` (default on), `fastvolum
 
 | Workflow | Builds in | Result runs on | Use it for |
 |---|---|---|---|
-| **Linux Portable** (`linux-portable.yml`) | ASWF VFX Reference Platform image (Rocky Linux 8, glibc 2.28) | Rocky/RHEL/Alma 8+, Ubuntu 20.04+, Debian 11+, Fedora, Arch — practically any current distro | **Distribution.** The AppImage to give people. |
+| **Linux Portable** (`linux-portable.yml`) | ASWF VFX Reference Platform image (Rocky Linux 8, glibc 2.28) | **Verified** (CI matrix, run 35522010097, 2026-09-20): Rocky 8 and 9, AlmaLinux 9, Fedora 44, Ubuntu 22.04 and 24.04, Debian 12, Arch, openSUSE Leap 15.6. Expected: anything else with glibc ≥ 2.28 (RHEL 8+, Ubuntu 20.04+, Debian 11+). | **Distribution.** The AppImage to give people. |
 | **Linux Build** (`linux-build.yml`) | `fedora:44` container, Fedora's packages | Fedora 44 only (tarball) | A fast Fedora-native build with the newest Qt/Python; CI sanity check |
 
 **Both build the same thing:** Natron, NatronRenderer and natron-python with Cycles,
