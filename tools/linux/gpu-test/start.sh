@@ -5,6 +5,9 @@ set -eo pipefail
 
 GEOMETRY=${GEOMETRY:-1920x1080}
 export PATH=/opt/TurboVNC/bin:/opt/VirtualGL/bin:$PATH
+# vulkaninfo / Qt warn when this is unset in a container.
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/xdg-$(id -u)}
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 
 echo "== GPU as the container sees it"
 nvidia-smi -L 2>/dev/null || echo "nvidia-smi not available: is the pod started with --gpus / the NVIDIA runtime?"

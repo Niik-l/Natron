@@ -7,8 +7,13 @@ FastVolumeRender, which needs Vulkan. An hour or two on a rented GPU covers
 that for a few dollars, on the distro we target (Rocky 9 here; swap the base
 image for Rocky 8, Ubuntu or Fedora to compare).
 
-Status 2026-09-20: image builds in CI (GPU Test Image workflow); not yet exercised on a GPU pod. Expect the first pod session
-to need a package-name fix or two.
+Status 2026-09-20: exercised on a RunPod RTX 4090 pod (Secure Cloud, $0.74/h). The
+desktop, noVNC clipboard bridge, GPU pass-through (nvidia-smi, Vulkan lists the
+4090, VirtualGL renderer = RTX 4090) and the pre-release download all worked first
+time. Natron ran with GPU rendering enabled; the 2D viewer, OCIO views, the 3D
+viewport with the camera gizmo, and FastVolumeRender on real Vulkan (the procedural
+cloud template at UHD) all passed. Paste commands via the noVNC sidebar clipboard,
+then Shift+Insert in the pod's terminal.
 
 ## Set-up
 
