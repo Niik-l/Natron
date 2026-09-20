@@ -536,10 +536,11 @@ jobs:
 
       - name: Summary
         run: |
+          # status.txt is root-owned (written inside the container) and absent
+          # if the container never ran; read it tolerantly, never modify it.
           st=t/out/status.txt
-          mkdir -p t/out; touch "$st"          # may be absent if the container never ran
-          libs=$(grep -o '^libs=.*' $st | cut -d= -f2); hl=$(grep -o '^headless=.*' $st | cut -d= -f2)
-          gui=$(grep -o '^gui=.*' $st | cut -d= -f2)
+          get() { { grep -o "^$1=.*" "$st" 2>/dev/null || true; } | cut -d= -f2; }
+          libs=$(get libs); hl=$(get headless); gui=$(get gui)
           {
             echo "### ${{ matrix.label }} (${{ matrix.image }})"
             echo "| libs resolve | headless start | GUI under Xvfb |"

@@ -54,7 +54,9 @@ elif command -v apt-get >/dev/null; then
           libsm6 libice6 libfribidi0 libasound2 libasound2t64"
     pkgs=""
     for p in $want; do                     # names differ per release; take what exists
-        apt-cache show "$p" >/dev/null 2>&1 && pkgs="$pkgs $p"
+        # `apt-cache show` also answers for pure virtual names (libasound2 on
+        # 24.04), which apt-get then refuses; policy's Candidate is the real test.
+        apt-cache policy "$p" 2>/dev/null | grep -q '^ *Candidate: [0-9]' && pkgs="$pkgs $p"
     done
     # shellcheck disable=SC2086
     apt-get install -y -qq --no-install-recommends $pkgs >/dev/null
@@ -65,12 +67,19 @@ elif command -v pacman >/dev/null; then
         xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm alsa-lib e2fsprogs \
         libgpg-error libsm libice fribidi >/dev/null
 elif command -v zypper >/dev/null; then
+    # libglvnd is one package here (libGL/libGLX/libEGL/libOpenGL). An unknown
+    # name makes zypper install nothing at all, so keep only names it knows.
+    want="$common python3 xorg-x11-server-Xvfb Mesa-dri Mesa-libGL1 Mesa-libEGL1 libglvnd
+          fontconfig libfreetype6 libharfbuzz0 dejavu-fonts libX11-6 libxcb1 libxkbcommon0
+          libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0
+          libxcb-cursor0 libSM6 libICE6 libfribidi0 libasound2"
+    zypper -n -q refresh >/dev/null
+    pkgs=""
+    for p in $want; do
+        zypper -n -q se -x -t package "$p" >/dev/null 2>&1 && pkgs="$pkgs $p"
+    done
     # shellcheck disable=SC2086
-    zypper -n -q install --no-recommends $common python3 xorg-x11-server-Xvfb Mesa-dri Mesa-libGL1 \
-        Mesa-libEGL1 libOpenGL0 libGLX0 fontconfig libfreetype6 libharfbuzz0 dejavu-fonts \
-        libX11-6 libxcb1 libxkbcommon0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 \
-        libxcb-keysyms1 libxcb-render-util0 libxcb-cursor0 libSM6 libICE6 libfribidi0 \
-        libasound2 >/dev/null || [ $? -eq 104 ]   # 104: some names not found, rest installed
+    zypper -n -q install --no-recommends $pkgs >/dev/null
 else
     echo "::error::no known package manager"; exit 2
 fi
