@@ -37,7 +37,7 @@ RUN curl -fsSL https://raw.githubusercontent.com/TurboVNC/repo/main/TurboVNC.rep
       -o /etc/yum.repos.d/TurboVNC.repo \
  && curl -fsSL https://raw.githubusercontent.com/VirtualGL/repo/main/VirtualGL.repo \
       -o /etc/yum.repos.d/VirtualGL.repo \
- && dnf -y install turbovnc virtualgl \
+ && dnf -y install turbovnc VirtualGL \
  && dnf clean all
 
 # GitHub CLI, to download the AppImage artifact from a workflow run.
