@@ -55,9 +55,16 @@ elif command -v apt-get >/dev/null; then
     pkgs=""
     for p in $want; do                     # names differ per release; take what exists
         # `apt-cache show` also answers for pure virtual names (libasound2 on
-        # 24.04), which apt-get then refuses; policy's Candidate is the real test.
-        apt-cache policy "$p" 2>/dev/null | grep -q '^ *Candidate: [0-9]' && pkgs="$pkgs $p"
+        # 24.04), which apt-get then refuses; policy's Candidate is the real
+        # test. No pipe into grep -q here: under pipefail its early exit
+        # made every name look missing.
+        cand=$(apt-cache policy "$p" 2>/dev/null)
+        case "$cand" in
+            *"Candidate: (none)"*|"") ;;
+            *Candidate:*) pkgs="$pkgs $p" ;;
+        esac
     done
+    echo "installing:$pkgs"
     # shellcheck disable=SC2086
     apt-get install -y -qq --no-install-recommends $pkgs >/dev/null
 elif command -v pacman >/dev/null; then
@@ -83,6 +90,9 @@ elif command -v zypper >/dev/null; then
 else
     echo "::error::no known package manager"; exit 2
 fi
+for t in file Xvfb gdb python3; do        # a silent partial install must not pass as a Natron failure
+    command -v "$t" >/dev/null || echo "::warning::$LABEL baseline incomplete: $t missing"
+done
 
 # ---- 2. every bundled binary resolves ---------------------------------------
 echo "== Every bundled binary resolves"
