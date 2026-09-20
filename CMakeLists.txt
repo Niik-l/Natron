@@ -172,17 +172,36 @@ set(CMAKE_AUTORCC ON)
 
 enable_testing()
 
+# Build identity for `Natron --version`, the About window and saved projects.
+# Global/GitVersion.h in the source tree is only a placeholder: the real
+# branch/commit/URL are generated into the build tree at configure time and
+# refreshed on every build (Global/GitVersion.cmake), and that directory is
+# searched first so the generated header wins over the placeholder.
+set(NATRON_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+set(NATRON_GITVERSION_CMD ${CMAKE_COMMAND}
+    -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DOUTPUT_DIR=${NATRON_GENERATED_DIR}
+    -P ${CMAKE_SOURCE_DIR}/Global/GitVersion.cmake)
+execute_process(COMMAND ${NATRON_GITVERSION_CMD})
+add_custom_target(NatronGitVersion ALL
+    COMMAND ${NATRON_GITVERSION_CMD}
+    BYPRODUCTS ${NATRON_GENERATED_DIR}/Global/GitVersion.h
+    COMMENT "Refreshing Global/GitVersion.h from git"
+    VERBATIM)
+include_directories(BEFORE ${NATRON_GENERATED_DIR})
+
 add_subdirectory(libs)
 
 add_subdirectory(HostSupport)
 
 add_subdirectory(Engine)
+add_dependencies(NatronEngine NatronGitVersion)
 
 add_subdirectory(PythonBin)
 
 add_subdirectory(Renderer)
 
 add_subdirectory(Gui)
+add_dependencies(NatronGui NatronGitVersion)
 
 if(NATRON_BUILD_TESTS)
     add_subdirectory(Tests)

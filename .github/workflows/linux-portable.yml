@@ -291,7 +291,8 @@ jobs:
 
       - name: Configure Natron
         run: |
-          docker exec natron-build bash -eo pipefail -c '
+          # Build identity for `Natron --version` / About (Global/GitVersion.cmake).
+          docker exec -e NATRON_GIT_COMMIT="${{ github.sha }}" -e NATRON_GIT_BRANCH="${{ github.ref_name }}"             -e NATRON_GIT_URL="${{ github.server_url }}/${{ github.repository }}"             natron-build bash -eo pipefail -c '
             cd /w/natron
             # Link the images oneTBB, not Rocky 8s old system libtbb.so.2.
             TBB=$(ls /usr/local/lib*/libtbb.so 2>/dev/null | head -1)

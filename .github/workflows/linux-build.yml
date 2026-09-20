@@ -239,6 +239,11 @@ jobs:
 
       - name: Configure Natron
         working-directory: natron
+        env:
+          # Build identity for `Natron --version` / About (Global/GitVersion.cmake).
+          NATRON_GIT_COMMIT: ${{ github.sha }}
+          NATRON_GIT_BRANCH: ${{ github.ref_name }}
+          NATRON_GIT_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           # App/CMakeLists.txt looks for TBB as "tbb12" (MSYS2's name); Fedora
           # ships libtbb.so.12 as plain "tbb". A preset cache var wins over
