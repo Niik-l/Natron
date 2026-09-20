@@ -2,8 +2,8 @@
 
 CI proves the AppImage loads, resolves every library and opens its GUI on nine
 distros, but only on Mesa's software renderers. What it cannot prove is the
-GPU path: Cycles on CUDA/OptiX, the GL viewports on a vendor driver, and
-FastVolumeRender, which needs Vulkan. An hour or two on a rented GPU covers
+GPU path: the GL viewports on a vendor driver and FastVolumeRender, which needs
+Vulkan. (Cycles is CPU-only in every build we make, so it is not a GPU test.) An hour or two on a rented GPU covers
 that for a few dollars, on the distro we target (Rocky 9 here; swap the base
 image for Rocky 8, Ubuntu or Fedora to compare).
 
@@ -11,8 +11,8 @@ Status 2026-09-20: exercised on a RunPod RTX 4090 pod (Secure Cloud, $0.74/h). T
 desktop, noVNC clipboard bridge, GPU pass-through (nvidia-smi, Vulkan lists the
 4090, VirtualGL renderer = RTX 4090) and the pre-release download all worked first
 time. Natron ran with GPU rendering enabled; the 2D viewer, OCIO views, the 3D
-viewport with the camera gizmo, and FastVolumeRender on real Vulkan (the procedural
-cloud template at UHD) all passed. Paste commands via the noVNC sidebar clipboard,
+viewport with the camera gizmo, FastVolumeRender on real Vulkan (the procedural
+cloud template at UHD) and a Cycles (CPU) sphere render all passed. Paste commands via the noVNC sidebar clipboard,
 then Shift+Insert in the pod's terminal.
 
 ## Set-up
@@ -64,8 +64,7 @@ Tick each against the Windows build's behaviour; screenshot anything odd
 | 2D viewer | Read a JPEG and an EXR from `/usr/share` or a download; view RGB, R, alpha; zoom/pan | Image shows, colorspace guessed correctly, no GL errors in the terminal |
 | OCIO | Viewer display/view dropdowns; switch between sRGB and ACES views | Display changes, no "could not be found" |
 | 3D viewport | Create Camera3D + Card3D + a Sphere3D, open a 3D viewer, orbit, use the gizmo | Draws on the GPU (`nvidia-smi` shows Natron), gizmo drags |
-| Cycles CPU | RenderPass / CyclesRender with a light and the sphere, Device = CPU | Converges, no crash |
-| Cycles GPU | Same with Device = CUDA, then OptiX | Device listed and used; faster than CPU; denoise (OIDN) works |
+| Cycles | RenderPass / CyclesRender with a light and the sphere | Converges, no crash; denoise (OIDN) works. **CPU only**: every build (Windows, Fedora, portable) configures Cycles with CUDA/OptiX/HIP/oneAPI off, so there is no device to switch. GPU Cycles would need the CUDA toolkit + OptiX SDK in the build image. |
 | FastVolumeRender | ReadVDB a small .vdb -> FastVolumeRender with the camera | Renders (needs Vulkan; the terminal shows the adapter it picked) |
 | Particles | ParticleEmitter -> ScanlineRender; play 50 frames | Plays without stalling |
 | Deep | DeepRead a small deep EXR (or Cycles deep output) -> DeepToImage | Flattens correctly |
