@@ -161,7 +161,13 @@ jobs:
 
       - name: Start the build container
         run: |
-          docker pull "$ASWF_IMAGE"
+          # Docker Hub occasionally resets the connection mid-pull of this 5 GB
+          # image; retry before giving up.
+          for i in 1 2 3 4; do
+            docker pull "$ASWF_IMAGE" && break
+            [ "$i" -lt 4 ] || { echo "::error::docker pull failed 4 times"; exit 1; }
+            echo "pull attempt $i failed; retrying in 30 s"; sleep 30
+          done
           docker run -d --name natron-build -v "$GITHUB_WORKSPACE:/w" -w /w \
             -e CCACHE_DIR=/w/.ccache -e CCACHE_MAXSIZE=3G \
             -e BT="${{ inputs.build_type }}" \
