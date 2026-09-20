@@ -893,7 +893,7 @@ jobs* replays the old commit). Inputs on both: `cycles` (default on), `fastvolum
 | Workflow | Builds in | Result runs on | Use it for |
 |---|---|---|---|
 | **Linux Portable** (`linux-portable.yml`) | ASWF VFX Reference Platform image (Rocky Linux 8, glibc 2.28) | Rocky/RHEL/Alma 8+, Ubuntu 20.04+, Debian 11+, Fedora, Arch — practically any current distro | **Distribution.** The AppImage to give people. |
-| **Linux Build** (`linux-build.yml`) | `fedora:44` container, Fedora's packages | Fedora 44 (tarball); AppImage needs glibc 2.43 | A fast Fedora-native build with the newest Qt/Python; CI sanity check |
+| **Linux Build** (`linux-build.yml`) | `fedora:44` container, Fedora's packages | Fedora 44 only (tarball) | A fast Fedora-native build with the newest Qt/Python; CI sanity check |
 
 **Both build the same thing:** Natron, NatronRenderer and natron-python with Cycles,
 FastVolumeRender and everything under `Engine/Dev`; plus `Misc.ofx`, `CImg.ofx` and `IO.ofx`
@@ -904,8 +904,8 @@ install layout); the portable one uses the shared scripts `tools/linux/build-plu
 `tools/linux/package.sh` and `tools/appimage/build-appimage.sh`.
 
 **Downloads (run page → Artifacts):**
-- `Natron-<name>-AppImage` — the AppImage plus a `.glibc.txt` naming the minimum glibc.
-  Download, `chmod +x`, run. Kept 14 days.
+- `Natron-<name>-AppImage` (portable only) — the AppImage plus a `.glibc.txt` naming the
+  minimum glibc. Download, `chmod +x`, run. Kept 14 days.
 - `Natron-<name>` — the stripped install tree as a tarball, same layout as `06-install.sh`:
   `bin/` (Natron, NatronRenderer, natron-python),
   `Plugins/OFX/Natron/*.ofx.bundle/Contents/Linux-x86-64/`, `Plugins/PyPlugs/`
@@ -917,11 +917,11 @@ install layout); the portable one uses the shared scripts `tools/linux/build-plu
 - `logs-<name>` — configure/build/plugin logs, `CMakeCache.txt`, and (portable) the
   dependency build logs under `deps-logs/`.
 
-Both workflows end with an **AppImage test job** that unpacks the AppImage on a *different*
-distro with only a desktop baseline installed (Rocky Linux 8 for the portable build, Arch for
-the Fedora one), fails if any bundled binary has an unresolved library, and then tries a
-headless `Natron --version` under gdb (informational). FastVolumeRender needs a Vulkan
-driver at runtime on any Linux.
+The portable workflow ends with an **AppImage test job** that unpacks the AppImage on a bare
+Rocky Linux 8 container with only a desktop baseline installed, fails if any bundled binary
+has an unresolved library, and then tries a headless `Natron --version` under gdb
+(informational). The Fedora workflow only starts Natron headless from its build tree.
+FastVolumeRender needs a Vulkan driver at runtime on any Linux.
 
 ### Linux Portable (recommended)
 
@@ -946,9 +946,9 @@ AppImage ships, so Wayland desktops run it through XWayland); SeExpr omitted.
 Built against (2026-09-18): GCC 16.2.1, CMake 4.3.0, Python 3.14.7, Qt / PySide6 / Shiboken6
 6.11.2, OpenVDB from Fedora + matching NanoVDB headers, wgpu-native v27.0.4.0. Its FFmpeg
 is Fedora's `-free` build (no H.264/H.265 *encoding*); SeExpr omitted. The tarball links
-Fedora's shared libraries, so it runs on Fedora 44 only. Its AppImage needs glibc 2.43 and
-its headless start crashed inside the loader on Arch (unresolved; the portable AppImage
-supersedes it).
+Fedora's shared libraries, so it runs on Fedora 44 only. It no longer produces an AppImage:
+the Fedora-built one needed glibc 2.43 and crashed inside the loader on Arch, and the
+portable AppImage supersedes it.
 
 ### Linux-specific gotchas (all handled by the workflows)
 
