@@ -933,6 +933,13 @@ packaging, not the GPU path: FastVolumeRender needs a Vulkan driver at runtime, 
 GPU rendering needs the vendor driver, so a real-hardware test is still needed for those.
 The Fedora workflow only starts Natron headless from its build tree.
 
+**Cutting a numbered release with Linux included.** The pre-release `linux-portable-latest` is
+the nightly. For a numbered release, run **Linux Portable** on the release commit (the same one
+the Windows package is built from), wait for the green run, then attach that run's AppImage,
+`.glibc.txt` and debug-symbols tarball to the numbered release:
+`gh release upload natron-2.6-<date> Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage ...`.
+Users who want a fixed version then have one; the pre-release keeps moving.
+
 ### Linux Portable (recommended)
 
 Runs inside `aswf/ci-vfxall:2026-clang19.6` (VFX Reference Platform CY2026, pinned to its

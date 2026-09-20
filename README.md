@@ -56,7 +56,7 @@ Verified on Rocky 8/9, AlmaLinux 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch 
 **Optional, but recommended:**
 
 - **An ACES OCIO config.** The archive bundles Natron's classic configs (nuke-default, blender, natron, spi, aces 0.x). For a modern ACES pipeline — the one this fork is tested on — download the ACES 2.0 studio config from the [OpenColorIO-Config-ACES releases](https://github.com/AcademySoftwareFoundation/OpenColorIO-Config-ACES/releases) and point Natron at it: Preferences → Color → OpenColorIO config → Custom, then choose the `.ocio` file. (Setting the `OCIO` environment variable works too, but it also affects other apps such as Blender.)
-- **OpenRV** for the *Open in RV* buttons on Write and CyclesRenderPass. Get a build from the [OpenRV releases](https://github.com/AcademySoftwareFoundation/OpenRV/releases), then either set the `NATRON_RV_PATH` environment variable to `rv.exe` or fill in the RV Executable knob on the node.
+- **OpenRV** for the *Open in RV* buttons on Write and CyclesRenderPass. Get a build from the [OpenRV releases](https://github.com/AcademySoftwareFoundation/OpenRV/releases), then either set the `NATRON_RV_PATH` environment variable to the executable (`rv.exe` on Windows, `rv` on Linux) or fill in the RV Executable knob on the node. On Linux the OpenRV project publishes no binaries: build it from source (Rocky 8/9 are the supported targets) or use a distribution package, then point `NATRON_RV_PATH` at the resulting `rv`. The buttons themselves are platform-neutral.
 
 To build from source, see [BUILDING.md](BUILDING.md) (Windows: MSYS2 / MinGW with an automated script set under `tools/win-build/`; Linux: the GitHub Actions workflows, documented in the same file).
 
