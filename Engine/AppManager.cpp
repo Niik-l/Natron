@@ -832,8 +832,12 @@ AppManager::loadInternal(const CLArgs& cl)
         // handlers that would swallow the signal.
         if (::socketpair(AF_UNIX, SOCK_STREAM, 0, s_shutDownSignalFds) == 0) {
             QSocketNotifier* notifier = new QSocketNotifier(s_shutDownSignalFds[1], QSocketNotifier::Read, this);
-            QObject::connect(notifier, qOverload<QSocketDescriptor, QSocketNotifier::Type>(&QSocketNotifier::activated),
-                             this, &AppManager::onShutDownSignalReceived);
+            // String-based connect: QSocketNotifier::activated is overloaded
+            // (a deprecated int form remains in Qt 6) and both end in a
+            // QPrivateSignal parameter, so neither &Class::signal nor
+            // qOverload<> can name the wanted one.
+            QObject::connect(notifier, SIGNAL(activated(QSocketDescriptor,QSocketNotifier::Type)),
+                             this, SLOT(onShutDownSignalReceived()));
             setShutDownSignal(SIGINT);   // shut down on ctrl-c
             setShutDownSignal(SIGTERM);   // shut down on killall
         } else {
