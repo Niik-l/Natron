@@ -58,6 +58,9 @@ jobs:
   portable:
     name: Rocky 8 (ASWF) ${{ inputs.build_type }}
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write     # prune old ccache entries (gh cache delete)
     timeout-minutes: 340
     defaults:
       run:
@@ -418,8 +421,18 @@ jobs:
         if: always()
         run: docker exec natron-build chown -R "$(id -u):$(id -g)" /w || true
 
+      # Only a complete tree may be cached: a run that failed mid-way once
+      # saved a 1 MB stub under this key, and since the key then "hit", every
+      # later run rebuilt the deps (~15 min) without ever re-saving.
+      - name: Check extra deps are complete
+        id: deps-check
+        if: always()
+        run: |
+          if [ -f extra-deps/.complete ]; then echo "complete=true" >> "$GITHUB_OUTPUT"
+          else echo "complete=false" >> "$GITHUB_OUTPUT"; echo "extra-deps incomplete; not caching"; fi
+
       - name: Save extra deps
-        if: always() && steps.deps-cache.outputs.cache-hit != 'true'
+        if: always() && steps.deps-cache.outputs.cache-hit != 'true' && steps.deps-check.outputs.complete == 'true'
         uses: actions/cache/save@v4
         with:
           path: extra-deps
@@ -431,6 +444,18 @@ jobs:
         with:
           path: .ccache
           key: portable-ccache-${{ env.ASWF_TAG }}-${{ inputs.build_type }}-${{ github.sha }}
+
+      # Each run saves a ~1 GB ccache under its own commit; without pruning
+      # they fill the repository's 10 GB cache quota within a day and evict
+      # the Cycles and deps caches. Keep only the one just saved.
+      - name: Prune older ccache entries
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prefix="portable-ccache-${{ env.ASWF_TAG }}-${{ inputs.build_type }}-"
+          keep="$prefix${{ github.sha }}"
+          gh cache list -R "$GITHUB_REPOSITORY" -L 100 --json id,key             -q ".[] | select(.key | startswith(\"$prefix\")) | select(.key != \"$keep\") | .id"             | while read -r id; do gh cache delete "$id" -R "$GITHUB_REPOSITORY" && echo "deleted cache $id"; done || true
 
       - name: Collect error summary
         if: failure()

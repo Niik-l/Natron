@@ -50,6 +50,9 @@ env:
 jobs:
   linux:
     name: Fedora ${{ inputs.build_type }}${{ inputs.cycles && ' + Cycles' || '' }}
+    permissions:
+      contents: read
+      actions: write     # prune old ccache entries
     runs-on: ubuntu-24.04
     container: fedora:44
     timeout-minutes: 340
@@ -80,7 +83,7 @@ jobs:
             embree-devel oidn-devel opensubdiv-devel openpgl-devel \
             pugixml-devel libzstd-devel libpng-devel libjpeg-turbo-devel libtiff-devel \
             openjpeg2-devel libwebp-devel \
-            make curl patch unzip binutils appstream patchelf LibRaw-devel \
+            make curl patch unzip binutils LibRaw-devel \
             libavcodec-free-devel libavformat-free-devel libavutil-free-devel \
             libswscale-free-devel libswresample-free-devel
 
@@ -339,6 +342,20 @@ jobs:
         with:
           path: .ccache
           key: ccache-f${{ env.FEDORA }}-${{ inputs.build_type }}-${{ github.sha }}
+
+      # One ~800 MB entry per commit would fill the repository's 10 GB cache
+      # quota and evict the other workflow's caches; keep only the newest.
+      - name: Prune older ccache entries
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The job runs in the Fedora container, which has no gh; use the API.
+          prefix="ccache-f${{ env.FEDORA }}-${{ inputs.build_type }}-"
+          keep="$prefix${{ github.sha }}"
+          curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/caches?per_page=100&key=$prefix"             | python3 -c "import json,sys; [print(c['id']) for c in json.load(sys.stdin)['actions_caches'] if c['key'].startswith('$prefix') and c['key'] != '$keep']"             | while read -r id; do
+                curl -fsS -X DELETE -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"                   "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/caches/$id" && echo "deleted cache $id"
+              done || true
 
       - name: Collect error summary
         if: failure()
