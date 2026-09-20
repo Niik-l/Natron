@@ -10,8 +10,9 @@ A step-by-step guide to building Natron from source with Qt6, PySide6, and Pytho
 >   understand each step or debug a failure. The scripts are generated from these
 >   instructions — so when something breaks, come back here.
 >
-> **Linux:** built on GitHub Actions (`.github/workflows/linux-build.yml`) rather than by
-> hand. See [Linux Build (GitHub Actions)](#linux-build-github-actions) near the end.
+> **Linux:** built on GitHub Actions rather than by hand — `linux-portable.yml` (the
+> distributable AppImage, runs on Rocky 8+/any current distro) and `linux-build.yml`
+> (Fedora-native). See [Linux Build (GitHub Actions)](#linux-build-github-actions) near the end.
 
 **Disk space:** A core Natron build (`build-qt6/`, no Cycles/plugins/DLL bundling) is ~4 GB with debug info (`Natron.exe` is ~819 MB, or ~1.2 GB once Cycles is statically linked). The **full** setup in this guide — Cycles + OFX plugins + community PyPlugs + OCIO configs + DLLs bundled into both `App/` and `Renderer/` — totals **~12 GB** for the Natron tree itself, or **~14 GB** including the sibling source repos (`cycles/`, `openfx-misc/`, `openfx-io/`, `natron-plugins/`) cloned next to it. Biggest contributors: debug symbols in the two executables, ~1.1 GB of bundled DLLs per binary, build intermediates, and ~940 MB of OCIO configs. **Stripping debug symbols** (`strip Natron.exe NatronRenderer.exe` or building with `-DCMAKE_BUILD_TYPE=RelWithDebInfo`) cuts each executable from ~1 GB to roughly 100-200 MB — worth doing for distribution, but keep an unstripped copy if you want usable crash backtraces.
 
@@ -884,34 +885,72 @@ Note: `-j4` or higher generally works fine for the main Natron build on 16GB+ ma
 
 ## Linux Build (GitHub Actions)
 
-The Linux build runs on GitHub's hosted runners, inside a `fedora:44` container:
-`.github/workflows/linux-build.yml`. It mirrors the `tools/win-build/` phases (Cycles →
-Natron → OFX plugins → install layout) using Fedora's system packages instead of MSYS2.
+Linux is built on GitHub's hosted runners, not by hand. Two workflows, both manual
+(Actions tab → workflow → **Run workflow**; after pushing a fix start a **new** run — *Re-run
+jobs* replays the old commit). Inputs on both: `cycles` (default on), `fastvolume` (default on),
+`build_type` (default `RelWithDebInfo`).
 
-**Run it:** Actions tab → **Linux Build** → **Run workflow** (manual trigger only). Inputs:
-`cycles` (default on), `fastvolume` (default on), `build_type` (default `RelWithDebInfo`).
-After pushing a fix, start a **new** run — *Re-run jobs* replays the old commit.
+| Workflow | Builds in | Result runs on | Use it for |
+|---|---|---|---|
+| **Linux Portable** (`linux-portable.yml`) | ASWF VFX Reference Platform image (Rocky Linux 8, glibc 2.28) | Rocky/RHEL/Alma 8+, Ubuntu 20.04+, Debian 11+, Fedora, Arch — practically any current distro | **Distribution.** The AppImage to give people. |
+| **Linux Build** (`linux-build.yml`) | `fedora:44` container, Fedora's packages | Fedora 44 (tarball); AppImage needs glibc 2.43 | A fast Fedora-native build with the newest Qt/Python; CI sanity check |
 
-**What it builds:** Natron, NatronRenderer and natron-python with Cycles, FastVolumeRender
-and everything under `Engine/Dev`; plus `Misc.ofx`, `CImg.ofx` and `IO.ofx` at the commits
-pinned in `tools/win-build/config.sh`, with the same `tools/win-build/patches/`. Cycles is the
-`Niik-l/cycles` `feature/cycles-deep` branch, built with the same flags as `03-cycles.sh`.
+**Both build the same thing:** Natron, NatronRenderer and natron-python with Cycles,
+FastVolumeRender and everything under `Engine/Dev`; plus `Misc.ofx`, `CImg.ofx` and `IO.ofx`
+at the commits pinned in `tools/win-build/config.sh`, with the same `tools/win-build/patches/`.
+Cycles is the `Niik-l/cycles` `feature/cycles-deep` branch, built with the same flags as
+`03-cycles.sh`. Both mirror the `tools/win-build/` phases (Cycles → Natron → OFX plugins →
+install layout); the portable one uses the shared scripts `tools/linux/build-plugins.sh`,
+`tools/linux/package.sh` and `tools/appimage/build-appimage.sh`.
 
 **Downloads (run page → Artifacts):**
-- `Natron-fedora44-<type>` — stripped install, same layout as `06-install.sh`:
+- `Natron-<name>-AppImage` — the AppImage plus a `.glibc.txt` naming the minimum glibc.
+  Download, `chmod +x`, run. Kept 14 days.
+- `Natron-<name>` — the stripped install tree as a tarball, same layout as `06-install.sh`:
   `bin/` (Natron, NatronRenderer, natron-python),
   `Plugins/OFX/Natron/*.ofx.bundle/Contents/Linux-x86-64/`, `Plugins/PyPlugs/`
-  (built-in + community), `Resources/OpenColorIO-Configs/`. Kept 14 days.
+  (built-in + community), `Resources/OpenColorIO-Configs/`. Needs the build distro's
+  libraries. Kept 14 days.
 - `…-debug-symbols` — the stripped debug info as `.debug` files (gnu-debuglink), for
-  symbolicating crash backtraces. Kept 7 days.
+  symbolicating crash backtraces: put `Natron.debug` next to `usr/bin/Natron` in the
+  extracted AppImage and run under gdb. Kept 7 days.
+- `logs-<name>` — configure/build/plugin logs, `CMakeCache.txt`, and (portable) the
+  dependency build logs under `deps-logs/`.
 
-**Runs only on Fedora 44** — it links Fedora's shared libraries. It needs a Vulkan driver for
-FastVolumeRender.
+Both workflows end with an **AppImage test job** that unpacks the AppImage on a *different*
+distro with only a desktop baseline installed (Rocky Linux 8 for the portable build, Arch for
+the Fedora one), fails if any bundled binary has an unresolved library, and then tries a
+headless `Natron --version` under gdb (informational). FastVolumeRender needs a Vulkan
+driver at runtime on any Linux.
+
+### Linux Portable (recommended)
+
+Runs inside `aswf/ci-vfxall:2026-clang19.6` (VFX Reference Platform CY2026, pinned to its
+2026-08-31 build): Rocky Linux 8, glibc 2.28, GCC 14.2, CMake 4.0, Python 3.13, Qt / PySide6 /
+Shiboken6 6.8.3, OIIO 3.1, OCIO 2.5, OpenEXR 3.4, OpenVDB 13, Embree 4.2, OIDN 2.5,
+OpenSubdiv 3.7, oneTBB, Boost 1.88, Alembic, Ceres — all under `/usr/local`.
+
+Added on top of the image (built from source into `/usr/local`, staged under `extra-deps/`
+and cached per image tag + `DEPS_KEY`, so only the first run pays for them): NanoVDB
+headers for OpenVDB 13.0.0, OpenPGL v0.7.1, x264 (stable), x265 4.1, FFmpeg n8.0.3
+(`--enable-gpl --enable-libx264 --enable-libx265`); OpenJPEG/WebP from Rocky;
+qtpy/packaging/patchelf via pip; wgpu-native v27.0.4.0. The image is ~5 GB compressed, so
+the job frees runner disk space and runs the image as a long-lived container (`docker exec`
+per step) instead of via `container:`.
+
+Differences from the Windows build: no native Wayland GL context (Qt's xcb plugin is what the
+AppImage ships, so Wayland desktops run it through XWayland); SeExpr omitted.
+
+### Linux Build (Fedora)
 
 Built against (2026-09-18): GCC 16.2.1, CMake 4.3.0, Python 3.14.7, Qt / PySide6 / Shiboken6
-6.11.2, OpenVDB from Fedora + matching NanoVDB headers, wgpu-native v27.0.4.0.
+6.11.2, OpenVDB from Fedora + matching NanoVDB headers, wgpu-native v27.0.4.0. Its FFmpeg
+is Fedora's `-free` build (no H.264/H.265 *encoding*); SeExpr omitted. The tarball links
+Fedora's shared libraries, so it runs on Fedora 44 only. Its AppImage needs glibc 2.43 and
+its headless start crashed inside the loader on Arch (unresolved; the portable AppImage
+supersedes it).
 
-### Linux-specific gotchas (all handled by the workflow)
+### Linux-specific gotchas (all handled by the workflows)
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -921,10 +960,16 @@ Built against (2026-09-18): GCC 16.2.1, CMake 4.3.0, Python 3.14.7, Qt / PySide6
 | Natron link: `tbb12` not found | MSYS2 names TBB `tbb12`; Fedora names it `tbb` | `-DTBB_LIB=/usr/lib64/libtbb.so` |
 | openfx-io: `'byte' is not a member of 'std'` | openfx-io forces C++14 when it detects OIIO ≥ 2.3; OIIO 3 needs C++17. MSYS2's find module doesn't report the version, so Windows never hit it | Switch that `CMAKE_CXX_STANDARD` line to 17 after patching |
 | openfx-io: `GL/glu.h: No such file` | GLU is a separate Fedora package | `mesa-libGLU-devel` |
-
-Fedora's FFmpeg is the `-free` build, so some patented video codecs (e.g. H.264/H.265
-encoding) are unavailable in the Linux IO.ofx; image formats are unaffected. SeExpr isn't
-packaged, so its node is omitted (optional).
+| **Portable:** `Knob.cpp: 'PyRun_String' was not declared` | The ASWF PySide6/Shiboken6 are abi3 builds and export `-DPy_LIMITED_API`, which hides `PyRun_String` | `#undef Py_LIMITED_API` before `Python.h`, as `AppManager.cpp` already did (fixed in source) |
+| **Portable:** Qt `Status`/`Bool` errors from `OSGLContext_wayland.cpp` | Rocky 8's EGL headers pull in Xlib | Natron/Qt headers before EGL (fixed in source) |
+| **Portable:** `'PFNEGLGETDISPLAYPROC' does not name a type` | Rocky 8's EGL headers predate those typedefs | `-DCMAKE_DISABLE_FIND_PACKAGE_Wayland=TRUE` (XWayland covers it) |
+| **Portable:** `App/Natron` link: `undefined reference to FT_Get_Paint` etc. | The image's Qt6Gui/HarfBuzz need FreeType 2.13 (in `/usr/local`, but with **no `freetype2.pc`**); Cairo's pkg-config chain pulled Rocky's FreeType 2.9 in by full path, and CMake's `pkgcfg_lib_Cairo_freetype` matched `/usr/lib64` first | Generate a `freetype2.pc` for the image's copy, put it first on `PKG_CONFIG_PATH`, and preset `pkgcfg_lib_Cairo_freetype` / `pkgcfg_lib_PKG_FONTCONFIG_freetype`; force-bundle FreeType + HarfBuzz into the AppImage (`FORCE_BUNDLE_LIBS`) since Rocky 8 hosts only have 2.9 |
+| **Portable:** old system TBB | Rocky's `/usr/lib64/libtbb.so.2` sits next to the image's oneTBB | `-DTBB_ROOT_DIR=/usr/local` (Cycles), `-DTBB_LIB=/usr/local/lib/libtbb.so` (Natron) |
+| **Portable:** x265 configure "incomplete, errors occurred" with no visible error | x265 sets `CMP0025`/`CMP0054` to OLD, which CMake 4 removed; CMake prints the error to stderr, *earlier* in the log than the tail | `sed` both to NEW before configuring |
+| AppImage: `linuxdeploy` strip fails on `.relr.dyn` | Its bundled `strip` is too old for current libraries | `NO_STRIP=1` (everything is stripped beforehand) |
+| AppImage: hooks never run | `linuxdeploy` makes `AppRun` a bare symlink to Natron | `--custom-apprun` with a launcher that sources `apprun-hooks/` |
+| AppImage: `bash`/`awk` segfault (exit 139) during checks | An `LD_LIBRARY_PATH` hook pointed every child process at the bundled libraries | No `LD_LIBRARY_PATH`; `linuxdeploy` sets relative RPATHs on executables, `.ofx` plugins, Python modules and the OIDN module |
+| AppImage test: `libOpenGL.so.0` / `libSM` / `libICE` / `fribidi` "not found" | These are on the AppImage excludelist (the host provides them); the bare test container lacked them | They belong in the test's desktop baseline, not in the AppImage |
 
 ---
 
