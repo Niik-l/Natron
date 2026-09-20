@@ -2258,24 +2258,54 @@ Viewport3D::keyPressEvent(QKeyEvent* e)
         _imp->imguizmoOp = ImGuizmo::SCALE;
         update();
     } else if (e->key() == Qt::Key_F) {
-        // Frame selected — try point cloud first, then selected node, then reset.
-        // Picks a single (targetX,Y,Z + distance) and dispatches to the right
-        // camera mover: in perspective mode we just update camTarget/camDistance;
-        // in look-through mode (on an editable Camera3D) we move the camera node
-        // along its current view direction so the framed target sits at the
-        // desired distance with the camera's orientation preserved.
+        // Frame selected. Precedence: the selected cloud points, then the
+        // selected node, then the whole point cloud, then reset. The cloud used
+        // to come first, so with a tracker cloud in the view F could never
+        // frame an object. Picks a single (targetX,Y,Z + distance) and
+        // dispatches to the right camera mover: in perspective mode we just
+        // update camTarget/camDistance; in look-through mode (on an editable
+        // Camera3D) we move the camera node along its current view direction so
+        // the framed target sits at the desired distance with the camera's
+        // orientation preserved.
         float targetX = 0, targetY = 0, targetZ = 0;
         float distance = 5.0f;
         bool  framed   = false;
 
+        // Box -> (target, distance) with the same fit factor everywhere.
+        auto fitBox = [&](const float* mn, const float* mx) {
+            targetX = 0.5f * (mn[0] + mx[0]);
+            targetY = 0.5f * (mn[1] + mx[1]);
+            targetZ = 0.5f * (mn[2] + mx[2]);
+            const float ex = mx[0]-mn[0], ey = mx[1]-mn[1], ez = mx[2]-mn[2];
+            float radius = 0.5f * std::sqrt(ex*ex + ey*ey + ez*ez);
+            if (radius < 0.1f) radius = 1.0f;
+            distance = radius * 2.5f;
+            framed = true;
+        };
+
         {
             QMutexLocker lock(&_imp->cloudMutex);
-            if (_imp->pointCloud && _imp->pointCloud->numPoints() > 0) {
-                _imp->pointCloud->getCenter(targetX, targetY, targetZ);
-                float radius = _imp->pointCloud->getRadius();
-                if (radius < 0.1f) radius = 2.0f;
-                distance = radius * 2.5f;
-                framed = true;
+            const float* data = _imp->pointCloud ? _imp->pointCloud->data() : nullptr;
+            const std::size_t n = _imp->pointCloud ? _imp->pointCloud->numPoints() : 0;
+            const int stride = 6;   // x,y,z,r,g,b
+            if (data && n > 0 && !_imp->selectedPointIndices.empty()) {
+                // 1. Selected points: their exact bounds.
+                float mn[3] = {0,0,0}, mx[3] = {0,0,0};
+                bool have = false;
+                for (int idx : _imp->selectedPointIndices) {
+                    if (idx < 0 || (std::size_t)idx >= n) continue;
+                    const float* p = data + (std::size_t)idx * stride;
+                    if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) continue;
+                    if (!have) {
+                        mn[0]=mx[0]=p[0]; mn[1]=mx[1]=p[1]; mn[2]=mx[2]=p[2];
+                        have = true;
+                    } else {
+                        for (int a = 0; a < 3; ++a) {
+                            if (p[a] < mn[a]) mn[a] = p[a]; else if (p[a] > mx[a]) mx[a] = p[a];
+                        }
+                    }
+                }
+                if (have) fitBox(mn, mx);
             }
         }
 
@@ -2311,14 +2341,7 @@ Viewport3D::keyPressEvent(QKeyEvent* e)
                 }
             }
             if (haveBounds) {
-                targetX = 0.5f * (mn[0] + mx[0]);
-                targetY = 0.5f * (mn[1] + mx[1]);
-                targetZ = 0.5f * (mn[2] + mx[2]);
-                const float ex = mx[0]-mn[0], ey = mx[1]-mn[1], ez = mx[2]-mn[2];
-                float radius = 0.5f * std::sqrt(ex*ex + ey*ey + ez*ez);
-                if (radius < 0.1f) radius = 1.0f;
-                distance = radius * 2.5f;   // same fit factor as the point-cloud path
-                framed = true;
+                fitBox(mn, mx);
             } else {
                 for (size_t i = 0; i < nodes.size(); ++i) {
                     if (nodes[i].name == _imp->selectedNodeName) {
@@ -2329,6 +2352,39 @@ Viewport3D::keyPressEvent(QKeyEvent* e)
                         break;
                     }
                 }
+            }
+        }
+
+        if (!framed) {
+            // 3. The whole point cloud, with outlier-tolerant bounds: a camera
+            // solve's cloud has a few points flung far off (mis-tracks, near-
+            // degenerate depth), and the stored bbox includes them, so fitting
+            // the bbox put the real scene in a tiny blob at the centre. Fit the
+            // 2nd..98th percentile on each axis instead.
+            QMutexLocker lock(&_imp->cloudMutex);
+            const float* data = _imp->pointCloud ? _imp->pointCloud->data() : nullptr;
+            const std::size_t n = _imp->pointCloud ? _imp->pointCloud->numPoints() : 0;
+            if (data && n > 0) {
+                const int stride = 6;
+                float mn[3] = {0,0,0}, mx[3] = {0,0,0};
+                bool have = true;
+                std::vector<float> v;
+                v.reserve(n);
+                for (int a = 0; a < 3; ++a) {
+                    v.clear();
+                    for (std::size_t i = 0; i < n; ++i) {
+                        const float x = data[i * stride + a];
+                        if (std::isfinite(x)) v.push_back(x);
+                    }
+                    if (v.empty()) { have = false; break; }
+                    const std::size_t lo = (std::size_t)(0.02 * (double)(v.size() - 1));
+                    const std::size_t hi = (std::size_t)(0.98 * (double)(v.size() - 1));
+                    std::nth_element(v.begin(), v.begin() + lo, v.end());
+                    mn[a] = v[lo];
+                    std::nth_element(v.begin(), v.begin() + hi, v.end());
+                    mx[a] = v[hi];
+                }
+                if (have) fitBox(mn, mx);
             }
         }
 
