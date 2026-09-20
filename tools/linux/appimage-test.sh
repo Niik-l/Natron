@@ -51,7 +51,8 @@ elif command -v apt-get >/dev/null; then
           libfreetype6 libharfbuzz0b fonts-dejavu-core libx11-6 libxcb1 libxkbcommon0
           libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0
           libxcb-cursor0 libxcb-shape0 libxcb-xinerama0 libxcb-randr0 libxcb-xfixes0
-          libsm6 libice6 libfribidi0 libasound2 libasound2t64"
+          libglx-mesa0 libxcb-dri2-0 libxcb-dri3-0 libxcb-glx0 libxcb-present0 libxcb-sync1
+          libxshmfence1 libsm6 libice6 libfribidi0 libasound2 libasound2t64"
     pkgs=""
     for p in $want; do                     # names differ per release; take what exists
         # `apt-cache show` also answers for pure virtual names (libasound2 on
