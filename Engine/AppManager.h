@@ -605,6 +605,10 @@ public Q_SLOTS:
         exitApp(true);
     }
 
+    // SIGINT/SIGTERM, delivered to the main thread through a socketpair (see
+    // handleShutDownSignal in AppManager.cpp); quits like File > Quit.
+    void onShutDownSignalReceived();
+
     void onViewerTileCacheSizeChanged();
 
     void toggleAutoHideGraphInputs();

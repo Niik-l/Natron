@@ -69,6 +69,8 @@
 #ifdef Q_OS_UNIX
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/socket.h> // socketpair, for the termination-signal channel
+#include <unistd.h>     // read/write on it
 #ifdef Q_OS_DARWIN
 #include <sys/sysctl.h>
 #include <libproc.h>
@@ -95,6 +97,7 @@
 #include <QAbstractSocket>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QSocketNotifier>
 
 
 #include "Global/ProcInfo.h"
@@ -241,20 +244,30 @@ AppManager* AppManager::_instance = 0;
 
 #ifdef __NATRON_UNIX__
 
-//namespace  {
+// SIGINT/SIGTERM must not tear the application down from signal context:
+// quitApplication() takes mutexes and joins render threads, and doing that on
+// whatever thread the signal interrupted intermittently ended in
+// "QThread: Destroyed while thread is still running" and an abort (seen on
+// the Linux CI distro tests, 2026-09). This is the pattern from the Qt docs,
+// "Calling Qt Functions From Unix Signal Handlers": the handler only writes a
+// byte to a socketpair, and a QSocketNotifier on the main thread quits from
+// the event loop (onShutDownSignalReceived), the same way File > Quit does.
+static int s_shutDownSignalFds[2] = { -1, -1 };
+
 static void
 handleShutDownSignal( int /*signalId*/ )
 {
-    if (appPTR) {
-        std::cerr << "\nCaught termination signal, exiting!" << std::endl;
-        appPTR->quitApplication();
+    if (s_shutDownSignalFds[0] != -1) {
+        const char c = 1;
+        // write() is async-signal-safe; nothing else in here may be.
+        ssize_t r = ::write(s_shutDownSignalFds[0], &c, sizeof(c));
+        Q_UNUSED(r);
     }
 }
 
 static void
 setShutDownSignal(int signalId)
 {
-#if defined(__NATRON_UNIX__)
     struct sigaction sa;
     sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
@@ -263,9 +276,6 @@ setShutDownSignal(int signalId)
         std::perror("setting up termination signal");
         std::exit(1);
     }
-#else
-    std::signal(signalId, handleShutDownSignal);
-#endif
 }
 
 #endif
@@ -644,6 +654,25 @@ AppManager::quit(const AppInstancePtr& instance)
 }
 
 void
+AppManager::onShutDownSignalReceived()
+{
+#ifdef __NATRON_UNIX__
+    char c;
+    ssize_t r = ::read(s_shutDownSignalFds[1], &c, sizeof(c));
+    Q_UNUSED(r);
+    // A second signal while the first quit is still unwinding must not start
+    // another one.
+    static bool quitting = false;
+    if (quitting) {
+        return;
+    }
+    quitting = true;
+    std::cerr << "\nCaught termination signal, exiting!" << std::endl;
+    quitApplication();
+#endif
+}
+
+void
 AppManager::quitApplication()
 {
     bool appsEmpty;
@@ -798,8 +827,18 @@ AppManager::loadInternal(const CLArgs& cl)
 
 # ifdef __NATRON_UNIX__
     if (mustSetSignalsHandlers) {
-        setShutDownSignal(SIGINT);   // shut down on ctrl-c
-        setShutDownSignal(SIGTERM);   // shut down on killall
+        // The wake-up channel must exist before the handlers that write to it.
+        // Without it, keep the default action (terminate) rather than install
+        // handlers that would swallow the signal.
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, s_shutDownSignalFds) == 0) {
+            QSocketNotifier* notifier = new QSocketNotifier(s_shutDownSignalFds[1], QSocketNotifier::Read, this);
+            QObject::connect(notifier, qOverload<QSocketDescriptor, QSocketNotifier::Type>(&QSocketNotifier::activated),
+                             this, &AppManager::onShutDownSignalReceived);
+            setShutDownSignal(SIGINT);   // shut down on ctrl-c
+            setShutDownSignal(SIGTERM);   // shut down on killall
+        } else {
+            std::perror("creating the termination signal channel");
+        }
 #     if defined(__NATRON_LINUX__) && !defined(__FreeBSD__)
         //Catch SIGSEGV only when google-breakpad is not active
         setSigSegvSignal();
