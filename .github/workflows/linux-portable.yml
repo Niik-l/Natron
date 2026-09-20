@@ -637,7 +637,7 @@ jobs:
 
           **Runs on** any 64-bit Linux with glibc ${glibc#GLIBC_} or newer (2018 onwards). Verified on Rocky 8/9, AlmaLinux 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch, openSUSE Leap 15.6, and on an NVIDIA RTX 4090 (GUI, 3D viewport, FastVolumeRender on Vulkan, Cycles). Needs only what a desktop provides: X11 (Wayland desktops run it through XWayland), a GL driver, fontconfig. FastVolumeRender needs a Vulkan driver. Cycles is CPU-only.
 
-          **Bundled:** Qt, Python, OpenImageIO, OpenColorIO (+ the classic Natron configs), OpenVDB, Cycles, FFmpeg with x264/x265, openfx-io and openfx-misc. Not yet on Linux: openfx-arena, openfx-gmic.
+          **Bundled** (same as the Windows package): Qt, Python, OpenImageIO, OpenColorIO (+ the classic Natron configs), OpenVDB, Cycles, FFmpeg with x264/x265, openfx-io and openfx-misc.
 
           **Notes:** in a container without FUSE add \`--appimage-extract-and-run\`. \`NatronRenderer\` is inside: \`--appimage-extract\`, then \`squashfs-root/usr/bin/NatronRenderer\`. The debug-symbols tarball is for gdb backtraces (see BUILDING.md). Report problems in [Issues](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/issues) with your distro, GPU and the terminal output.
 

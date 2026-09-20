@@ -40,7 +40,7 @@ Templates menu: ready-made graphs for a basic 3D scene, the Megascans loader, Fa
 
 ## Installing
 
-**Windows.** Download the `.7z` from the [Releases page](https://github.com/Niik-l/Natron/releases), extract it anywhere, and run `bin/Natron.exe`. The archive contains Natron, the bundled OpenFX plugins (openfx-io, openfx-misc, openfx-arena, openfx-gmic) and `NatronRenderer.exe` for command-line rendering. Nothing is written outside the folder except Natron's own settings.
+**Windows.** Download the `.7z` from the [Releases page](https://github.com/Niik-l/Natron/releases), extract it anywhere, and run `bin/Natron.exe`. The archive contains Natron, the bundled OpenFX plugins (openfx-io and openfx-misc, the latter providing both `Misc.ofx` and `CImg.ofx`) and `NatronRenderer.exe` for command-line rendering. Nothing is written outside the folder except Natron's own settings.
 
 **Linux.** Download the AppImage from the [`linux-portable-latest`](https://github.com/Niik-l/Natron/releases/tag/linux-portable-latest) pre-release, make it executable and run it:
 
@@ -49,7 +49,7 @@ chmod +x Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
 ./Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
 ```
 
-It bundles Qt, Python, OpenImageIO/OpenColorIO, OpenVDB, Cycles, FFmpeg (with x264/x265) and the openfx-io and openfx-misc plugins; openfx-arena and openfx-gmic are not built for Linux yet. It needs only what a desktop provides (X11, Mesa or a vendor GL driver, fontconfig). On a Wayland desktop it runs through XWayland. Inside a container without FUSE, add `--appimage-extract-and-run`. `NatronRenderer` for command-line rendering is inside the AppImage: `./Natron-*.AppImage --appimage-extract` and use `squashfs-root/usr/bin/NatronRenderer`. The pre-release is rewritten by every green CI run and its notes name the exact commit; a matching debug-symbols tarball is attached for crash backtraces.
+It bundles the same things as the Windows archive: Qt, Python, OpenImageIO/OpenColorIO, OpenVDB, Cycles, FFmpeg (with x264/x265) and the openfx-io and openfx-misc plugins. It needs only what a desktop provides (X11, Mesa or a vendor GL driver, fontconfig). On a Wayland desktop it runs through XWayland. Inside a container without FUSE, add `--appimage-extract-and-run`. `NatronRenderer` for command-line rendering is inside the AppImage: `./Natron-*.AppImage --appimage-extract` and use `squashfs-root/usr/bin/NatronRenderer`. The pre-release is rewritten by every green CI run and its notes name the exact commit; a matching debug-symbols tarball is attached for crash backtraces.
 
 Verified on Rocky 8/9, AlmaLinux 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch and openSUSE Leap 15.6 (CI, software GL) and on an NVIDIA RTX 4090 (GUI, 3D viewport, FastVolumeRender on Vulkan, Cycles). Not yet tried: a native Wayland session, AMD or Intel GPUs. NixOS needs its AppImage wrapper; Alpine (musl) is not supported.
 
@@ -92,7 +92,7 @@ Natron is a free, open-source (GPLv2) video compositor, similar in functionality
 - Color management handled by [OpenColorIO](https://opencolorio.org/).
 - Dozens of video and image formats supported such as: H264, DNxHR, EXR, DPX, TIFF, JPG, PNG through [OpenImageIO](https://github.com/OpenImageIO/oiio) and [FFmpeg](https://ffmpeg.org/).
 - Support for many free, open-source, and commercial OpenFX plugins—currently almost all features of OpenFX v1.4 are supported.
-  - [OpenFX-IO](https://github.com/NatronGitHub/openfx-io), [OpenFX-Misc](https://github.com/NatronGitHub/openfx-misc), [OpenFX-G'MIC](https://github.com/NatronGitHub/openfx-gmic), [OpenFX-Arena](https://github.com/NatronGitHub/openfx-arena) (all bundled in the releases)
+  - [OpenFX-IO](https://github.com/NatronGitHub/openfx-io) and [OpenFX-Misc](https://github.com/NatronGitHub/openfx-misc) are bundled in this fork's releases; upstream Natron also ships [OpenFX-G'MIC](https://github.com/NatronGitHub/openfx-gmic) and [OpenFX-Arena](https://github.com/NatronGitHub/openfx-arena), which this fork does not build on either platform
   - [All OFX products from RevisionFX](http://www.revisionfx.com), [Boris FX](https://borisfx.com/) OpenFX plugins including Sapphire, [Furnace by The Foundry](http://www.thefoundry.co.uk/products/furnace/), and many more.
 - Intuitive user interface: Natron aims not to break habits by providing an intuitive and familiar user interface. It is possible to customize and separate the graphical user interface on any number of screens. You can re-use your layouts and share your layout files (.nl).
 - Performance: In Natron, anything you do produces real-time feedback in the viewer thanks to the optimized multi-threaded rendering pipeline and support for proxy rendering (computing at a lower resolution to speed up rendering).
