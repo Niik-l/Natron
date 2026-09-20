@@ -196,9 +196,18 @@ jobs:
             export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
             D=/w/extra-deps
             stage() { cp -a "$D/." / && ldconfig; }
+            mkdir -p /w/deps-logs   # uploaded with the logs artifact
             run() { # name log-file command...
-              local n=$1 l=/tmp/$2; shift 2
-              "$@" > "$l" 2>&1 || { echo "::error::$n failed; last 60 lines of $l:"; tail -60 "$l"; exit 1; }
+              local n=$1 l=/w/deps-logs/$2; shift 2
+              "$@" > "$l" 2>&1 || {
+                # CMake/configure errors go to stderr, which lands earlier in
+                # the file than buffered progress output; show those blocks
+                # first, then the tail.
+                echo "::error::$n failed ($l)"
+                grep -n -B2 -A12 -E "CMake Error|error:|ERROR:|not found|No such file" "$l" | head -120 || true
+                echo "--- last 25 lines:"; tail -25 "$l"
+                exit 1
+              }
             }
             if [ "$DEPS_HIT" = "true" ] && [ -f "$D/.complete" ]; then
               echo "== Extra deps: restored from cache"
@@ -225,7 +234,11 @@ jobs:
 
               echo "== x265 $X265_VERSION"
               git clone -q --depth 1 --branch "$X265_VERSION" https://bitbucket.org/multicoreware/x265_git.git /tmp/x265
-              run "x265 configure" x265-cfg.log cmake -S /tmp/x265/source -B /tmp/x265/build -G Ninja \
+              # CMake 4 removed the OLD behaviour of CMP0025/CMP0054; x265 sets
+              # both to OLD, which is now an error. NEW is fine on Linux.
+              sed -i -E "s/cmake_policy\(SET (CMP0025|CMP0054) OLD\)/cmake_policy(SET \1 NEW)/" /tmp/x265/source/CMakeLists.txt
+              grep -q "CMP0054 NEW" /tmp/x265/source/CMakeLists.txt
+              run "x265 configure" x265-cfg.log cmake -S /tmp/x265/source -B /tmp/x265/build -G Ninja -Wno-dev \
                 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
                 -DENABLE_SHARED=ON -DENABLE_CLI=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
               run "x265 build" x265-build.log env DESTDIR=$D ninja -C /tmp/x265/build install
@@ -432,6 +445,7 @@ jobs:
             build.log
             plugins.log
             natron/build/CMakeCache.txt
+            deps-logs/
           if-no-files-found: ignore
 
       - name: Upload build
