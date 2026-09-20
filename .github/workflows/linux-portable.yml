@@ -592,3 +592,51 @@ jobs:
         run: |
           echo "::error::AppImage test failed on ${{ matrix.label }}; see the step log and artifact"
           exit 1
+
+  # A green build that passed on every distro becomes the rolling pre-release
+  # "linux-portable-latest", so a test pod (tools/linux/gpu-test) or anyone
+  # else can fetch it with a plain curl, no GitHub login:
+  #   https://github.com/<repo>/releases/download/linux-portable-latest/<file>
+  # The release is recreated each time so its tag moves to the built commit.
+  # Not the "Latest" release: the Windows packages keep that.
+  publish:
+    name: Pre-release linux-portable-latest
+    needs: [portable, appimage-test]
+    if: success() && inputs.build_type == 'RelWithDebInfo'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - name: Download AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: Natron-${{ env.NAME }}-AppImage
+          path: rel
+
+      - name: Download debug symbols
+        uses: actions/download-artifact@v4
+        with:
+          name: Natron-${{ env.NAME }}-debug-symbols
+          path: rel
+
+      - name: Recreate the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=linux-portable-latest
+          glibc=$(cat rel/*.glibc.txt 2>/dev/null || echo "?")
+          notes="Portable Linux AppImage from the latest green **Linux Portable** run.
+
+          - Commit: ${GITHUB_SHA} (\`${GITHUB_REF_NAME}\`)
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Needs glibc ${glibc}; verified on Rocky 8/9, Alma 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch, openSUSE Leap 15.6 (CI, software GL)
+          - \`chmod +x\` and run; in a container use \`--appimage-extract-and-run\`
+          - The debug-symbols tarball is for gdb backtraces (see BUILDING.md)
+
+          This pre-release is rewritten by every green run; the Windows packages are the numbered releases."
+          gh release delete "$tag" -R "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA"             --title "Linux portable AppImage (latest green build)" --notes "$notes"             rel/*.AppImage rel/*.glibc.txt rel/*-debug-symbols.tar.gz
+          echo "Published ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"

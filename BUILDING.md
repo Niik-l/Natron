@@ -905,7 +905,12 @@ install layout); the portable one uses the shared scripts `tools/linux/build-plu
 
 **Downloads (run page → Artifacts):**
 - `Natron-<name>-AppImage` (portable only) — the AppImage plus a `.glibc.txt` naming the
-  minimum glibc. Download, `chmod +x`, run. Kept 14 days.
+  minimum glibc. Download, `chmod +x`, run. Kept 14 days. A green `RelWithDebInfo` run that
+  passed the distro matrix also rewrites the rolling pre-release **`linux-portable-latest`**
+  (Releases page), so the latest good AppImage is always at
+  `https://github.com/Niik-l/Natron/releases/download/linux-portable-latest/Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage`
+  with no login. The GPU test container (`tools/linux/gpu-test`, built by the **GPU Test
+  Image** workflow to `ghcr.io/niik-l/natron-gpu-test`) fetches it from there.
 - `Natron-<name>` — the stripped install tree as a tarball, same layout as `06-install.sh`:
   `bin/` (Natron, NatronRenderer, natron-python),
   `Plugins/OFX/Natron/*.ofx.bundle/Contents/Linux-x86-64/`, `Plugins/PyPlugs/`

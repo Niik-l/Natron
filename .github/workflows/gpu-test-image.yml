@@ -1,0 +1,61 @@
+# Builds the Rocky 9 desktop container used to test the portable AppImage on
+# a rented GPU (tools/linux/gpu-test) and pushes it to the fork's container
+# registry, ghcr.io/<owner>/natron-gpu-test:latest. RunPod / Vast.ai can only
+# launch images from a registry, and building here also catches package-name
+# mistakes for free instead of on a paid pod. No GPU on the runner: the smoke
+# test only checks the tools are installed and the entry point starts.
+
+name: GPU Test Image
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: gpu-test-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: Build + push natron-gpu-test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools/linux/gpu-test
+          sparse-checkout-cone-mode: false
+
+      - name: Image name
+        id: img
+        run: |
+          # ghcr.io requires a lowercase owner.
+          echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/natron-gpu-test" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: docker build -t "${{ steps.img.outputs.name }}:latest" tools/linux/gpu-test
+
+      - name: Smoke test (no GPU here)
+        run: |
+          docker run --rm "${{ steps.img.outputs.name }}:latest" bash -c '
+            export PATH=/opt/TurboVNC/bin:/opt/VirtualGL/bin:$PATH
+            for t in vncserver websockify vglrun vulkaninfo gh gdb python3 curl; do
+              printf "%-12s %s\n" "$t" "$(command -v $t || echo MISSING)"
+            done
+            ls /usr/share/novnc/vnc.html
+            # The entry point must get as far as starting the VNC server.
+            timeout 25 /usr/local/bin/start.sh > /tmp/start.log 2>&1 || true
+            cat /tmp/start.log
+            grep -q "Desktop: open" /tmp/start.log
+          '
+
+      - name: Push
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "${{ steps.img.outputs.name }}:latest"
+          echo "Pushed ${{ steps.img.outputs.name }}:latest" >> "$GITHUB_STEP_SUMMARY"

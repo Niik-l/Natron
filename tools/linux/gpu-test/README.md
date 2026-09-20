@@ -12,30 +12,32 @@ to need a package-name fix or two.
 
 ## Set-up
 
-1. Build and push the image once (any registry the provider can pull from, or
-   build it on the pod itself):
-
-       docker build -t <you>/natron-gpu-test tools/linux/gpu-test
-       docker push <you>/natron-gpu-test
+1. The image is built and pushed by the **GPU Test Image** workflow (Actions tab
+   -> Run workflow) to `ghcr.io/niik-l/natron-gpu-test:latest`. Re-run it after
+   editing the Dockerfile. (Or build locally: `docker build -t natron-gpu-test
+   tools/linux/gpu-test`.)
 
 2. Rent a pod with an RTX-class card (an RTX 3090/4090 is plenty). Roughly
    20 to 60 cents an hour on RunPod or Vast.ai as of 2026-09.
-   - **RunPod**: create a template from the image, expose HTTP port `6080`,
+   - **RunPod**: create a template from `ghcr.io/niik-l/natron-gpu-test:latest`, expose HTTP port `6080`,
      environment `NVIDIA_DRIVER_CAPABILITIES=all`, no start command (the
      image's `start.sh` runs). Connect -> HTTP 6080 -> `vnc.html`.
    - **Vast.ai**: same image, map port 6080, `-e NVIDIA_DRIVER_CAPABILITIES=all`.
    - **Any Linux box with an NVIDIA card and the container toolkit**:
-     `docker run --gpus all -p 6080:6080 <you>/natron-gpu-test`, then open
+     `docker run --gpus all -p 6080:6080 ghcr.io/niik-l/natron-gpu-test:latest`, then open
      `http://localhost:6080/vnc.html`.
 
-3. In a terminal on the desktop, fetch the AppImage from a green
-   **Linux Portable** run (the run id is in the Actions URL):
+3. In a terminal on the desktop, fetch the latest green build from the rolling
+   pre-release (every green **Linux Portable** run rewrites it; no login needed):
 
-       gh auth login
-       gh run download <run-id> -R Niik-l/Natron -n Natron-portable-rocky8-RelWithDebInfo-AppImage
-       gh run download <run-id> -R Niik-l/Natron -n Natron-portable-rocky8-RelWithDebInfo-debug-symbols
+       base=https://github.com/Niik-l/Natron/releases/download/linux-portable-latest
+       curl -fLO $base/Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
+       curl -fLO $base/Natron-portable-rocky8-RelWithDebInfo-debug-symbols.tar.gz
        chmod +x Natron-*.AppImage
        vglrun -d egl ./Natron-*.AppImage --appimage-extract-and-run
+
+   (A specific run's build: `gh auth login`, then `gh run download <run-id>
+   -R Niik-l/Natron -n Natron-portable-rocky8-RelWithDebInfo-AppImage`.)
 
    `vglrun -d egl` sends Natron's OpenGL to the NVIDIA GPU (the VNC X server
    has no GPU of its own); without it everything runs on Mesa software GL,
