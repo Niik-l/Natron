@@ -438,6 +438,20 @@ struct CameraTrackerNodePrivate
     PointCloudDataPtr viewportCloud;   // cached cloud for the 3D viewport (rebuilt only when the solve changes)
     bool cloudDirty;
 
+    // --- Persistence of the working state with the project ---
+    // Everything above that is not a knob (2D tracks, manual ids, planar quads,
+    // solved cameras + points, scene orientation/scale) lives in one hidden
+    // multi-line string knob, "trackerState", so a saved project reopens with
+    // its features and solve intact instead of empty. Written by
+    // syncStateKnob() after every mutating button / viewer edit (see
+    // serializeState for the format), read back in onKnobsLoaded / knobChanged.
+    KnobStringWPtr stateData;
+    bool stateSyncGuard = false;       // our own setValue must not re-enter deserialize
+    std::string lastAppliedState;      // skip re-applying an identical blob (load fires twice)
+    std::string serializeState() const;
+    bool deserializeState(const std::string& s);
+    void syncStateKnob();
+
     CameraTrackerNodePrivate(CameraTrackerNode* pub)
         : publicInterface(pub)
         , lastSolveError(0)
@@ -1224,6 +1238,18 @@ CameraTrackerNode::initializeKnobs()
         trackPage->addKnob(k);
         _imp->solveStatusDisplay = k;
     }
+    {
+        // Hidden, persistent: the tracks / solve / planars / orientation blob
+        // (CameraTrackerNodePrivate::serializeState). Never shown or animated.
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Tracker State"));
+        k->setName("trackerState");
+        k->setAsMultiLine();
+        k->setSecret(true);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        trackPage->addKnob(k);
+        _imp->stateData = k;
+    }
 
     // ========== Solving ==========
     KnobPagePtr solvePage = AppManager::createKnob<KnobPage>(this, tr("Solve"));
@@ -1623,6 +1649,16 @@ CameraTrackerNode::onKnobsLoaded()
         if ((rk = _imp->roiY2.lock())) rk->setSecret(!on);
     }
 
+    // Restore the working state (tracks, solve, planars, orientation) saved
+    // with the project. knobChanged(trackerState) may fire too; the blob
+    // compare inside deserializeState makes the second application a no-op.
+    if (KnobStringPtr sk = _imp->stateData.lock()) {
+        const std::string blob = sk->getValue();
+        if (!blob.empty() && _imp->deserializeState(blob)) {
+            _imp->refreshManualList();
+        }
+    }
+
     NodePtr thisNode = getNode();
     if (!thisNode || !thisNode->getApp()) return;
 
@@ -1717,8 +1753,32 @@ CameraTrackerNode::knobChanged(KnobI* k,
                                 double time,
                                 bool /*originatedFromMainThread*/)
 {
+    // The persisted working state came back (project load, undo, paste):
+    // rebuild tracks / solve / planars from it. Our own syncStateKnob()
+    // writes are ignored through the guard.
+    if (k == _imp->stateData.lock().get()) {
+        if (!_imp->stateSyncGuard) {
+            KnobStringPtr sk = _imp->stateData.lock();
+            if (_imp->deserializeState(sk ? sk->getValue() : std::string())) {
+                _imp->refreshManualList();
+            }
+        }
+        return true;
+    }
+
     if (reason == eValueChangedReasonNatronGuiEdited ||
         reason == eValueChangedReasonUserEdited) {
+
+        // Every button may change the working state (detect, track, clear,
+        // delete, import, solve, refine, orientation...); re-serialise it into
+        // the hidden state knob once the handler below has run. Read-only
+        // buttons (exports, Create Camera3D) just rewrite an identical blob.
+        struct SyncOnExit {
+            CameraTrackerNodePrivate* p;
+            bool on;
+            ~SyncOnExit() { if (on) p->syncStateKnob(); }
+        };
+        SyncOnExit syncOnExit{ _imp.get(), dynamic_cast<KnobButton*>(k) != nullptr };
 
         if (k == _imp->detectFeaturesBtn.lock().get()) {
             _imp->detectFeatures(static_cast<int>(time));
@@ -2423,6 +2483,7 @@ CameraTrackerNode::onOverlayPenDown(double time,
        << ") on frame " << curFrame << " (" << _imp->manualTrackIds.size() << " manual)";
     _imp->solveStatusDisplay.lock()->setValue(ss.str());
     _imp->refreshManualList();
+    _imp->syncStateKnob();   // a new manual track is working state
 
     // Trigger overlay redraw
     getApp()->redrawAllViewers();
@@ -2527,6 +2588,17 @@ CameraTrackerNode::onOverlayPenUp(double time,
                                    double /*timestamp*/)
 {
     if (!_imp) return false;
+
+    // A pen-up that ends a pattern resize, a marker drag, a planar draw or a
+    // planar corner edit changed the working state: persist it on the way
+    // out (selection drags don't).
+    struct SyncOnExit {
+        CameraTrackerNodePrivate* p;
+        bool on;
+        ~SyncOnExit() { if (on) p->syncStateKnob(); }
+    };
+    SyncOnExit syncOnExit{ _imp.get(), _imp->patternResizeActive || _imp->manualDragActive ||
+                                       _imp->planarCreating || _imp->planarEditQuad >= 0 };
 
     if (_imp->patternResizeActive) {
         _imp->patternResizeActive = false;
@@ -2706,6 +2778,224 @@ CameraTrackerNodePrivate::deleteTracksInRegion(int frame)
     CT_DBG("CameraTracker: deleteTracksInRegion removed %d, %d remain\n", removed, (int)tracks.size());
 }
 
+
+// ==================== Working-state persistence ====================
+//
+// One line per record, whitespace separated, in the hidden "trackerState"
+// knob (so it rides along in the .ntp like any knob value):
+//
+//   CTSTATE 1
+//   S hasSolution lastSolveError tracksImported sceneOrientSet sceneScale
+//     originX originY originZ  rot(9, row-major)
+//   M n id...                                   manual track ids
+//   T id error patternHalf n  frame x y ...     one per 2D track
+//   C frame tx ty tz rx ry rz residual R(9)     one per solved camera
+//   P track x y z                               one per solved 3D point
+//   Q id refFrame tracked nKeys key... nBaked id... nQuads frame c0..c7 ...
+//
+// Pixels at 1/1000 px, 3D values with 9 significant digits; anything else
+// (selection, drag state, caches) is rebuilt. Unknown record types are
+// skipped so a newer file still loads what an older build understands.
+
+std::string
+CameraTrackerNodePrivate::serializeState() const
+{
+    std::string out;
+    out.reserve(64 + tracks.size() * 64 + solvedCameras.size() * 200 + solvedPoints.size() * 48);
+    char buf[512];
+    auto emit = [&](const char* s) { out += s; };
+
+    emit("CTSTATE 1\n");
+    snprintf(buf, sizeof(buf), "S %d %.9g %d %d %.9g %.9g %.9g %.9g",
+             hasSolution ? 1 : 0, lastSolveError, tracksImported ? 1 : 0, sceneOrientSet ? 1 : 0,
+             sceneScale, sceneOrigin[0], sceneOrigin[1], sceneOrigin[2]);
+    emit(buf);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            snprintf(buf, sizeof(buf), " %.9g", sceneRot[r][c]);
+            emit(buf);
+        }
+    }
+    emit("\n");
+
+    snprintf(buf, sizeof(buf), "M %d", (int)manualTrackIds.size());
+    emit(buf);
+    for (int id : manualTrackIds) {
+        snprintf(buf, sizeof(buf), " %d", id);
+        emit(buf);
+    }
+    emit("\n");
+
+    for (const Track2D& t : tracks) {
+        snprintf(buf, sizeof(buf), "T %d %.9g %.9g %d", t.id, t.error, t.patternHalf, (int)t.markers.size());
+        emit(buf);
+        for (const auto& m : t.markers) {
+            snprintf(buf, sizeof(buf), " %d %.3f %.3f", m.first, m.second.first, m.second.second);
+            emit(buf);
+        }
+        emit("\n");
+    }
+
+    for (const SolvedCamera& c : solvedCameras) {
+        snprintf(buf, sizeof(buf), "C %d %.9g %.9g %.9g %.9g %.9g %.9g %.9g",
+                 c.frame, c.tx, c.ty, c.tz, c.rx, c.ry, c.rz, c.residual);
+        emit(buf);
+        for (int r = 0; r < 3; ++r) {
+            for (int k = 0; k < 3; ++k) {
+                snprintf(buf, sizeof(buf), " %.9g", c.R[r][k]);
+                emit(buf);
+            }
+        }
+        emit("\n");
+    }
+
+    for (const SolvedPoint& p : solvedPoints) {
+        snprintf(buf, sizeof(buf), "P %d %.9g %.9g %.9g\n", p.track, p.x, p.y, p.z);
+        emit(buf);
+    }
+
+    for (const PlanarTrack& q : planarTracks) {
+        snprintf(buf, sizeof(buf), "Q %d %d %d %d", q.id, q.refFrame, q.tracked ? 1 : 0, (int)q.userKeys.size());
+        emit(buf);
+        for (int f : q.userKeys) { snprintf(buf, sizeof(buf), " %d", f); emit(buf); }
+        snprintf(buf, sizeof(buf), " %d", (int)q.bakedIds.size());
+        emit(buf);
+        for (int id : q.bakedIds) { snprintf(buf, sizeof(buf), " %d", id); emit(buf); }
+        snprintf(buf, sizeof(buf), " %d", (int)q.quads.size());
+        emit(buf);
+        for (const auto& fq : q.quads) {
+            snprintf(buf, sizeof(buf), " %d", fq.first);
+            emit(buf);
+            for (int i = 0; i < 8; ++i) {
+                snprintf(buf, sizeof(buf), " %.3f", fq.second[i]);
+                emit(buf);
+            }
+        }
+        emit("\n");
+    }
+    return out;
+}
+
+bool
+CameraTrackerNodePrivate::deserializeState(const std::string& s)
+{
+    if (s == lastAppliedState) {
+        return false;   // already applied (load fires onKnobsLoaded and knobChanged)
+    }
+    std::istringstream in(s);
+    std::string line;
+    if (!std::getline(in, line) || line.rfind("CTSTATE", 0) != 0) {
+        if (!s.empty()) {
+            CT_DBG("CameraTracker: trackerState has no CTSTATE header; ignoring\n");
+        }
+        return false;
+    }
+
+    std::vector<Track2D> newTracks;
+    std::vector<SolvedCamera> newCams;
+    std::vector<SolvedPoint> newPts;
+    std::vector<PlanarTrack> newPlanars;
+    std::set<int> newManual;
+    bool newHasSolution = false, newImported = false, newOrientSet = false;
+    double newSolveError = -1.0, newScale = 0.0;
+    double newOrigin[3] = {0, 0, 0};
+    double newRot[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::istringstream ls(line);
+        std::string tag;
+        ls >> tag;
+        if (tag == "S") {
+            int hs = 0, imp = 0, os = 0;
+            ls >> hs >> newSolveError >> imp >> os >> newScale >> newOrigin[0] >> newOrigin[1] >> newOrigin[2];
+            for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) ls >> newRot[r][c];
+            newHasSolution = hs != 0; newImported = imp != 0; newOrientSet = os != 0;
+        } else if (tag == "M") {
+            int n = 0; ls >> n;
+            for (int i = 0; i < n; ++i) { int id; if (ls >> id) newManual.insert(id); }
+        } else if (tag == "T") {
+            Track2D t;
+            int n = 0;
+            ls >> t.id >> t.error >> t.patternHalf >> n;
+            for (int i = 0; i < n; ++i) {
+                int f; double x, y;
+                if (!(ls >> f >> x >> y)) break;
+                t.markers[f] = std::make_pair(x, y);
+            }
+            newTracks.push_back(std::move(t));
+        } else if (tag == "C") {
+            SolvedCamera c;
+            ls >> c.frame >> c.tx >> c.ty >> c.tz >> c.rx >> c.ry >> c.rz >> c.residual;
+            for (int r = 0; r < 3; ++r) for (int k = 0; k < 3; ++k) ls >> c.R[r][k];
+            newCams.push_back(c);
+        } else if (tag == "P") {
+            SolvedPoint p;
+            ls >> p.track >> p.x >> p.y >> p.z;
+            newPts.push_back(p);
+        } else if (tag == "Q") {
+            PlanarTrack q;
+            int tr = 0, nk = 0, nb = 0, nq = 0;
+            ls >> q.id >> q.refFrame >> tr >> nk;
+            q.tracked = tr != 0;
+            for (int i = 0; i < nk; ++i) { int f; if (ls >> f) q.userKeys.insert(f); }
+            ls >> nb;
+            for (int i = 0; i < nb; ++i) { int id; if (ls >> id) q.bakedIds.push_back(id); }
+            ls >> nq;
+            for (int i = 0; i < nq; ++i) {
+                int f; std::array<double, 8> c;
+                if (!(ls >> f)) break;
+                for (int k = 0; k < 8; ++k) ls >> c[k];
+                q.quads[f] = c;
+            }
+            newPlanars.push_back(std::move(q));
+        }
+        // unknown tags: skipped
+    }
+
+    tracks.swap(newTracks);
+    solvedCameras.swap(newCams);
+    solvedPoints.swap(newPts);
+    planarTracks.swap(newPlanars);
+    manualTrackIds.swap(newManual);
+    hasSolution = newHasSolution;
+    lastSolveError = newSolveError;
+    tracksImported = newImported;
+    sceneOrientSet = newOrientSet;
+    sceneScale = newScale;
+    for (int i = 0; i < 3; ++i) sceneOrigin[i] = newOrigin[i];
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) sceneRot[r][c] = newRot[r][c];
+    selectedManualId = -1;
+    viewportSelection.clear();
+    cloudDirty = true;
+    lastAppliedState = s;
+
+    if (KnobStringPtr st = solveStatusDisplay.lock()) {
+        std::stringstream ss;
+        ss << "Restored " << tracks.size() << " track(s)";
+        if (!planarTracks.empty()) ss << ", " << planarTracks.size() << " planar";
+        if (hasSolution) ss << ", solve (" << solvedCameras.size() << " cameras, "
+                            << solvedPoints.size() << " points)";
+        else ss << ", not solved";
+        st->setValue(ss.str());
+    }
+    CT_DBG("CameraTracker: restored state: %d tracks, %d cams, %d pts, %d planars\n",
+           (int)tracks.size(), (int)solvedCameras.size(), (int)solvedPoints.size(), (int)planarTracks.size());
+    return true;
+}
+
+void
+CameraTrackerNodePrivate::syncStateKnob()
+{
+    KnobStringPtr sk = stateData.lock();
+    if (!sk) return;
+    const std::string blob = serializeState();
+    if (blob == lastAppliedState) return;   // nothing changed
+    lastAppliedState = blob;
+    stateSyncGuard = true;
+    sk->setValue(blob);
+    stateSyncGuard = false;
+}
 
 // ==================== 2D track import (validation) ====================
 
