@@ -21,7 +21,7 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
 RUN dnf -y install epel-release dnf-plugins-core \
  && dnf config-manager --set-enabled crb \
  && dnf -y groupinstall "Xfce" \
- && dnf -y install --setopt=install_weak_deps=False \
+ && dnf -y install --setopt=install_weak_deps=False --allowerasing \
       xterm xorg-x11-fonts-misc dejavu-sans-fonts fontconfig \
       novnc python3-websockify \
       libglvnd-glx libglvnd-egl libglvnd-opengl mesa-libGL mesa-libEGL mesa-dri-drivers \

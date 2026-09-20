@@ -7,7 +7,7 @@ FastVolumeRender, which needs Vulkan. An hour or two on a rented GPU covers
 that for a few dollars, on the distro we target (Rocky 9 here; swap the base
 image for Rocky 8, Ubuntu or Fedora to compare).
 
-Status 2026-09-20: prepared, not yet exercised. Expect the first `docker build`
+Status 2026-09-20: image builds in CI (GPU Test Image workflow); not yet exercised on a GPU pod. Expect the first pod session
 to need a package-name fix or two.
 
 ## Set-up
