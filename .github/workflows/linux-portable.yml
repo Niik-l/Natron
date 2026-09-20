@@ -453,9 +453,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Keep the newest entry of this prefix (the one just saved) and
+          # delete the rest. Newest by creation time, not by key: a first
+          # version compared keys and deleted the entry it had just saved.
           prefix="portable-ccache-${{ env.ASWF_TAG }}-${{ inputs.build_type }}-"
-          keep="$prefix${{ github.sha }}"
-          gh cache list -R "$GITHUB_REPOSITORY" -L 100 --json id,key             -q ".[] | select(.key | startswith(\"$prefix\")) | select(.key != \"$keep\") | .id"             | while read -r id; do gh cache delete "$id" -R "$GITHUB_REPOSITORY" && echo "deleted cache $id"; done || true
+          gh cache list -R "$GITHUB_REPOSITORY" -L 100 --json id,key,createdAt             -q "[.[] | select(.key | startswith(\"$prefix\"))] | sort_by(.createdAt) | reverse
+                | to_entries[] | \"\(if .key == 0 then \"keep\" else \"delete\" end) \(.value.id) \(.value.createdAt) \(.value.key)\""             | tee /tmp/ccache-prune.txt
+          awk '$1 == "delete" {print $2}' /tmp/ccache-prune.txt             | while read -r id; do gh cache delete "$id" -R "$GITHUB_REPOSITORY" && echo "deleted cache $id"; done || true
 
       - name: Collect error summary
         if: failure()

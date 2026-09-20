@@ -350,10 +350,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The job runs in the Fedora container, which has no gh; use the API.
+          # Keep the newest entry of this prefix (the one just saved), delete
+          # the rest. The job runs in the Fedora container, which has no gh;
+          # use the REST API.
           prefix="ccache-f${{ env.FEDORA }}-${{ inputs.build_type }}-"
-          keep="$prefix${{ github.sha }}"
-          curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/caches?per_page=100&key=$prefix"             | python3 -c "import json,sys; [print(c['id']) for c in json.load(sys.stdin)['actions_caches'] if c['key'].startswith('$prefix') and c['key'] != '$keep']"             | while read -r id; do
+          curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/caches?per_page=100&key=$prefix"             | python3 -c '
+          import json, sys
+          prefix = sys.argv[1]
+          caches = [c for c in json.load(sys.stdin)["actions_caches"] if c["key"].startswith(prefix)]
+          caches.sort(key=lambda c: c["created_at"], reverse=True)
+          for i, c in enumerate(caches):
+              print("keep" if i == 0 else "delete", c["id"], c["created_at"], c["key"])
+          ' "$prefix" | tee /tmp/ccache-prune.txt
+          awk '$1 == "delete" {print $2}' /tmp/ccache-prune.txt             | while read -r id; do
                 curl -fsS -X DELETE -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"                   "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/caches/$id" && echo "deleted cache $id"
               done || true
 
