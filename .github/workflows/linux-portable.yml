@@ -569,12 +569,12 @@ jobs:
           # if the container never ran; read it tolerantly, never modify it.
           st=t/out/status.txt
           get() { { grep -o "^$1=.*" "$st" 2>/dev/null || true; } | cut -d= -f2; }
-          libs=$(get libs); hl=$(get headless); gui=$(get gui)
+          libs=$(get libs); hl=$(get headless); gui=$(get gui); sd=$(get shutdown)
           {
             echo "### ${{ matrix.label }} (${{ matrix.image }})"
-            echo "| libs resolve | headless start | GUI under Xvfb |"
-            echo "|---|---|---|"
-            echo "| ${libs:-n/a} | ${hl:-n/a} | ${gui:-n/a} |"
+            echo "| libs resolve | headless start | GUI under Xvfb | clean exit on SIGTERM (informational) |"
+            echo "|---|---|---|---|"
+            echo "| ${libs:-n/a} | ${hl:-n/a} | ${gui:-n/a} | ${sd:-n/a} |"
             [ -f t/out/screenshot.png ] && echo "Screenshot in the \`appimage-test-${{ matrix.label }}\` artifact."
           } >> "$GITHUB_STEP_SUMMARY"
 

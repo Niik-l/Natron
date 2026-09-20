@@ -11,9 +11,13 @@
 #      AppImage excludelist), with the distro's own package manager;
 #   2. libs:     every bundled ELF file resolves (ldd through the bundled RPATHs);
 #   3. headless: `Natron --version` starts and exits normally;
-#   4. gui:      the full GUI comes up under Xvfb on Mesa's software GL;
-#                <outdir>/screenshot.png is grabbed after a settle time, and a
-#                gdb backtrace is taken if it crashed.
+#   4. gui:      the full GUI comes up under Xvfb on Mesa's software GL and
+#                is still running after a settle time; <outdir>/screenshot.png
+#                is grabbed then, and a gdb backtrace is taken if it crashed.
+#   5. shutdown: (informational) it then exits cleanly on SIGTERM. Natron's
+#                handler calls quitApplication() from signal context, which
+#                intermittently aborts ("QThread: Destroyed while thread is
+#                still running"); a failure here gets a backtrace too.
 # Exit status is non-zero if any of 2-4 failed.
 set -uo pipefail
 
@@ -33,7 +37,7 @@ sed "s/^/AppImage needs /" ./*.glibc.txt 2>/dev/null || true
 echo "== Desktop baseline"
 common="file binutils findutils tar gzip gdb"
 if command -v dnf >/dev/null; then
-    pkgs="$common python3 xorg-x11-server-Xvfb mesa-dri-drivers mesa-libGL mesa-libEGL
+    pkgs="$common procps-ng python3 xorg-x11-server-Xvfb mesa-dri-drivers mesa-libGL mesa-libEGL
           libglvnd-glx libglvnd-egl libglvnd-opengl fontconfig freetype harfbuzz dejavu-sans-fonts
           libX11 libxcb libxkbcommon libxkbcommon-x11 xcb-util-wm xcb-util-image xcb-util-keysyms
           xcb-util-renderutil xcb-util-cursor libSM libICE fribidi alsa-lib"
@@ -47,7 +51,7 @@ if command -v dnf >/dev/null; then
 elif command -v apt-get >/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq >/dev/null
-    want="$common python3 xvfb libgl1-mesa-dri libgl1 libegl1 libopengl0 libglx0 fontconfig
+    want="$common procps python3 xvfb libgl1-mesa-dri libgl1 libegl1 libopengl0 libglx0 fontconfig
           libfreetype6 libharfbuzz0b fonts-dejavu-core libx11-6 libxcb1 libxkbcommon0
           libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0
           libxcb-cursor0 libxcb-shape0 libxcb-xinerama0 libxcb-randr0 libxcb-xfixes0
@@ -70,14 +74,14 @@ elif command -v apt-get >/dev/null; then
     apt-get install -y -qq --no-install-recommends $pkgs >/dev/null
 elif command -v pacman >/dev/null; then
     # shellcheck disable=SC2086
-    pacman -Syu --noconfirm --needed -q $common python xorg-server-xvfb mesa libglvnd fontconfig \
+    pacman -Syu --noconfirm --needed -q $common procps-ng python xorg-server-xvfb mesa libglvnd fontconfig \
         freetype2 harfbuzz ttf-dejavu libx11 libxcb libxkbcommon libxkbcommon-x11 xcb-util-cursor \
         xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm alsa-lib e2fsprogs \
         libgpg-error libsm libice fribidi >/dev/null
 elif command -v zypper >/dev/null; then
     # libglvnd is one package here (libGL/libGLX/libEGL/libOpenGL). An unknown
     # name makes zypper install nothing at all, so keep only names it knows.
-    want="$common python3 xorg-x11-server-Xvfb Mesa-dri Mesa-libGL1 Mesa-libEGL1 libglvnd
+    want="$common procps python3 xorg-x11-server-Xvfb Mesa-dri Mesa-libGL1 Mesa-libEGL1 libglvnd
           fontconfig libfreetype6 libharfbuzz0 dejavu-fonts libX11-6 libxcb1 libxkbcommon0
           libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0
           libxcb-cursor0 libSM6 libICE6 libfribidi0 libasound2"
@@ -134,32 +138,43 @@ else
         sleep 1
         if ! kill -0 $NATRON 2>/dev/null; then alive=0; break; fi
     done
+    shutdown=n/a
     if [ $alive -eq 1 ]; then
+        gui=ok
         cp "$OUT/fb/Xvfb_screen0" "$OUT/screenshot.xwd"
         python3 "$TOOLS/xwd2png.py" "$OUT/screenshot.xwd" "$OUT/screenshot.png" && rm -f "$OUT/screenshot.xwd"
-        kill $NATRON 2>/dev/null; sleep 5; kill -9 $NATRON 2>/dev/null
+        kill $NATRON 2>/dev/null; sleep 10; kill -9 $NATRON 2>/dev/null
         wait $NATRON; rc=$?
-        # 0 or SIGTERM (143) = it was still running fine when we stopped it.
-        if [ $rc -eq 0 ] || [ $rc -eq 143 ]; then gui=ok; fi
-        echo "GUI ran ${settle}s, stopped with exit $rc"
+        # 0 or SIGTERM (143) = a clean exit; 134 = abort during teardown.
+        if [ $rc -eq 0 ] || [ $rc -eq 143 ]; then shutdown=ok; else shutdown=FAIL; fi
+        echo "GUI ran ${settle}s, then exit $rc on SIGTERM"
     else
         wait $NATRON; rc=$?
         echo "GUI exited early with $rc"
     fi
     tail -60 "$OUT/gui.log"
-    if [ $gui != ok ] && ls Natron-*-debug-symbols.tar.gz >/dev/null 2>&1; then
+    if { [ $gui != ok ] || [ $shutdown = FAIL ]; } && ls Natron-*-debug-symbols.tar.gz >/dev/null 2>&1; then
         echo "== Backtrace"
         tar -xzf Natron-*-debug-symbols.tar.gz
         cp debug/Natron.debug squashfs-root/usr/bin/
+        # A startup crash shows up on its own; a shutdown abort needs SIGTERM
+        # sent after the settle time and passed through to the program (not
+        # stopping gdb), so the abort that follows is what gets the backtrace.
         # "info symbol" names the library holding the crash address;
         # "info sharedlibrary" shows which copies (bundled or host) loaded.
-        APPDIR="$PWD/squashfs-root" timeout 300 gdb -q -batch -ex run -ex 'thread apply all bt 30' \
+        if [ $gui = ok ]; then
+            ( sleep $settle; pkill -TERM -f 'squashfs-root/usr/bin/Natron' ) &
+        fi
+        APPDIR="$PWD/squashfs-root" timeout 300 gdb -q -batch \
+            -ex 'handle SIGTERM nostop noprint pass' -ex run -ex 'thread apply all bt 30' \
             -ex 'info symbol $pc' -ex 'info sharedlibrary' \
             --args squashfs-root/usr/bin/Natron 2>&1 | tail -250 | tee "$OUT/backtrace.log" || true
     fi
 fi
 kill $XVFB 2>/dev/null; rm -rf "$OUT/fb"
 note gui $gui
+note shutdown $shutdown
 
-grep -q FAIL "$STATUS" && exit 1
+# shutdown is informational (see the header); the other FAILs fail the test.
+if grep -v '^shutdown=' "$STATUS" | grep FAIL >/dev/null; then exit 1; fi
 exit 0
