@@ -474,19 +474,42 @@ jobs:
         if: always()
         run: docker rm -f natron-build || true
 
-  # The target platform itself: a plain Rocky Linux 8 container with only what
-  # a desktop provides (GL, X11, fonts, and the libraries on the AppImage
-  # excludelist). Any library the AppImage failed to bundle shows up here.
-  # Artifacts are downloaded on the host and the checks run via `docker run`,
-  # so the GitHub actions themselves don't need to run on Rocky 8.
+  # The target platforms: bare distro containers with only what a desktop
+  # provides (GL, X11, fonts, and the libraries on the AppImage excludelist).
+  # tools/linux/appimage-test.sh installs that baseline with each distro's own
+  # package manager, checks every bundled binary resolves, starts Natron
+  # headless, then brings up the full GUI under Xvfb on Mesa's software GL and
+  # screenshots it. Rocky 8 is the build's own glibc floor; the rest show how
+  # far the same AppImage travels. Artifacts are downloaded on the host and the
+  # checks run via `docker run`, so the actions themselves needn't run there.
   appimage-test:
-    name: AppImage on Rocky Linux 8
+    name: AppImage on ${{ matrix.label }}
     needs: portable
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: rocky8,    image: "rockylinux/rockylinux:8" }
+          - { label: rocky9,    image: "rockylinux/rockylinux:9" }
+          - { label: alma9,     image: "almalinux:9" }
+          - { label: fedora44,  image: "fedora:44" }
+          - { label: ubuntu22,  image: "ubuntu:22.04" }
+          - { label: ubuntu24,  image: "ubuntu:24.04" }
+          - { label: debian12,  image: "debian:12" }
+          - { label: arch,      image: "archlinux:latest" }
+          - { label: leap156,   image: "opensuse/leap:15.6" }
     defaults:
       run:
         shell: bash -eo pipefail {0}
     steps:
+      - name: Checkout test tools
+        uses: actions/checkout@v4
+        with:
+          path: natron
+          sparse-checkout: tools/linux
+          sparse-checkout-cone-mode: false
+
       - name: Download AppImage
         uses: actions/download-artifact@v4
         with:
@@ -499,42 +522,37 @@ jobs:
           name: Natron-${{ env.NAME }}-debug-symbols
           path: t
 
-      - name: Test on Rocky Linux 8
+      - name: Test on ${{ matrix.label }}
+        id: test
         run: |
-          docker run --rm -v "$PWD/t:/t" -w /t rockylinux/rockylinux:8 bash -o pipefail -c '
-            echo "== Desktop baseline"
-            dnf install -y -q --setopt=install_weak_deps=False --skip-broken \
-              file binutils findutils tar gzip gdb \
-              mesa-libGL mesa-libEGL libglvnd-glx libglvnd-egl libglvnd-opengl fontconfig freetype harfbuzz \
-              libX11 libxcb libxkbcommon libxkbcommon-x11 xcb-util-wm xcb-util-image \
-              xcb-util-keysyms xcb-util-renderutil libSM libICE fribidi alsa-lib >/dev/null
-            ldd --version | sed -n 1p
-            sed "s/^/AppImage needs /" *.glibc.txt
+          docker run --rm -v "$PWD/t:/t" -v "$PWD/natron/tools/linux:/tools:ro" -w /t             "${{ matrix.image }}" bash /tools/appimage-test.sh "${{ matrix.label }}" /t/out
+        continue-on-error: true
 
-            echo "== Every bundled binary resolves"
-            chmod +x *.AppImage
-            ./*.AppImage --appimage-extract >/dev/null
-            bad=0
-            while IFS= read -r f; do
-              # Plain ldd resolves through the bundled RPATHs, as a launch does.
-              missing=$({ ldd "$f" 2>/dev/null || true; } | awk "/not found/ {print \$1}")
-              if [ -n "$missing" ]; then echo "$f: $missing"; bad=1; fi
-            done < <(find squashfs-root/usr -type f -exec sh -c "file -b \"\$1\" | grep -q ELF" _ {} \; -print)
-            [ "$bad" -eq 0 ] && echo "All bundled binaries resolve on Rocky Linux 8"
+      - name: Summary
+        run: |
+          st=t/out/status.txt
+          mkdir -p t/out; touch "$st"          # may be absent if the container never ran
+          libs=$(grep -o '^libs=.*' $st | cut -d= -f2); hl=$(grep -o '^headless=.*' $st | cut -d= -f2)
+          gui=$(grep -o '^gui=.*' $st | cut -d= -f2)
+          {
+            echo "### ${{ matrix.label }} (${{ matrix.image }})"
+            echo "| libs resolve | headless start | GUI under Xvfb |"
+            echo "|---|---|---|"
+            echo "| ${libs:-n/a} | ${hl:-n/a} | ${gui:-n/a} |"
+            [ -f t/out/screenshot.png ] && echo "Screenshot in the \`appimage-test-${{ matrix.label }}\` artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-            echo "== Headless start (informational)"
-            QT_QPA_PLATFORM=offscreen timeout 120 squashfs-root/AppRun --version \
-              || echo "headless start exited with $?"
+      - name: Upload screenshot + logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage-test-${{ matrix.label }}
+          path: t/out/
+          retention-days: 14
+          if-no-files-found: ignore
 
-            echo "== Backtrace of the headless start (informational)"
-            tar -xzf Natron-*-debug-symbols.tar.gz
-            cp debug/Natron.debug squashfs-root/usr/bin/
-            # "info symbol" names the library holding the crash address;
-            # "info sharedlibrary" shows which copies (bundled or host) loaded.
-            APPDIR="$PWD/squashfs-root" QT_QPA_PLATFORM=offscreen timeout 300 \
-              gdb -q -batch -ex run -ex "thread apply all bt 30" \
-              -ex "info symbol \$pc" -ex "info sharedlibrary" \
-              --args squashfs-root/usr/bin/Natron --version 2>&1 | tail -250 || true
-
-            exit $bad
-          '
+      - name: Result
+        if: steps.test.outcome != 'success'
+        run: |
+          echo "::error::AppImage test failed on ${{ matrix.label }}; see the step log and artifact"
+          exit 1

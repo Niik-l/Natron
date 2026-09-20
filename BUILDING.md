@@ -917,11 +917,16 @@ install layout); the portable one uses the shared scripts `tools/linux/build-plu
 - `logs-<name>` — configure/build/plugin logs, `CMakeCache.txt`, and (portable) the
   dependency build logs under `deps-logs/`.
 
-The portable workflow ends with an **AppImage test job** that unpacks the AppImage on a bare
-Rocky Linux 8 container with only a desktop baseline installed, fails if any bundled binary
-has an unresolved library, and then tries a headless `Natron --version` under gdb
-(informational). The Fedora workflow only starts Natron headless from its build tree.
-FastVolumeRender needs a Vulkan driver at runtime on any Linux.
+The portable workflow ends with an **AppImage test matrix** (`tools/linux/appimage-test.sh`)
+that unpacks the AppImage on bare containers of Rocky 8 and 9, AlmaLinux 9, Fedora 44,
+Ubuntu 22.04 and 24.04, Debian 12, Arch and openSUSE Leap 15.6, each with only a desktop
+baseline installed. Per distro it checks that every bundled binary resolves, that a headless
+`Natron --version` exits normally, and that the full GUI comes up under Xvfb on Mesa's
+software GL; a screenshot and the logs (plus a gdb backtrace on a crash) are uploaded as
+`appimage-test-<distro>`, and the run summary shows one table per distro. This proves the
+packaging, not the GPU path: FastVolumeRender needs a Vulkan driver at runtime, and Cycles
+GPU rendering needs the vendor driver, so a real-hardware test is still needed for those.
+The Fedora workflow only starts Natron headless from its build tree.
 
 ### Linux Portable (recommended)
 
