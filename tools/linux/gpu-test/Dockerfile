@@ -28,7 +28,7 @@ RUN dnf -y install epel-release dnf-plugins-core \
       vulkan-loader vulkan-tools mesa-vulkan-drivers \
       libxkbcommon-x11 xcb-util-wm xcb-util-image xcb-util-keysyms xcb-util-renderutil \
       xcb-util-cursor libSM libICE fribidi alsa-lib \
-      fuse fuse-libs file binutils gdb procps-ng curl wget tar gzip unzip which \
+      fuse fuse-libs file binutils gdb procps-ng curl wget tar gzip unzip which sudo \
  && dnf clean all
 
 # TurboVNC (the X server the desktop runs on) and VirtualGL (routes Natron's
