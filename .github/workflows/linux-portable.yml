@@ -628,15 +628,20 @@ jobs:
         run: |
           tag=linux-portable-latest
           glibc=$(cat rel/*.glibc.txt 2>/dev/null || echo "?")
-          notes="Portable Linux AppImage from the latest green **Linux Portable** run.
+          notes="Portable Linux build of the fork, rebuilt from every green **Linux Portable** CI run. This pre-release always holds the latest good build; the numbered releases are the Windows packages.
 
-          - Commit: ${GITHUB_SHA} (\`${GITHUB_REF_NAME}\`)
-          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          - Needs glibc ${glibc}; verified on Rocky 8/9, Alma 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch, openSUSE Leap 15.6 (CI, software GL)
-          - \`chmod +x\` and run; in a container use \`--appimage-extract-and-run\`
-          - The debug-symbols tarball is for gdb backtraces (see BUILDING.md)
+          **Download** \`Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage\`, then:
 
-          This pre-release is rewritten by every green run; the Windows packages are the numbered releases."
+              chmod +x Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
+              ./Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
+
+          **Runs on** any 64-bit Linux with glibc ${glibc#GLIBC_} or newer (2018 onwards). Verified on Rocky 8/9, AlmaLinux 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch, openSUSE Leap 15.6, and on an NVIDIA RTX 4090 (GUI, 3D viewport, FastVolumeRender on Vulkan, Cycles). Needs only what a desktop provides: X11 (Wayland desktops run it through XWayland), a GL driver, fontconfig. FastVolumeRender needs a Vulkan driver. Cycles is CPU-only.
+
+          **Bundled:** Qt, Python, OpenImageIO, OpenColorIO (+ the classic Natron configs), OpenVDB, Cycles, FFmpeg with x264/x265, openfx-io and openfx-misc. Not yet on Linux: openfx-arena, openfx-gmic.
+
+          **Notes:** in a container without FUSE add \`--appimage-extract-and-run\`. \`NatronRenderer\` is inside: \`--appimage-extract\`, then \`squashfs-root/usr/bin/NatronRenderer\`. The debug-symbols tarball is for gdb backtraces (see BUILDING.md). Report problems in [Issues](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/issues) with your distro, GPU and the terminal output.
+
+          Built from commit ${GITHUB_SHA} (\`${GITHUB_REF_NAME}\`), run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
           gh release delete "$tag" -R "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
           gh release create "$tag" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA"             --title "Linux portable AppImage (latest green build)" --notes "$notes"             rel/*.AppImage rel/*.glibc.txt rel/*-debug-symbols.tar.gz
           echo "Published ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
