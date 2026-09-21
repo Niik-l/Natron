@@ -1732,9 +1732,57 @@ Node::findPluginFormatKnobs(const KnobsVec & knobs,
             std::vector<ChoiceOption> formats;
             int defValue;
             getApp()->getProject()->getProjectFormatEntries(&formats, &defValue);
+            // Sampled BEFORE the refresh: it moves the knob's default to the
+            // project format, after which a never-touched knob (value = the
+            // plugin's default) would count as modified.
+            KnobChoicePtr choice = _imp->pluginFormatKnobs.formatChoice.lock();
+            const bool untouched = choice && !choice->hasModifications();
             refreshFormatParamChoice(formats, defValue, loadingSerialization);
+
+            // A freshly created node starts on the PROJECT format (Nuke:
+            // root.format), not on the plugin's built-in default (PC_Video
+            // 640x480). Only when the knob was never set: a loaded, pasted or
+            // user-edited node keeps its own selection. The size/par knobs are
+            // written directly too, since handleFormatKnob skips a hidden
+            // choice (Reformat "To Project Format", generator "Default"
+            // extent) and the plugin reads those knobs once the user switches
+            // to the format mode.
+            if ( !loadingSerialization && untouched &&
+                 defValue >= 0 && defValue != choice->getValue() ) {
+                Format f;
+                if ( getApp()->getProject()->getProjectFormatAtIndex(defValue, &f) ) {
+                    choice->setValue(defValue);   // -> handleFormatKnob when visible
+                    _imp->lastFormatKnobIndex = defValue;
+                    applyFormatToPluginKnobs(f);
+                }
+            }
         }
     }
+}
+
+// Push a format into the hijacked size / pixel-aspect knobs without
+// re-triggering the plugin's own instanceChanged for each.
+void
+Node::applyFormatToPluginKnobs(const Format& f)
+{
+    KnobIntPtr size = _imp->pluginFormatKnobs.size.lock();
+    KnobDoublePtr par = _imp->pluginFormatKnobs.par.lock();
+    if (!size || !par) {
+        return;
+    }
+    _imp->effect->beginChanges();
+    size->blockValueChanges();
+    size->setValues(f.width(), f.height(), ViewSpec::all(), eValueChangedReasonNatronInternalEdited);
+    size->unblockValueChanges();
+    par->blockValueChanges();
+    par->setValue( f.getPixelAspectRatio() );
+    par->unblockValueChanges();
+    // A blocked set does not refresh the modified flag, and unmodified knobs
+    // are not serialized: without this a preselected size came back as the
+    // plugin default on project load while the choice still named the format.
+    size->computeHasModifications();
+    par->computeHasModifications();
+    _imp->effect->endChanges();
 }
 
 void
@@ -2599,19 +2647,7 @@ Node::handleFormatKnob(KnobI* knob)
         }
     }
 
-    KnobIntPtr size = _imp->pluginFormatKnobs.size.lock();
-    KnobDoublePtr par = _imp->pluginFormatKnobs.par.lock();
-    assert(size && par);
-
-    _imp->effect->beginChanges();
-    size->blockValueChanges();
-    size->setValues(f.width(), f.height(), ViewSpec::all(), eValueChangedReasonNatronInternalEdited);
-    size->unblockValueChanges();
-    par->blockValueChanges();
-    par->setValue( f.getPixelAspectRatio() );
-    par->unblockValueChanges();
-
-    _imp->effect->endChanges();
+    applyFormatToPluginKnobs(f);
 
     return true;
 }

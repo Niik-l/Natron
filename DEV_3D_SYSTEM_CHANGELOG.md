@@ -17,6 +17,23 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Formats: new nodes start on the project format; format names get no spaces
+  (2026-09-21)** — audit of the July New/Edit/Delete Format work against Nuke
+  (headless round trip on the 09.20 build: custom formats reach every dropdown,
+  size/PAR follow, project + node selections survive save/reload — all OK).
+  Two gaps fixed: (1) a freshly created generator / Reformat showed PC_Video
+  640x480 once switched to its Format mode, where Nuke preselects root.format —
+  `Node::findPluginFormatKnobs` now sets the choice to the project format on a
+  never-touched knob (sampled before `refreshFormatParamChoice` moves the
+  default) and pushes the size/PAR through the new `applyFormatToPluginKnobs`
+  even while the choice is hidden; that helper also calls
+  `computeHasModifications()`, since a blocked set left the size unmodified and
+  therefore unserialized (it came back as the plugin default on load while the
+  choice still named the format). Loaded, pasted and user-edited nodes keep
+  their selection; a list refresh never touches it. (2) `AddFormatDialog`
+  turns spaces in the name into underscores: the format is stored and re-read
+  as "<name> <w>x<h> <par>" split on whitespace. Still open vs Nuke: per-user
+  formats across projects, format offsets, proxy format, Python edit/delete.
 - **CameraTracker: working state saved with the project (2026-09-20)** — user
   request: a reopened scene came back with an empty tracker and the solve had
   to be redone. Everything the node held outside its knobs — the 2D tracks

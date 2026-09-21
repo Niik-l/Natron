@@ -267,7 +267,11 @@ AddFormatDialog::getFormat() const
     int w = (int)_widthSpinBox->value();
     int h = (int)_heightSpinBox->value();
     double pa = _pixelAspectSpinBox->value();
-    QString name = _nameLineEdit->text();
+    // The format is stored and re-read as "<name> <w>x<h> <par>" split on
+    // whitespace, so a name with spaces would misparse; use underscores
+    // (Nuke's HD_1080 style) and drop stray whitespace.
+    QString name = _nameLineEdit->text().simplified();
+    name.replace( QLatin1Char(' '), QLatin1Char('_') );
 
     return Format(0, 0, w, h, name.toStdString(), pa);
 }

@@ -1305,6 +1305,10 @@ public:
 
     bool handleFormatKnob(KnobI* knob);
 
+    // Write a format into the hijacked size / pixel-aspect knobs (shared by
+    // handleFormatKnob and the new-node project-format preselect).
+    void applyFormatToPluginKnobs(const Format& f);
+
     QString makeDocumentation(bool genHTML) const;
 
     void refreshPreviewsAfterProjectLoad();
