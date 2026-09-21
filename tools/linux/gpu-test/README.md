@@ -9,7 +9,7 @@ image for Rocky 8, Ubuntu or Fedora to compare).
 
 Status 2026-09-20: exercised on a RunPod RTX 4090 pod (Secure Cloud, $0.74/h). The
 desktop, noVNC clipboard bridge, GPU pass-through (nvidia-smi, Vulkan lists the
-4090, VirtualGL renderer = RTX 4090) and the pre-release download all worked first
+4090, VirtualGL renderer = RTX 4090) and the AppImage download all worked first
 time. Natron ran with GPU rendering enabled; the 2D viewer, OCIO views, the 3D
 viewport with the camera gizmo, FastVolumeRender on real Vulkan (the procedural
 cloud template at UHD) and a Cycles (CPU) sphere render all passed. Paste commands via the noVNC sidebar clipboard,
@@ -32,16 +32,16 @@ then Shift+Insert in the pod's terminal.
      `docker run --gpus all -p 6080:6080 ghcr.io/niik-l/natron-gpu-test:latest`, then open
      `http://localhost:6080/vnc.html`.
 
-3. In a terminal on the desktop, fetch the latest green build from the rolling
-   pre-release (every green **Linux Portable** run rewrites it; no login needed):
+3. In a terminal on the desktop, fetch the AppImage of the current numbered release
+   (the one with the Latest badge; no login needed):
 
-       base=https://github.com/Niik-l/Natron/releases/download/linux-portable-latest
+       base=https://github.com/Niik-l/Natron/releases/latest/download
        curl -fLO $base/Natron-2.6-linux-x86_64.AppImage
        curl -fLO $base/Natron-2.6-linux-x86_64-debug-symbols.tar.gz
        chmod +x Natron-*.AppImage
        vglrun -d egl ./Natron-*.AppImage --appimage-extract-and-run
 
-   (A specific run's build: `gh auth login`, then `gh run download <run-id>
+   (An unreleased CI build instead: `gh auth login`, then `gh run download <run-id>
    -R Niik-l/Natron -n Natron-2.6-linux-x86_64-AppImage`.)
 
    `vglrun -d egl` sends Natron's OpenGL to the NVIDIA GPU (the VNC X server

@@ -4,7 +4,7 @@
 
 A fork of [Natron](https://github.com/NatronGitHub/Natron), the open-source node-based compositor, that adds a 3D system, the Cycles renderer + Cycles deep, a deep-compositing pipeline, a particle system, volumes, and an early 3D camera tracker — **69 new built-in nodes** — on a Qt6 / Python 3.14 / OpenGL 4.3 base. Windows and Linux builds.
 
-- **Download:** [Releases](https://github.com/Niik-l/Natron/releases) — Windows portable archive (numbered releases), Linux AppImage ([`linux-portable-latest`](https://github.com/Niik-l/Natron/releases/tag/linux-portable-latest), rebuilt from every green CI run); no installer either way
+- **Download:** [Releases](https://github.com/Niik-l/Natron/releases) — Windows portable archive (numbered releases), Linux AppImage attached to the same numbered releases; no installer either way
 - **Node list:** [wiki](https://github.com/Niik-l/Natron/wiki) · developer notes in [NODE_REGISTRY.md](NODE_REGISTRY.md)
 - **Bugs / ideas:** [Issues](https://github.com/Niik-l/Natron/issues)
 - **Build it yourself:** [BUILDING.md](BUILDING.md) · change history in [DEV_3D_SYSTEM_CHANGELOG.md](DEV_3D_SYSTEM_CHANGELOG.md)
@@ -42,14 +42,14 @@ Templates menu: ready-made graphs for a basic 3D scene, the Megascans loader, Fa
 
 **Windows.** Download the `.7z` from the [Releases page](https://github.com/Niik-l/Natron/releases), extract it anywhere, and run `bin/Natron.exe`. The archive contains Natron, the bundled OpenFX plugins (openfx-io and openfx-misc, the latter providing both `Misc.ofx` and `CImg.ofx`) and `NatronRenderer.exe` for command-line rendering. Nothing is written outside the folder except Natron's own settings.
 
-**Linux.** Download the AppImage from the [`linux-portable-latest`](https://github.com/Niik-l/Natron/releases/tag/linux-portable-latest) pre-release, make it executable and run it:
+**Linux.** Download the AppImage from the same [Releases page](https://github.com/Niik-l/Natron/releases) (each numbered release carries both platforms, built from the same commit), make it executable and run it:
 
 ```sh
 chmod +x Natron-2.6-linux-x86_64.AppImage
 ./Natron-2.6-linux-x86_64.AppImage
 ```
 
-It bundles the same things as the Windows archive: Qt, Python, OpenImageIO/OpenColorIO, OpenVDB, Cycles, FFmpeg (with x264/x265) and the openfx-io and openfx-misc plugins. It needs only what a desktop provides (X11, Mesa or a vendor GL driver, fontconfig). On a Wayland desktop it runs through XWayland. Inside a container without FUSE, add `--appimage-extract-and-run`. `NatronRenderer` for command-line rendering is inside the AppImage: `./Natron-*.AppImage --appimage-extract` and use `squashfs-root/usr/bin/NatronRenderer`. The pre-release is rewritten by every green CI run and its notes name the exact commit; a matching debug-symbols tarball is attached for crash backtraces.
+It bundles the same things as the Windows archive: Qt, Python, OpenImageIO/OpenColorIO, OpenVDB, Cycles, FFmpeg (with x264/x265) and the openfx-io and openfx-misc plugins. It needs only what a desktop provides (X11, Mesa or a vendor GL driver, fontconfig). On a Wayland desktop it runs through XWayland. Inside a container without FUSE, add `--appimage-extract-and-run`. `NatronRenderer` for command-line rendering is inside the AppImage: `./Natron-*.AppImage --appimage-extract` and use `squashfs-root/usr/bin/NatronRenderer`. Each release names the commit it was built from; a matching debug-symbols tarball is attached for crash backtraces.
 
 Verified on Rocky 8/9, AlmaLinux 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch and openSUSE Leap 15.6 (CI, software GL) and on an NVIDIA RTX 4090 (GUI, 3D viewport, FastVolumeRender on Vulkan, Cycles). Not yet tried: a native Wayland session, AMD or Intel GPUs. NixOS needs its AppImage wrapper; Alpine (musl) is not supported.
 

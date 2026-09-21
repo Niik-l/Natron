@@ -26,8 +26,8 @@ cat <<EOF
 Desktop: open the pod's port 6080 in a browser (RunPod: "Connect" -> HTTP 6080;
 Vast: the mapped port), then vnc.html -> Connect.
 
-In a terminal on that desktop (latest green CI build, no login needed):
-  base=https://github.com/Niik-l/Natron/releases/download/linux-portable-latest
+In a terminal on that desktop (current numbered release, no login needed):
+  base=https://github.com/Niik-l/Natron/releases/latest/download
   curl -fLO \$base/Natron-2.6-linux-x86_64.AppImage
   curl -fLO \$base/Natron-2.6-linux-x86_64-debug-symbols.tar.gz
   chmod +x Natron-*.AppImage

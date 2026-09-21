@@ -905,12 +905,10 @@ install layout); the portable one uses the shared scripts `tools/linux/build-plu
 
 **Downloads (run page → Artifacts):**
 - `Natron-<name>-AppImage` (portable only) — the AppImage plus a `.glibc.txt` naming the
-  minimum glibc. Download, `chmod +x`, run. Kept 14 days. A green `RelWithDebInfo` run that
-  passed the distro matrix also rewrites the rolling pre-release **`linux-portable-latest`**
-  (Releases page), so the latest good AppImage is always at
-  `https://github.com/Niik-l/Natron/releases/download/linux-portable-latest/Natron-2.6-linux-x86_64.AppImage`
-  with no login. The GPU test container (`tools/linux/gpu-test`, built by the **GPU Test
-  Image** workflow to `ghcr.io/niik-l/natron-gpu-test`) fetches it from there.
+  minimum glibc. Download, `chmod +x`, run. Kept 14 days. This is where the AppImage for a
+  numbered release comes from (below); there is no rolling nightly release. The GPU test
+  container (`tools/linux/gpu-test`, built by the **GPU Test Image** workflow to
+  `ghcr.io/niik-l/natron-gpu-test`) fetches the latest numbered release's AppImage.
 - `Natron-<name>` — the stripped install tree as a tarball, same layout as `06-install.sh`:
   `bin/` (Natron, NatronRenderer, natron-python),
   `Plugins/OFX/Natron/*.ofx.bundle/Contents/Linux-x86-64/`, `Plugins/PyPlugs/`
@@ -933,12 +931,13 @@ packaging, not the GPU path: FastVolumeRender needs a Vulkan driver at runtime, 
 GPU rendering needs the vendor driver, so a real-hardware test is still needed for those.
 The Fedora workflow only starts Natron headless from its build tree.
 
-**Cutting a numbered release with Linux included.** The pre-release `linux-portable-latest` is
-the nightly. For a numbered release, run **Linux Portable** on the release commit (the same one
-the Windows package is built from), wait for the green run, then attach that run's AppImage,
-`.glibc.txt` and debug-symbols tarball to the numbered release:
+**Cutting a numbered release with Linux included.** Releases are numbered and carry both
+platforms, built from the same commit; there is no Linux nightly. Run **Linux Portable** on
+the release commit (the one the Windows package is built from), wait for the green run, then
+attach that run's AppImage, `.glibc.txt` and debug-symbols tarball to the numbered release:
 `gh release upload natron-2.6-<date> Natron-2.6-linux-x86_64.AppImage ...`.
-Users who want a fixed version then have one; the pre-release keeps moving.
+`https://github.com/Niik-l/Natron/releases/latest/download/Natron-2.6-linux-x86_64.AppImage`
+then always points at the current release.
 
 ### Linux Portable (recommended)
 
