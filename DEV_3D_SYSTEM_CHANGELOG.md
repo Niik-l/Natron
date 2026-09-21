@@ -17,6 +17,32 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **CameraTracker: working state saved with the project (2026-09-20)** — user
+  request: a reopened scene came back with an empty tracker and the solve had
+  to be redone. Everything the node held outside its knobs — the 2D tracks
+  (markers, error, pattern size), manual-track ids, planar quads with their
+  user keys and baked ids, the solved cameras and 3D points, hasSolution /
+  solve error, and Set Origin / Ground / Scale — now lives in a hidden
+  multi-line string knob **`trackerState`** (one text record per line, see
+  `CameraTrackerNodePrivate::serializeState`). `syncStateKnob()` rewrites it
+  after every button (RAII guard at the top of `knobChanged`) and after every
+  mutating viewer edit (pen-up ending a marker drag / pattern resize / planar
+  draw or corner edit; a new manual track); `onKnobsLoaded` and
+  `knobChanged(trackerState)` (undo / paste) restore it, skipping an identical
+  blob so the double fire on load is a no-op. Restore invalidates the viewport
+  cloud cache and writes "Restored N tracks, solve (...)" to the Status line.
+  Pixels are stored at 1/1000 px, 3D values with 9 significant digits; unknown
+  record tags are skipped. Cost: a few MB of .ntp text for thousands of
+  tracks over hundreds of frames (compress later if it matters).
+- **3D viewport F: selection before point cloud, outlier-tolerant cloud fit
+  (2026-09-20)** — user report: with a tracker solve shown, F never framed the
+  selected object. `keyPressEvent(Key_F)` tried the point cloud first and only
+  fell through to the selected node when there was no cloud. Precedence is now
+  selected cloud points → selected node → whole cloud → reset; the whole-cloud
+  fit uses the 2nd..98th percentile per axis (`std::nth_element`) instead of
+  the stored bbox, which a few flung-off solve points stretched until the real
+  scene was a dot; non-finite points are skipped; one `fitBox` lambda serves
+  all three paths with the same 2.5× radius fit factor.
 - **FastVolumeRender particle light (2026-09-17, QUICK COMMIT — needs proper
   testing; the user had not GUI-tested it when committed)** — sparks / tracers
   passing through fog. Particles from any `ParticleProvider` wired directly

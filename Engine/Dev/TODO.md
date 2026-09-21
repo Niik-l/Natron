@@ -140,6 +140,8 @@ Remaining:
 - **Forward-motion shots produce bad solves** — Camera positions in the millions. The two-view essential matrix decomposition is degenerate for forward/dolly motion. Rotation-first fallback is implemented but not fully effective.
 - **Tracking blocks GUI thread** — Natron freezes during tracking. Needs background thread (like TrackerNode's TrackScheduler).
 - **"Export" tab** — Originally "Output" but renamed due to script name conflict with internal Output node.
+- **~~Tracks and solve lost on save~~** — FIXED 2026-09-20 (see TODO 9). Big solves add a few MB of text to the .ntp; compress the blob if that ever matters.
+- **~~F in the 3D viewer never framed an object while the solve cloud was shown~~** — FIXED 2026-09-20 in `Viewport3D` (selection before cloud; outlier-tolerant cloud fit).
 
 ### TODO
 
@@ -151,6 +153,7 @@ Remaining:
 6. Move tracking to background thread with progress dialog
 7. Track management (select/delete individual tracks, bidirectional tracking)
 8. Test with lateral-motion footage (should produce much better solves)
+9. ~~Persist tracks / solve / planars / orientation with the project~~ DONE 2026-09-20 — hidden `trackerState` knob, rewritten after every button and mutating viewer edit, restored in `onKnobsLoaded`; Status line reports what came back.
 
 ### Files
 - `Engine/CameraTrackerNode.h/cpp`
