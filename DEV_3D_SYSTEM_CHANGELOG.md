@@ -63,6 +63,21 @@ Recent milestones:
   kicks the automatic transform solve. Note: the transform solve is
   asynchronous (progress + queued end callback), so a baked (Link off) export
   pressed before it finishes is identity — the dialog now says so.
+- **CameraTracker → Tracker node export (2026-09-17)** — Export tab, Outputs:
+  **Create Tracker From Selected Tracks** builds a stock Natron Tracker node
+  (`CameraTracker_Tracker`, input = this node's plate) with one marker per
+  selected 2D track: the cloud points selected in the 3D viewport map to their
+  tracks, plus the selected manual track; with nothing selected, every manual
+  track. Each marker's centre is keyed on every tracked frame
+  (`setValuesAtTime`, Y-up canonical coords as drawn in the viewer) and the
+  marker is disabled before its first / after its last frame so a stabilize
+  or match-move does not drag on a held end value. Labels `manual_<id>` /
+  `track_<id>`. Purpose: the 2D roto/paint link Nuke does from a Tracker —
+  a manual track placed where the paint goes anchors the 3D solve AND drives
+  the roto through the Tracker's stock exports (Transform stabilize /
+  match-move, CornerPin) or an expression link on the stroke's Transform.
+  Verified headlessly (imported tracks → 2 markers, per-frame keys, enabled
+  windows, plate connected); GUI pass pending.
 - **FastVolumeRender particle light (2026-09-17, QUICK COMMIT — needs proper
   testing; the user had not GUI-tested it when committed)** — sparks / tracers
   passing through fog. Particles from any `ParticleProvider` wired directly

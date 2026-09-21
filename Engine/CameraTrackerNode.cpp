@@ -23,6 +23,10 @@
 
 #include "CameraTrackerNode.h"
 
+#include <climits>
+#include "Engine/TrackerContext.h"
+#include "Engine/TrackMarker.h"
+
 #include <cmath>
 #include <cstdlib>
 #include <vector>
@@ -299,6 +303,7 @@ struct CameraTrackerNodePrivate
 
     // --- Output tab ---
     KnobButtonWPtr setOriginBtn;      // scene orientation from viewport selection
+    KnobButtonWPtr createTrackerBtn;  // 2D tracks -> a Natron Tracker node (roto / paint link)
     KnobButtonWPtr setGroundBtn;
     KnobDoubleWPtr scaleDistance;     // known real-world distance between 2 selected points
     KnobButtonWPtr setScaleBtn;
@@ -561,6 +566,7 @@ struct CameraTrackerNodePrivate
     void createCardsFromPlanars();
     void solveCameraMotion();
     void createCamera3DNode();
+    void createTrackerFromSelection();
     void exportPointCloud();
     void exportSolveReport();
 };
@@ -1536,6 +1542,21 @@ CameraTrackerNode::initializeKnobs()
         _imp->createCameraBtn = k;
     }
     {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Create Tracker From Selected Tracks"));
+        k->setName("createTrackerFromTracks");
+        k->setHintToolTip(tr("Hand the selected 2D tracks to a new Natron Tracker node (fed by this "
+                             "node's plate): one marker per track, keyed on every tracked frame and "
+                             "disabled outside its range. Selection = the cloud points selected in "
+                             "the 3D viewport plus the selected manual track; with nothing selected, "
+                             "all manual tracks. From there the stock Tracker exports apply "
+                             "(Transform stabilize / match-move, CornerPin) and RotoPaint strokes "
+                             "can link to the markers - place a manual track where the paint goes "
+                             "and one track drives both the solve and the roto."));
+        k->setEvaluateOnChange(false);
+        grpOutputs->addKnob(k);
+        _imp->createTrackerBtn = k;
+    }
+    {
         KnobOutputFilePtr k = AppManager::createKnob<KnobOutputFile>(this, tr("Point Cloud File"));
         k->setName("pointCloudFile");
         k->setHintToolTip(tr("Output path for the reconstructed 3D point cloud (Wavefront .obj). "
@@ -1997,6 +2018,11 @@ CameraTrackerNode::knobChanged(KnobI* k,
 
         if (k == _imp->createCardBtn.lock().get()) {
             _imp->createCardAtSelection();
+            return true;
+        }
+
+        if (k == _imp->createTrackerBtn.lock().get()) {
+            _imp->createTrackerFromSelection();
             return true;
         }
 
@@ -7126,6 +7152,98 @@ CameraTrackerNodePrivate::solveCameraMotion()
 
 
 // ==================== Camera3D Output ====================
+
+// Export the selected 2D tracks as markers of a new Natron Tracker node so
+// the stock 2D tools (Transform stabilize / match-move, CornerPin, RotoPaint
+// links) can use tracks the camera solve has already validated.
+void
+CameraTrackerNodePrivate::createTrackerFromSelection()
+{
+    NodePtr thisNode = publicInterface->getNode();
+    AppInstancePtr app = thisNode ? thisNode->getApp() : AppInstancePtr();
+    if (!app) return;
+
+    // Selection: cloud points selected in the 3D viewport (-> their tracks)
+    // plus the selected manual track; with nothing selected, every manual track.
+    std::set<int> ids;
+    for (int idx : viewportSelection) {
+        if (idx >= 0 && idx < (int)solvedPoints.size()) ids.insert(solvedPoints[idx].track);
+    }
+    if (selectedManualId >= 0 && manualTrackIds.count(selectedManualId)) ids.insert(selectedManualId);
+    if (ids.empty()) ids = manualTrackIds;
+    std::vector<const Track2D*> chosen;
+    for (const Track2D& t : tracks) {
+        if (ids.count(t.id) && !t.markers.empty()) chosen.push_back(&t);
+    }
+    if (chosen.empty()) {
+        solveStatusDisplay.lock()->setValue("Create Tracker: select cloud points in the 3D viewport "
+                                            "or a manual track first (or add manual tracks)");
+        return;
+    }
+
+    CreateNodeArgs cnArgs(PLUGINID_NATRON_TRACKER, thisNode->getGroup());
+    cnArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+    cnArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+    NodePtr trackerNode = app->createNode(cnArgs);
+    if (!trackerNode) {
+        solveStatusDisplay.lock()->setValue("Create Tracker: failed to create the Tracker node");
+        return;
+    }
+    trackerNode->setLabel("CameraTracker_Tracker");
+    if (NodePtr plate = thisNode->getInput(0)) {
+        trackerNode->connectInput(plate, 0);
+    }
+    TrackerContextPtr ctx = trackerNode->getTrackerContext();
+    if (!ctx) {
+        solveStatusDisplay.lock()->setValue("Create Tracker: the Tracker node has no tracker context");
+        return;
+    }
+
+    int nMarkers = 0, nKeys = 0;
+    for (const Track2D* t : chosen) {
+        TrackMarkerPtr m = ctx->createMarker();
+        if (!m) continue;
+        {
+            std::stringstream nm;
+            nm << (manualTrackIds.count(t->id) ? "manual_" : "track_") << t->id;
+            m->setLabel(nm.str());
+        }
+        KnobDoublePtr center = m->getCenterKnob();
+        if (!center) continue;
+        const int first = t->markers.begin()->first, last = t->markers.rbegin()->first;
+        for (std::map<int, std::pair<double, double>>::const_iterator it = t->markers.begin(); it != t->markers.end(); ++it) {
+            center->setValuesAtTime(it->first, it->second.first, it->second.second,
+                                    ViewSpec::all(), eValueChangedReasonNatronInternalEdited);
+            ++nKeys;
+        }
+        // Outside the tracked range the centre would hold its end value and drag
+        // a stabilize/match-move off: disable the marker there.
+        m->setEnabledAtTime(first, true);
+        m->setEnabledAtTime(first - 1, false);
+        m->setEnabledAtTime(last + 1, false);
+        m->setUserKeyframe(first);
+        ++nMarkers;
+    }
+    // Reference frame inside the tracked range (the Tracker's default, the
+    // project start, is usually outside a hand-placed track's life).
+    {
+        int rMin = INT_MAX, rMax = INT_MIN;
+        for (const Track2D* t : chosen) {
+            rMin = std::min(rMin, t->markers.begin()->first);
+            rMax = std::max(rMax, t->markers.rbegin()->first);
+        }
+        KnobIntPtr refK = std::dynamic_pointer_cast<KnobInt>( trackerNode->getKnobByName("referenceFrame") );
+        if (refK && rMin <= rMax) {
+            const int cur = refK->getValue();
+            if (cur < rMin || cur > rMax) refK->setValue(rMin);
+        }
+        ctx->solveTransformParamsIfAutomatic();
+    }
+    std::stringstream ss;
+    ss << "Created Tracker node with " << nMarkers << " marker" << (nMarkers == 1 ? "" : "s")
+       << " (" << nKeys << " keys) - use its Export for Transform / CornerPin, or link roto strokes to the markers";
+    solveStatusDisplay.lock()->setValue(ss.str());
+}
 
 void
 CameraTrackerNodePrivate::createCamera3DNode()
