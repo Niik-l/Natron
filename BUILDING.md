@@ -908,7 +908,7 @@ install layout); the portable one uses the shared scripts `tools/linux/build-plu
   minimum glibc. Download, `chmod +x`, run. Kept 14 days. A green `RelWithDebInfo` run that
   passed the distro matrix also rewrites the rolling pre-release **`linux-portable-latest`**
   (Releases page), so the latest good AppImage is always at
-  `https://github.com/Niik-l/Natron/releases/download/linux-portable-latest/Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage`
+  `https://github.com/Niik-l/Natron/releases/download/linux-portable-latest/Natron-2.6-linux-x86_64.AppImage`
   with no login. The GPU test container (`tools/linux/gpu-test`, built by the **GPU Test
   Image** workflow to `ghcr.io/niik-l/natron-gpu-test`) fetches it from there.
 - `Natron-<name>` — the stripped install tree as a tarball, same layout as `06-install.sh`:
@@ -937,7 +937,7 @@ The Fedora workflow only starts Natron headless from its build tree.
 the nightly. For a numbered release, run **Linux Portable** on the release commit (the same one
 the Windows package is built from), wait for the green run, then attach that run's AppImage,
 `.glibc.txt` and debug-symbols tarball to the numbered release:
-`gh release upload natron-2.6-<date> Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage ...`.
+`gh release upload natron-2.6-<date> Natron-2.6-linux-x86_64.AppImage ...`.
 Users who want a fixed version then have one; the pre-release keeps moving.
 
 ### Linux Portable (recommended)

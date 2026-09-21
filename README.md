@@ -45,8 +45,8 @@ Templates menu: ready-made graphs for a basic 3D scene, the Megascans loader, Fa
 **Linux.** Download the AppImage from the [`linux-portable-latest`](https://github.com/Niik-l/Natron/releases/tag/linux-portable-latest) pre-release, make it executable and run it:
 
 ```sh
-chmod +x Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
-./Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
+chmod +x Natron-2.6-linux-x86_64.AppImage
+./Natron-2.6-linux-x86_64.AppImage
 ```
 
 It bundles the same things as the Windows archive: Qt, Python, OpenImageIO/OpenColorIO, OpenVDB, Cycles, FFmpeg (with x264/x265) and the openfx-io and openfx-misc plugins. It needs only what a desktop provides (X11, Mesa or a vendor GL driver, fontconfig). On a Wayland desktop it runs through XWayland. Inside a container without FUSE, add `--appimage-extract-and-run`. `NatronRenderer` for command-line rendering is inside the AppImage: `./Natron-*.AppImage --appimage-extract` and use `squashfs-root/usr/bin/NatronRenderer`. The pre-release is rewritten by every green CI run and its notes name the exact commit; a matching debug-symbols tarball is attached for crash backtraces.

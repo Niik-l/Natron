@@ -36,13 +36,13 @@ then Shift+Insert in the pod's terminal.
    pre-release (every green **Linux Portable** run rewrites it; no login needed):
 
        base=https://github.com/Niik-l/Natron/releases/download/linux-portable-latest
-       curl -fLO $base/Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
-       curl -fLO $base/Natron-portable-rocky8-RelWithDebInfo-debug-symbols.tar.gz
+       curl -fLO $base/Natron-2.6-linux-x86_64.AppImage
+       curl -fLO $base/Natron-2.6-linux-x86_64-debug-symbols.tar.gz
        chmod +x Natron-*.AppImage
        vglrun -d egl ./Natron-*.AppImage --appimage-extract-and-run
 
    (A specific run's build: `gh auth login`, then `gh run download <run-id>
-   -R Niik-l/Natron -n Natron-portable-rocky8-RelWithDebInfo-AppImage`.)
+   -R Niik-l/Natron -n Natron-2.6-linux-x86_64-AppImage`.)
 
    `vglrun -d egl` sends Natron's OpenGL to the NVIDIA GPU (the VNC X server
    has no GPU of its own); without it everything runs on Mesa software GL,

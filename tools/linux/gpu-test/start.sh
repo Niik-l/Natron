@@ -28,8 +28,8 @@ Vast: the mapped port), then vnc.html -> Connect.
 
 In a terminal on that desktop (latest green CI build, no login needed):
   base=https://github.com/Niik-l/Natron/releases/download/linux-portable-latest
-  curl -fLO \$base/Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
-  curl -fLO \$base/Natron-portable-rocky8-RelWithDebInfo-debug-symbols.tar.gz
+  curl -fLO \$base/Natron-2.6-linux-x86_64.AppImage
+  curl -fLO \$base/Natron-2.6-linux-x86_64-debug-symbols.tar.gz
   chmod +x Natron-*.AppImage
   vglrun -d egl ./Natron-*.AppImage --appimage-extract-and-run
 

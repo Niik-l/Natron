@@ -52,7 +52,10 @@ env:
   CYCLES_REF: feature/cycles-deep
   WGPU_VERSION: v27.0.4.0
   WGPU_SHA256: 271481ef76fbf3ea09631a6079e9493636ecf813cd9c92306c44a1a452991ba1
-  NAME: portable-rocky8-${{ inputs.build_type }}
+  # Public file names: Natron-2.6-linux-x86_64.AppImage / .tar.gz / -debug-symbols.tar.gz
+  # (built on Rocky 8 for glibc 2.28, but that is an implementation detail); a
+  # non-default build type is appended so a Debug build cannot be mistaken for it.
+  NAME: 2.6-linux-x86_64${{ inputs.build_type != 'RelWithDebInfo' && format('-{0}', inputs.build_type) || '' }}
 
 jobs:
   portable:
@@ -411,7 +414,7 @@ jobs:
             # AppImage excludelist, and Rocky 8 hosts have FreeType 2.9. Bundle them.
             export FORCE_BUNDLE_LIBS="$(ls /usr/local/lib*/libfreetype.so.6 /usr/local/lib*/libharfbuzz.so.0 2>/dev/null | tr "\n" " ")"
             [ -n "$FORCE_BUNDLE_LIBS" ] || { echo "::error::image FreeType/HarfBuzz not found in /usr/local"; exit 1; }
-            bash natron/tools/appimage/build-appimage.sh dist/Natron appimage "Natron-$NAME-x86_64.AppImage"
+            bash natron/tools/appimage/build-appimage.sh dist/Natron appimage "Natron-$NAME.AppImage"
           '
           echo "Minimum glibc: $(cat appimage/*.glibc.txt)" >> "$GITHUB_STEP_SUMMARY"
 
@@ -630,10 +633,10 @@ jobs:
           glibc=$(cat rel/*.glibc.txt 2>/dev/null || echo "?")
           notes="Portable Linux build of the fork, rebuilt from every green **Linux Portable** CI run. This pre-release always holds the latest good build; the numbered releases are the Windows packages.
 
-          **Download** \`Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage\`, then:
+          **Download** \`Natron-2.6-linux-x86_64.AppImage\`, then:
 
-              chmod +x Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
-              ./Natron-portable-rocky8-RelWithDebInfo-x86_64.AppImage
+              chmod +x Natron-2.6-linux-x86_64.AppImage
+              ./Natron-2.6-linux-x86_64.AppImage
 
           **Runs on** any 64-bit Linux with glibc ${glibc#GLIBC_} or newer (2018 onwards). Verified on Rocky 8/9, AlmaLinux 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch, openSUSE Leap 15.6, and on an NVIDIA RTX 4090 (GUI, 3D viewport, FastVolumeRender on Vulkan, Cycles). Needs only what a desktop provides: X11 (Wayland desktops run it through XWayland), a GL driver, fontconfig. FastVolumeRender needs a Vulkan driver. Cycles is CPU-only.
 
