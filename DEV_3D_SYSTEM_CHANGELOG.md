@@ -43,6 +43,26 @@ Recent milestones:
   the stored bbox, which a few flung-off solve points stretched until the real
   scene was a dot; non-finite points are skipped; one `fitBox` lambda serves
   all three paths with the same 2.5× radius fit factor.
+- **Tracker node: knob changes dropped without a viewer + solve/export
+  diagnostics (2026-09-17)** — `TrackerNode::knobChanged` returned before
+  forwarding to the `TrackerContext` whenever no viewer held the node's
+  overlay (`getCurrentViewportForOverlays()` null: a 3D viewport or another
+  node focused, panel-only, headless). Motion Type / Reference Frame changes
+  and the **Export** button were silently ignored in that state — the likely
+  cause of "the export doesn't always work". Now the viewer-bound tools are
+  skipped but the context still gets the change. Plus `trackerLog()`
+  (TrackerContextPrivate) writing one line per step to the Error Log and
+  stderr: solve skipped (no tracks / Motion Type None), solve start (tracks,
+  enabled tracks, keyframe range, reference frame, motion + transform type,
+  tracks enabled at the reference frame — WARNING when 0), solve end (valid
+  frames, max fitting error, frames with no enabled track, WARNING when the
+  reference frame has no valid transform), export (node, linked/baked, motion
+  type, invert, keyframe count — WARNING + dialog when the transform has no
+  keys or is out of date). CameraTracker's Tracker export now also moves the
+  Reference Frame inside the exported tracks' range when it was outside, and
+  kicks the automatic transform solve. Note: the transform solve is
+  asynchronous (progress + queued end callback), so a baked (Link off) export
+  pressed before it finishes is identity — the dialog now says so.
 - **FastVolumeRender particle light (2026-09-17, QUICK COMMIT — needs proper
   testing; the user had not GUI-tested it when committed)** — sparks / tracers
   passing through fog. Particles from any `ParticleProvider` wired directly

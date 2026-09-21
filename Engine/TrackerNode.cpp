@@ -572,9 +572,14 @@ TrackerNode::knobChanged(KnobI* k,
 
     OverlaySupport* overlay = getCurrentViewportForOverlays();
     if (!overlay || !overlay->getInternalViewerNode()) {
-        return false;
+        // No viewer holds this node's overlay (headless, a 3D viewport or a
+        // different node focused, panel opened without a viewer): the viewer-bound
+        // tools cannot run, but the Transform / Export section and the
+        // transform solve must still react - returning here silently dropped
+        // Motion Type changes and the Export button.
+        return ctx->knobChanged(k, reason, view, time, originatedFromMainThread);
     }
-    
+
     bool ret = true;
     if ( k == _imp->ui->trackRangeDialogOkButton.lock().get() ) {
         int first = _imp->ui->trackRangeDialogFirstFrame.lock()->getValue();

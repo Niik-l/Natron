@@ -40,6 +40,9 @@
 #include "Engine/KnobTypes.h"
 #include "Engine/Image.h"
 #include "Engine/Node.h"
+#include "Engine/AppManager.h"
+#include <QtCore/QDateTime>
+#include <cstdio>
 #include "Engine/TLSHolder.h"
 #include "Engine/TrackMarker.h"
 #include "Engine/TrackerNode.h"
@@ -2457,15 +2460,50 @@ TrackerContextPrivate::resetTransformParamsAnimation()
 }
 
 void
+trackerLog(const NodePtr& node, const QString& msg)
+{
+    QString ctx = QString::fromUtf8("Tracker");
+    if (node) {
+        ctx += QString::fromUtf8(" ") + QString::fromUtf8( node->getScriptName_mt_safe().c_str() );
+    }
+    appPTR->writeToErrorLog_mt_safe(ctx, QDateTime::currentDateTime(), msg);
+    std::fprintf(stderr, "[%s] %s\n", ctx.toStdString().c_str(), msg.toStdString().c_str());
+    std::fflush(stderr);
+}
+
+void
 TrackerContextPrivate::computeTransformParamsFromTracksEnd(double refTime,
                                                            double maxFittingError,
                                                            const QList<TransformData>& results)
 {
     QList<TransformData> validResults;
+    QStringList invalidFrames;
     for (QList<TransformData>::const_iterator it = results.begin(); it != results.end(); ++it) {
         if (it->valid) {
             validResults.push_back(*it);
+        } else if (invalidFrames.size() < 8) {
+            invalidFrames.push_back( QString::number(it->time) );
         }
+    }
+    {
+        double maxRms = 0.0;
+        bool refValid = false;
+        for (QList<TransformData>::const_iterator it = validResults.begin(); it != validResults.end(); ++it) {
+            if (it->rms > maxRms) maxRms = it->rms;
+            if (it->time == refTime) refValid = true;
+        }
+        QString msg = QString::fromUtf8("transform solve done: %1 of %2 frames valid, max fitting error %3 px (warn above %4)")
+                      .arg( validResults.size() ).arg( results.size() ).arg(maxRms, 0, 'f', 3).arg(maxFittingError);
+        if ( !invalidFrames.isEmpty() ) {
+            msg += QString::fromUtf8(", no transform at frames %1%2 (no enabled track there)")
+                   .arg( invalidFrames.join( QString::fromUtf8(", ") ) )
+                   .arg( results.size() - validResults.size() > invalidFrames.size() ? QString::fromUtf8(" ...") : QString() );
+        }
+        if (!refValid) {
+            msg += QString::fromUtf8(". WARNING: reference frame %1 has no valid transform - the output has no anchor; set Reference Frame inside the tracked range")
+                   .arg(refTime);
+        }
+        trackerLog(node.lock(), msg);
     }
 
 

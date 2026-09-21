@@ -811,6 +811,7 @@ TrackerContext::exportTrackDataFromExportOptions()
     TrackerMotionTypeEnum mt = (TrackerMotionTypeEnum)motionType_i;
 
     if (mt == eTrackerMotionTypeNone) {
+        trackerLog( getNode(), QString::fromUtf8("export aborted: Motion Type is None") );
         Dialogs::errorDialog( tr("Tracker Export").toStdString(), tr("Please select the export mode with the Motion Type parameter").toStdString() );
 
         return;
@@ -835,7 +836,36 @@ TrackerContext::exportTrackDataFromExportOptions()
 
     NodePtr createdNode = app->createNode(args);
     if (!createdNode) {
+        trackerLog( getNode(), QString::fromUtf8("export failed: could not create a %1 node").arg(pluginID) );
         return;
+    }
+    {
+        // What the new node will carry: the Tracker's own transform animation.
+        KnobDoublePtr trK = _imp->translate.lock();
+        const int nKeys = trK ? trK->getKeyFramesCount(ViewSpec::all(), 0) : 0;
+        KnobStringPtr outOfDate = _imp->transformOutOfDateLabel.lock();
+        const bool stale = outOfDate && !outOfDate->getIsSecret();
+        QString msg = QString::fromUtf8("export: created %1 (%2, %3), Motion Type %4, reference frame %5, invert %6, transform has %7 keyframes")
+                      .arg( QString::fromUtf8( createdNode->getScriptName_mt_safe().c_str() ) )
+                      .arg( transformType == eTrackerTransformNodeCornerPin ? QString::fromUtf8("CornerPin") : QString::fromUtf8("Transform") )
+                      .arg( linked ? QString::fromUtf8("linked to this Tracker - follows its Motion Type from now on") : QString::fromUtf8("baked copy") )
+                      .arg( QString::fromUtf8( motionTypeKnob->getActiveEntry().id.c_str() ) )
+                      .arg( getTransformReferenceFrame() )
+                      .arg( _imp->invertTransform.lock() && _imp->invertTransform.lock()->getValue() ? QString::fromUtf8("on") : QString::fromUtf8("off") )
+                      .arg(nKeys);
+        if (stale) {
+            msg += QString::fromUtf8(". WARNING: the transform is OUT OF DATE (Compute Transform Automatically is off) - press Compute, then export again");
+        }
+        if (nKeys == 0 && transformType == eTrackerTransformNodeTransform) {
+            msg += QString::fromUtf8(". WARNING: the transform has no keyframes yet (solve pending, failed, or tracks empty) - the exported node is identity");
+        }
+        trackerLog(getNode(), msg);
+        if ( stale || (nKeys == 0 && transformType == eTrackerTransformNodeTransform) ) {
+            Dialogs::warningDialog( tr("Tracker Export").toStdString(),
+                                    tr("The Tracker's transform has no keyframes yet, or is out of date. The exported node "
+                                       "will be identity until it is solved: press Compute (or turn on Compute Transform "
+                                       "Automatically) and check Display > Error Log for the reason.").toStdString() );
+        }
     }
 
     // Move the new node
@@ -1162,6 +1192,7 @@ TrackerContext::solveTransformParams()
 
     getAllMarkers(&markers);
     if ( markers.empty() ) {
+        trackerLog( getNode(), QString::fromUtf8("transform solve skipped: the Tracker has no tracks") );
         return;
     }
 
@@ -1175,6 +1206,7 @@ TrackerContext::solveTransformParams()
     bool jitterAdd = false;
     switch (type) {
     case eTrackerMotionTypeNone:
+        trackerLog( getNode(), QString::fromUtf8("transform solve skipped: Motion Type is None (pick Stabilize / Match-Move first)") );
 
         return;
     case eTrackerMotionTypeMatchMove:
@@ -1233,6 +1265,33 @@ TrackerContext::solveTransformParams()
         centerValue.x /= nSamplesAtRefTime;
         centerValue.y /= nSamplesAtRefTime;
         centerKnob->setValues(centerValue.x, centerValue.y, ViewSpec::all(), eValueChangedReasonNatronInternalEdited);
+    }
+    {
+        int nEnabledTracks = 0;
+        for (std::size_t i = 0; i < markers.size(); ++i) {
+            std::set<double> keys;
+            markers[i]->getCenterKeyframes(&keys);
+            bool anyEnabled = false;
+            for (std::set<double>::const_iterator it = keys.begin(); it != keys.end() && !anyEnabled; ++it) {
+                anyEnabled = markers[i]->isEnabled(*it);
+            }
+            if (anyEnabled) ++nEnabledTracks;
+        }
+        const double kMin = keyframes.empty() ? 0.0 : *keyframes.begin();
+        const double kMax = keyframes.empty() ? 0.0 : *keyframes.rbegin();
+        QString msg = QString::fromUtf8("solving transform: %1 tracks (%2 enabled), %3 keyframes over %4..%5, reference frame %6, Motion Type %7, Transform Type %8, %9 tracks enabled at the reference frame")
+                      .arg( markers.size() ).arg(nEnabledTracks).arg( keyframes.size() ).arg(kMin).arg(kMax).arg(refTime)
+                      .arg( QString::fromUtf8( motionTypeKnob->getActiveEntry().id.c_str() ) )
+                      .arg( QString::fromUtf8( transformTypeKnob->getActiveEntry().id.c_str() ) )
+                      .arg(nSamplesAtRefTime);
+        if (nSamplesAtRefTime == 0) {
+            msg += QString::fromUtf8(". WARNING: no enabled track at the reference frame - the transform has nothing to be relative to; set Reference Frame inside the tracked range (%1..%2)")
+                   .arg(kMin).arg(kMax);
+        }
+        if ( keyframes.empty() ) {
+            msg += QString::fromUtf8(". WARNING: the tracks have no keyframes - track them first");
+        }
+        trackerLog(getNode(), msg);
     }
 
     bool robustModel;

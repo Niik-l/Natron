@@ -688,6 +688,12 @@ public Q_SLOTS:
     void onTransformSolverWatcherProgress(int progress);
 };
 
+// Tracker diagnostics: one line per solve / export step into Natron's Error
+// Log (Display > Error Log) and stderr, so "the export did nothing" can be
+// traced (no tracks, reference frame outside the tracks, solve still running,
+// exported node with no keys ...).
+void trackerLog(const NodePtr& node, const QString& msg);
+
 NATRON_NAMESPACE_EXIT
 
 #endif // TRACKERCONTEXTPRIVATE_H
