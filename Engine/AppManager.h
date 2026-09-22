@@ -353,6 +353,7 @@ public:
     void checkCacheFreeMemoryIsGoodEnough();
 
     void onCheckerboardSettingsChanged() { Q_EMIT checkerboardSettingsChanged(); }
+    void onViewport3DSettingsChanged() { Q_EMIT viewport3DSettingsChanged(); }
 
     void onOCIOConfigPathChanged(const std::string& path);
     ///Non MT-safe!
@@ -645,6 +646,7 @@ Q_SIGNALS:
 
 
     void checkerboardSettingsChanged();
+    void viewport3DSettingsChanged();
 
     void s_requestOFXDialogOnMainThread(OfxImageEffectInstance* instance, void* instanceData);
 

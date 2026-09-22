@@ -44,6 +44,8 @@
 #include "Gui/SpinBox.h"
 #include "Gui/TimeLineGui.h"
 #include "Gui/Viewport3D.h"
+#include "Engine/AppManager.h"
+#include "Engine/Settings.h"
 #include "Engine/TimeLine.h"
 #include "Engine/Project.h"
 #include "Engine/Node.h"
@@ -290,6 +292,21 @@ Viewport3DTab::Viewport3DTab(Gui* gui, QWidget* parent)
 
     // ==================== 3D Viewport ====================
     _viewport = new Viewport3D(gui);
+
+    // Startup defaults from Preferences > 3D Viewport (the toolbar still
+    // changes them per viewport afterwards).
+    {
+        SettingsPtr settings = appPTR->getCurrentSettings();
+        _gridVisible = settings->getViewport3DGridAtStartup();
+        _gridBtn->setChecked(_gridVisible);
+        _viewport->setShowGrid(_gridVisible);
+        int sh = settings->getViewport3DDefaultShading();
+        // Indexed by Viewport3D::ShadingMode: Wireframe, Shaded, Shaded+Wire, Flat, Face Orientation.
+        static const char* shadingLabels[5] = { "Wireframe", "Shaded", "Shaded+Wire", "Flat", "Face Orientation" };
+        if (sh < 0 || sh > 4) sh = (int)Viewport3D::eShadedWire;
+        _viewport->setShadingMode( (Viewport3D::ShadingMode)sh );
+        _shadingDropdown->setText( QString::fromUtf8("Shading: ") + QString::fromUtf8(shadingLabels[sh]) );
+    }
     mainLayout->addWidget(_viewport, 1); // stretch factor 1 = takes all remaining space
 
     // ==================== Timeline Scrubber ====================

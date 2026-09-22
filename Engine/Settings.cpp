@@ -122,6 +122,7 @@ Settings::initializeKnobs()
     initializeKnobsColorManagement();
     initializeKnobsCaching();
     initializeKnobsViewers();
+    initializeKnobsViewport3D();
     initializeKnobsNodeGraph();
     initializeKnobsPlugins();
     initializeKnobsPython();
@@ -1161,6 +1162,149 @@ Settings::initializeKnobsViewers()
 } // Settings::initializeKnobsViewers
 
 void
+Settings::initializeKnobsViewport3D()
+{
+    _viewport3DTab = AppManager::createKnob<KnobPage>( this, tr("3D Viewport") );
+
+    // ---- Navigation ----
+    _viewport3DNavPreset = AppManager::createKnob<KnobChoice>( this, tr("Navigation preset") );
+    _viewport3DNavPreset->setName("viewport3DNavPreset");
+    {
+        std::vector<ChoiceOption> entries;
+        entries.push_back( ChoiceOption("maya", tr("Maya / Nuke").toStdString(),
+                                        tr("Orbit: Alt+left drag. Pan: Alt+middle drag. Dolly: Alt+right drag or wheel.").toStdString()) );
+        entries.push_back( ChoiceOption("blender", tr("Blender").toStdString(),
+                                        tr("Orbit: middle drag. Pan: Shift+middle drag. Dolly: Ctrl+middle drag or wheel. "
+                                           "No Alt, so it also works on Linux desktops that grab Alt+drag to move windows.").toStdString()) );
+        entries.push_back( ChoiceOption("legacy", tr("Natron (legacy)").toStdString(),
+                                        tr("Orbit: middle drag or Alt+left drag. Pan: Alt+middle or Shift+middle drag. "
+                                           "Dolly: Alt+right drag or wheel. The bindings before this preference existed.").toStdString()) );
+        _viewport3DNavPreset->populateChoices(entries);
+    }
+    _viewport3DNavPreset->setHintToolTip( tr("Mouse bindings for orbiting, panning and dollying the 3D viewport, both for the "
+                                             "free camera and while looking through an editable Camera3D. Hover each option for "
+                                             "its bindings. Left drag alone always selects; W/E/R pick the gizmo mode; F frames "
+                                             "the selection.") );
+    _viewport3DTab->addKnob(_viewport3DNavPreset);
+
+    _viewport3DOrbitSpeed = AppManager::createKnob<KnobDouble>( this, tr("Orbit speed") );
+    _viewport3DOrbitSpeed->setName("viewport3DOrbitSpeed");
+    _viewport3DOrbitSpeed->setMinimum(0.1); _viewport3DOrbitSpeed->setMaximum(10.);
+    _viewport3DOrbitSpeed->setDisplayMinimum(0.1); _viewport3DOrbitSpeed->setDisplayMaximum(5.);
+    _viewport3DOrbitSpeed->setHintToolTip( tr("Multiplier on the orbit (tumble) sensitivity. 1 = default.") );
+    _viewport3DTab->addKnob(_viewport3DOrbitSpeed);
+
+    _viewport3DPanSpeed = AppManager::createKnob<KnobDouble>( this, tr("Pan speed") );
+    _viewport3DPanSpeed->setName("viewport3DPanSpeed");
+    _viewport3DPanSpeed->setMinimum(0.1); _viewport3DPanSpeed->setMaximum(10.);
+    _viewport3DPanSpeed->setDisplayMinimum(0.1); _viewport3DPanSpeed->setDisplayMaximum(5.);
+    _viewport3DPanSpeed->setHintToolTip( tr("Multiplier on the pan (track) sensitivity. 1 = default.") );
+    _viewport3DTab->addKnob(_viewport3DPanSpeed);
+
+    _viewport3DZoomSpeed = AppManager::createKnob<KnobDouble>( this, tr("Zoom speed") );
+    _viewport3DZoomSpeed->setName("viewport3DZoomSpeed");
+    _viewport3DZoomSpeed->setMinimum(0.1); _viewport3DZoomSpeed->setMaximum(10.);
+    _viewport3DZoomSpeed->setDisplayMinimum(0.1); _viewport3DZoomSpeed->setDisplayMaximum(5.);
+    _viewport3DZoomSpeed->setHintToolTip( tr("Multiplier on the dolly / wheel zoom sensitivity. 1 = default.") );
+    _viewport3DTab->addKnob(_viewport3DZoomSpeed);
+
+    _viewport3DInvertWheel = AppManager::createKnob<KnobBool>( this, tr("Invert wheel zoom") );
+    _viewport3DInvertWheel->setName("viewport3DInvertWheel");
+    _viewport3DInvertWheel->setHintToolTip( tr("Wheel up zooms out instead of in.") );
+    _viewport3DTab->addKnob(_viewport3DInvertWheel);
+
+    _viewport3DOrbitAroundSelection = AppManager::createKnob<KnobBool>( this, tr("Orbit around selection") );
+    _viewport3DOrbitAroundSelection->setName("viewport3DOrbitAroundSelection");
+    _viewport3DOrbitAroundSelection->setHintToolTip( tr("Starting an orbit with a node selected re-centres the orbit on that node's "
+                                                        "world position (Maya's tumble-about-selection). Off: orbit about the "
+                                                        "current pivot.") );
+    _viewport3DTab->addKnob(_viewport3DOrbitAroundSelection);
+
+    _viewport3DClampOrbit = AppManager::createKnob<KnobBool>( this, tr("Clamp vertical orbit") );
+    _viewport3DClampOrbit->setName("viewport3DClampOrbit");
+    _viewport3DClampOrbit->setHintToolTip( tr("Stop the orbit just short of straight up / straight down so the view never "
+                                              "flips. Off: tumble over the top like Maya.") );
+    _viewport3DTab->addKnob(_viewport3DClampOrbit);
+
+    // ---- Background & grid ----
+    _viewport3DBackgroundMode = AppManager::createKnob<KnobChoice>( this, tr("Background") );
+    _viewport3DBackgroundMode->setName("viewport3DBackground");
+    {
+        std::vector<ChoiceOption> entries;
+        entries.push_back( ChoiceOption("solid", tr("Solid").toStdString(), tr("One background colour.").toStdString()) );
+        entries.push_back( ChoiceOption("gradient", tr("Gradient").toStdString(), tr("Top-to-bottom gradient (Maya / Blender style).").toStdString()) );
+        _viewport3DBackgroundMode->populateChoices(entries);
+    }
+    _viewport3DBackgroundMode->setHintToolTip( tr("Background of the 3D viewport.") );
+    _viewport3DTab->addKnob(_viewport3DBackgroundMode);
+
+    _viewport3DBackgroundColor = AppManager::createKnob<KnobColor>( this, tr("Background colour"), 3 );
+    _viewport3DBackgroundColor->setName("viewport3DBackgroundColor");
+    _viewport3DBackgroundColor->setHintToolTip( tr("Background colour when Background is Solid.") );
+    _viewport3DTab->addKnob(_viewport3DBackgroundColor);
+
+    _viewport3DBackgroundTop = AppManager::createKnob<KnobColor>( this, tr("Gradient top colour"), 3 );
+    _viewport3DBackgroundTop->setName("viewport3DBackgroundTop");
+    _viewport3DBackgroundTop->setHintToolTip( tr("Top colour when Background is Gradient.") );
+    _viewport3DTab->addKnob(_viewport3DBackgroundTop);
+
+    _viewport3DBackgroundBottom = AppManager::createKnob<KnobColor>( this, tr("Gradient bottom colour"), 3 );
+    _viewport3DBackgroundBottom->setName("viewport3DBackgroundBottom");
+    _viewport3DBackgroundBottom->setHintToolTip( tr("Bottom colour when Background is Gradient.") );
+    _viewport3DTab->addKnob(_viewport3DBackgroundBottom);
+
+    _viewport3DGridColor = AppManager::createKnob<KnobColor>( this, tr("Grid colour"), 3 );
+    _viewport3DGridColor->setName("viewport3DGridColor");
+    _viewport3DGridColor->setHintToolTip( tr("Colour of the ground grid lines (the X/Y/Z axes keep red/green/blue).") );
+    _viewport3DTab->addKnob(_viewport3DGridColor);
+
+    // ---- Startup defaults ----
+    _viewport3DDefaultFov = AppManager::createKnob<KnobDouble>( this, tr("Default field of view (degrees)") );
+    _viewport3DDefaultFov->setName("viewport3DDefaultFov");
+    _viewport3DDefaultFov->setMinimum(5.); _viewport3DDefaultFov->setMaximum(150.);
+    _viewport3DDefaultFov->setDisplayMinimum(10.); _viewport3DDefaultFov->setDisplayMaximum(120.);
+    _viewport3DDefaultFov->setHintToolTip( tr("Vertical field of view of the free (non look-through) camera, applied to new "
+                                              "viewports and on Reset View.") );
+    _viewport3DTab->addKnob(_viewport3DDefaultFov);
+
+    _viewport3DNearClip = AppManager::createKnob<KnobDouble>( this, tr("Near clip (minimum)") );
+    _viewport3DNearClip->setName("viewport3DNearClip");
+    _viewport3DNearClip->setMinimum(0.0001); _viewport3DNearClip->setMaximum(1000.);
+    _viewport3DNearClip->setDisplayMinimum(0.001); _viewport3DNearClip->setDisplayMaximum(10.);
+    _viewport3DNearClip->setHintToolTip( tr("Floor of the adaptive near clipping plane. The plane also scales with the "
+                                            "camera distance so large environments keep working; lower this if close-up "
+                                            "geometry gets cut off.") );
+    _viewport3DTab->addKnob(_viewport3DNearClip);
+
+    _viewport3DFarClip = AppManager::createKnob<KnobDouble>( this, tr("Far clip (minimum)") );
+    _viewport3DFarClip->setName("viewport3DFarClip");
+    _viewport3DFarClip->setMinimum(1.); _viewport3DFarClip->setMaximum(1e8);
+    _viewport3DFarClip->setDisplayMinimum(100.); _viewport3DFarClip->setDisplayMaximum(1e6);
+    _viewport3DFarClip->setHintToolTip( tr("Floor of the adaptive far clipping plane (it also scales with the camera distance).") );
+    _viewport3DTab->addKnob(_viewport3DFarClip);
+
+    _viewport3DGridAtStartup = AppManager::createKnob<KnobBool>( this, tr("Show grid in new viewports") );
+    _viewport3DGridAtStartup->setName("viewport3DGridAtStartup");
+    _viewport3DGridAtStartup->setHintToolTip( tr("Startup state of the Grid toggle on the viewport toolbar.") );
+    _viewport3DTab->addKnob(_viewport3DGridAtStartup);
+
+    _viewport3DDefaultShading = AppManager::createKnob<KnobChoice>( this, tr("Default shading") );
+    _viewport3DDefaultShading->setName("viewport3DDefaultShading");
+    {
+        // Same order and values as Viewport3D::ShadingMode.
+        std::vector<ChoiceOption> entries;
+        entries.push_back( ChoiceOption("wireframe", tr("Wireframe").toStdString(), "") );
+        entries.push_back( ChoiceOption("shaded", tr("Shaded").toStdString(), "") );
+        entries.push_back( ChoiceOption("shadedwire", tr("Shaded+Wire").toStdString(), "") );
+        entries.push_back( ChoiceOption("flat", tr("Flat").toStdString(), "") );
+        entries.push_back( ChoiceOption("faceorientation", tr("Face Orientation").toStdString(), "") );
+        _viewport3DDefaultShading->populateChoices(entries);
+    }
+    _viewport3DDefaultShading->setHintToolTip( tr("Startup shading of new 3D viewports (the toolbar dropdown still changes it per viewport).") );
+    _viewport3DTab->addKnob(_viewport3DDefaultShading);
+}
+
+void
 Settings::initializeKnobsNodeGraph()
 {
     /////////// Nodegraph tab
@@ -1543,6 +1687,26 @@ Settings::setDefaultValues()
     _texturesMode->setDefaultValue(0, 0);
     _powerOf2Tiling->setDefaultValue(8, 0);
     _checkerboardTileSize->setDefaultValue(5);
+    // 3D Viewport page. Background/grid defaults match the values that were hard-coded.
+    _viewport3DNavPreset->setDefaultValue(0);          // Maya / Nuke
+    _viewport3DOrbitSpeed->setDefaultValue(1.);
+    _viewport3DPanSpeed->setDefaultValue(1.);
+    _viewport3DZoomSpeed->setDefaultValue(1.);
+    _viewport3DInvertWheel->setDefaultValue(false);
+    _viewport3DOrbitAroundSelection->setDefaultValue(true);
+    _viewport3DClampOrbit->setDefaultValue(true);
+    _viewport3DBackgroundMode->setDefaultValue(0);     // Solid
+    for (int i = 0; i < 3; ++i) {
+        _viewport3DBackgroundColor->setDefaultValue(0.15, i);
+        _viewport3DGridColor->setDefaultValue(0.3, i);
+    }
+    _viewport3DBackgroundTop->setDefaultValue(0.30, 0); _viewport3DBackgroundTop->setDefaultValue(0.32, 1); _viewport3DBackgroundTop->setDefaultValue(0.36, 2);
+    _viewport3DBackgroundBottom->setDefaultValue(0.09, 0); _viewport3DBackgroundBottom->setDefaultValue(0.09, 1); _viewport3DBackgroundBottom->setDefaultValue(0.11, 2);
+    _viewport3DDefaultFov->setDefaultValue(27.);
+    _viewport3DNearClip->setDefaultValue(0.02);
+    _viewport3DFarClip->setDefaultValue(10000.);
+    _viewport3DGridAtStartup->setDefaultValue(true);
+    _viewport3DDefaultShading->setDefaultValue(2);     // Shaded+Wire (Viewport3D::eShadedWire)
     _checkerboardColor1->setDefaultValue(0.5, 0);
     _checkerboardColor1->setDefaultValue(0.5, 1);
     _checkerboardColor1->setDefaultValue(0.5, 2);
@@ -2341,6 +2505,13 @@ Settings::onKnobValueChanged(KnobI* k,
         appPTR->onMaxPanelsOpenedChanged( _maxPanelsOpened->getValue() );
     } else if ( k == _queueRenders.get() ) {
         appPTR->onQueueRendersChanged( _queueRenders->getValue() );
+    } else if ( k == _viewport3DNavPreset.get() || k == _viewport3DOrbitSpeed.get() || k == _viewport3DPanSpeed.get() ||
+                k == _viewport3DZoomSpeed.get() || k == _viewport3DInvertWheel.get() || k == _viewport3DOrbitAroundSelection.get() ||
+                k == _viewport3DClampOrbit.get() || k == _viewport3DBackgroundMode.get() || k == _viewport3DBackgroundColor.get() ||
+                k == _viewport3DBackgroundTop.get() || k == _viewport3DBackgroundBottom.get() || k == _viewport3DGridColor.get() ||
+                k == _viewport3DDefaultFov.get() || k == _viewport3DNearClip.get() || k == _viewport3DFarClip.get() ||
+                k == _viewport3DGridAtStartup.get() || k == _viewport3DDefaultShading.get() ) {
+        appPTR->onViewport3DSettingsChanged();   // open 3D viewports repaint with the new values
     } else if ( ( k == _checkerboardTileSize.get() ) || ( k == _checkerboardColor1.get() ) || ( k == _checkerboardColor2.get() ) ) {
         appPTR->onCheckerboardSettingsChanged();
     } else if ( k == _powerOf2Tiling.get() && !_restoringSettings) {
@@ -2477,6 +2648,50 @@ Settings::getCheckerboardColor2(double* r,
     *b = _checkerboardColor2->getValue(2);
     *a = _checkerboardColor2->getValue(3);
 }
+
+Settings::Viewport3DNavPresetEnum
+Settings::getViewport3DNavPreset() const
+{
+    return (Viewport3DNavPresetEnum)_viewport3DNavPreset->getValue();
+}
+
+double Settings::getViewport3DOrbitSpeed() const { return _viewport3DOrbitSpeed->getValue(); }
+double Settings::getViewport3DPanSpeed() const { return _viewport3DPanSpeed->getValue(); }
+double Settings::getViewport3DZoomSpeed() const { return _viewport3DZoomSpeed->getValue(); }
+bool Settings::getViewport3DInvertWheel() const { return _viewport3DInvertWheel->getValue(); }
+bool Settings::getViewport3DOrbitAroundSelection() const { return _viewport3DOrbitAroundSelection->getValue(); }
+bool Settings::getViewport3DClampOrbit() const { return _viewport3DClampOrbit->getValue(); }
+bool Settings::getViewport3DGradientBackground() const { return _viewport3DBackgroundMode->getValue() == 1; }
+
+void
+Settings::getViewport3DBackgroundColor(double* r, double* g, double* b) const
+{
+    *r = _viewport3DBackgroundColor->getValue(0); *g = _viewport3DBackgroundColor->getValue(1); *b = _viewport3DBackgroundColor->getValue(2);
+}
+
+void
+Settings::getViewport3DBackgroundTopColor(double* r, double* g, double* b) const
+{
+    *r = _viewport3DBackgroundTop->getValue(0); *g = _viewport3DBackgroundTop->getValue(1); *b = _viewport3DBackgroundTop->getValue(2);
+}
+
+void
+Settings::getViewport3DBackgroundBottomColor(double* r, double* g, double* b) const
+{
+    *r = _viewport3DBackgroundBottom->getValue(0); *g = _viewport3DBackgroundBottom->getValue(1); *b = _viewport3DBackgroundBottom->getValue(2);
+}
+
+void
+Settings::getViewport3DGridColor(double* r, double* g, double* b) const
+{
+    *r = _viewport3DGridColor->getValue(0); *g = _viewport3DGridColor->getValue(1); *b = _viewport3DGridColor->getValue(2);
+}
+
+double Settings::getViewport3DDefaultFov() const { return _viewport3DDefaultFov->getValue(); }
+double Settings::getViewport3DNearClip() const { return _viewport3DNearClip->getValue(); }
+double Settings::getViewport3DFarClip() const { return _viewport3DFarClip->getValue(); }
+bool Settings::getViewport3DGridAtStartup() const { return _viewport3DGridAtStartup->getValue(); }
+int Settings::getViewport3DDefaultShading() const { return _viewport3DDefaultShading->getValue(); }
 
 bool
 Settings::isAutoWipeEnabled() const

@@ -84,6 +84,9 @@ public Q_SLOTS:
 
     void resetCamera();
 
+    // Preferences > 3D Viewport changed: repaint with the new colours / bindings.
+    void onViewport3DSettingsChanged();
+
     /**
      * @brief Scan the node graph for DeepToPoints nodes and grab
      * point cloud data from the first one found.

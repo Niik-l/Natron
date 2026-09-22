@@ -50,6 +50,8 @@ CLANG_DIAG_ON(uninitialized)
 #define M_PI 3.14159265358979323846
 #endif
 
+#include "Engine/AppManager.h"
+#include "Engine/Settings.h"
 #include "Engine/AppInstance.h"
 #include "Engine/Dev/Scene3D/CameraProvider.h"
 #include "Engine/Dev/Scene3D/Card3D.h"
@@ -876,6 +878,7 @@ struct Viewport3DPrivate
     // zoom/navigation would constantly trigger the menu). Threshold checked
     // in mouseReleaseEvent.
     bool rightButtonDown;
+    bool rightPressWasNav = false;   // the RMB press mapped to a navigation action: never show the Blast menu on release
     int rightPressX, rightPressY;
 
     // "Look Through" — when set, the viewport view+projection matrices come
@@ -995,6 +998,17 @@ Viewport3D::Viewport3D(Gui* gui,
     // Blast menu manually from mouseReleaseEvent only when the click had no
     // drag (so right-drag for navigation doesn't accidentally open the menu).
     setContextMenuPolicy(Qt::PreventContextMenu);
+
+    // Preferences > 3D Viewport: colours, clip floors and bindings are read at
+    // paint / press time; a change only needs a repaint.
+    QObject::connect( appPTR, SIGNAL(viewport3DSettingsChanged()), this, SLOT(onViewport3DSettingsChanged()) );
+    _imp->fov = (float)appPTR->getCurrentSettings()->getViewport3DDefaultFov();
+}
+
+void
+Viewport3D::onViewport3DSettingsChanged()
+{
+    update();
 }
 
 // Which viewport currently drives the shared ImGuizmo state. See the comment at
@@ -1050,6 +1064,7 @@ Viewport3D::resetCamera()
     _imp->camTarget[0] = 0.0f;
     _imp->camTarget[1] = 0.0f;
     _imp->camTarget[2] = 0.0f;
+    _imp->fov = (float)appPTR->getCurrentSettings()->getViewport3DDefaultFov();
     update();
 }
 
@@ -1440,7 +1455,31 @@ Viewport3D::paintGL()
 {
     ++_imp->paintSerial;
     purgePreviewTextures(_imp->previewGlTextures, _imp->paintSerial, 600);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    // Background from Preferences > 3D Viewport, every frame (a one-off
+    // glClearColor in initializeGL could not follow a preference change).
+    {
+        SettingsPtr settings = appPTR->getCurrentSettings();
+        double r = 0.15, g = 0.15, b = 0.15;
+        settings->getViewport3DBackgroundColor(&r, &g, &b);
+        glClearColor((float)r, (float)g, (float)b, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if ( settings->getViewport3DGradientBackground() ) {
+            // Full-screen quad in clip space, depth writes off, before the scene.
+            double tr, tg, tb, br, bg, bb;
+            settings->getViewport3DBackgroundTopColor(&tr, &tg, &tb);
+            settings->getViewport3DBackgroundBottomColor(&br, &bg, &bb);
+            glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+            glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadIdentity();
+            glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE); glDisable(GL_LIGHTING); glDisable(GL_TEXTURE_2D);
+            glBegin(GL_QUADS);
+            glColor3f((float)br, (float)bg, (float)bb); glVertex2f(-1.f, -1.f); glVertex2f(1.f, -1.f);
+            glColor3f((float)tr, (float)tg, (float)tb); glVertex2f(1.f, 1.f);   glVertex2f(-1.f, 1.f);
+            glEnd();
+            glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST);
+            glMatrixMode(GL_PROJECTION); glPopMatrix();
+            glMatrixMode(GL_MODELVIEW);  glPopMatrix();
+        }
+    }
 
     // 1. Build camera matrices.
     //   - "Look Through" mode: use the chosen Camera3D / ReadAlembicCamera's
@@ -1519,7 +1558,9 @@ Viewport3D::paintGL()
         eye[1] = sinf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[1];
         eye[2] = sinf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[2];
         float at[3] = { _imp->camTarget[0], _imp->camTarget[1], _imp->camTarget[2] };
-        float up[3] = { 0.f, 1.f, 0.f };
+        // Past straight up/down (unclamped orbit) the camera is upside down;
+        // flip the up hint so the tumble continues smoothly over the top.
+        float up[3] = { 0.f, (cosf(_imp->camXAngle) < 0.f) ? -1.f : 1.f, 0.f };
         LookAt(eye, at, up, _imp->cameraView);
 
         float aspect = (_imp->viewH > 0) ? (float)_imp->viewW / (float)_imp->viewH : 1.0f;
@@ -1528,8 +1569,9 @@ Viewport3D::paintGL()
         // orbit distance, with a generous far floor so big scenes are visible
         // even while zoomed in close. Near scales too, keeping the depth
         // ratio ~2e5-1e6 (safe for the 24-bit depth buffer).
-        const float zNear = std::max(0.02f, _imp->camDistance * 0.002f);
-        const float zFar  = std::max(10000.f, _imp->camDistance * 400.f);
+        // The floors come from Preferences > 3D Viewport (defaults 0.02 / 10000).
+        const float zNear = std::max((float)appPTR->getCurrentSettings()->getViewport3DNearClip(), _imp->camDistance * 0.002f);
+        const float zFar  = std::max((float)appPTR->getCurrentSettings()->getViewport3DFarClip(), _imp->camDistance * 400.f);
         Perspective(_imp->fov, aspect, zNear, zFar, _imp->cameraProjection);
     }
 
@@ -1980,6 +2022,46 @@ Viewport3D::paintGL()
 // Section 6: Mouse events
 // ============================================================================
 
+// ----------------------------------------------------------------------------
+// Navigation bindings. ONE mapping for the free camera and the look-through
+// Camera3D edit (they used to carry separate copies of the button/modifier
+// checks and drifted apart), and for the right-click menu suppression.
+// Preset = Preferences > 3D Viewport > Navigation preset.
+// ----------------------------------------------------------------------------
+enum NavAction { eNavNone = 0, eNavOrbit, eNavPan, eNavDolly };
+
+static NavAction
+classifyNav(Qt::MouseButton button, Qt::KeyboardModifiers mods)
+{
+    const bool alt   = mods & Qt::AltModifier;
+    const bool shift = mods & Qt::ShiftModifier;
+    const bool ctrl  = mods & Qt::ControlModifier;
+    switch ( appPTR->getCurrentSettings()->getViewport3DNavPreset() ) {
+    case Settings::eViewport3DNavBlender:
+        // Orbit MMB, pan Shift+MMB, dolly Ctrl+MMB. No Alt (Linux WMs grab Alt+drag).
+        if (button == Qt::MiddleButton) {
+            if (shift) return eNavPan;
+            if (ctrl)  return eNavDolly;
+            return eNavOrbit;
+        }
+        return eNavNone;
+    case Settings::eViewport3DNavLegacy:
+        // The bindings before this preference existed.
+        if (button == Qt::MiddleButton) return (alt || shift) ? eNavPan : eNavOrbit;
+        if (button == Qt::LeftButton && alt)  return eNavOrbit;
+        if (button == Qt::RightButton && alt) return eNavDolly;
+        return eNavNone;
+    case Settings::eViewport3DNavMaya:
+    default:
+        // Maya / Nuke: Alt+LMB tumble, Alt+MMB track, Alt+RMB dolly.
+        if (!alt) return eNavNone;
+        if (button == Qt::LeftButton)   return eNavOrbit;
+        if (button == Qt::MiddleButton) return eNavPan;
+        if (button == Qt::RightButton)  return eNavDolly;
+        return eNavNone;
+    }
+}
+
 void
 Viewport3D::mousePressEvent(QMouseEvent* e)
 {
@@ -2010,10 +2092,11 @@ Viewport3D::mousePressEvent(QMouseEvent* e)
     // a ReadAlembicCamera) and the user starts an Alt+L / Mid / Alt+R drag,
     // redirect interactions to write the camera's knobs instead of the orbit
     // camera's state. Capture the orbit pivot 5 units in front of the camera.
+    const NavAction nav = classifyNav(e->button(), e->modifiers());
     if (Camera3DNode* editCam = getEditableCamera3D(_imp->lookThroughCam)) {
-        const bool isOrbit = (e->button() == Qt::LeftButton && (e->modifiers() & Qt::AltModifier));
-        const bool isPan = (e->button() == Qt::MiddleButton);
-        const bool isDolly = (e->button() == Qt::RightButton && (e->modifiers() & Qt::AltModifier));
+        const bool isOrbit = (nav == eNavOrbit);
+        const bool isPan   = (nav == eNavPan);
+        const bool isDolly = (nav == eNavDolly);
         if (isOrbit || isPan || isDolly) {
             double time = 0.0;
             if (getGui() && getGui()->getApp()) {
@@ -2034,6 +2117,7 @@ Viewport3D::mousePressEvent(QMouseEvent* e)
             // since they wanted to dolly, but keep the state coherent).
             if (e->button() == Qt::RightButton) {
                 _imp->rightButtonDown = true;
+                _imp->rightPressWasNav = true;
                 _imp->rightPressX = e->x();
                 _imp->rightPressY = e->y();
             }
@@ -2041,54 +2125,50 @@ Viewport3D::mousePressEvent(QMouseEvent* e)
         }
     }
 
-    if (e->button() == Qt::MiddleButton) {
-        if ((e->modifiers() & Qt::AltModifier) || (e->modifiers() & Qt::ShiftModifier)) {
-            _imp->panning = true;
-        } else {
-            _imp->orbiting = true;
-            // Maya-style: orbit around selected object center
-            if (!_imp->selectedNodeName.empty()) {
-                const std::vector<SceneNode>& nodes = _imp->sceneGraph.nodes();
-                for (size_t si = 0; si < nodes.size(); ++si) {
-                    if (nodes[si].name == _imp->selectedNodeName) {
-                        // Use the selected node's transform position as orbit target
-                        _imp->camTarget[0] = nodes[si].localMatrix[12];
-                        _imp->camTarget[1] = nodes[si].localMatrix[13];
-                        _imp->camTarget[2] = nodes[si].localMatrix[14];
-                        // Recalculate distance from eye to new target
-                        float eye[3];
-                        eye[0] = cosf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[0];
-                        eye[1] = sinf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[1];
-                        eye[2] = sinf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[2];
-                        float dx = eye[0] - _imp->camTarget[0];
-                        float dy = eye[1] - _imp->camTarget[1];
-                        float dz = eye[2] - _imp->camTarget[2];
-                        _imp->camDistance = sqrtf(dx*dx + dy*dy + dz*dz);
-                        break;
-                    }
+    if (nav == eNavOrbit) {
+        _imp->orbiting = true;
+        // Maya's tumble-about-selection: re-centre the orbit on the selected
+        // node's WORLD position (a child of a Group3D used to orbit its local
+        // offset instead), keeping the eye where it is.
+        if ( appPTR->getCurrentSettings()->getViewport3DOrbitAroundSelection() && !_imp->selectedNodeName.empty() ) {
+            const std::vector<SceneNode>& nodes = _imp->sceneGraph.nodes();
+            for (size_t si = 0; si < nodes.size(); ++si) {
+                if (nodes[si].name == _imp->selectedNodeName) {
+                    float eye[3];
+                    eye[0] = cosf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[0];
+                    eye[1] = sinf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[1];
+                    eye[2] = sinf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[2];
+                    _imp->camTarget[0] = nodes[si].worldMatrix[12];
+                    _imp->camTarget[1] = nodes[si].worldMatrix[13];
+                    _imp->camTarget[2] = nodes[si].worldMatrix[14];
+                    const float dx = eye[0] - _imp->camTarget[0];
+                    const float dy = eye[1] - _imp->camTarget[1];
+                    const float dz = eye[2] - _imp->camTarget[2];
+                    _imp->camDistance = std::max(0.01f, sqrtf(dx*dx + dy*dy + dz*dz));
+                    break;
                 }
             }
         }
+    } else if (nav == eNavPan) {
+        _imp->panning = true;
+    } else if (nav == eNavDolly) {
+        _imp->zooming = true;
     } else if (e->button() == Qt::LeftButton) {
-        if (e->modifiers() & Qt::AltModifier) {
-            _imp->orbiting = true;
-        } else {
-            // Try point picking first (a Path3D control point, then the point
-            // cloud), then start box select drag
-            if (!pickPathPointAtPosition(e->x(), e->y()) && !pickPointAtPosition(e->x(), e->y())) {
-                // Start potential box select — if drag is small, treat as click select
-                _imp->boxSelecting = true;
-                _imp->boxStartX = _imp->boxEndX = e->x();
-                _imp->boxStartY = _imp->boxEndY = e->y();
-            }
+        // Plain left drag always selects, whatever the preset: try point
+        // picking first (a Path3D control point, then the point cloud), then
+        // start a box-select drag.
+        if (!pickPathPointAtPosition(e->x(), e->y()) && !pickPointAtPosition(e->x(), e->y())) {
+            // Start potential box select - if the drag is small, treat as click select
+            _imp->boxSelecting = true;
+            _imp->boxStartX = _imp->boxEndX = e->x();
+            _imp->boxStartY = _imp->boxEndY = e->y();
         }
-    } else if (e->button() == Qt::RightButton) {
-        if (e->modifiers() & Qt::AltModifier) {
-            _imp->zooming = true;
-        }
-        // Always remember the press position so mouseReleaseEvent can decide
-        // whether this was a click (→ show Blast menu) or a drag (→ ignore).
+    }
+    if (e->button() == Qt::RightButton) {
+        // Always remember the press so mouseReleaseEvent can decide whether
+        // this was a click (-> Blast menu) or a drag / navigation (-> ignore).
         _imp->rightButtonDown = true;
+        _imp->rightPressWasNav = (nav != eNavNone);
         _imp->rightPressX = e->x();
         _imp->rightPressY = e->y();
     }
@@ -2138,14 +2218,24 @@ Viewport3D::mouseMoveEvent(QMouseEvent* e)
     }
 
     if (_imp->orbiting) {
-        _imp->camYAngle += dx * 0.01f;
-        _imp->camXAngle += dy * 0.01f;
-        // Clamp vertical angle to avoid flipping
-        _imp->camXAngle = std::max(-1.5f, std::min(1.5f, _imp->camXAngle));
+        SettingsPtr settings = appPTR->getCurrentSettings();
+        const float orbitSpeed = 0.01f * (float)settings->getViewport3DOrbitSpeed();
+        _imp->camYAngle += dx * orbitSpeed;
+        _imp->camXAngle += dy * orbitSpeed;
+        if ( settings->getViewport3DClampOrbit() ) {
+            // Stop short of the poles so the view never flips.
+            _imp->camXAngle = std::max(-1.5f, std::min(1.5f, _imp->camXAngle));
+        } else {
+            // Tumble over the top (paintGL flips the up hint past the pole); keep
+            // the angle bounded so it never grows without limit.
+            const float twoPi = 6.2831853f;
+            if (_imp->camXAngle >  3.1415927f) _imp->camXAngle -= twoPi;
+            if (_imp->camXAngle < -3.1415927f) _imp->camXAngle += twoPi;
+        }
         update();
     } else if (_imp->panning) {
         // Pan: move camTarget in camera-right and camera-up directions
-        float panSpeed = _imp->camDistance * 0.002f;
+        float panSpeed = _imp->camDistance * 0.002f * (float)appPTR->getCurrentSettings()->getViewport3DPanSpeed();
         // Camera right direction (from view matrix row 0)
         float rightX = _imp->cameraView[0];
         float rightY = _imp->cameraView[4];
@@ -2161,7 +2251,7 @@ Viewport3D::mouseMoveEvent(QMouseEvent* e)
         update();
     } else if (_imp->zooming) {
         // Alt+RMB zoom: drag right/up = zoom in, left/down = zoom out
-        float zoomSpeed = _imp->camDistance * 0.005f;
+        float zoomSpeed = _imp->camDistance * 0.005f * (float)appPTR->getCurrentSettings()->getViewport3DZoomSpeed();
         _imp->camDistance -= (dx + dy) * zoomSpeed;
         if (_imp->camDistance < 0.1f) _imp->camDistance = 0.1f;
         update();
@@ -2210,7 +2300,9 @@ Viewport3D::mouseReleaseEvent(QMouseEvent* e)
         const bool wasClick = (std::abs(dx) <= CLICK_THRESHOLD &&
                                std::abs(dy) <= CLICK_THRESHOLD);
         _imp->rightButtonDown = false;
-        if (wasClick && !(e->modifiers() & Qt::AltModifier)) {
+        const bool wasNav = _imp->rightPressWasNav;
+        _imp->rightPressWasNav = false;
+        if (wasClick && !wasNav) {
             showBlastContextMenu(e->globalPos());
         }
     }
@@ -2225,7 +2317,9 @@ void
 Viewport3D::wheelEvent(QWheelEvent* e)
 {
     float delta = e->angleDelta().y() / 120.0f;
-    _imp->camDistance *= (1.0f - delta * 0.1f);
+    SettingsPtr settings = appPTR->getCurrentSettings();
+    if ( settings->getViewport3DInvertWheel() ) delta = -delta;
+    _imp->camDistance *= (1.0f - delta * 0.1f * (float)settings->getViewport3DZoomSpeed());
     // Clamp — wide range so large environments can be framed (the old 500
     // cap couldn't even back away far enough to see a big terrain).
     _imp->camDistance = std::max(0.01f, std::min(50000.0f, _imp->camDistance));
@@ -2918,8 +3012,10 @@ Viewport3D::selectObjectAtPosition(int screenX, int screenY)
 void
 Viewport3D::drawGrid() const
 {
+    double gr = 0.3, gg = 0.3, gb = 0.3;
+    appPTR->getCurrentSettings()->getViewport3DGridColor(&gr, &gg, &gb);
     glBegin(GL_LINES);
-    glColor3f(0.3f, 0.3f, 0.3f);
+    glColor3f((float)gr, (float)gg, (float)gb);
     for (int i = -10; i <= 10; ++i) {
         glVertex3f((float)i, 0.0f, -10.0f);
         glVertex3f((float)i, 0.0f,  10.0f);

@@ -250,6 +250,26 @@ public:
     int getCheckerboardTileSize() const;
     void getCheckerboardColor1(double* r, double* g, double* b, double* a) const;
     void getCheckerboardColor2(double* r, double* g, double* b, double* a) const;
+
+    // 3D Viewport preferences page (Gui/Viewport3D reads these at paint / press time)
+    enum Viewport3DNavPresetEnum { eViewport3DNavMaya = 0, eViewport3DNavBlender, eViewport3DNavLegacy };
+    Viewport3DNavPresetEnum getViewport3DNavPreset() const;
+    double getViewport3DOrbitSpeed() const;
+    double getViewport3DPanSpeed() const;
+    double getViewport3DZoomSpeed() const;
+    bool getViewport3DInvertWheel() const;
+    bool getViewport3DOrbitAroundSelection() const;
+    bool getViewport3DClampOrbit() const;
+    bool getViewport3DGradientBackground() const;
+    void getViewport3DBackgroundColor(double* r, double* g, double* b) const;
+    void getViewport3DBackgroundTopColor(double* r, double* g, double* b) const;
+    void getViewport3DBackgroundBottomColor(double* r, double* g, double* b) const;
+    void getViewport3DGridColor(double* r, double* g, double* b) const;
+    double getViewport3DDefaultFov() const;
+    double getViewport3DNearClip() const;
+    double getViewport3DFarClip() const;
+    bool getViewport3DGridAtStartup() const;
+    int getViewport3DDefaultShading() const;   // Viewport3D::ShadingMode as int
     bool isAutoWipeEnabled() const;
     bool isAutoProxyEnabled() const;
     unsigned int getAutoProxyMipmapLevel() const;
@@ -401,6 +421,7 @@ private:
     void initializeKnobsColorManagement();
     void initializeKnobsCaching();
     void initializeKnobsViewers();
+    void initializeKnobsViewport3D();
     void initializeKnobsNodeGraph();
     void initializeKnobsPlugins();
     void initializeKnobsPython();
@@ -533,6 +554,26 @@ private:
     KnobIntPtr _checkerboardTileSize;
     KnobColorPtr _checkerboardColor1;
     KnobColorPtr _checkerboardColor2;
+
+    // 3D Viewport
+    KnobPagePtr _viewport3DTab;
+    KnobChoicePtr _viewport3DNavPreset;
+    KnobDoublePtr _viewport3DOrbitSpeed;
+    KnobDoublePtr _viewport3DPanSpeed;
+    KnobDoublePtr _viewport3DZoomSpeed;
+    KnobBoolPtr _viewport3DInvertWheel;
+    KnobBoolPtr _viewport3DOrbitAroundSelection;
+    KnobBoolPtr _viewport3DClampOrbit;
+    KnobChoicePtr _viewport3DBackgroundMode;
+    KnobColorPtr _viewport3DBackgroundColor;
+    KnobColorPtr _viewport3DBackgroundTop;
+    KnobColorPtr _viewport3DBackgroundBottom;
+    KnobColorPtr _viewport3DGridColor;
+    KnobDoublePtr _viewport3DDefaultFov;
+    KnobDoublePtr _viewport3DNearClip;
+    KnobDoublePtr _viewport3DFarClip;
+    KnobBoolPtr _viewport3DGridAtStartup;
+    KnobChoicePtr _viewport3DDefaultShading;
     KnobBoolPtr _autoWipe;
     KnobBoolPtr _autoProxyWhenScrubbingTimeline;
     KnobChoicePtr _autoProxyLevel;

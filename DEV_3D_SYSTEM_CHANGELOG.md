@@ -17,6 +17,30 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Preferences > 3D Viewport page (2026-09-21)** — from VIEWPORT3D_SETTINGS_PLAN.md.
+  New knob page in `Settings::initializeKnobsViewport3D()` (persists like every
+  preference; nothing in the project format changes), pushed live through
+  `AppManager::viewport3DSettingsChanged` -> `Viewport3D::onViewport3DSettingsChanged`
+  (a repaint; the viewport reads the settings at paint / press time).
+  **Navigation:** one `classifyNav(button, modifiers)` mapping now serves the free
+  camera, the look-through Camera3D edit AND the right-click Blast-menu
+  suppression (`rightPressWasNav`), replacing three drifting copies of the
+  button checks. Presets: **Maya / Nuke** (default: Alt+LMB tumble, Alt+MMB
+  track, Alt+RMB dolly), **Blender** (MMB orbit, Shift+MMB pan, Ctrl+MMB dolly —
+  no Alt, for Linux WMs that grab Alt+drag), **Natron (legacy)** (the old mix).
+  Plus orbit / pan / zoom speed multipliers (free camera; the look-through edit
+  keeps its own gains), invert wheel, orbit-around-selection (now the node's
+  WORLD position, was the local one) and clamp-vertical-orbit (off = tumble over
+  the top; paintGL flips the LookAt up hint past the pole). Plain LMB drag always
+  selects. **Background & grid:** Solid / Gradient background, colours, grid line
+  colour — clear colour set every frame in paintGL (a one-off in initializeGL
+  could not follow a change), gradient = clip-space quad with depth off before
+  the scene; the ~59 other overlay colours are deliberately not themed.
+  **Startup defaults:** field of view (applied to new viewports and Reset View),
+  near / far clip floors (the adaptive scaling with camera distance stays), grid
+  on at startup, default shading (indexed by `Viewport3D::ShadingMode`, whose
+  order is Wireframe, Shaded, Shaded+Wire, Flat, Face Orientation). Headless
+  builds untouched: getters live in Engine, only Gui reads them.
 - **Formats: new nodes start on the project format; format names get no spaces
   (2026-09-21)** — audit of the July New/Edit/Delete Format work against Nuke
   (headless round trip on the 09.20 build: custom formats reach every dropdown,
@@ -1516,7 +1540,7 @@ Replaced the original hand-rolled 3D viewport with this ImGuizmo-based rewrite:
 - Spherical camera (camYAngle, camXAngle, camDistance) → LookAt matrix
 - ImGuizmo::Manipulate for translate/rotate/scale gizmos
 - ImGuizmo::DecomposeMatrixToComponents/RecomposeMatrixFromComponents for T/R/S ↔ matrix
-- Orbit (middle-mouse), pan (shift+middle), zoom (scroll)
+- Navigation bindings from Preferences > 3D Viewport (`classifyNav`): Maya/Nuke default, Blender, legacy
 - W/E/R keys for gizmo mode, F for frame selected
 
 ### ReadGeo (Alembic)
