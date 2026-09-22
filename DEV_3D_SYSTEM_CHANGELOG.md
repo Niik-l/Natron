@@ -18,6 +18,8 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 Recent milestones:
 
 - **Preferences > 3D Viewport page (2026-09-21)** — from VIEWPORT3D_SETTINGS_PLAN.md.
+  User doc + screenshot: [wiki: 3D Viewport preferences](https://github.com/Niik-l/Natron/wiki/3D-Viewport-Preferences)
+  ([image](https://raw.githubusercontent.com/wiki/Niik-l/Natron/images/viewport3d-preferences.png)).
   New knob page in `Settings::initializeKnobsViewport3D()` (persists like every
   preference; nothing in the project format changes), pushed live through
   `AppManager::viewport3DSettingsChanged` -> `Viewport3D::onViewport3DSettingsChanged`
