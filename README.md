@@ -7,7 +7,7 @@ A fork of [Natron](https://github.com/NatronGitHub/Natron), the open-source node
 - **Download:** [Releases](https://github.com/Niik-l/Natron/releases) — Windows portable archive (numbered releases), Linux AppImage attached to the same numbered releases; no installer either way
 - **Node list:** [wiki](https://github.com/Niik-l/Natron/wiki) · developer notes in [NODE_REGISTRY.md](NODE_REGISTRY.md)
 - **3D viewport navigation:** Maya/Nuke bindings by default; Blender and legacy presets, colours and startup defaults under Preferences → 3D Viewport ([wiki page](https://github.com/Niik-l/Natron/wiki/3D-Viewport-Preferences))
-- **Bugs / ideas:** [Issues](https://github.com/Niik-l/Natron/issues)
+- **Bugs / ideas:** [Issues](https://github.com/Niik-l/Natron/issues) · **Chat / screenshare help:** [Discord](https://discord.gg/vZQNeJHqKB) (confirmed bugs still go to Issues so they stay tracked with the fix)
 - **Build it yourself:** [BUILDING.md](BUILDING.md) · change history in [DEV_3D_SYSTEM_CHANGELOG.md](DEV_3D_SYSTEM_CHANGELOG.md)
 
 ## A disclaimer
