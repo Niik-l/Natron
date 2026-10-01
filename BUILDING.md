@@ -395,6 +395,15 @@ endif()
 
 ## 7. Install Plugins
 
+> **openfx-arena (Arena.ofx, added 2026-10-01):** ReadSVG, ReadPSD, ReadKrita, ReadCDR, ReadPDF, Text and
+> the ImageMagick filters (Polar, Swirl, Sketch, ...). `tools/win-build` builds it like the other two plugins:
+> deps `pacman -S mingw-w64-x86_64-{imagemagick,libzip,poppler,librevenge,libcdr,librsvg,pango,lcms2,fontconfig}`,
+> pinned ref `OPENFX_ARENA_REF` in `config.sh`, `patches/openfx-arena.patch` (C++20 for MSYS2 poppler 26.x,
+> quoted `CMAKE_SYSTEM_PROCESSOR`, link pangoft2 + libpoppler core + shlwapi), then `cmake .. -G "MinGW Makefiles"`
+> and `mingw32-make` in `openfx-arena/build` -> `Arena.ofx` -> `Plugins/OFX/Natron/Arena.ofx.bundle/Contents/Win64/`.
+> Its DLLs (ImageMagick, poppler, librsvg...) ride along with the bin/ DLL sweep; `etc/ImageMagick-7` is staged
+> next to bin/. Not on Linux yet.
+
 Copy the built `.ofx` files into Natron's plugin directory:
 
 ```bash

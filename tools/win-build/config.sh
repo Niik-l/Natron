@@ -32,6 +32,9 @@ NATRON_BRANCH="RB-2.6"
 CYCLES_REF="feature/cycles-deep"
 OPENFX_MISC_REF="0abd46b5a8cbc98fa24579042129460d0aa87b8f"
 OPENFX_IO_REF="31ebb488d0b4aec52e92ec94cdc30da277091d30"
+# openfx-arena (Arena.ofx: ReadSVG, ReadPSD, ReadKrita, ReadCDR, ReadPDF, Text, Magick
+# filters) — master @ 2026-07-16; patched to C++20 for MSYS2 poppler (patches/openfx-arena.patch).
+OPENFX_ARENA_REF="49e4d5fc197a637196c1a7decab7f97751b867f6"
 # natron-plugins is content only (no patch); tracks tip. Built-with: b0c499fb6391024f54be9f26ed41b5cf7475d574
 
 # ---- Toolchain location ---------------------------------------------

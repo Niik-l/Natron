@@ -28,6 +28,8 @@ clone_at https://github.com/NatronGitHub/openfx-misc.git openfx-misc "$OPENFX_MI
 log "openfx-misc submodules"; git -C openfx-misc submodule update --init --recursive
 clone_at https://github.com/NatronGitHub/openfx-io.git   openfx-io   "$OPENFX_IO_REF"
 log "openfx-io submodules";  git -C openfx-io  submodule update --init --recursive
+clone_at https://github.com/NatronGitHub/openfx-arena.git openfx-arena "$OPENFX_ARENA_REF"
+log "openfx-arena submodules"; git -C openfx-arena submodule update --init --recursive
 
 if [ -d natron-plugins/.git ]; then ok "natron-plugins already present (skipping clone)"
 else log "Cloning natron-plugins (tip, shallow)"; git clone --depth 1 https://github.com/NatronGitHub/natron-plugins.git natron-plugins; fi

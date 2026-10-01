@@ -15,6 +15,7 @@ apply_patch() {
 
 apply_patch openfx-io   "$PATCHES/openfx-io.patch"
 apply_patch openfx-misc "$PATCHES/openfx-misc.patch"
+apply_patch openfx-arena "$PATCHES/openfx-arena.patch"
 
 if [ "${WITH_CYCLES:-1}" = "1" ]; then
   cd "$NATRON_ROOT/cycles"

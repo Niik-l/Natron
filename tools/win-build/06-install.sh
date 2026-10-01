@@ -58,7 +58,7 @@ rm -rf "$I/lib/python$PYV"
 cp -r "$MINGW/lib/python$PYV" "$I/lib/python$PYV"
 
 # --- OFX plugins into .ofx.bundle/Contents/Win64 ---
-log "OFX plugins (Misc, CImg, IO)"
+log "OFX plugins (Misc, CImg, IO, Arena)"
 install_ofx() { # name srcpath
   local n="$1" src="$2" d="$I/Plugins/OFX/Natron/$1.ofx.bundle/Contents/Win64"
   mkdir -p "$d"; cp "$src" "$d/$1.ofx"
@@ -66,6 +66,13 @@ install_ofx() { # name srcpath
 install_ofx Misc "$NATRON_ROOT/openfx-misc/build/Misc.ofx"
 install_ofx CImg "$NATRON_ROOT/openfx-misc/build/CImg.ofx"
 install_ofx IO   "$NATRON_ROOT/openfx-io/build/IO.ofx"
+install_ofx Arena "$NATRON_ROOT/openfx-arena/build/Arena.ofx"
+# Arena needs ImageMagick's config files (delegates, colors, policy) at runtime;
+# the DLLs come with the DLL sweep above; MSYS2 ImageMagick resolves <dll dir>/../etc.
+if [ -d "$MINGW/etc/ImageMagick-7" ]; then
+  mkdir -p "$I/etc"
+  cp -r "$MINGW/etc/ImageMagick-7" "$I/etc/"
+fi
 
 # --- PyPlugs: built-ins (from the build's POST_BUILD) + community pack ---
 log "PyPlugs (built-in + community)"

@@ -1,0 +1,66 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 88fa919..077771f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -50,13 +50,15 @@ find_package(PkgConfig REQUIRED)
+ pkg_search_module(MAGICK REQUIRED ${MAGICK_PKG_CONFIG})
+ pkg_search_module(LCMS2 REQUIRED lcms2)
+ pkg_search_module(FONTCONFIG REQUIRED fontconfig)
+-pkg_search_module(PANGO REQUIRED pangocairo)
++# Niik-l fork: TextOFX/RichText call pango_fc_font_map_set_config (pangoft2).
++pkg_check_modules(PANGO REQUIRED pangocairo pangoft2)
+ pkg_search_module(XML REQUIRED libxml-2.0)
+ pkg_search_module(ZIP REQUIRED libzip)
+ pkg_search_module(SVG REQUIRED librsvg-2.0)
+ pkg_search_module(GLIB REQUIRED glib-2.0)
+ pkg_search_module(CAIRO REQUIRED cairo)
+-pkg_search_module(POPPLER REQUIRED poppler-glib)
++# Niik-l fork: ReadPDF also uses the core GlobalParams API (libpoppler), not only poppler-glib.
++pkg_check_modules(POPPLER REQUIRED poppler-glib poppler)
+ pkg_check_modules(REVENGE REQUIRED librevenge-0.0 librevenge-generators-0.0 librevenge-stream-0.0)
+ pkg_search_module(CDR REQUIRED libcdr-0.1)
+ add_compile_options(${MAGICK_CFLAGS}) # we need the magick flags
+@@ -79,7 +81,8 @@ if(${HALDCLUT})
+     pkg_search_module(CURL REQUIRED libcurl)
+ endif()
+ 
+-set (CMAKE_CXX_STANDARD 11)
++# Niik-l fork: MSYS2 poppler 26.x headers use std::span / starts_with (C++20).
++set (CMAKE_CXX_STANDARD 20)
+ 
+ # Use -Ofast when applicable (implies -ffast-math)
+ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+@@ -306,6 +309,10 @@ target_link_libraries(
+     ${REVENGE_LDFLAGS}
+     ${CDR_LDFLAGS}
+ )
++if(MINGW)
++    # Niik-l fork: ReadPDF's getResourcesPath uses PathRemoveFileSpecA (shlwapi).
++    target_link_libraries(${PROJECT_NAME} shlwapi)
++endif()
+ 
+ if(${AUDIO})
+     include_directories(${SOX_INCLUDE_DIRS})
+@@ -328,7 +335,9 @@ SET(OFX_ARCH UNKNOWN)
+ # Win
+ if(MINGW)
+     set(OFX_ARCH "Win32")
+-    if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")
++    # MSYS2's CMake leaves CMAKE_SYSTEM_PROCESSOR empty; quote it and fall back
++    # to the pointer size so the bundle lands in Contents/Win64.
++    if("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR CMAKE_SIZEOF_VOID_P EQUAL 8)
+         set(OFX_ARCH "Win64")
+     endif()
+ # Visual Studio    
+diff --git a/OpenFX-IO b/OpenFX-IO
+--- a/OpenFX-IO
++++ b/OpenFX-IO
+@@ -1 +1 @@
+-Subproject commit f30a6a861bfe2e3616a223d80682d14173214382
++Subproject commit f30a6a861bfe2e3616a223d80682d14173214382-dirty
+diff --git a/lodepng b/lodepng
+--- a/lodepng
++++ b/lodepng
+@@ -1 +1 @@
+-Subproject commit c18b949b71f45e78b1f9a28c5d458bce0da505d6
++Subproject commit c18b949b71f45e78b1f9a28c5d458bce0da505d6-dirty

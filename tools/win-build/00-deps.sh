@@ -15,7 +15,10 @@ pacman -S --needed --noconfirm \
   mingw-w64-x86_64-cairo mingw-w64-x86_64-expat mingw-w64-x86_64-openvdb \
   mingw-w64-x86_64-alembic \
   mingw-w64-x86_64-openimageio mingw-w64-x86_64-openexr mingw-w64-x86_64-opencolorio \
-  mingw-w64-x86_64-ffmpeg mingw-w64-x86_64-libraw mingw-w64-x86_64-libpng
+  mingw-w64-x86_64-ffmpeg mingw-w64-x86_64-libraw mingw-w64-x86_64-libpng \
+  mingw-w64-x86_64-imagemagick mingw-w64-x86_64-libzip mingw-w64-x86_64-poppler \
+  mingw-w64-x86_64-librevenge mingw-w64-x86_64-libcdr mingw-w64-x86_64-librsvg \
+  mingw-w64-x86_64-pango mingw-w64-x86_64-lcms2 mingw-w64-x86_64-fontconfig
 
 if [ "${WITH_CYCLES:-1}" = "1" ]; then
   log "Installing Cycles dependencies"

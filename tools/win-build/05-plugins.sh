@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Phase 05 — build OFX plugins: openfx-misc (Misc.ofx, CImg.ofx) and openfx-io (IO.ofx).
+# Phase 05 — build OFX plugins: openfx-misc (Misc.ofx, CImg.ofx), openfx-io (IO.ofx)
+# and openfx-arena (Arena.ofx).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/config.sh"; source "$HERE/lib.sh"
 require_mingw
@@ -24,4 +25,11 @@ cmake .. "${CMAKE_COMMON[@]}"
 mingw32-make -j"$(jobs_n)"
 [ -f IO.ofx ] || die "openfx-io incomplete (IO.ofx missing)"
 ok "openfx-io built (IO.ofx)"
+
+log "openfx-arena: configure + build"
+cd "$NATRON_ROOT/openfx-arena"; mkdir -p build && cd build
+cmake .. "${CMAKE_COMMON[@]}"
+mingw32-make -j"$(jobs_n)"
+[ -f Arena.ofx ] || die "openfx-arena incomplete (Arena.ofx missing)"
+ok "openfx-arena built (Arena.ofx)"
 ok "Phase 05 (plugins) complete"

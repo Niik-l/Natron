@@ -29,7 +29,8 @@ else ok "Cycles intentionally absent (WITH_CYCLES=0)"; fi
 
 grep -q "WriteOIIO" <<<"$out" || die "openfx-io (WriteOIIO) not loaded"
 grep -q "eu.cimg."  <<<"$out" || die "CImg.ofx not loaded"
-ok "OFX plugins loaded (openfx-io + CImg)"
+grep -q "net.fxarena.openfx.ReadSVG" <<<"$out" || die "Arena.ofx not loaded (ReadSVG missing)"
+ok "OFX plugins loaded (openfx-io + CImg + Arena)"
 
 if grep -qi "Failed to import qtpy" <<<"$out"; then warn "qtpy import warning present (check DLL bundling in App/ and Renderer/)"
 else ok "qtpy OK"; fi

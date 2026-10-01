@@ -17,6 +17,18 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **openfx-arena in the Windows package (2026-10-01)** — user feedback: no SVG import.
+  ReadSVG lives in openfx-arena, which the fork had never built on either platform (the
+  README had wrongly claimed it until 2026-09-21). `tools/win-build` now clones, patches,
+  builds, installs and verifies `Arena.ofx` (19 plugins: ReadSVG/PSD/Krita/CDR/PDF, Text,
+  ImageMagick filters). `patches/openfx-arena.patch`: C++20 (MSYS2 poppler 26.x headers use
+  std::span / starts_with), quoted CMAKE_SYSTEM_PROCESSOR (same MSYS2 CMake quirk as
+  misc/io), and three missing link inputs: pangoft2 (`pango_fc_font_map_set_config`),
+  libpoppler core (`GlobalParams` in ReadPDF) and shlwapi (`PathRemoveFileSpecA`).
+  Verified headless: ReadSVG -> Write renders a test SVG to PNG. Arena carries its own copy of
+  OpenFX-IO's GenericReader/GenericOCIO (newer than our pinned openfx-io; our colorspace patch
+  does not apply there), so its readers may still show the old `default`-colorspace
+  behaviour under ACES — check in the GUI. Linux (ASWF image) still to do.
 - **Preferences > 3D Viewport page (2026-09-21)** — from VIEWPORT3D_SETTINGS_PLAN.md.
   User doc + screenshot: [wiki: 3D Viewport preferences](https://github.com/Niik-l/Natron/wiki/3D-Viewport-Preferences)
   ([image](https://raw.githubusercontent.com/wiki/Niik-l/Natron/images/viewport3d-preferences.png)).
