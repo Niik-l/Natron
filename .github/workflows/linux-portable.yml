@@ -202,14 +202,17 @@ jobs:
             # Rocky 8 packages for what the image lacks (nasm: x264/FFmpeg asm).
             dnf install -y -q openjpeg2-devel libwebp-devel patch file unzip gdb nasm
             # openfx-arena (Arena.ofx) libraries from Rocky 8 + EPEL + PowerTools: librsvg, pango,
-            # poppler (glib + core), libcdr/librevenge, libzip, lcms2, libxml2; plus what the
-            # ImageMagick source build below links (png/jpeg/tiff/freetype/fontconfig).
+            # poppler (glib + core), libcdr/librevenge, libzip, lcms2, libxml2, freetype/fontconfig.
             # (libcdr-devel exists in neither Rocky 8 nor EPEL 8: libcdr is built from source below.)
+            # No libjpeg-turbo/libpng/libtiff -devel here: the ASWF image already ships those in
+            # /usr/local (libjpeg.so.8, jpeg8 ABI). The EL8 libjpeg-turbo-devel is the jpeg62 ABI in
+            # /usr/lib64; gcc finds /usr/local/include first but ld finds /usr/lib64 first, so the
+            # ImageMagick link died with "undefined reference to jpeg_default_qtables".
             dnf install -y -q epel-release >/dev/null
             dnf config-manager --set-enabled powertools >/dev/null
             arena_pkgs="lcms2-devel fontconfig-devel freetype-devel pango-devel libxml2-devel libzip-devel
                         librsvg2-devel glib2-devel cairo-devel poppler-glib-devel poppler-devel librevenge-devel
-                        libicu-devel libpng-devel libjpeg-turbo-devel libtiff-devel"
+                        libicu-devel"
             dnf install -y -q --setopt=strict=0 $arena_pkgs
             echo "== arena packages"
             for pk in $arena_pkgs; do
@@ -312,10 +315,12 @@ jobs:
                      --with-quantum-depth=16 --enable-hdri --without-x --without-perl --disable-docs \
                      --with-png --with-jpeg --with-tiff --with-lcms --with-freetype --with-fontconfig --with-xml \
                      --without-pango --without-rsvg --without-openjp2 --without-webp --without-raw --without-heic \
+                     CPPFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib -L/usr/local/lib64" \
                 && run "ImageMagick build" im-build.log make -j"$(nproc)" \
                 && run "ImageMagick install" im-install.log make install DESTDIR=$D )
               stage
               pkg-config --modversion Magick++ || { echo "::error::Magick++ not found after the ImageMagick build"; exit 1; }
+              echo "ImageMagick delegates: $(/usr/local/bin/magick -version | sed -n 's/^Delegates (built-in): //p')"
 
               touch "$D/.complete"
             fi
