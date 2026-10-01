@@ -48,7 +48,8 @@ env:
   X264_COMMIT: b35605ace3ddf7c1a5d67a2eb553f034aef41d55   # stable branch, 2026-09
   X265_VERSION: 4.1
   IMAGEMAGICK_VERSION: 7.1.2-27   # same as MSYS2 (Windows package); shared libs, no coder modules
-  DEPS_KEY: openpgl-v0.7.1_ffmpeg-n8.0.3_x264-b35605a_x265-4.1_im-7.1.2-27
+  LIBCDR_VERSION: 0.1.9           # no libcdr-devel in Rocky 8 / EPEL 8: built from source
+  DEPS_KEY: openpgl-v0.7.1_ffmpeg-n8.0.3_x264-b35605a_x265-4.1_im-7.1.2-27_libcdr-0.1.9
   CYCLES_REPO: Niik-l/cycles
   CYCLES_REF: feature/cycles-deep
   WGPU_VERSION: v27.0.4.0
@@ -193,7 +194,7 @@ jobs:
 
       - name: Install the missing dependencies
         run: |
-          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION -e FFMPEG_VERSION -e X264_COMMIT -e X265_VERSION -e IMAGEMAGICK_VERSION \
+          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION -e FFMPEG_VERSION -e X264_COMMIT -e X265_VERSION -e IMAGEMAGICK_VERSION -e LIBCDR_VERSION \
             -e DEPS_HIT="${{ steps.deps-cache.outputs.cache-hit }}" natron-build bash -eo pipefail -c '
             # The checkouts belong to the runner user, not the container root;
             # without this git refuses to touch them ("dubious ownership").
@@ -203,13 +204,19 @@ jobs:
             # openfx-arena (Arena.ofx) libraries from Rocky 8 + EPEL + PowerTools: librsvg, pango,
             # poppler (glib + core), libcdr/librevenge, libzip, lcms2, libxml2; plus what the
             # ImageMagick source build below links (png/jpeg/tiff/freetype/fontconfig).
+            # (libcdr-devel exists in neither Rocky 8 nor EPEL 8: libcdr is built from source below.)
             dnf install -y -q epel-release >/dev/null
             dnf config-manager --set-enabled powertools >/dev/null
-            dnf install -y -q --setopt=strict=0 lcms2-devel fontconfig-devel freetype-devel pango-devel \
-              libxml2-devel libzip-devel librsvg2-devel glib2-devel cairo-devel poppler-glib-devel \
-              poppler-devel librevenge-devel libcdr-devel libpng-devel libjpeg-turbo-devel libtiff-devel
-            for m in librsvg-2.0 pangocairo pangoft2 poppler-glib poppler libcdr-0.1 librevenge-0.0 libzip lcms2; do
-              pkg-config --exists "$m" || { echo "::error::arena dependency $m missing after dnf"; exit 1; }
+            arena_pkgs="lcms2-devel fontconfig-devel freetype-devel pango-devel libxml2-devel libzip-devel
+                        librsvg2-devel glib2-devel cairo-devel poppler-glib-devel poppler-devel librevenge-devel
+                        libicu-devel libpng-devel libjpeg-turbo-devel libtiff-devel"
+            dnf install -y -q --setopt=strict=0 $arena_pkgs
+            echo "== arena packages"
+            for pk in $arena_pkgs; do
+              if rpm -q "$pk" >/dev/null 2>&1; then echo "  $pk: $(rpm -q "$pk")"; else echo "  $pk: MISSING"; fi
+            done
+            for m in librsvg-2.0 pangocairo pangoft2 poppler-glib poppler librevenge-0.0 libzip lcms2 libxml-2.0 icu-uc; do
+              pkg-config --exists "$m" || { echo "::error::arena dependency $m missing after dnf (see the list above)"; exit 1; }
             done
             # qtpy + packaging: Natron imports qtpy at startup. patchelf: the AppImage script.
             python3 -m pip install -q qtpy packaging patchelf
@@ -286,6 +293,16 @@ jobs:
                 && run "FFmpeg build" ffmpeg-build.log make -j"$(nproc)" \
                 && run "FFmpeg install" ffmpeg-install.log make install DESTDIR=$D )
               stage
+              echo "== libcdr $LIBCDR_VERSION (ReadCDR; no devel package on EL8)"
+              curl -fsSL "https://dev-www.libreoffice.org/src/libcdr-$LIBCDR_VERSION.tar.xz" | tar -xJ -C /tmp
+              ( cd "/tmp/libcdr-$LIBCDR_VERSION" \
+                && run "libcdr configure" libcdr-cfg.log ./configure --prefix=/usr/local --disable-static \
+                     --without-docs --disable-tests --disable-werror CPPFLAGS="-I/usr/local/include" \
+                && run "libcdr build" libcdr-build.log make -j"$(nproc)" \
+                && run "libcdr install" libcdr-install.log make install DESTDIR=$D )
+              stage
+              pkg-config --exists libcdr-0.1 || { echo "::error::libcdr-0.1 not found after the libcdr build"; exit 1; }
+
               echo "== ImageMagick $IMAGEMAGICK_VERSION (Magick++ for openfx-arena; shared, coders built in)"
               curl -fsSL "https://github.com/ImageMagick/ImageMagick/archive/refs/tags/$IMAGEMAGICK_VERSION.tar.gz" \
                 | tar -xz -C /tmp
