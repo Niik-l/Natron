@@ -47,7 +47,8 @@ env:
   FFMPEG_VERSION: n8.0.3     # FFmpeg 8 (libavcodec 62) is what the Fedora build uses
   X264_COMMIT: b35605ace3ddf7c1a5d67a2eb553f034aef41d55   # stable branch, 2026-09
   X265_VERSION: 4.1
-  DEPS_KEY: openpgl-v0.7.1_ffmpeg-n8.0.3_x264-b35605a_x265-4.1
+  IMAGEMAGICK_VERSION: 7.1.2-27   # same as MSYS2 (Windows package); shared libs, no coder modules
+  DEPS_KEY: openpgl-v0.7.1_ffmpeg-n8.0.3_x264-b35605a_x265-4.1_im-7.1.2-27
   CYCLES_REPO: Niik-l/cycles
   CYCLES_REF: feature/cycles-deep
   WGPU_VERSION: v27.0.4.0
@@ -91,9 +92,11 @@ jobs:
           cfg=natron/tools/win-build/config.sh
           misc=$(grep -m1 '^OPENFX_MISC_REF=' "$cfg" | cut -d'"' -f2)
           io=$(grep -m1 '^OPENFX_IO_REF=' "$cfg" | cut -d'"' -f2)
-          [ -n "$misc" ] && [ -n "$io" ] || { echo "::error::could not read plugin refs from $cfg"; exit 1; }
+          arena=$(grep -m1 '^OPENFX_ARENA_REF=' "$cfg" | cut -d'"' -f2)
+          [ -n "$misc" ] && [ -n "$io" ] && [ -n "$arena" ] || { echo "::error::could not read plugin refs from $cfg"; exit 1; }
           echo "misc=$misc" >> "$GITHUB_OUTPUT"
           echo "io=$io" >> "$GITHUB_OUTPUT"
+          echo "arena=$arena" >> "$GITHUB_OUTPUT"
 
       - name: Checkout openfx-misc
         uses: actions/checkout@v4
@@ -109,6 +112,14 @@ jobs:
           repository: NatronGitHub/openfx-io
           ref: ${{ steps.refs.outputs.io }}
           path: openfx-io
+          submodules: recursive
+
+      - name: Checkout openfx-arena
+        uses: actions/checkout@v4
+        with:
+          repository: NatronGitHub/openfx-arena
+          ref: ${{ steps.refs.outputs.arena }}
+          path: openfx-arena
           submodules: recursive
 
       - name: Checkout natron-plugins
@@ -182,13 +193,24 @@ jobs:
 
       - name: Install the missing dependencies
         run: |
-          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION -e FFMPEG_VERSION -e X264_COMMIT -e X265_VERSION \
+          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION -e FFMPEG_VERSION -e X264_COMMIT -e X265_VERSION -e IMAGEMAGICK_VERSION \
             -e DEPS_HIT="${{ steps.deps-cache.outputs.cache-hit }}" natron-build bash -eo pipefail -c '
             # The checkouts belong to the runner user, not the container root;
             # without this git refuses to touch them ("dubious ownership").
             git config --global --add safe.directory "*"
             # Rocky 8 packages for what the image lacks (nasm: x264/FFmpeg asm).
             dnf install -y -q openjpeg2-devel libwebp-devel patch file unzip gdb nasm
+            # openfx-arena (Arena.ofx) libraries from Rocky 8 + EPEL + PowerTools: librsvg, pango,
+            # poppler (glib + core), libcdr/librevenge, libzip, lcms2, libxml2; plus what the
+            # ImageMagick source build below links (png/jpeg/tiff/freetype/fontconfig).
+            dnf install -y -q epel-release >/dev/null
+            dnf config-manager --set-enabled powertools >/dev/null
+            dnf install -y -q --setopt=strict=0 lcms2-devel fontconfig-devel freetype-devel pango-devel \
+              libxml2-devel libzip-devel librsvg2-devel glib2-devel cairo-devel poppler-glib-devel \
+              poppler-devel librevenge-devel libcdr-devel libpng-devel libjpeg-turbo-devel libtiff-devel
+            for m in librsvg-2.0 pangocairo pangoft2 poppler-glib poppler libcdr-0.1 librevenge-0.0 libzip lcms2; do
+              pkg-config --exists "$m" || { echo "::error::arena dependency $m missing after dnf"; exit 1; }
+            done
             # qtpy + packaging: Natron imports qtpy at startup. patchelf: the AppImage script.
             python3 -m pip install -q qtpy packaging patchelf
             # The image installs to /usr/local; make sure ldd/ld.so see it
@@ -264,6 +286,20 @@ jobs:
                 && run "FFmpeg build" ffmpeg-build.log make -j"$(nproc)" \
                 && run "FFmpeg install" ffmpeg-install.log make install DESTDIR=$D )
               stage
+              echo "== ImageMagick $IMAGEMAGICK_VERSION (Magick++ for openfx-arena; shared, coders built in)"
+              curl -fsSL "https://github.com/ImageMagick/ImageMagick/archive/refs/tags/$IMAGEMAGICK_VERSION.tar.gz" \
+                | tar -xz -C /tmp
+              ( cd "/tmp/ImageMagick-$IMAGEMAGICK_VERSION" \
+                && run "ImageMagick configure" im-cfg.log ./configure --prefix=/usr/local \
+                     --enable-shared --disable-static --with-modules=no --with-magick-plus-plus=yes \
+                     --with-quantum-depth=16 --enable-hdri --without-x --without-perl --disable-docs \
+                     --with-png --with-jpeg --with-tiff --with-lcms --with-freetype --with-fontconfig --with-xml \
+                     --without-pango --without-rsvg --without-openjp2 --without-webp --without-raw --without-heic \
+                && run "ImageMagick build" im-build.log make -j"$(nproc)" \
+                && run "ImageMagick install" im-install.log make install DESTDIR=$D )
+              stage
+              pkg-config --modversion Magick++ || { echo "::error::Magick++ not found after the ImageMagick build"; exit 1; }
+
               touch "$D/.complete"
             fi
 
@@ -273,6 +309,8 @@ jobs:
             echo "oneTBB: $(ls /usr/local/lib*/libtbb.so 2>/dev/null | head -1)"
             echo "openpgl: $(ls /usr/local/lib*/libopenpgl.so* 2>/dev/null | head -1)"
             echo "ffmpeg:  $(pkg-config --modversion libavcodec 2>/dev/null || echo MISSING) (libavcodec)"
+            echo "magick:  $(pkg-config --modversion Magick++ 2>/dev/null || echo MISSING) (Magick++, arena)"
+            echo "poppler: $(pkg-config --modversion poppler-glib 2>/dev/null || echo MISSING)  librsvg: $(pkg-config --modversion librsvg-2.0 2>/dev/null || echo MISSING)  libcdr: $(pkg-config --modversion libcdr-0.1 2>/dev/null || echo MISSING)"
             echo "x264/x265: $(pkg-config --modversion x264 2>/dev/null || echo MISSING) / $(pkg-config --modversion x265 2>/dev/null || echo MISSING)"
           '
 
@@ -378,13 +416,16 @@ jobs:
           docker exec -e FV="${{ inputs.fastvolume }}" natron-build bash -eo pipefail -c '
             cd /w; B=natron/build; bad=0
             for f in $B/App/Natron $B/Renderer/NatronRenderer $B/PythonBin/natron-python \
-                     $(find openfx-misc/build openfx-io/build -name "*.ofx" -type f); do
+                     $(find openfx-misc/build openfx-io/build openfx-arena/build -name "*.ofx" -type f); do
               file "$f"
               if ldd "$f" | grep "not found"; then echo "::error::$f has unresolved libraries"; bad=1; fi
             done
             # IO.ofx must have picked up FFmpeg (else it silently builds without video nodes).
             io=$(find openfx-io/build -name IO.ofx -type f | head -1)
             ldd "$io" | grep -E "libavcodec|libx264|libx265" || { echo "::error::IO.ofx was built without FFmpeg"; bad=1; }
+            arena=$(find openfx-arena/build -name Arena.ofx -type f | head -1)
+            [ -n "$arena" ] || { echo "::error::Arena.ofx was not built"; bad=1; }
+            [ -n "$arena" ] && { ldd "$arena" | grep -E "libMagick\+\+|librsvg|libpoppler" || { echo "::error::Arena.ofx lacks ImageMagick/librsvg/poppler"; bad=1; }; }
             if [ "$FV" = true ]; then
               for f in $B/App/Natron $B/Renderer/NatronRenderer; do
                 grep -q built-in.FastVolumeRender "$f" && echo "FastVolumeRender present in $f" \

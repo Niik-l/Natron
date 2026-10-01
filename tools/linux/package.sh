@@ -22,8 +22,9 @@ rm -rf "$R/dist"
 mkdir -p "$D/bin" "$D/Plugins/OFX/Natron" "$D/Plugins/PyPlugs" "$D/Resources" "$G"
 cp "$B/App/Natron" "$B/Renderer/NatronRenderer" "$B/PythonBin/natron-python" "$D/bin/"
 
-for p in Misc CImg IO; do
-    src=$(find openfx-misc/build openfx-io/build -name "$p.ofx" -type f | head -1)
+for p in Misc CImg IO Arena; do
+    src=$(find openfx-misc/build openfx-io/build openfx-arena/build -name "$p.ofx" -type f | head -1)
+    [ -n "$src" ] || { echo "::error::$p.ofx not found for packaging"; exit 1; }
     d="$D/Plugins/OFX/Natron/$p.ofx.bundle/Contents/Linux-x86-64"
     mkdir -p "$d"; cp "$src" "$d/"
 done

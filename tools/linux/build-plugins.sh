@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Build the OFX plugins (Misc.ofx, CImg.ofx from openfx-misc; IO.ofx from
-# openfx-io) for a Linux CI build. Mirrors tools/win-build/02-patch.sh +
+# openfx-io; Arena.ofx from openfx-arena) for a Linux CI build. Mirrors tools/win-build/02-patch.sh +
 # 05-plugins.sh: same pinned sources (checked out by the workflow at the refs
 # in tools/win-build/config.sh) and the same patches.
 #
 # Usage: build-plugins.sh <workspace> <build-type>
-#   <workspace> holds natron/, openfx-misc/ and openfx-io/ checkouts.
+#   <workspace> holds natron/, openfx-misc/, openfx-io/ and openfx-arena/ checkouts.
 # Writes <workspace>/plugins.log. Exits non-zero if any plugin wasn't built,
 # after trying both repos, so one run reports every failure.
 set -euo pipefail
@@ -16,7 +16,7 @@ BUILD_TYPE="$2"
 P="$W/natron/tools/win-build/patches"
 cd "$W"
 
-for repo in openfx-misc openfx-io; do
+for repo in openfx-misc openfx-io openfx-arena; do
     if git -C "$repo" apply --reverse --check "$P/$repo.patch" 2>/dev/null; then
         echo "$repo: patch already applied"
     else
@@ -37,7 +37,7 @@ make -C openfx-misc/CImg CImg.h
 # CMAKE_POLICY_VERSION_MINIMUM: the plugin CMakeLists predate CMake 4.
 fail=0
 : > "$W/plugins.log"
-for repo in openfx-misc openfx-io; do
+for repo in openfx-misc openfx-io openfx-arena; do
     { cmake -S "$repo" -B "$repo/build" -G Ninja \
         -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -46,8 +46,8 @@ for repo in openfx-misc openfx-io; do
       | tee -a "$W/plugins.log" || fail=1
 done
 
-for p in Misc CImg IO; do
-    find openfx-misc/build openfx-io/build -name "$p.ofx" -type f | grep -q . \
+for p in Misc CImg IO Arena; do
+    find openfx-misc/build openfx-io/build openfx-arena/build -name "$p.ofx" -type f | grep -q . \
         || { echo "::error::$p.ofx was not built"; fail=1; }
 done
 exit $fail

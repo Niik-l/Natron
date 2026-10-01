@@ -52,15 +52,3 @@ index 88fa919..077771f 100644
          set(OFX_ARCH "Win64")
      endif()
  # Visual Studio    
-diff --git a/OpenFX-IO b/OpenFX-IO
---- a/OpenFX-IO
-+++ b/OpenFX-IO
-@@ -1 +1 @@
--Subproject commit f30a6a861bfe2e3616a223d80682d14173214382
-+Subproject commit f30a6a861bfe2e3616a223d80682d14173214382-dirty
-diff --git a/lodepng b/lodepng
---- a/lodepng
-+++ b/lodepng
-@@ -1 +1 @@
--Subproject commit c18b949b71f45e78b1f9a28c5d458bce0da505d6
-+Subproject commit c18b949b71f45e78b1f9a28c5d458bce0da505d6-dirty
