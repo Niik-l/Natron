@@ -320,7 +320,7 @@ jobs:
                 && run "ImageMagick install" im-install.log make install DESTDIR=$D )
               stage
               pkg-config --modversion Magick++ || { echo "::error::Magick++ not found after the ImageMagick build"; exit 1; }
-              echo "ImageMagick delegates: $(/usr/local/bin/magick -version | sed -n 's/^Delegates (built-in): //p')"
+              echo "ImageMagick delegates: $(/usr/local/bin/magick -version | sed -n "s/^Delegates (built-in): //p")"
 
               touch "$D/.complete"
             fi
