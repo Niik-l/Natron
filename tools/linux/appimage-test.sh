@@ -136,6 +136,7 @@ rm -f "$OUT/arena.png"; mkdir -p /tmp/home
 # Same environment AppRun gives Natron (APPDIR + the linuxdeploy hooks), in a
 # subshell so none of it leaks into the GUI step below.
 (
+    set +u   # the linuxdeploy Qt hook reads XDG_CURRENT_DESKTOP etc. unset
     export APPDIR="$PWD/squashfs-root"
     for hook in "$APPDIR"/apprun-hooks/*.sh; do [ -f "$hook" ] && . "$hook"; done
     ARENA_SVG="$OUT/arena.svg" ARENA_OUT="$OUT/arena.png" QT_QPA_PLATFORM=offscreen HOME=/tmp/home \

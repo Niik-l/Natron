@@ -49,7 +49,7 @@ env:
   X265_VERSION: 4.1
   IMAGEMAGICK_VERSION: 7.1.2-27   # same as MSYS2 (Windows package); shared libs, no coder modules
   LIBCDR_VERSION: 0.1.9           # no libcdr-devel in Rocky 8 / EPEL 8: built from source
-  DEPS_KEY: openpgl-v0.7.1_ffmpeg-n8.0.3_x264-b35605a_x265-4.1_im-7.1.2-27_libcdr-0.1.9
+  DEPS_KEY: openpgl-v0.7.1_ffmpeg-n8.0.3_x264-b35605a_x265-4.1_im-7.1.2-27_libcdr-0.1.9_hbglib
   CYCLES_REPO: Niik-l/cycles
   CYCLES_REF: feature/cycles-deep
   WGPU_VERSION: v27.0.4.0
@@ -321,6 +321,28 @@ jobs:
               stage
               pkg-config --modversion Magick++ || { echo "::error::Magick++ not found after the ImageMagick build"; exit 1; }
               echo "ImageMagick delegates: $(/usr/local/bin/magick -version | sed -n "s/^Delegates (built-in): //p")"
+
+              # The AppImage must bundle the image's HarfBuzz (its Qt needs it, old hosts
+              # are too old), but that copy was built without GLib, while Rocky's pango
+              # (Arena.ofx: Text, ReadSVG) was built against a GLib-enabled HarfBuzz:
+              # "libpangoft2-1.0.so.0: undefined symbol: hb_glib_script_from_script" on
+              # every distro. Rebuild the same HarfBuzz version in place with GLib on.
+              HB_VER=$(pkg-config --modversion harfbuzz)
+              hb_so=$(ls /usr/local/lib*/libharfbuzz.so.0 | head -1)
+              hb_libdir=$(basename "$(dirname "$hb_so")")
+              echo "== HarfBuzz $HB_VER rebuilt with GLib (in $hb_libdir; Rocky pango needs hb_glib_*)"
+              command -v meson >/dev/null || python3 -m pip install -q meson
+              curl -fsSL "https://github.com/harfbuzz/harfbuzz/releases/download/$HB_VER/harfbuzz-$HB_VER.tar.xz" | tar -xJ -C /tmp
+              ( cd "/tmp/harfbuzz-$HB_VER" \
+                && run "HarfBuzz setup" hb-cfg.log meson setup build --prefix=/usr/local --libdir="$hb_libdir" \
+                     --buildtype=release -Dglib=enabled -Dgobject=disabled -Dfreetype=enabled \
+                     -Dcairo=disabled -Dicu=disabled -Dgraphite2=disabled -Dchafa=disabled \
+                     -Dtests=disabled -Ddocs=disabled -Dbenchmark=disabled -Dintrospection=disabled \
+                && run "HarfBuzz build" hb-build.log ninja -C build \
+                && run "HarfBuzz install" hb-install.log env DESTDIR=$D ninja -C build install )
+              stage
+              nm -D "$hb_so" | grep -q hb_glib_script_from_script \
+                || { echo "::error::rebuilt libharfbuzz.so.0 still lacks hb_glib_script_from_script"; exit 1; }
 
               touch "$D/.complete"
             fi
