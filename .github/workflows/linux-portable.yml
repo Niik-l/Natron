@@ -327,10 +327,16 @@ jobs:
               # (Arena.ofx: Text, ReadSVG) was built against a GLib-enabled HarfBuzz:
               # "libpangoft2-1.0.so.0: undefined symbol: hb_glib_script_from_script" on
               # every distro. Rebuild the same HarfBuzz version in place with GLib on.
-              HB_VER=$(pkg-config --modversion harfbuzz)
               hb_so=$(ls /usr/local/lib*/libharfbuzz.so.0 | head -1)
+              hb_real=$(readlink -f "$hb_so")
               hb_libdir=$(basename "$(dirname "$hb_so")")
-              echo "== HarfBuzz $HB_VER rebuilt with GLib (in $hb_libdir; Rocky pango needs hb_glib_*)"
+              # /usr/local ships no harfbuzz.pc (pkg-config would answer with the Rocky 1.7.5
+              # devel package), so the version comes from the libtool file name:
+              # libharfbuzz.so.0.<major*10000 + minor*100 + micro>.0
+              hb_num=$(echo "$hb_real" | sed -E "s/.*\.so\.0\.([0-9]+)\.0$/\1/")
+              case "$hb_num" in ""|*[!0-9]*) echo "::error::cannot read the HarfBuzz version from $hb_real"; exit 1;; esac
+              HB_VER="$((hb_num / 10000)).$(((hb_num / 100) % 100)).$((hb_num % 100))"
+              echo "== HarfBuzz $HB_VER ($hb_real) rebuilt with GLib (in $hb_libdir; Rocky pango needs hb_glib_*)"
               command -v meson >/dev/null || python3 -m pip install -q meson
               curl -fsSL "https://github.com/harfbuzz/harfbuzz/releases/download/$HB_VER/harfbuzz-$HB_VER.tar.xz" | tar -xJ -C /tmp
               ( cd "/tmp/harfbuzz-$HB_VER" \
