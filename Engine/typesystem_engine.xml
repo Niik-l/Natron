@@ -867,7 +867,9 @@
         </modify-function>
     </object-type>
     
-    <object-type name="UserParamHolder" copyable="false">
+    <!-- exception-handling: a std::exception thrown by the C++ side (a destroyed node, see
+         Effect::liveNode / UserParamHolder::holder) becomes a Python RuntimeError. -->
+    <object-type name="UserParamHolder" copyable="false" exception-handling="yes">
     	<modify-function signature="createIntParam(QString,QString)">
             <modify-argument index="return">
                 <define-ownership class="target" owner="target"/>
@@ -965,7 +967,7 @@
         </modify-function>
     </object-type>
         
-    <object-type name="Effect" copyable="false">
+    <object-type name="Effect" copyable="false" exception-handling="yes">
         <inject-documentation format="target">
             This object represents a single node in Natron, that is, an instance of a plug-in.
             You cannot create Effects directly by calling their constructor, instead you must use the

@@ -35,6 +35,8 @@
 
 #include <list>
 
+#include <QtCore/QPointer>
+
 #include "Engine/ImagePlaneDesc.h"
 #include "Engine/Knob.h" // KnobI
 #include "Engine/PyNodeGroup.h" // Group
@@ -101,7 +103,15 @@ public:
 
 class UserParamHolder
 {
-    KnobHolder* _holder;
+    // QPointer: a KnobHolder is a QObject, so this goes null when the effect
+    // instance is deleted (Effect.destroy()) instead of dangling.
+    QPointer<KnobHolder> _holder;
+
+    /**
+     * @brief The holder while it is alive. Otherwise raises a Python RuntimeError
+     * and returns null, and the caller returns its "nothing" value.
+     **/
+    KnobHolder* holder() const;
 
 public:
 
@@ -219,6 +229,13 @@ class Effect
     : public Group, public UserParamHolder
 {
     NodeWPtr _node;
+
+    /**
+     * @brief The node while it is alive and still has its effect instance, i.e. until
+     * destroy() completed. Otherwise raises a Python RuntimeError and returns null, and
+     * the caller returns its "nothing" value: a destroyed node must raise, not crash.
+     **/
+    NodePtr liveNode() const;
 
 public:
 

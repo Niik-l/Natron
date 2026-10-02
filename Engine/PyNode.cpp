@@ -195,6 +195,18 @@ UserParamHolder::setHolder(KnobHolder* holder)
     _holder = holder;
 }
 
+KnobHolder*
+UserParamHolder::holder() const
+{
+    KnobHolder* h = _holder.data();
+    if (h) {
+        return h;
+    }
+    // The wrapper is generated with exception-handling="yes" (typesystem_engine.xml):
+    // shiboken catches this and raises it as a Python RuntimeError.
+    throw std::runtime_error("This node has been destroyed (Effect.destroy()); its parameters can no longer be edited");
+}
+
 Effect::Effect(const NodePtr& node)
     : Group()
     , UserParamHolder(node ? node->getEffectInstance().get() : 0)
@@ -219,10 +231,22 @@ Effect::getInternalNode() const
     return _node.lock();
 }
 
+NodePtr
+Effect::liveNode() const
+{
+    NodePtr node = _node.lock();
+    if ( node && node->getEffectInstance() ) {
+        return node;
+    }
+    // The wrapper is generated with exception-handling="yes" (typesystem_engine.xml):
+    // shiboken catches this and raises it as a Python RuntimeError.
+    throw std::runtime_error("This node has been destroyed (Effect.destroy()) and can no longer be used");
+}
+
 bool
 Effect::isReaderNode()
 {
-    NodePtr n = getInternalNode();
+    NodePtr n = liveNode();
 
     if (!n) {
         return false;
@@ -234,7 +258,7 @@ Effect::isReaderNode()
 bool
 Effect::isWriterNode()
 {
-    NodePtr n = getInternalNode();
+    NodePtr n = liveNode();
 
     if (!n) {
         return false;
@@ -246,7 +270,7 @@ Effect::isWriterNode()
 bool
 Effect::isOutputNode()
 {
-    NodePtr n = getInternalNode();
+    NodePtr n = liveNode();
 
     if (!n) {
         return false;
@@ -258,13 +282,24 @@ Effect::isOutputNode()
 void
 Effect::destroy(bool autoReconnect)
 {
-    getInternalNode()->destroyNode(false, autoReconnect);
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    node->destroyNode(false, autoReconnect);
 }
 
 int
 Effect::getMaxInputCount() const
 {
-    return getInternalNode()->getNInputs();
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return 0;
+    }
+
+    return node->getNInputs();
 }
 
 bool
@@ -275,10 +310,15 @@ Effect::canConnectInput(int inputNumber,
         return false;
     }
 
-    if ( !node->getInternalNode() ) {
+    NodePtr thisNode = liveNode();
+    if (!thisNode) {
         return false;
     }
-    Node::CanConnectInputReturnValue ret = getInternalNode()->canConnectInput(node->getInternalNode(), inputNumber);
+    NodePtr otherNode = node->liveNode();
+    if (!otherNode) {
+        return false;
+    }
+    Node::CanConnectInputReturnValue ret = thisNode->canConnectInput(otherNode, inputNumber);
 
     return ret == Node::eCanConnectInput_ok ||
            ret == Node::eCanConnectInput_differentFPS ||
@@ -290,7 +330,7 @@ Effect::connectInput(int inputNumber,
                      const Effect* input)
 {
     if ( canConnectInput(inputNumber, input) ) {
-        return getInternalNode()->connectInput(input->getInternalNode(), inputNumber);
+        return getInternalNode()->connectInput(input->getInternalNode(), inputNumber);  // both checked live above
     } else {
         return false;
     }
@@ -299,13 +339,23 @@ Effect::connectInput(int inputNumber,
 void
 Effect::disconnectInput(int inputNumber)
 {
-    getInternalNode()->disconnectInput(inputNumber);
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    node->disconnectInput(inputNumber);
 }
 
 Effect*
 Effect::getInput(int inputNumber) const
 {
-    NodePtr node = getInternalNode()->getRealInput(inputNumber);
+    NodePtr thisNode = liveNode();
+
+    if (!thisNode) {
+        return NULL;
+    }
+    NodePtr node = thisNode->getRealInput(inputNumber);
 
     if (node) {
         return new Effect(node);
@@ -317,7 +367,7 @@ Effect::getInput(int inputNumber) const
 Effect*
 Effect::getInput(const QString& inputLabel) const
 {
-    NodePtr node = getInternalNode();
+    NodePtr node = liveNode();
     if (!node) {
         return 0;
     }
@@ -338,14 +388,25 @@ Effect::getInput(const QString& inputLabel) const
 QString
 Effect::getScriptName() const
 {
-    return QString::fromUtf8( getInternalNode()->getScriptName_mt_safe().c_str() );
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return QString();
+    }
+
+    return QString::fromUtf8( node->getScriptName_mt_safe().c_str() );
 }
 
 bool
 Effect::setScriptName(const QString& scriptName)
 {
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return false;
+    }
     try {
-        getInternalNode()->setScriptName( scriptName.toStdString() );
+        node->setScriptName( scriptName.toStdString() );
     } catch (...) {
         return false;
     }
@@ -356,22 +417,38 @@ Effect::setScriptName(const QString& scriptName)
 QString
 Effect::getLabel() const
 {
-    return QString::fromUtf8( getInternalNode()->getLabel_mt_safe().c_str() );
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return QString();
+    }
+
+    return QString::fromUtf8( node->getLabel_mt_safe().c_str() );
 }
 
 void
 Effect::setLabel(const QString& name)
 {
-    return getInternalNode()->setLabel( name.toStdString() );
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    node->setLabel( name.toStdString() );
 }
 
 QString
 Effect::getInputLabel(int inputNumber)
 {
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return QString();
+    }
     try {
-        return QString::fromUtf8( getInternalNode()->getInputLabel(inputNumber).c_str() );
+        return QString::fromUtf8( node->getInputLabel(inputNumber).c_str() );
     } catch (const std::exception& e) {
-        getInternalNode()->getApp()->appendToScriptEditor( e.what() );
+        node->getApp()->appendToScriptEditor( e.what() );
     }
 
     return QString();
@@ -380,7 +457,13 @@ Effect::getInputLabel(int inputNumber)
 QString
 Effect::getPluginID() const
 {
-    return QString::fromUtf8( getInternalNode()->getPluginID().c_str() );
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return QString();
+    }
+
+    return QString::fromUtf8( node->getPluginID().c_str() );
 }
 
 Param*
@@ -463,7 +546,12 @@ std::list<Param*>
 Effect::getParams() const
 {
     std::list<Param*> ret;
-    const KnobsVec& knobs = getInternalNode()->getKnobs();
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return ret;
+    }
+    const KnobsVec& knobs = node->getKnobs();
 
     for (KnobsVec::const_iterator it = knobs.begin(); it != knobs.end(); ++it) {
         Param* p = createParamWrapperForKnob(*it);
@@ -478,7 +566,11 @@ Effect::getParams() const
 Param*
 Effect::getParam(const QString& name) const
 {
-    NodePtr node = getInternalNode();
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return NULL;
+    }
 
     QString fallbackSearchName;
     if (node->getApp()->isCreatingPythonGroup()) {
@@ -505,35 +597,63 @@ Effect::getParam(const QString& name) const
 int
 Effect::getCurrentTime() const
 {
-    return getInternalNode()->getEffectInstance()->getCurrentTime();
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return 0;
+    }
+
+    return node->getEffectInstance()->getCurrentTime();
 }
 
 void
 Effect::setPosition(double x,
                     double y)
 {
-    getInternalNode()->setPosition(x, y);
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    node->setPosition(x, y);
 }
 
 void
 Effect::getPosition(double* x,
                     double* y) const
 {
-    getInternalNode()->getPosition(x, y);
+    *x = *y = 0.;
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    node->getPosition(x, y);
 }
 
 void
 Effect::setSize(double w,
                 double h)
 {
-    getInternalNode()->setSize(w, h);
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    node->setSize(w, h);
 }
 
 void
 Effect::getSize(double* w,
                 double* h) const
 {
-    getInternalNode()->getSize(w, h);
+    *w = *h = 0.;
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    node->getSize(w, h);
 }
 
 void
@@ -541,7 +661,13 @@ Effect::getColor(double* r,
                  double *g,
                  double* b) const
 {
-    bool hasColor = getInternalNode()->getColor(r, g, b);
+    *r = *g = *b = 0.;
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    bool hasColor = node->getColor(r, g, b);
     Q_UNUSED(hasColor);
 }
 
@@ -550,37 +676,62 @@ Effect::setColor(double r,
                  double g,
                  double b)
 {
-    getInternalNode()->setColor(r, g, b);
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    node->setColor(r, g, b);
 }
 
 bool
 Effect::isNodeSelected() const
 {
-    return getInternalNode()->isUserSelected();
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return false;
+    }
+
+    return node->isUserSelected();
 }
 
 void
 Effect::beginChanges()
 {
-    getInternalNode()->getEffectInstance()->beginChanges();
-    getInternalNode()->beginInputEdition();
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    node->getEffectInstance()->beginChanges();
+    node->beginInputEdition();
 }
 
 void
 Effect::endChanges()
 {
-    getInternalNode()->getEffectInstance()->endChanges();
-    getInternalNode()->endInputEdition(true);
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return;
+    }
+    node->getEffectInstance()->endChanges();
+    node->endInputEdition(true);
 }
 
 IntParam*
 UserParamHolder::createIntParam(const QString& name,
                                 const QString& label)
 {
-    KnobIntPtr knob = _holder->createIntKnob(name.toStdString(), label.toStdString(), 1);
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobIntPtr knob = h->createIntKnob(name.toStdString(), label.toStdString(), 1);
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -595,10 +746,14 @@ Int2DParam*
 UserParamHolder::createInt2DParam(const QString& name,
                                   const QString& label)
 {
-    KnobIntPtr knob = _holder->createIntKnob(name.toStdString(), label.toStdString(), 2);
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobIntPtr knob = h->createIntKnob(name.toStdString(), label.toStdString(), 2);
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -613,10 +768,14 @@ Int3DParam*
 UserParamHolder::createInt3DParam(const QString& name,
                                   const QString& label)
 {
-    KnobIntPtr knob = _holder->createIntKnob(name.toStdString(), label.toStdString(), 3);
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobIntPtr knob = h->createIntKnob(name.toStdString(), label.toStdString(), 3);
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -631,10 +790,14 @@ DoubleParam*
 UserParamHolder::createDoubleParam(const QString& name,
                                    const QString& label)
 {
-    KnobDoublePtr knob = _holder->createDoubleKnob(name.toStdString(), label.toStdString(), 1);
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobDoublePtr knob = h->createDoubleKnob(name.toStdString(), label.toStdString(), 1);
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -649,10 +812,14 @@ Double2DParam*
 UserParamHolder::createDouble2DParam(const QString& name,
                                      const QString& label)
 {
-    KnobDoublePtr knob = _holder->createDoubleKnob(name.toStdString(), label.toStdString(), 2);
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobDoublePtr knob = h->createDoubleKnob(name.toStdString(), label.toStdString(), 2);
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -667,10 +834,14 @@ Double3DParam*
 UserParamHolder::createDouble3DParam(const QString& name,
                                      const QString& label)
 {
-    KnobDoublePtr knob = _holder->createDoubleKnob(name.toStdString(), label.toStdString(), 3);
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobDoublePtr knob = h->createDoubleKnob(name.toStdString(), label.toStdString(), 3);
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -685,10 +856,14 @@ BooleanParam*
 UserParamHolder::createBooleanParam(const QString& name,
                                     const QString& label)
 {
-    KnobBoolPtr knob = _holder->createBoolKnob( name.toStdString(), label.toStdString() );
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobBoolPtr knob = h->createBoolKnob( name.toStdString(), label.toStdString() );
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -703,10 +878,14 @@ ChoiceParam*
 UserParamHolder::createChoiceParam(const QString& name,
                                    const QString& label)
 {
-    KnobChoicePtr knob = _holder->createChoiceKnob( name.toStdString(), label.toStdString() );
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobChoicePtr knob = h->createChoiceKnob( name.toStdString(), label.toStdString() );
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -722,10 +901,14 @@ UserParamHolder::createColorParam(const QString& name,
                                   const QString& label,
                                   bool useAlpha)
 {
-    KnobColorPtr knob = _holder->createColorKnob(name.toStdString(), label.toStdString(), useAlpha ? 4 : 3);
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobColorPtr knob = h->createColorKnob(name.toStdString(), label.toStdString(), useAlpha ? 4 : 3);
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -740,10 +923,14 @@ StringParam*
 UserParamHolder::createStringParam(const QString& name,
                                    const QString& label)
 {
-    KnobStringPtr knob = _holder->createStringKnob( name.toStdString(), label.toStdString() );
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobStringPtr knob = h->createStringKnob( name.toStdString(), label.toStdString() );
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -758,10 +945,14 @@ FileParam*
 UserParamHolder::createFileParam(const QString& name,
                                  const QString& label)
 {
-    KnobFilePtr knob = _holder->createFileKnob( name.toStdString(), label.toStdString() );
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobFilePtr knob = h->createFileKnob( name.toStdString(), label.toStdString() );
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -776,10 +967,14 @@ OutputFileParam*
 UserParamHolder::createOutputFileParam(const QString& name,
                                        const QString& label)
 {
-    KnobOutputFilePtr knob = _holder->createOuptutFileKnob( name.toStdString(), label.toStdString() );
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobOutputFilePtr knob = h->createOuptutFileKnob( name.toStdString(), label.toStdString() );
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -794,10 +989,14 @@ PathParam*
 UserParamHolder::createPathParam(const QString& name,
                                  const QString& label)
 {
-    KnobPathPtr knob = _holder->createPathKnob( name.toStdString(), label.toStdString() );
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobPathPtr knob = h->createPathKnob( name.toStdString(), label.toStdString() );
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -812,10 +1011,14 @@ ButtonParam*
 UserParamHolder::createButtonParam(const QString& name,
                                    const QString& label)
 {
-    KnobButtonPtr knob = _holder->createButtonKnob( name.toStdString(), label.toStdString() );
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobButtonPtr knob = h->createButtonKnob( name.toStdString(), label.toStdString() );
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -830,10 +1033,14 @@ SeparatorParam*
 UserParamHolder::createSeparatorParam(const QString& name,
                                       const QString& label)
 {
-    KnobSeparatorPtr knob = _holder->createSeparatorKnob( name.toStdString(), label.toStdString() );
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobSeparatorPtr knob = h->createSeparatorKnob( name.toStdString(), label.toStdString() );
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -848,10 +1055,14 @@ GroupParam*
 UserParamHolder::createGroupParam(const QString& name,
                                   const QString& label)
 {
-    KnobGroupPtr knob = _holder->createGroupKnob( name.toStdString(), label.toStdString() );
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobGroupPtr knob = h->createGroupKnob( name.toStdString(), label.toStdString() );
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -866,12 +1077,11 @@ PageParam*
 UserParamHolder::createPageParam(const QString& name,
                                  const QString& label)
 {
-    if (!_holder) {
-        assert(false);
-
+    KnobHolder* h = holder();
+    if (!h) {
         return 0;
     }
-    KnobPagePtr knob = _holder->createPageKnob( name.toStdString(), label.toStdString() );
+    KnobPagePtr knob = h->createPageKnob( name.toStdString(), label.toStdString() );
     if (knob) {
         return new PageParam(knob);
     } else {
@@ -884,10 +1094,14 @@ UserParamHolder::createParametricParam(const QString& name,
                                        const QString& label,
                                        int nbCurves)
 {
-    KnobParametricPtr knob = _holder->createParametricKnob(name.toStdString(), label.toStdString(), nbCurves);
+    KnobHolder* h = holder();
+    if (!h) {
+        return 0;
+    }
+    KnobParametricPtr knob = h->createParametricKnob(name.toStdString(), label.toStdString(), nbCurves);
 
     if (knob) {
-        KnobPagePtr userPage = _holder->getOrCreateUserPageKnob();
+        KnobPagePtr userPage = h->getOrCreateUserPageKnob();
         if (userPage) {
             userPage->addKnob(knob);
         }
@@ -901,6 +1115,10 @@ UserParamHolder::createParametricParam(const QString& name,
 bool
 UserParamHolder::removeParam(Param* param)
 {
+    KnobHolder* h = holder();
+    if (!h) {
+        return false;
+    }
     if (!param) {
         return false;
     }
@@ -911,7 +1129,7 @@ UserParamHolder::removeParam(Param* param)
         return false;
     }
 
-    _holder->deleteKnob(param->getInternalKnob().get(), true);
+    h->deleteKnob(param->getInternalKnob().get(), true);
 
     return true;
 }
@@ -919,7 +1137,12 @@ UserParamHolder::removeParam(Param* param)
 PageParam*
 Effect::getUserPageParam() const
 {
-    KnobPagePtr page = getInternalNode()->getEffectInstance()->getOrCreateUserPageKnob();
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return NULL;
+    }
+    KnobPagePtr page = node->getEffectInstance()->getOrCreateUserPageKnob();
 
     assert(page);
 
@@ -929,14 +1152,23 @@ Effect::getUserPageParam() const
 void
 UserParamHolder::refreshUserParamsGUI()
 {
-    _holder->recreateUserKnobs(false);
+    KnobHolder* h = holder();
+    if (!h) {
+        return;
+    }
+    h->recreateUserKnobs(false);
 }
 
 
 Roto*
 Effect::getRotoContext() const
 {
-    RotoContextPtr roto = getInternalNode()->getRotoContext();
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return 0;
+    }
+    RotoContextPtr roto = node->getRotoContext();
 
     if (roto) {
         return new Roto(roto);
@@ -948,7 +1180,12 @@ Effect::getRotoContext() const
 Tracker*
 Effect::getTrackerContext() const
 {
-    TrackerContextPtr t = getInternalNode()->getTrackerContext();
+    NodePtr node = liveNode();
+
+    if (!node) {
+        return 0;
+    }
+    TrackerContextPtr t = node->getTrackerContext();
 
     if (t) {
         return new Tracker(t);
@@ -962,13 +1199,14 @@ Effect::getRegionOfDefinition(double time,
                               int view) const
 {
     RectD rod;
+    NodePtr node = liveNode();
 
-    if ( !getInternalNode() || !getInternalNode()->getEffectInstance() ) {
+    if (!node) {
         return rod;
     }
-    U64 hash = getInternalNode()->getHashValue();
+    U64 hash = node->getHashValue();
     bool isProject;
-    StatusEnum stat = getInternalNode()->getEffectInstance()->getRegionOfDefinition_public(hash, time, RenderScale::identity, ViewIdx(view), &rod, &isProject);
+    StatusEnum stat = node->getEffectInstance()->getRegionOfDefinition_public(hash, time, RenderScale::identity, ViewIdx(view), &rod, &isProject);
     if (stat != eStatusOK) {
         return RectD();
     }
@@ -979,10 +1217,12 @@ Effect::getRegionOfDefinition(double time,
 void
 Effect::setSubGraphEditable(bool editable)
 {
-    if ( !getInternalNode() ) {
+    NodePtr node = liveNode();
+
+    if (!node) {
         return;
     }
-    NodeGroup* isGroup = getInternalNode()->isEffectGroup();
+    NodeGroup* isGroup = node->isEffectGroup();
     if (isGroup) {
         isGroup->setSubGraphEditable(editable);
     }
@@ -1006,22 +1246,28 @@ Effect::addUserPlane(const QString& planeName,
         chans[i] = c;
     }
     ImagePlaneDesc comp(planeName.toStdString(),planeName.toStdString(), compsGlobal, chans);
+    NodePtr node = liveNode();
 
-    return getInternalNode()->addUserComponents(comp);
+    if (!node) {
+        return false;
+    }
+
+    return node->addUserComponents(comp);
 }
 
 std::list<ImageLayer>
 Effect::getAvailableLayers(int inputNb) const
 {
     std::list<ImageLayer> ret;
+    NodePtr node = liveNode();
 
-    if ( !getInternalNode() ) {
+    if (!node) {
         return ret;
     }
-    double time(getInternalNode()->getApp()->getTimeLine()->currentFrame());
+    double time(node->getApp()->getTimeLine()->currentFrame());
 
     std::list<ImagePlaneDesc> availComps;
-    getInternalNode()->getEffectInstance()->getAvailableLayers(time, ViewIdx(0), inputNb, &availComps);
+    node->getEffectInstance()->getAvailableLayers(time, ViewIdx(0), inputNb, &availComps);
     for (std::list<ImagePlaneDesc>::iterator it = availComps.begin(); it != availComps.end(); ++it) {
         ret.push_back(ImageLayer(*it));
     }
@@ -1033,7 +1279,7 @@ Effect::getAvailableLayers(int inputNb) const
 RectI
 Effect::getOutputFormat() const
 {
-    NodePtr node = getInternalNode();
+    NodePtr node = liveNode();
 
     if (!node) {
         return RectI();
@@ -1045,7 +1291,7 @@ Effect::getOutputFormat() const
 double
 Effect::getFrameRate() const
 {
-    NodePtr node = getInternalNode();
+    NodePtr node = liveNode();
 
     if (!node) {
         return 24.;
@@ -1057,7 +1303,7 @@ Effect::getFrameRate() const
 double
 Effect::getPixelAspectRatio() const
 {
-    NodePtr node = getInternalNode();
+    NodePtr node = liveNode();
 
     if (!node) {
         return 1.;
@@ -1069,7 +1315,7 @@ Effect::getPixelAspectRatio() const
 ImageBitDepthEnum
 Effect::getBitDepth() const
 {
-    NodePtr node = getInternalNode();
+    NodePtr node = liveNode();
 
     if (!node) {
         return eImageBitDepthFloat;
@@ -1081,7 +1327,7 @@ Effect::getBitDepth() const
 ImagePremultiplicationEnum
 Effect::getPremult() const
 {
-    NodePtr node = getInternalNode();
+    NodePtr node = liveNode();
 
     if (!node) {
         return eImagePremultiplicationPremultiplied;
@@ -1093,7 +1339,9 @@ Effect::getPremult() const
 void
 Effect::setPagesOrder(const QStringList& pages)
 {
-    if ( !getInternalNode() ) {
+    NodePtr node = liveNode();
+
+    if (!node) {
         return;
     }
 
@@ -1101,7 +1349,7 @@ Effect::setPagesOrder(const QStringList& pages)
     for (QStringList::const_iterator it = pages.begin(); it != pages.end(); ++it) {
         order.push_back( it->toStdString() );
     }
-    getInternalNode()->setPagesOrder(order);
+    node->setPagesOrder(order);
 }
 
 NATRON_PYTHON_NAMESPACE_EXIT
