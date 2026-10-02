@@ -322,8 +322,8 @@ jobs:
               pkg-config --modversion Magick++ || { echo "::error::Magick++ not found after the ImageMagick build"; exit 1; }
               echo "ImageMagick delegates: $(/usr/local/bin/magick -version | sed -n "s/^Delegates (built-in): //p")"
 
-              # The AppImage must bundle the image's HarfBuzz (its Qt needs it, old hosts
-              # are too old), but that copy was built without GLib, while Rocky's pango
+              # The AppImage must bundle the build image HarfBuzz (its Qt needs it, old hosts
+              # are too old), but that copy was built without GLib, while the Rocky pango
               # (Arena.ofx: Text, ReadSVG) was built against a GLib-enabled HarfBuzz:
               # "libpangoft2-1.0.so.0: undefined symbol: hb_glib_script_from_script" on
               # every distro. Rebuild the same HarfBuzz version in place with GLib on.
