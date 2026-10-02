@@ -330,15 +330,32 @@ jobs:
               hb_so=$(ls /usr/local/lib*/libharfbuzz.so.0 | head -1)
               hb_real=$(readlink -f "$hb_so")
               hb_libdir=$(basename "$(dirname "$hb_so")")
+              echo "== HarfBuzz files in the image:"; ls -la /usr/local/lib*/libharfbuzz* /usr/local/include/harfbuzz/hb-version.h 2>&1 | sed "s/^/   /"
               # /usr/local ships no harfbuzz.pc (pkg-config would answer with the Rocky 1.7.5
-              # devel package), so the version comes from the libtool file name:
-              # libharfbuzz.so.0.<major*10000 + minor*100 + micro>.0
-              hb_num=$(echo "$hb_real" | sed -E "s/.*\.so\.0\.([0-9]+)\.0$/\1/")
-              case "$hb_num" in ""|*[!0-9]*) echo "::error::cannot read the HarfBuzz version from $hb_real"; exit 1;; esac
-              HB_VER="$((hb_num / 10000)).$(((hb_num / 100) % 100)).$((hb_num % 100))"
+              # devel package) and its library name does not follow the libtool scheme, so
+              # the version comes from hb-version.h, or from the version literal that
+              # hb_version_string() keeps in the library.
+              HB_VER=""
+              if [ -f /usr/local/include/harfbuzz/hb-version.h ]; then
+                HB_VER=$(sed -nE "s/^#define HB_VERSION_STRING \"([0-9.]+)\".*/\1/p" /usr/local/include/harfbuzz/hb-version.h)
+              fi
+              if [ -z "$HB_VER" ]; then
+                HB_VER=$(strings -n 5 "$hb_real" | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | head -1)
+              fi
+              if [ -z "$HB_VER" ]; then
+                echo "::error::cannot determine the HarfBuzz version of $hb_real"
+                strings -n 5 "$hb_real" | grep -E "^[0-9]+\.[0-9]+" | head -20
+                exit 1
+              fi
               echo "== HarfBuzz $HB_VER ($hb_real) rebuilt with GLib (in $hb_libdir; Rocky pango needs hb_glib_*)"
               command -v meson >/dev/null || python3 -m pip install -q meson
-              curl -fsSL "https://github.com/harfbuzz/harfbuzz/releases/download/$HB_VER/harfbuzz-$HB_VER.tar.xz" | tar -xJ -C /tmp
+              rm -rf "/tmp/harfbuzz-$HB_VER"
+              if ! curl -fsSL "https://github.com/harfbuzz/harfbuzz/releases/download/$HB_VER/harfbuzz-$HB_VER.tar.xz" | tar -xJ -C /tmp; then
+                echo "no release tarball for $HB_VER; using the tag archive"
+                rm -rf "/tmp/harfbuzz-$HB_VER"
+                curl -fsSL "https://github.com/harfbuzz/harfbuzz/archive/refs/tags/$HB_VER.tar.gz" | tar -xz -C /tmp
+              fi
+              [ -d "/tmp/harfbuzz-$HB_VER" ] || { echo "::error::no HarfBuzz $HB_VER source could be downloaded"; exit 1; }
               ( cd "/tmp/harfbuzz-$HB_VER" \
                 && run "HarfBuzz setup" hb-cfg.log meson setup build --prefix=/usr/local --libdir="$hb_libdir" \
                      --buildtype=release -Dglib=enabled -Dgobject=disabled -Dfreetype=enabled \
