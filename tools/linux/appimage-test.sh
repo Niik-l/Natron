@@ -11,6 +11,9 @@
 #      AppImage excludelist), with the distro's own package manager;
 #   2. libs:     every bundled ELF file resolves (ldd through the bundled RPATHs);
 #   3. headless: `Natron --version` starts and exits normally;
+#   3b. arena:   NatronRenderer renders an SVG to PNG through the bundled
+#                Arena.ofx (openfx-arena: ReadSVG via librsvg/cairo), the
+#                plugin with by far the most bundled runtime libraries;
 #   4. gui:      the full GUI comes up under Xvfb on Mesa's software GL and
 #                is still running after a settle time; <outdir>/screenshot.png
 #                is grabbed then, and a gdb backtrace is taken if it crashed.
@@ -18,7 +21,7 @@
 #                handler calls quitApplication() from signal context, which
 #                intermittently aborts ("QThread: Destroyed while thread is
 #                still running"); a failure here gets a backtrace too.
-# Exit status is non-zero if any of 2-4 failed.
+# Exit status is non-zero if any of 2-3b-4 failed.
 set -uo pipefail
 
 LABEL=${1:?label}
@@ -118,6 +121,31 @@ if QT_QPA_PLATFORM=offscreen timeout 120 squashfs-root/AppRun --version > "$OUT/
     cat "$OUT/headless.log"; note headless ok
 else
     rc=$?; cat "$OUT/headless.log"; echo "exit $rc"; note headless FAIL
+fi
+
+# ---- 3b. Arena.ofx renders an SVG headless ----------------------------------
+echo "== Arena.ofx: ReadSVG -> PNG headless"
+cat > "$OUT/arena.svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+  <rect width="400" height="300" fill="#202830"/>
+  <circle cx="200" cy="150" r="90" fill="#ff8800"/>
+  <text x="200" y="160" font-size="40" text-anchor="middle" fill="white">SVG</text>
+</svg>
+SVG
+rm -f "$OUT/arena.png"; mkdir -p /tmp/home
+# Same environment AppRun gives Natron (APPDIR + the linuxdeploy hooks), in a
+# subshell so none of it leaks into the GUI step below.
+(
+    export APPDIR="$PWD/squashfs-root"
+    for hook in "$APPDIR"/apprun-hooks/*.sh; do [ -f "$hook" ] && . "$hook"; done
+    ARENA_SVG="$OUT/arena.svg" ARENA_OUT="$OUT/arena.png" QT_QPA_PLATFORM=offscreen HOME=/tmp/home \
+        timeout 300 "$APPDIR/usr/bin/NatronRenderer" -t "$TOOLS/appimage-arena-probe.py"
+) > "$OUT/arena.log" 2>&1 || true
+grep -E "ARENA_PLUGIN_COUNT|RENDERED_PNG_BYTES|RESULT|Error|error|Traceback" "$OUT/arena.log" | head -20
+if grep -q "RESULT DONE_OK" "$OUT/arena.log" && [ -s "$OUT/arena.png" ]; then
+    note arena ok
+else
+    tail -40 "$OUT/arena.log"; note arena FAIL
 fi
 
 # ---- 4. GUI under Xvfb -------------------------------------------------------

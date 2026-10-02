@@ -29,6 +29,13 @@ for p in Misc CImg IO Arena; do
     mkdir -p "$d"; cp "$src" "$d/"
 done
 
+# Arena.ofx's ImageMagick (built into /usr/local for the portable build) reads
+# its config (delegates, colors, policy) from etc/ImageMagick-7; ship it like
+# the Windows package does. AppRun points MAGICK_CONFIGURE_PATH at it.
+for e in /usr/local/etc/ImageMagick-7 /etc/ImageMagick-7; do
+    if [ -d "$e" ]; then mkdir -p "$D/etc"; cp -r "$e" "$D/etc/"; break; fi
+done
+
 cp -r "$B/Plugins/PyPlugs/." "$D/Plugins/PyPlugs/"
 cp -r natron-plugins/. "$D/Plugins/PyPlugs/"
 rm -rf "$D/Plugins/PyPlugs/.git" "$D/Plugins/PyPlugs/.github"

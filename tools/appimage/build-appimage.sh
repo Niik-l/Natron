@@ -128,6 +128,10 @@ export APPDIR="${APPDIR:-$this_dir}"
 for hook in "$this_dir"/apprun-hooks/*.sh; do
     [ -f "$hook" ] && . "$hook"
 done
+# ImageMagick (Arena.ofx) config shipped with the tree, see tools/linux/package.sh.
+if [ -d "$this_dir/usr/etc/ImageMagick-7" ]; then
+    export MAGICK_CONFIGURE_PATH="$this_dir/usr/etc/ImageMagick-7"
+fi
 exec "$this_dir/usr/bin/Natron" "$@"
 EOF
 chmod +x "$WORK/AppRun"
