@@ -145,6 +145,10 @@ AddMultipleNodesCommand::undo()
 
     for (std::list<NodeGuiWPtr>::const_iterator it = _nodes.begin(); it != _nodes.end(); ++it) {
         NodeGuiPtr node = it->lock();
+        // Destroyed since (Effect.destroy() from Python): nothing left to undo.
+        if ( !node || !node->getNode() || !node->getNode()->getEffectInstance() ) {
+            continue;
+        }
         std::list<ViewerInstance* > viewers;
         node->getNode()->hasViewersConnected(&viewers);
         for (std::list<ViewerInstance* >::iterator it2 = viewers.begin(); it2 != viewers.end(); ++it2) {
@@ -177,7 +181,15 @@ AddMultipleNodesCommand::redo()
     std::list<ViewerInstance*> viewersToRefresh;
     std::list<NodeGuiPtr> nodes;
     for (std::list<NodeGuiWPtr>::const_iterator it = _nodes.begin(); it != _nodes.end(); ++it) {
-        nodes.push_back( it->lock() );
+        NodeGuiPtr node = it->lock();
+        // Destroyed since (Effect.destroy() from Python): nothing left to redo.
+        if ( !node || !node->getNode() || !node->getNode()->getEffectInstance() ) {
+            continue;
+        }
+        nodes.push_back(node);
+    }
+    if ( nodes.empty() ) {
+        return;
     }
     if (_firstRedoCalled) {
         for (std::list<NodeGuiPtr> ::const_iterator it = nodes.begin(); it != nodes.end(); ++it) {

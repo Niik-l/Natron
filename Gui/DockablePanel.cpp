@@ -457,7 +457,13 @@ DockablePanel::DockablePanel(Gui* gui,
 
 DockablePanel::~DockablePanel()
 {
-    
+    // Gui keeps the open panels as raw pointers (addVisibleDockablePanel walks
+    // them to enforce the max-panels setting). A panel deleted while open, which
+    // NodeGui::destroyGui does for a node destroyed from Python, must leave that
+    // list or the next panel opened dereferences it.
+    if (_imp->_gui) {
+        _imp->_gui->removeVisibleDockablePanel(this);
+    }
 }
 
 bool

@@ -2706,6 +2706,18 @@ NodeGui::destroyGui()
     //Remove undo stack
     removeUndoStack();
 
+    // Effect.destroy() (Python) reaches here without the GUI hide the Delete
+    // key gets through Node::deactivate(): deactivate() skips its deactivated()
+    // signal for a node being destroyed and leaves the GUI to this function.
+    // Hide the item and take it out of the scene now. Anything still holding a
+    // NodeGuiPtr (a move/add undo command, a hint pointer) would otherwise keep
+    // a ghost node in the graph that can be clicked and dragged, which
+    // dereferences the reset EffectInstance (crash in NodeGraph::checkForHints).
+    hide();
+    setActive(false);
+    if ( scene() ) {
+        scene()->removeItem(this);
+    }
 
     NodeGuiPtr thisShared = shared_from_this();
 

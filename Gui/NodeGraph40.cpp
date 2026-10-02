@@ -406,6 +406,12 @@ NodeGraph::deleteNodePermanantly(const NodeGuiPtr& n)
         n->setUserSelected(false);
         _imp->_selection.erase(found);
     }
+    if (_imp->_magnifiedNode == n) {
+        _imp->_magnifiedNode.reset();
+    }
+    if (_imp->_mergeHintNode == n) {
+        _imp->_mergeHintNode.reset();
+    }
 } // deleteNodePermanantly
 
 void

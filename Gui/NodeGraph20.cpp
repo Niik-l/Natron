@@ -60,6 +60,11 @@ NodeGraph::checkForHints(bool shiftdown,
                          const QRectF& visibleSceneR)
 {
     NodePtr internalNode = selectedNode->getNode();
+    // A node destroyed from Python while its item was still selected has no
+    // effect (or no node) any more; there is nothing to hint about.
+    if ( !internalNode || !internalNode->getEffectInstance() ) {
+        return;
+    }
     bool doMergeHints = shiftdown && controlDown;
     // Nuke-style: edge-insert hints on a plain drag, no modifier needed.
     // (Previously gated on Ctrl.) Safe because fully-connected nodes are
