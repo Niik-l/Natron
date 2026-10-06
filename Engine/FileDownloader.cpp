@@ -60,7 +60,7 @@ FileDownloader::FileDownloader(const QUrl& imageUrl,
 
     m_reply = m_WebCtrl->get(request);
     m_timer->start();
-    QObject::connect( m_reply, SIGNAL(error(QNetworkReply::NetworkError)), this, SIGNAL(error()) );
+    QObject::connect( m_reply, SIGNAL(errorOccurred(QNetworkReply::NetworkError)), this, SIGNAL(error()) ); // Qt 6 name (was error())
     QObject::connect( m_reply, SIGNAL(downloadProgress(qint64,qint64)), this, SLOT(onDownloadProgress(qint64,qint64)) );
 }
 
