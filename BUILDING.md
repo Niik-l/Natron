@@ -521,6 +521,10 @@ cp /c/msys64/mingw64/bin/*.dll .
 # Qt6 platform plugin (required for windowing)
 mkdir -p platforms
 cp /c/msys64/mingw64/share/qt6/plugins/platforms/qwindows.dll platforms/
+# Qt6 image-format plugins (JPEG/TIFF/WebP/SVG... for PySide6 scripts; Qt has only PNG built in).
+# Needs mingw-w64-x86_64-qt6-imageformats and -qt6-svg installed.
+mkdir -p imageformats
+cp /c/msys64/mingw64/share/qt6/plugins/imageformats/*.dll imageformats/
 
 # Python standard library (required for scripting)
 # Check your Python version with: python3 --version

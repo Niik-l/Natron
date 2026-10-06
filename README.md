@@ -52,7 +52,7 @@ chmod +x Natron-2.6-linux-x86_64.AppImage
 
 It bundles the same things as the Windows archive: Qt, Python, OpenImageIO/OpenColorIO, OpenVDB, Cycles, FFmpeg (with x264/x265) and the openfx-io, openfx-misc and openfx-arena plugins. It needs only what a desktop provides (X11, Mesa or a vendor GL driver, fontconfig). On a Wayland desktop it runs through XWayland. Inside a container without FUSE, add `--appimage-extract-and-run`. `NatronRenderer` for command-line rendering is inside the AppImage: `./Natron-*.AppImage --appimage-extract` and use `squashfs-root/usr/bin/NatronRenderer`. Each release names the commit it was built from; a matching debug-symbols tarball is attached for crash backtraces.
 
-Verified on Rocky 8/9, AlmaLinux 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch and openSUSE Leap 15.6 (CI, software GL) and on an NVIDIA RTX 4090 (GUI, 3D viewport, FastVolumeRender on Vulkan, Cycles). Not yet tried: a native Wayland session, AMD or Intel GPUs. NixOS needs its AppImage wrapper; Alpine (musl) is not supported.
+Verified on Rocky 8/9, AlmaLinux 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch and openSUSE Leap 15.6 (CI, software GL) and on an NVIDIA RTX 4090 (GUI, 3D viewport, FastVolumeRender on Vulkan, Cycles). The 2026.10.02 AppImage crashed at startup on NVIDIA desktops; use 2026.10.06 or later. Not yet tried: a native Wayland session, AMD or Intel GPUs. NixOS needs its AppImage wrapper; Alpine (musl) is not supported.
 
 **Optional, but recommended:**
 

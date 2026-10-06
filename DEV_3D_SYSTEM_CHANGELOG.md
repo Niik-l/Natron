@@ -17,6 +17,37 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Linux: startup crash with NVIDIA drivers fixed (2026-10-05, issue #2, shipped in 2026.10.06)** —
+  the 10.02 AppImage segfaulted in `QPlatformBackingStore::rhiFlush` at first paint on NVIDIA
+  (Ubuntu 24.04, Mint 22.3; Qt shader compile with an empty log). Cause: Natron releases its
+  own GLX contexts by binding None, and the GLX current context is per thread, so on the GUI
+  thread this unbound Qt's compositor context (plugin GL detach on node create/destroy, the
+  context pool's first-context probe). `OSGLContext_x11` now keeps a registry of Natron's
+  contexts and a thread-local record of the foreign (Qt) context/drawable/display current when
+  one of ours was bound, restored on release via `glXMakeContextCurrent`. `restoreGuiGeometry()`
+  also called `showMaximized()` inside `setupUi()` (before the UI and GL widgets existed); the
+  saved state is applied on the next event-loop turn. AppRun exports
+  `__GL_THREADED_OPTIMIZATIONS=0` unless user-set. Confirmed by two NVIDIA users, including with
+  threaded optimizations forced on. Also: Qt 6 `errorOccurred` in FileDownloader.
+- **Windows package: Qt image-format plugins (2026-10-06)** — PySide6 scripts/PyPlugs using
+  `QImage`/`QPixmap` could only write PNG (only `platforms/qwindows.dll` was shipped). `06-install`
+  now copies `imageformats/` (JPEG, TIFF, WebP, SVG, GIF, ICO, ICNS, TGA, MNG, WBMP, JP2; packages
+  qt6-imageformats + qt6-svg) and `07-verify` requires jpg/tiff/webp. Natron's own I/O (OIIO)
+  was never affected; Linux already bundled the set.
+- **Python `Effect.destroy()` crash class (2026-10-02)** — `destroy()` left a draggable ghost
+  node (drag -> SIGSEGV in `NodeGraph::checkForHints`) because `Node::deactivate()` skips its GUI
+  hide for a node being destroyed and `NodeGui::destroyGui()` never hid the item; the deleted
+  settings panel also stayed in `Gui`'s open-panels list (crash when creating the next node).
+  Fixed: destroyGui hides/removes the item, DockablePanel's dtor leaves the list, hint and undo
+  guards. The Python API now raises `RuntimeError` for any call on a destroyed node
+  (`Effect::liveNode()`/`UserParamHolder::holder()` throw; wrappers generated with
+  `exception-handling="yes"` — a `PyErr_SetString` inside a wrapped C++ method is NOT propagated
+  by this shiboken). `destroy()` completes on the next event-loop turn.
+- **openfx-arena on Linux too (2026-10-02)** — the AppImage builds and ships `Arena.ofx`
+  (Rocky/EPEL packages + libcdr 0.1.9 and ImageMagick 7.1.2 from source; the image's HarfBuzz
+  rebuilt with GLib, without which Rocky's pango fails to load: `hb_glib_script_from_script`).
+  The 9-distro matrix now renders an SVG through the bundled plugin, which is what caught that.
+  README lists openfx-arena as bundled on both platforms.
 - **openfx-arena in the Windows package (2026-10-01)** — user feedback: no SVG import.
   ReadSVG lives in openfx-arena, which the fork had never built on either platform (the
   README had wrongly claimed it until 2026-09-21). `tools/win-build` now clones, patches,
@@ -28,7 +59,7 @@ Recent milestones:
   Verified headless: ReadSVG -> Write renders a test SVG to PNG. Arena carries its own copy of
   OpenFX-IO's GenericReader/GenericOCIO (newer than our pinned openfx-io; our colorspace patch
   does not apply there), so its readers may still show the old `default`-colorspace
-  behaviour under ACES — check in the GUI. Linux (ASWF image) still to do.
+  behaviour under ACES — check in the GUI. Linux followed on 2026-10-02 (entry above).
 - **Preferences > 3D Viewport page (2026-09-21)** — from VIEWPORT3D_SETTINGS_PLAN.md.
   User doc + screenshot: [wiki: 3D Viewport preferences](https://github.com/Niik-l/Natron/wiki/3D-Viewport-Preferences)
   ([image](https://raw.githubusercontent.com/wiki/Niik-l/Natron/images/viewport3d-preferences.png)).
