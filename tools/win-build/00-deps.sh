@@ -11,6 +11,7 @@ log "Installing core build + runtime dependencies"
 pacman -S --needed --noconfirm \
   mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake git \
   mingw-w64-x86_64-qt6-base mingw-w64-x86_64-pyside6 mingw-w64-x86_64-shiboken6 \
+  mingw-w64-x86_64-qt6-imageformats mingw-w64-x86_64-qt6-svg \
   mingw-w64-x86_64-python mingw-w64-x86_64-python-qtpy mingw-w64-x86_64-boost \
   mingw-w64-x86_64-cairo mingw-w64-x86_64-expat mingw-w64-x86_64-openvdb \
   mingw-w64-x86_64-alembic \

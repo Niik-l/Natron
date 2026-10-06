@@ -32,6 +32,13 @@ grep -q "eu.cimg."  <<<"$out" || die "CImg.ofx not loaded"
 grep -q "net.fxarena.openfx.ReadSVG" <<<"$out" || die "Arena.ofx not loaded (ReadSVG missing)"
 ok "OFX plugins loaded (openfx-io + CImg + Arena)"
 
+# Qt image-format plugins (imageformats/qjpeg.dll etc.): jpg, tif, webp must be writable.
+fmts="$(grep "RESULT QT_IMAGE_WRITE_FORMATS:" <<<"$out" || true)"
+for f in jpg tiff webp; do
+  grep -qw "$f" <<<"$fmts" || die "Qt image format '$f' missing (imageformats/ plugins not installed): $fmts"
+done
+ok "Qt image-format plugins present (jpg, tiff, webp)"
+
 if grep -qi "Failed to import qtpy" <<<"$out"; then warn "qtpy import warning present (check DLL bundling in App/ and Renderer/)"
 else ok "qtpy OK"; fi
 ok "Phase 07 (verify) complete — install at $I is good"

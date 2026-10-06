@@ -13,6 +13,12 @@ try:
     for key in ["read", "write", "blur", "merge", "transform",
                 "cimg", "cycles", "grade", "shuffle", "roto"]:
         print("RESULT CHECK %-10s -> %s" % (key, find(key)))
+
+    # Qt image-format plugins (imageformats/): PySide6 scripts write JPEG/TIFF/WebP
+    # through these; PNG alone means the folder is missing from the install.
+    from PySide6.QtGui import QImageWriter
+    fmts = sorted(bytes(f).decode() for f in QImageWriter.supportedImageFormats())
+    print("RESULT QT_IMAGE_WRITE_FORMATS:", " ".join(fmts))
     print("RESULT DONE_OK")
 except Exception as e:
     import traceback

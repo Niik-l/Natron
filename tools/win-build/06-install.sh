@@ -31,6 +31,13 @@ cp "$B/App/Natron.exe" "$I/App/"
 cp "$MINGW"/bin/*.dll "$I/App/"
 fix_oidn "$I/App"
 cp "$MINGW/share/qt6/plugins/platforms/qwindows.dll" "$I/App/platforms/"
+# Qt image-format plugins: Qt has only PNG/BMP/PPM built in; JPEG, TIFF, WebP, SVG,
+# GIF, ICO... are plugins. Natron itself reads images through OpenImageIO, but
+# PySide6 scripts and PyPlugs using QImage/QPixmap had no JPEG writer in the
+# portable (user report 2026-10-04). The Linux AppImage already bundles the set.
+# Their extra DLLs (libmng-2, Qt6Svg) come with the bin/*.dll sweep above.
+mkdir -p "$I/App/imageformats"
+cp "$MINGW"/share/qt6/plugins/imageformats/*.dll "$I/App/imageformats/"
 
 # --- Headless renderer (optional) ---
 if [ "${STAGE_RENDERER:-1}" = "1" ]; then
@@ -40,6 +47,8 @@ if [ "${STAGE_RENDERER:-1}" = "1" ]; then
   cp "$MINGW"/bin/*.dll "$I/Renderer/"
   fix_oidn "$I/Renderer"
   cp "$MINGW/share/qt6/plugins/platforms/qwindows.dll" "$I/Renderer/platforms/"
+  mkdir -p "$I/Renderer/imageformats"
+  cp "$MINGW"/share/qt6/plugins/imageformats/*.dll "$I/Renderer/imageformats/"
 fi
 
 # FastVolumeRender runtime: wgpu-native isn't an MSYS2 package, so the DLL
