@@ -639,16 +639,23 @@ GuiPrivate::restoreGuiGeometry()
         QRect screen = desktop->availableGeometry();
         _gui->resize( (int)( 0.93 * screen.width() ), (int)( 0.93 * screen.height() ) ); // leave some space
     }
+    // Maximizing or going full screen here shows the window before setupUi() has built
+    // it, so its first expose (and Qt's compositor context) races the creation of the GL
+    // viewer widgets; on NVIDIA/Linux that crashed in QPlatformBackingStore::rhiFlush
+    // (issue #2). Let GuiAppInstance::load() show the window normally first, then apply
+    // the saved state on the next event-loop turn.
     if ( settings.contains( QString::fromUtf8("maximized")) ) {
         bool maximized = settings.value( QString::fromUtf8("maximized") ).toBool();
         if (maximized) {
-            _gui->showMaximized();
+            Gui* gui = _gui;
+            QTimer::singleShot(0, gui, [gui]() { gui->showMaximized(); });
         }
     }
     if ( settings.contains( QString::fromUtf8("fullScreen") ) ) {
         bool fs = settings.value( QString::fromUtf8("fullScreen") ).toBool();
         if (fs) {
-            _gui->toggleFullScreen();
+            Gui* gui = _gui;
+            QTimer::singleShot(0, gui, [gui]() { if ( !gui->isFullScreen() ) { gui->toggleFullScreen(); } });
         }
     }
 

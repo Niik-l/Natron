@@ -132,6 +132,13 @@ done
 if [ -d "$this_dir/usr/etc/ImageMagick-7" ]; then
     export MAGICK_CONFIGURE_PATH="$this_dir/usr/etc/ImageMagick-7"
 fi
+# NVIDIA: the driver's threaded optimizations raced Qt's window compositor against
+# Natron's own GL contexts on the first paint (issue #2: shader compile with an empty
+# log, then a crash in QPlatformBackingStore::rhiFlush). The driver reads this when
+# libGL loads, so it has to be set here, not in main(). Respect a user's own setting.
+if [ -z "${__GL_THREADED_OPTIMIZATIONS+x}" ]; then
+    export __GL_THREADED_OPTIMIZATIONS=0
+fi
 exec "$this_dir/usr/bin/Natron" "$@"
 EOF
 chmod +x "$WORK/AppRun"

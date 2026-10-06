@@ -30,6 +30,9 @@
 #include <stdexcept>
 #include <iostream>
 #include <sstream> // stringstream
+#include <set>
+
+#include <QtCore/QMutex>
 
 #include <dlfcn.h>
 
@@ -127,6 +130,9 @@ typedef XVisualInfo* (*PFNGLXGETVISUALFROMFBCONFIGPROC)(Display*, GLXFBConfig);
 typedef GLXWindow (*PFNGLXCREATEWINDOWPROC)(Display*, GLXFBConfig, Window, const int*);
 typedef void (*PFNGLXDESTROYWINDOWPROC)(Display*, GLXWindow);
 typedef void (*PFNGLXMAKECONTEXTCURRENTPROC)(Display*, GLXDrawable, GLXDrawable, GLXContext);
+typedef GLXDrawable (*PFNGLXGETCURRENTDRAWABLEPROC)();
+typedef GLXDrawable (*PFNGLXGETCURRENTREADDRAWABLEPROC)();
+typedef Display* (*PFNGLXGETCURRENTDISPLAYPROC)();
 typedef Bool (*PFNGLXISDIRECT)(Display*, GLXContext);
 
 // https://www.opengl.org/registry/specs/MESA/glx_query_renderer.txt
@@ -178,6 +184,9 @@ struct OSGLContext_glx_dataPrivate
     PFNGLXCREATEWINDOWPROC CreateWindow;
     PFNGLXDESTROYWINDOWPROC DestroyWindow;
     PFNGLXMAKECONTEXTCURRENTPROC MakeContextCurrent;
+    PFNGLXGETCURRENTDRAWABLEPROC GetCurrentDrawable;
+    PFNGLXGETCURRENTREADDRAWABLEPROC GetCurrentReadDrawable;
+    PFNGLXGETCURRENTDISPLAYPROC GetCurrentDisplay;
     PFNGLXISDIRECT IsDirect;
 
     // GLX 1.4 and extension functions
@@ -330,6 +339,9 @@ OSGLContext_x11::initGLXData(OSGLContext_glx_data* glxInfo)
     glxInfo->_imp->GetProcAddressARB = (PFNGLXGETPROCADDRESSPROC)dlsym(glxInfo->_imp->handle, "glXGetProcAddressARB");
     glxInfo->_imp->GetVisualFromFBConfig = (PFNGLXGETVISUALFROMFBCONFIGPROC)dlsym(glxInfo->_imp->handle, "glXGetVisualFromFBConfig");
     glxInfo->_imp->MakeContextCurrent = (PFNGLXMAKECONTEXTCURRENTPROC)dlsym(glxInfo->_imp->handle, "glXMakeContextCurrent");
+    glxInfo->_imp->GetCurrentDrawable = (PFNGLXGETCURRENTDRAWABLEPROC)dlsym(glxInfo->_imp->handle, "glXGetCurrentDrawable");
+    glxInfo->_imp->GetCurrentReadDrawable = (PFNGLXGETCURRENTREADDRAWABLEPROC)dlsym(glxInfo->_imp->handle, "glXGetCurrentReadDrawable");
+    glxInfo->_imp->GetCurrentDisplay = (PFNGLXGETCURRENTDISPLAYPROC)dlsym(glxInfo->_imp->handle, "glXGetCurrentDisplay");
     glxInfo->_imp->IsDirect = (PFNGLXISDIRECT)dlsym(glxInfo->_imp->handle, "glXIsDirect");
 
     if ( !glxInfo->_imp->QueryExtension(glxInfo->_imp->x11.display, &glxInfo->_imp->errorBase, &glxInfo->_imp->eventBase) ) {
@@ -783,6 +795,36 @@ OSGLContext_x11Private::createContextGLX(OSGLContext_glx_data* glxInfo,
 #undef setGLXattrib
 
 
+namespace {
+// The GLX contexts Natron created. A context current on a thread that is not one of
+// these belongs to Qt (its window compositor, or a QOpenGLWidget on the GUI thread).
+QMutex natronGLXContextsMutex;
+std::set<GLXContext> natronGLXContexts;
+
+bool
+isNatronGLXContext(GLXContext ctx)
+{
+    QMutexLocker k(&natronGLXContextsMutex);
+
+    return natronGLXContexts.find(ctx) != natronGLXContexts.end();
+}
+
+// What Qt had current on this thread when Natron bound one of its own contexts, put back
+// when Natron releases it. Releasing by binding None instead unbound Qt's context under
+// its feet: the GLX current context is per thread, not per Display connection. On
+// NVIDIA/Linux Qt's backing-store shader then failed to compile (empty log) and
+// QPlatformBackingStore::rhiFlush crashed on the first paint (issue #2).
+struct ForeignGLXCurrent
+{
+    Display* display = 0;
+    GLXDrawable draw = 0;
+    GLXDrawable read = 0;
+    GLXContext context = 0;
+    bool valid = false;
+};
+thread_local ForeignGLXCurrent foreignGLXCurrent;
+} // namespace
+
 OSGLContext_x11::OSGLContext_x11(const FramebufferConfig& pixelFormatAttrs,
                                  int major,
                                  int minor,
@@ -801,6 +843,10 @@ OSGLContext_x11::OSGLContext_x11(const FramebufferConfig& pixelFormatAttrs,
     ChooseVisualGLX(glxInfo, pixelFormatAttrs, &visual, &depth);
     _imp->createWindow(glxInfo, visual, depth);
     _imp->createContextGLX(glxInfo, pixelFormatAttrs, major, minor, coreProfile, rendererID.renderID, shareContext);
+    if (_imp->glxContextHandle) {
+        QMutexLocker k(&natronGLXContextsMutex);
+        natronGLXContexts.insert(_imp->glxContextHandle);
+    }
 }
 
 OSGLContext_x11::~OSGLContext_x11()
@@ -815,9 +861,12 @@ OSGLContext_x11::~OSGLContext_x11()
         _imp->glxWindowHandle = 0;
     }
     if (_imp->glxContextHandle) {
-
+        {
+            QMutexLocker k(&natronGLXContextsMutex);
+            natronGLXContexts.erase(_imp->glxContextHandle);
+        }
         if (glxInfo->_imp->GetCurrentContext() == _imp->glxContextHandle) {
-            glxInfo->_imp->MakeCurrent(glxInfo->_imp->x11.display, None, NULL);
+            makeContextCurrent(0);
         }
         glxInfo->_imp->DestroyContext(glxInfo->_imp->x11.display, _imp->glxContextHandle);
         _imp->glxContextHandle = 0;
@@ -836,10 +885,34 @@ OSGLContext_x11::makeContextCurrent(const OSGLContext_x11* context)
     }
 
     if (context) {
+        // Binding one of ours over a context that is not ours (Qt's): remember it so that
+        // makeContextCurrent(0) restores it instead of leaving the thread without a context.
+        GLXContext cur = glxInfo->_imp->GetCurrentContext();
+        if ( cur && (cur != context->_imp->glxContextHandle) && !isNatronGLXContext(cur)
+             && glxInfo->_imp->GetCurrentDisplay && glxInfo->_imp->GetCurrentDrawable ) {
+            foreignGLXCurrent.display = glxInfo->_imp->GetCurrentDisplay();
+            foreignGLXCurrent.draw = glxInfo->_imp->GetCurrentDrawable();
+            foreignGLXCurrent.read = glxInfo->_imp->GetCurrentReadDrawable ? glxInfo->_imp->GetCurrentReadDrawable() : foreignGLXCurrent.draw;
+            foreignGLXCurrent.context = cur;
+            foreignGLXCurrent.valid = (foreignGLXCurrent.display != 0);
+        }
+
         return glxInfo->_imp->MakeCurrent(glxInfo->_imp->x11.display, context->_imp->glxWindowHandle, context->_imp->glxContextHandle);
-    } else {
-        return glxInfo->_imp->MakeCurrent(glxInfo->_imp->x11.display, None, NULL);
     }
+
+    if (foreignGLXCurrent.valid) {
+        ForeignGLXCurrent f = foreignGLXCurrent;
+        foreignGLXCurrent.valid = false;
+        if (glxInfo->_imp->MakeContextCurrent) {
+            glxInfo->_imp->MakeContextCurrent(f.display, f.draw, f.read, f.context);
+
+            return true;
+        }
+
+        return glxInfo->_imp->MakeCurrent(f.display, f.draw, f.context);
+    }
+
+    return glxInfo->_imp->MakeCurrent(glxInfo->_imp->x11.display, None, NULL);
 }
 
 bool
