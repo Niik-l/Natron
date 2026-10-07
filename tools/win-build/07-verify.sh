@@ -6,6 +6,7 @@ require_mingw
 I="$INSTALL_DIR"
 SCRIPT="$HERE/verify_natron.py"
 [ -f "$SCRIPT" ] || die "verify_natron.py not found next to the scripts"
+export NATRON_PYPLUGS_DIR="$I/Plugins/PyPlugs"   # verify_natron.py checks every PyPlug's node IDs exist
 
 # Prefer the headless renderer; fall back to the GUI binary in interpreter mode.
 if [ -f "$I/Renderer/NatronRenderer.exe" ]; then BIN_DIR="$I/Renderer"; BIN="NatronRenderer.exe"
@@ -30,7 +31,20 @@ else ok "Cycles intentionally absent (WITH_CYCLES=0)"; fi
 grep -q "WriteOIIO" <<<"$out" || die "openfx-io (WriteOIIO) not loaded"
 grep -q "eu.cimg."  <<<"$out" || die "CImg.ofx not loaded"
 grep -q "net.fxarena.openfx.ReadSVG" <<<"$out" || die "Arena.ofx not loaded (ReadSVG missing)"
-ok "OFX plugins loaded (openfx-io + CImg + Arena)"
+# SeExpr/SeExprSimple/SeNoise/SeGrain are built into IO.ofx only when openfx-io finds the
+# SeExpr 2.11 library (MSYS2 package mingw-w64-x86_64-seexpr); 35 bundled PyPlugs need them.
+grep -q "fr.inria.openfx.SeExprSimple" <<<"$out" || die "IO.ofx was built without SeExpr (SeExprSimple missing): is mingw-w64-x86_64-seexpr installed?"
+grep -q "net.sf.openfx.SeNoise" <<<"$out" || die "IO.ofx was built without SeNoise"
+ok "OFX plugins loaded (openfx-io + CImg + Arena + SeExpr nodes)"
+
+# PyPlug dependencies: every node ID the bundled PyPlugs create must exist. Known exception:
+# OpenFX.Yo.ResolveMath is a third-party plugin upstream does not bundle either (2 PyPlugs).
+missing_deps="$(grep "RESULT PYPLUG_MISSING" <<<"$out" | grep -v "OpenFX.Yo.ResolveMath" || true)"
+if [ -n "$missing_deps" ]; then
+  echo "$missing_deps"
+  die "bundled PyPlugs reference plugins this install does not have (see above)"
+fi
+ok "PyPlug dependencies satisfied ($(grep -o 'RESULT PYPLUG_DEPS checked=[0-9]*' <<<"$out" | cut -d= -f2) node IDs)"
 
 # Qt image-format plugins (imageformats/qjpeg.dll etc.): jpg, tif, webp must be writable.
 fmts="$(grep "RESULT QT_IMAGE_WRITE_FORMATS:" <<<"$out" || true)"

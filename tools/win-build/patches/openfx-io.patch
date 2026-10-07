@@ -1,7 +1,21 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 415277e..8288932 100644
+index 415277e..fc72623 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
+@@ -382,11 +382,11 @@ if(${SEEXPR2_FOUND})
+   message(STATUS "  Adding SeExpr nodes")
+   target_include_directories(IO
+     PUBLIC
+-      ${SEEXPR2_INCLUDES}
++      ${SEEXPR2_INCLUDE_DIR}
+   )
+   target_link_libraries(IO
+     PUBLIC
+-      ${SEEXPR2_LIBRARIES}
++      ${SEEXPR2_LIBRARY}
+   )
+ else()
+   message(STATUS "  Not adding SeExpr nodes")
 @@ -399,7 +399,9 @@ set(OFX_ARCH UNKNOWN)
  # Win
  if(MINGW)

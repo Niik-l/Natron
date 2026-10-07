@@ -139,14 +139,22 @@ rm -f "$OUT/arena.png"; mkdir -p /tmp/home
     set +u   # the linuxdeploy Qt hook reads XDG_CURRENT_DESKTOP etc. unset
     export APPDIR="$PWD/squashfs-root"
     for hook in "$APPDIR"/apprun-hooks/*.sh; do [ -f "$hook" ] && . "$hook"; done
-    ARENA_SVG="$OUT/arena.svg" ARENA_OUT="$OUT/arena.png" QT_QPA_PLATFORM=offscreen HOME=/tmp/home \
+    ARENA_SVG="$OUT/arena.svg" ARENA_OUT="$OUT/arena.png" PYPLUGS_DIR="$APPDIR/usr/Plugins/PyPlugs" \
+        QT_QPA_PLATFORM=offscreen HOME=/tmp/home \
         timeout 300 "$APPDIR/usr/bin/NatronRenderer" -t "$TOOLS/appimage-arena-probe.py"
 ) > "$OUT/arena.log" 2>&1 || true
-grep -E "ARENA_PLUGIN_COUNT|RENDERED_PNG_BYTES|RESULT|Error|error|Traceback" "$OUT/arena.log" | head -20
+grep -E "ARENA_PLUGIN_COUNT|RENDERED_PNG_BYTES|PYPLUG_|RESULT|Error|error|Traceback" "$OUT/arena.log" | head -30
 if grep -q "RESULT DONE_OK" "$OUT/arena.log" && [ -s "$OUT/arena.png" ]; then
     note arena ok
 else
     tail -40 "$OUT/arena.log"; note arena FAIL
+fi
+# PyPlug dependencies (same probe): every node ID the bundled PyPlugs create must exist.
+# Known exception: OpenFX.Yo.ResolveMath, a third-party plugin upstream does not bundle either.
+if grep "PYPLUG_MISSING" "$OUT/arena.log" | grep -qv "OpenFX.Yo.ResolveMath"; then
+    grep "PYPLUG_MISSING" "$OUT/arena.log"; note pyplugs FAIL
+else
+    note pyplugs ok
 fi
 
 # ---- 4. GUI under Xvfb -------------------------------------------------------

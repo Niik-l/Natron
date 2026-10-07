@@ -49,7 +49,8 @@ env:
   X265_VERSION: 4.1
   IMAGEMAGICK_VERSION: 7.1.2-27   # same as MSYS2 (Windows package); shared libs, no coder modules
   LIBCDR_VERSION: 0.1.9           # no libcdr-devel in Rocky 8 / EPEL 8: built from source
-  DEPS_KEY: openpgl-v0.7.1_ffmpeg-n8.0.3_x264-b35605a_x265-4.1_im-7.1.2-27_libcdr-0.1.9_hbglib
+  SEEXPR_VERSION: "2.11"          # SeExpr/SeExprSimple/SeNoise/SeGrain nodes in IO.ofx (35 PyPlugs need them)
+  DEPS_KEY: openpgl-v0.7.1_ffmpeg-n8.0.3_x264-b35605a_x265-4.1_im-7.1.2-27_libcdr-0.1.9_hbglib_seexpr-2.11
   CYCLES_REPO: Niik-l/cycles
   CYCLES_REF: feature/cycles-deep
   WGPU_VERSION: v27.0.4.0
@@ -194,13 +195,13 @@ jobs:
 
       - name: Install the missing dependencies
         run: |
-          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION -e FFMPEG_VERSION -e X264_COMMIT -e X265_VERSION -e IMAGEMAGICK_VERSION -e LIBCDR_VERSION \
+          docker exec -e OPENVDB_VERSION -e OPENPGL_VERSION -e FFMPEG_VERSION -e X264_COMMIT -e X265_VERSION -e IMAGEMAGICK_VERSION -e LIBCDR_VERSION -e SEEXPR_VERSION \
             -e DEPS_HIT="${{ steps.deps-cache.outputs.cache-hit }}" natron-build bash -eo pipefail -c '
             # The checkouts belong to the runner user, not the container root;
             # without this git refuses to touch them ("dubious ownership").
             git config --global --add safe.directory "*"
             # Rocky 8 packages for what the image lacks (nasm: x264/FFmpeg asm).
-            dnf install -y -q openjpeg2-devel libwebp-devel patch file unzip gdb nasm
+            dnf install -y -q openjpeg2-devel libwebp-devel patch file unzip gdb nasm bison flex
             # openfx-arena (Arena.ofx) libraries from Rocky 8 + EPEL + PowerTools: librsvg, pango,
             # poppler (glib + core), libcdr/librevenge, libzip, lcms2, libxml2, freetype/fontconfig.
             # (libcdr-devel exists in neither Rocky 8 nor EPEL 8: libcdr is built from source below.)
@@ -367,6 +368,24 @@ jobs:
               nm -D "$hb_so" | grep -q hb_glib_script_from_script \
                 || { echo "::error::rebuilt libharfbuzz.so.0 still lacks hb_glib_script_from_script"; exit 1; }
 
+              # SeExpr 2.11 (Disney): openfx-io builds its SeExpr, SeExprSimple, SeNoise and SeGrain
+              # nodes only when FindSeExpr2 finds libSeExpr + SeExpression.h; 35 of the bundled
+              # community PyPlugs create those nodes. No EL8 package: built from source with the
+              # patches upstream Natron uses for its SDK (tools/jenkins/include/patches/SeExpr).
+              echo "== SeExpr $SEEXPR_VERSION (IO.ofx SeExpr nodes)"
+              curl -fsSL "https://github.com/wdas/SeExpr/archive/refs/tags/v$SEEXPR_VERSION.tar.gz" | tar -xz -C /tmp
+              ( cd "/tmp/SeExpr-$SEEXPR_VERSION" \
+                && for pt in /w/natron/tools/jenkins/include/patches/SeExpr/000*.patch; do patch -Np1 -i "$pt" || exit 1; done \
+                && mkdir -p build && cd build \
+                && run "SeExpr configure" seexpr-cfg.log cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib \
+                     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+                     -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=14 -DCMAKE_CXX_FLAGS="-fPIC -Wno-error" \
+                && run "SeExpr build" seexpr-build.log make -j"$(nproc)" \
+                && run "SeExpr install" seexpr-install.log make install DESTDIR=$D )
+              stage
+              [ -f /usr/local/include/SeExpression.h ] && ls /usr/local/lib/libSeExpr.so* >/dev/null 2>&1 \
+                || { echo "::error::SeExpr not installed (SeExpression.h / libSeExpr.so missing)"; exit 1; }
+
               touch "$D/.complete"
             fi
 
@@ -377,6 +396,7 @@ jobs:
             echo "openpgl: $(ls /usr/local/lib*/libopenpgl.so* 2>/dev/null | head -1)"
             echo "ffmpeg:  $(pkg-config --modversion libavcodec 2>/dev/null || echo MISSING) (libavcodec)"
             echo "magick:  $(pkg-config --modversion Magick++ 2>/dev/null || echo MISSING) (Magick++, arena)"
+            echo "seexpr:  $(ls /usr/local/lib/libSeExpr.so 2>/dev/null || echo MISSING) (IO.ofx SeExpr nodes)"
             echo "poppler: $(pkg-config --modversion poppler-glib 2>/dev/null || echo MISSING)  librsvg: $(pkg-config --modversion librsvg-2.0 2>/dev/null || echo MISSING)  libcdr: $(pkg-config --modversion libcdr-0.1 2>/dev/null || echo MISSING)"
             echo "x264/x265: $(pkg-config --modversion x264 2>/dev/null || echo MISSING) / $(pkg-config --modversion x265 2>/dev/null || echo MISSING)"
           '
@@ -490,6 +510,7 @@ jobs:
             # IO.ofx must have picked up FFmpeg (else it silently builds without video nodes).
             io=$(find openfx-io/build -name IO.ofx -type f | head -1)
             ldd "$io" | grep -E "libavcodec|libx264|libx265" || { echo "::error::IO.ofx was built without FFmpeg"; bad=1; }
+            ldd "$io" | grep -E "libSeExpr" || { echo "::error::IO.ofx was built without SeExpr (SeExpr/SeNoise nodes missing)"; bad=1; }
             arena=$(find openfx-arena/build -name Arena.ofx -type f | head -1)
             [ -n "$arena" ] || { echo "::error::Arena.ofx was not built"; bad=1; }
             [ -n "$arena" ] && { ldd "$arena" | grep -E "libMagick\+\+|librsvg|libpoppler" || { echo "::error::Arena.ofx lacks ImageMagick/librsvg/poppler"; bad=1; }; }
@@ -680,12 +701,12 @@ jobs:
           # if the container never ran; read it tolerantly, never modify it.
           st=t/out/status.txt
           get() { { grep -o "^$1=.*" "$st" 2>/dev/null || true; } | cut -d= -f2; }
-          libs=$(get libs); hl=$(get headless); ar=$(get arena); gui=$(get gui); sd=$(get shutdown)
+          libs=$(get libs); hl=$(get headless); ar=$(get arena); pp=$(get pyplugs); gui=$(get gui); sd=$(get shutdown)
           {
             echo "### ${{ matrix.label }} (${{ matrix.image }})"
-            echo "| libs resolve | headless start | SVG render (Arena.ofx) | GUI under Xvfb | clean exit on SIGTERM (informational) |"
-            echo "|---|---|---|---|---|"
-            echo "| ${libs:-n/a} | ${hl:-n/a} | ${ar:-n/a} | ${gui:-n/a} | ${sd:-n/a} |"
+            echo "| libs resolve | headless start | SVG render (Arena.ofx) | PyPlug deps | GUI under Xvfb | clean exit on SIGTERM (informational) |"
+            echo "|---|---|---|---|---|---|"
+            echo "| ${libs:-n/a} | ${hl:-n/a} | ${ar:-n/a} | ${pp:-n/a} | ${gui:-n/a} | ${sd:-n/a} |"
             [ -f t/out/screenshot.png ] && echo "Screenshot in the \`appimage-test-${{ matrix.label }}\` artifact."
           } >> "$GITHUB_STEP_SUMMARY"
 

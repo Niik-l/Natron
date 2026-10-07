@@ -30,6 +30,27 @@ try:
     out("RENDERED_PNG_BYTES", size)
     if size <= 0:
         raise RuntimeError("no PNG written")
+    # Every bundled PyPlug creates nodes by plugin ID; each must exist in this AppImage.
+    # (2026-10-07: 35 PyPlugs needed the SeExpr nodes IO.ofx only has with the SeExpr library.)
+    import re, collections
+    pyplugs = os.environ.get("PYPLUGS_DIR")
+    if pyplugs and os.path.isdir(pyplugs):
+        have = set(NatronEngine.natron.getPluginIDs(""))
+        needs = collections.defaultdict(set)
+        rx = re.compile(r'createNode\(\s*["\']([^"\']+)["\']')
+        for dp, dn, fn in os.walk(pyplugs):
+            for f in fn:
+                if f.endswith(".py"):
+                    try:
+                        txt = open(os.path.join(dp, f), encoding="utf-8", errors="ignore").read()
+                    except Exception:
+                        continue
+                    for pid in rx.findall(txt):
+                        needs[pid].add(f)
+        missing = sorted(pid for pid in needs if pid not in have)
+        out("PYPLUG_DEPS checked=%d missing=%d" % (len(needs), len(missing)))
+        for pid in missing:
+            out("PYPLUG_MISSING %s (%d pyplugs)" % (pid, len(needs[pid])))
     out("RESULT DONE_OK")
 except Exception as e:  # noqa: BLE001
     import traceback

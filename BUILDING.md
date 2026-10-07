@@ -395,6 +395,12 @@ endif()
 
 ## 7. Install Plugins
 
+> **SeExpr nodes (added 2026-10-07):** `SeExpr`, `SeExprSimple`, `SeNoise`, `SeGrain` are part of
+> openfx-io and need the SeExpr 2.11 library at build time: `pacman -S mingw-w64-x86_64-seexpr` (in
+> `00-deps.sh`). Our `patches/openfx-io.patch` also fixes upstream's CMake, which found the library but
+> never linked it. 35 bundled PyPlugs (Copy_N, the lp_ keyers, ...) need these nodes; `07-verify.sh`
+> now fails if any bundled PyPlug references a plugin the install lacks.
+>
 > **openfx-arena (Arena.ofx, added 2026-10-01):** ReadSVG, ReadPSD, ReadKrita, ReadCDR, ReadPDF, Text and
 > the ImageMagick filters (Polar, Swirl, Sketch, ...). `tools/win-build` builds it like the other two plugins:
 > deps `pacman -S mingw-w64-x86_64-{imagemagick,libzip,poppler,librevenge,libcdr,librsvg,pango,lcms2,fontconfig}`,

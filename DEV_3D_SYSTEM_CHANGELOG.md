@@ -17,6 +17,19 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **SeExpr nodes on both platforms (2026-10-07)** — a user hit `Copy_N` failing with
+  `'NoneType' object has no attribute 'setScriptName'`: the PyPlug creates
+  `fr.inria.openfx.SeExprSimple`, which neither package had. SeExpr, SeExprSimple, SeNoise and
+  SeGrain live in openfx-io and are built only when `FindSeExpr2` finds the SeExpr 2.11 library;
+  35 of the 306 bundled community PyPlugs create one of them. Windows: MSYS2 package
+  `mingw-w64-x86_64-seexpr` (headers flat in include/, exactly where FindSeExpr2 looks). Linux:
+  SeExpr 2.11 built from source into /usr/local with upstream Natron's six SDK patches
+  (`tools/jenkins/include/patches/SeExpr`). Upstream openfx-io bug fixed in our patch: its
+  CMake read `${SEEXPR2_LIBRARIES}`/`${SEEXPR2_INCLUDES}` but the find module sets
+  `SEEXPR2_LIBRARY`/`SEEXPR2_INCLUDE_DIR`, so the nodes compiled but never linked. New guard on
+  both platforms: the verify step scans every bundled PyPlug for the plugin IDs it creates and
+  fails if one is missing (only `OpenFX.Yo.ResolveMath`, third-party, is tolerated: 2 PyPlugs,
+  broken upstream too). Plugin count 580 -> 584.
 - **Linux: startup crash with NVIDIA drivers fixed (2026-10-05, issue #2, shipped in 2026.10.06)** —
   the 10.02 AppImage segfaulted in `QPlatformBackingStore::rhiFlush` at first paint on NVIDIA
   (Ubuntu 24.04, Mint 22.3; Qt shader compile with an empty log). Cause: Natron releases its
