@@ -32,4 +32,11 @@ cmake .. "${CMAKE_COMMON[@]}"
 mingw32-make -j"$(jobs_n)"
 [ -f Arena.ofx ] || die "openfx-arena incomplete (Arena.ofx missing)"
 ok "openfx-arena built (Arena.ofx)"
+
+log "nik-kit-natron: configure + build"
+cd "$NATRON_ROOT/nik-kit-natron"; mkdir -p build && cd build
+cmake .. "${CMAKE_COMMON[@]}"
+mingw32-make -j"$(jobs_n)"
+[ -f NikKit.ofx ] || die "nik-kit-natron incomplete (NikKit.ofx missing)"
+ok "nik-kit-natron built (NikKit.ofx)"
 ok "Phase 05 (plugins) complete"

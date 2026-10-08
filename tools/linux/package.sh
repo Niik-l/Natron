@@ -22,8 +22,8 @@ rm -rf "$R/dist"
 mkdir -p "$D/bin" "$D/Plugins/OFX/Natron" "$D/Plugins/PyPlugs" "$D/Resources" "$G"
 cp "$B/App/Natron" "$B/Renderer/NatronRenderer" "$B/PythonBin/natron-python" "$D/bin/"
 
-for p in Misc CImg IO Arena; do
-    src=$(find openfx-misc/build openfx-io/build openfx-arena/build -name "$p.ofx" -type f | head -1)
+for p in Misc CImg IO Arena NikKit; do
+    src=$(find openfx-misc/build openfx-io/build openfx-arena/build nik-kit-natron/build -name "$p.ofx" -type f | head -1)
     [ -n "$src" ] || { echo "::error::$p.ofx not found for packaging"; exit 1; }
     d="$D/Plugins/OFX/Natron/$p.ofx.bundle/Contents/Linux-x86-64"
     mkdir -p "$d"; cp "$src" "$d/"
@@ -39,6 +39,11 @@ done
 cp -r "$B/Plugins/PyPlugs/." "$D/Plugins/PyPlugs/"
 cp -r natron-plugins/. "$D/Plugins/PyPlugs/"
 rm -rf "$D/Plugins/PyPlugs/.git" "$D/Plugins/PyPlugs/.github"
+# nik-kit-natron's PyPlugs (menu group "Nik Kit") in their own folder
+if ls nik-kit-natron/pyplugs/*/ >/dev/null 2>&1; then
+    mkdir -p "$D/Plugins/PyPlugs/NikKit"
+    cp -r nik-kit-natron/pyplugs/*/ "$D/Plugins/PyPlugs/NikKit/"
+fi
 
 curl -fsSL https://github.com/NatronGitHub/OpenColorIO-Configs/archive/Natron-v2.4.tar.gz \
     | tar -xz -C "$D/Resources"

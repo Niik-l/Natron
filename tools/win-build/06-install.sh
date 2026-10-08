@@ -76,6 +76,7 @@ install_ofx Misc "$NATRON_ROOT/openfx-misc/build/Misc.ofx"
 install_ofx CImg "$NATRON_ROOT/openfx-misc/build/CImg.ofx"
 install_ofx IO   "$NATRON_ROOT/openfx-io/build/IO.ofx"
 install_ofx Arena "$NATRON_ROOT/openfx-arena/build/Arena.ofx"
+install_ofx NikKit "$NATRON_ROOT/nik-kit-natron/build/NikKit.ofx"
 # Arena needs ImageMagick's config files (delegates, colors, policy) at runtime;
 # the DLLs come with the DLL sweep above; MSYS2 ImageMagick resolves <dll dir>/../etc.
 if [ -d "$MINGW/etc/ImageMagick-7" ]; then
@@ -87,6 +88,11 @@ fi
 log "PyPlugs (built-in + community)"
 [ -d "$B/Plugins/PyPlugs" ] && cp -r "$B/Plugins/PyPlugs/." "$I/Plugins/PyPlugs/" || warn "no built-in PyPlugs found in build tree"
 cp -r "$NATRON_ROOT/natron-plugins/." "$I/Plugins/PyPlugs/"
+# nik-kit-natron's PyPlugs (menu group "Nik Kit") live in their own folder
+if ls "$NATRON_ROOT/nik-kit-natron/pyplugs"/*/ >/dev/null 2>&1; then
+  mkdir -p "$I/Plugins/PyPlugs/NikKit"
+  cp -r "$NATRON_ROOT/nik-kit-natron/pyplugs"/*/ "$I/Plugins/PyPlugs/NikKit/"
+fi
 # Drop the upstream .git metadata — it shouldn't ship in a deployable
 # bundle (and adds ~100 MB of dead weight).
 rm -rf "$I/Plugins/PyPlugs/.git"

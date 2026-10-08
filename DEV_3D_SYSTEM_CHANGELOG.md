@@ -17,6 +17,13 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **nik-kit-natron bundled (2026-10-07)** — bespoke 2D tools now live in their own OpenFX plugin
+  repo, https://github.com/Niik-l/nik-kit-natron (GPL-2.0+, CMake like openfx-misc, own
+  Windows+Linux CI), so they also run in upstream Natron and other OFX hosts. The fork pins it
+  (`NIK_KIT_REF` in config.sh) and builds/installs/verifies `NikKit.ofx` like the other plugin
+  sets on both platforms; its `pyplugs/` land in `Plugins/PyPlugs/NikKit`. Menu group "Nik Kit".
+  First node: SoftThreshold (soft-knee highlight isolation), the source stage of the planned
+  physically-based Glare node (plan in the local NIK_KIT_PLAN.md).
 - **SeExpr nodes on both platforms (2026-10-07)** — a user hit `Copy_N` failing with
   `'NoneType' object has no attribute 'setScriptName'`: the PyPlug creates
   `fr.inria.openfx.SeExprSimple`, which neither package had. SeExpr, SeExprSimple, SeNoise and

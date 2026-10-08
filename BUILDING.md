@@ -395,6 +395,10 @@ endif()
 
 ## 7. Install Plugins
 
+> **nik-kit-natron (NikKit.ofx, added 2026-10-07):** this fork's own OpenFX tools, pinned by
+> `NIK_KIT_REF` in `config.sh` and built like the other plugin repos (no patch). Menu group "Nik Kit";
+> its `pyplugs/` are installed under `Plugins/PyPlugs/NikKit`. Repo: https://github.com/Niik-l/nik-kit-natron
+>
 > **SeExpr nodes (added 2026-10-07):** `SeExpr`, `SeExprSimple`, `SeNoise`, `SeGrain` are part of
 > openfx-io and need the SeExpr 2.11 library at build time: `pacman -S mingw-w64-x86_64-seexpr` (in
 > `00-deps.sh`). Our `patches/openfx-io.patch` also fixes upstream's CMake, which found the library but

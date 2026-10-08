@@ -95,10 +95,12 @@ jobs:
           misc=$(grep -m1 '^OPENFX_MISC_REF=' "$cfg" | cut -d'"' -f2)
           io=$(grep -m1 '^OPENFX_IO_REF=' "$cfg" | cut -d'"' -f2)
           arena=$(grep -m1 '^OPENFX_ARENA_REF=' "$cfg" | cut -d'"' -f2)
-          [ -n "$misc" ] && [ -n "$io" ] && [ -n "$arena" ] || { echo "::error::could not read plugin refs from $cfg"; exit 1; }
+          nikkit=$(grep -m1 '^NIK_KIT_REF=' "$cfg" | cut -d'"' -f2)
+          [ -n "$misc" ] && [ -n "$io" ] && [ -n "$arena" ] && [ -n "$nikkit" ] || { echo "::error::could not read plugin refs from $cfg"; exit 1; }
           echo "misc=$misc" >> "$GITHUB_OUTPUT"
           echo "io=$io" >> "$GITHUB_OUTPUT"
           echo "arena=$arena" >> "$GITHUB_OUTPUT"
+          echo "nikkit=$nikkit" >> "$GITHUB_OUTPUT"
 
       - name: Checkout openfx-misc
         uses: actions/checkout@v4
@@ -122,6 +124,14 @@ jobs:
           repository: NatronGitHub/openfx-arena
           ref: ${{ steps.refs.outputs.arena }}
           path: openfx-arena
+          submodules: recursive
+
+      - name: Checkout nik-kit-natron
+        uses: actions/checkout@v4
+        with:
+          repository: Niik-l/nik-kit-natron
+          ref: ${{ steps.refs.outputs.nikkit }}
+          path: nik-kit-natron
           submodules: recursive
 
       - name: Checkout natron-plugins
@@ -503,7 +513,7 @@ jobs:
           docker exec -e FV="${{ inputs.fastvolume }}" natron-build bash -eo pipefail -c '
             cd /w; B=natron/build; bad=0
             for f in $B/App/Natron $B/Renderer/NatronRenderer $B/PythonBin/natron-python \
-                     $(find openfx-misc/build openfx-io/build openfx-arena/build -name "*.ofx" -type f); do
+                     $(find openfx-misc/build openfx-io/build openfx-arena/build nik-kit-natron/build -name "*.ofx" -type f); do
               file "$f"
               if ldd "$f" | grep "not found"; then echo "::error::$f has unresolved libraries"; bad=1; fi
             done
@@ -513,6 +523,7 @@ jobs:
             ldd "$io" | grep -E "libSeExpr" || { echo "::error::IO.ofx was built without SeExpr (SeExpr/SeNoise nodes missing)"; bad=1; }
             arena=$(find openfx-arena/build -name Arena.ofx -type f | head -1)
             [ -n "$arena" ] || { echo "::error::Arena.ofx was not built"; bad=1; }
+            [ -n "$(find nik-kit-natron/build -name NikKit.ofx -type f | head -1)" ] || { echo "::error::NikKit.ofx was not built"; bad=1; }
             [ -n "$arena" ] && { ldd "$arena" | grep -E "libMagick\+\+|librsvg|libpoppler" || { echo "::error::Arena.ofx lacks ImageMagick/librsvg/poppler"; bad=1; }; }
             if [ "$FV" = true ]; then
               for f in $B/App/Natron $B/Renderer/NatronRenderer; do

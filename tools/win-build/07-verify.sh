@@ -35,7 +35,8 @@ grep -q "net.fxarena.openfx.ReadSVG" <<<"$out" || die "Arena.ofx not loaded (Rea
 # SeExpr 2.11 library (MSYS2 package mingw-w64-x86_64-seexpr); 35 bundled PyPlugs need them.
 grep -q "fr.inria.openfx.SeExprSimple" <<<"$out" || die "IO.ofx was built without SeExpr (SeExprSimple missing): is mingw-w64-x86_64-seexpr installed?"
 grep -q "net.sf.openfx.SeNoise" <<<"$out" || die "IO.ofx was built without SeNoise"
-ok "OFX plugins loaded (openfx-io + CImg + Arena + SeExpr nodes)"
+grep -q "com.nikkit.openfx.SoftThreshold" <<<"$out" || die "NikKit.ofx not loaded (SoftThreshold missing)"
+ok "OFX plugins loaded (openfx-io + CImg + Arena + SeExpr nodes + NikKit)"
 
 # PyPlug dependencies: every node ID the bundled PyPlugs create must exist. Known exception:
 # OpenFX.Yo.ResolveMath is a third-party plugin upstream does not bundle either (2 PyPlugs).
