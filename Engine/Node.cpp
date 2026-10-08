@@ -1231,6 +1231,35 @@ Node::setPagesOrder(const std::list<std::string>& pages)
             }
         }
     }
+
+    // Pages the plug-in declares that the saved order does not know about (a plug-in update
+    // added a tab after the project was saved): keep them with the other plug-in pages, in
+    // their declaration order, instead of leaving them after Natron's own Node / Info pages.
+    {
+        std::list<KnobIPtr> missing;
+        const KnobsVec &knobs = getKnobs();
+        for (KnobsVec::const_iterator it2 = knobs.begin(); it2 != knobs.end(); ++it2) {
+            KnobPage* isPage = dynamic_cast<KnobPage*>( it2->get() );
+            if ( isPage && isPage->isDeclaredByPlugin() ) {
+                missing.push_back(*it2);
+            }
+        }
+        if ( !missing.empty() ) {
+            std::list<KnobIPtr>::iterator pos = pagesOrdered.begin();
+            for (std::list<KnobIPtr>::iterator it2 = pagesOrdered.begin(); it2 != pagesOrdered.end(); ++it2) {
+                KnobPage* isPage = dynamic_cast<KnobPage*>( it2->get() );
+                if ( isPage && isPage->isDeclaredByPlugin() ) {
+                    pos = it2;
+                    ++pos;
+                }
+            }
+            for (std::list<KnobIPtr>::iterator it2 = missing.begin(); it2 != missing.end(); ++it2) {
+                _imp->effect->removeKnobFromList( it2->get() );
+                pos = pagesOrdered.insert(pos, *it2);
+                ++pos;
+            }
+        }
+    }
     int index = 0;
     for (std::list<KnobIPtr>::iterator it =  pagesOrdered.begin(); it != pagesOrdered.end(); ++it, ++index) {
         _imp->effect->insertKnob(index, *it);
