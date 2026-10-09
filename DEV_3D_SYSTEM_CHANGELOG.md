@@ -17,6 +17,16 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Zap3D (2026-10-09)** — procedural lightning as 3D geometry, the sibling of the Nik Kit 2D
+  Zap: the same midpoint-displacement bolt (branching, smooth Wiggle, Restrike, Flicker, Progress,
+  tip taper, Bolt Variation) between Start/End knobs or the `from` / `to` inputs (any node with
+  Translate knobs, or a Light3D), meshed as a thin tube. Implemented as MeshProvider +
+  MaterialProvider so Scene3D / viewport / ScanlineRender / Cycles pick it up with no consumer
+  changes; the Material page defaults to Emission Strength 50, so in Cycles it is a real light
+  (verified headless: lit floor + cube shadow). FastVolumeRender got one block that turns each
+  wired Zap3D into a chain of point lights along its channels (Lights page: Max Lights, Light
+  Intensity, Light Range), flickering with the emission. Frame-varying metadata. Viewport and
+  ScanlineRender show the tube grey / white (no emission there): add the 2D Zap or Glare in comp.
 - **nik-kit-natron bundled (2026-10-07)** — bespoke 2D tools now live in their own OpenFX plugin
   repo, https://github.com/Niik-l/nik-kit-natron (GPL-2.0+, CMake like openfx-misc, own
   Windows+Linux CI), so they also run in upstream Natron and other OFX hosts. The fork pins it

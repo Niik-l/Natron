@@ -35,6 +35,7 @@
 #include "../Scene3D/ReadVDB.h"
 #include "../Scene3D/SceneGraph.h"
 #include "../Scene3D/Volume3D.h"
+#include "../Scene3D/Zap3D.h"
 
 #include "FastVolumeCore.h"
 
@@ -780,6 +781,37 @@ FastVolumeRender::render(const RenderActionArgs& args)
             ld.type = FastVolume::LIGHT_POINT;
             ld.range = plRange;
             for (int i = 0; i < 3; ++i) { ld.pos[i] = c.pos[i]; ld.color[i] = c.col[i]; }
+            ++look.numLights;
+        }
+    }
+    // ---- Zap3D bolts as light chains: each wired Zap3D with "As Lights" on
+    // spreads its Light Intensity over point lights along its channels (world
+    // space via the SceneGraph node's matrix), into the slots still free.
+    for (const SceneNode& sn : scene.nodes()) {
+        if (look.numLights >= FastVolume::MAX_LIGHTS) break;
+        NodePtr zn = sn.sourceNode.lock();
+        if (!zn || !upstream.count(zn.get()) || zn->isNodeDisabled()) continue;
+        Zap3D* zap = dynamic_cast<Zap3D*>(zn->getEffectInstance().get());
+        if (!zap || !zap->getAsLights()) continue;
+        std::vector<Zap3D::LightSample> samples;
+        zap->getLightSamples(args.time, FastVolume::MAX_LIGHTS - look.numLights, samples);
+        if (samples.empty()) continue;
+        double er, eg, eb, es;
+        zap->getMaterialEmission(args.time, er, eg, eb, es);
+        const float k = (float)zap->getLightIntensity(args.time) * kSunScale;
+        const float range = (float)zap->getLightRange(args.time);
+        const float* wm = sn.worldMatrix;
+        for (const Zap3D::LightSample& ls : samples) {
+            if (look.numLights >= FastVolume::MAX_LIGHTS) break;
+            FastVolume::LightDesc& ld = look.lights[look.numLights];
+            ld = FastVolume::LightDesc();
+            ld.type = FastVolume::LIGHT_POINT;
+            ld.range = range;
+            ld.pos[0] = wm[0] * ls.pos[0] + wm[4] * ls.pos[1] + wm[8]  * ls.pos[2] + wm[12];
+            ld.pos[1] = wm[1] * ls.pos[0] + wm[5] * ls.pos[1] + wm[9]  * ls.pos[2] + wm[13];
+            ld.pos[2] = wm[2] * ls.pos[0] + wm[6] * ls.pos[1] + wm[10] * ls.pos[2] + wm[14];
+            const float w = ls.weight * k;
+            ld.color[0] = (float)er * w; ld.color[1] = (float)eg * w; ld.color[2] = (float)eb * w;
             ++look.numLights;
         }
     }
