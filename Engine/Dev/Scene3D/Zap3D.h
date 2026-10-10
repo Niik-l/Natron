@@ -106,6 +106,12 @@ public:
     };
     void getLightSamples(double time, int maxN, std::vector<LightSample>& out) const;
     bool getAsLights() const;
+
+    /** Start / End in world space at `time` (inputs win over the knobs). */
+    void getEndpoints(double time, double* start, double* end) const { endpoints(time, start, end); }
+    /** Which endpoint the Point X/Y/Z knobs and the viewport gizmo move: 0 = Start, 1 = End. */
+    int selectedEndpoint() const;
+    void setSelectedEndpoint(int index);
     double getLightIntensity(double time) const;
     double getLightRange(double time) const;
 
@@ -123,6 +129,9 @@ public:
 
 private:
     virtual void initializeKnobs() OVERRIDE FINAL;
+    virtual void onKnobsLoaded() OVERRIDE FINAL;
+    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
+    void syncEditor();                        // selected endpoint -> Point X/Y/Z (translate) knobs
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 

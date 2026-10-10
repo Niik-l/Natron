@@ -27,6 +27,11 @@ Recent milestones:
   wired Zap3D into a chain of point lights along its channels (Lights page: Max Lights, Light
   Intensity, Light Range), flickering with the emission. Frame-varying metadata. Viewport and
   ScanlineRender show the tube grey / white (no emission there): add the 2D Zap or Glare in comp.
+  Same day: draggable endpoints. Edit Point (Start / End) mirrors the chosen endpoint into
+  translateX/Y/Z the way Path3D does, so the stock gizmo moves it; the viewport draws both points
+  (selected one white, click to pick) and the node publishes its mesh pre-shifted by the mirror so
+  the consumers' translate lands it back in world space. The Transform page is gone: Start / End
+  (or the from / to inputs) are the placement.
 - **nik-kit-natron bundled (2026-10-07)** — bespoke 2D tools now live in their own OpenFX plugin
   repo, https://github.com/Niik-l/nik-kit-natron (GPL-2.0+, CMake like openfx-misc, own
   Windows+Linux CI), so they also run in upstream Natron and other OFX hosts. The fork pins it

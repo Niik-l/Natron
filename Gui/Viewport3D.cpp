@@ -64,6 +64,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/Cylinder3D.h"
 #include "Engine/Dev/Scene3D/MeshProvider.h"
 #include "Engine/Dev/Scene3D/Path3D.h"
+#include "Engine/Dev/Scene3D/Zap3D.h"
 #include "Engine/Dev/Scene3D/ReadAlembicCamera.h"
 #include "Engine/Dev/Scene3D/ReadAlembicTransform.h"
 #include "Engine/Dev/Scene3D/CameraMath.h"
@@ -1732,7 +1733,7 @@ Viewport3D::paintGL()
         glMultMatrixf(sn.worldMatrix);
 
         switch (sn.type) {
-            case eSceneNodeMesh:       drawMeshNode(sn); break;
+            case eSceneNodeMesh:       drawMeshNode(sn); drawZapEndpoints(sn); break;
             case eSceneNodeCard:       drawCardNode(sn); break;
             case eSceneNodeCamera:     drawCameraNode(sn); break;
             case eSceneNodePointCloud: drawPointCloudNode(sn); break;
@@ -3953,8 +3954,48 @@ Viewport3D::drawPathNode(const SceneNode& sn) const
     glEnd();
 }
 
+// Zap3D: its Start / End as draggable points (selected one white) and a dim
+// line between them. World space (the endpoints are world coordinates).
+void
+Viewport3D::drawZapEndpoints(const SceneNode& sn) const
+{
+    NodePtr node = sn.sourceNode.lock();
+    if (!node) return;
+    Zap3D* zap = dynamic_cast<Zap3D*>(node->getEffectInstance().get());
+    if (!zap) return;
+    Gui* gui = getGui();
+    GuiAppInstancePtr app = gui ? gui->getApp() : GuiAppInstancePtr();
+    const double time = app ? app->getTimeLine()->currentFrame() : 0.0;
+    double a[3], b[3];
+    zap->getEndpoints(time, a, b);
+    const bool isSel = (sn.name == _imp->selectedNodeName);
+    const int selPt = zap->selectedEndpoint();
+
+    GLProtectAttrib attr(GL_ENABLE_BIT | GL_LINE_BIT | GL_POINT_BIT | GL_CURRENT_BIT);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_LINE_SMOOTH);
+    glEnable(GL_POINT_SMOOTH);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0.6f, 0.6f, 0.6f, isSel ? 0.5f : 0.25f);
+    glLineWidth(1.0f);
+    glBegin(GL_LINES);
+    glVertex3d(a[0], a[1], a[2]);
+    glVertex3d(b[0], b[1], b[2]);
+    glEnd();
+    glPointSize(isSel ? 9.0f : 6.0f);
+    glBegin(GL_POINTS);
+    if (isSel && selPt == 0) glColor4f(1.0f, 1.0f, 1.0f, 1.0f); else glColor4f(0.3f, 0.9f, 1.0f, 0.9f);
+    glVertex3d(a[0], a[1], a[2]);
+    if (isSel && selPt == 1) glColor4f(1.0f, 1.0f, 1.0f, 1.0f); else glColor4f(0.3f, 0.9f, 1.0f, 0.9f);
+    glVertex3d(b[0], b[1], b[2]);
+    glEnd();
+}
+
 // Click on a control point of the selected Path3D: make it the Selected Point
 // (which the gizmo then moves). False when no path is selected / no point hit.
+// Also handles the selected Zap3D's Start / End points the same way.
 bool
 Viewport3D::pickPathPointAtPosition(int screenX, int screenY)
 {
@@ -3962,6 +4003,29 @@ Viewport3D::pickPathPointAtPosition(int screenX, int screenY)
     const std::vector<SceneNode>& nodes = _imp->sceneGraph.nodes();
     for (size_t i = 0; i < nodes.size(); ++i) {
         const SceneNode& sn = nodes[i];
+        if (sn.type == eSceneNodeMesh && sn.name == _imp->selectedNodeName) {
+            NodePtr node = sn.sourceNode.lock();
+            Zap3D* zap = node ? dynamic_cast<Zap3D*>(node->getEffectInstance().get()) : NULL;
+            if (!zap) continue;
+            Gui* gui = getGui();
+            GuiAppInstancePtr app = gui ? gui->getApp() : GuiAppInstancePtr();
+            const double time = app ? app->getTimeLine()->currentFrame() : 0.0;
+            double pts[2][3];
+            zap->getEndpoints(time, pts[0], pts[1]);
+            float best = 12.0f;
+            int bestIdx = -1;
+            for (int p = 0; p < 2; ++p) {
+                float sx, sy;
+                if (!worldToScreenDev(_imp->cameraView, _imp->cameraProjection, _imp->viewW, _imp->viewH,
+                                      (float)pts[p][0], (float)pts[p][1], (float)pts[p][2], sx, sy)) continue;
+                const float d = std::sqrt((sx - screenX) * (sx - screenX) + (sy - screenY) * (sy - screenY));
+                if (d < best) { best = d; bestIdx = p; }
+            }
+            if (bestIdx < 0) return false;
+            zap->setSelectedEndpoint(bestIdx);
+            update();
+            return true;
+        }
         if (sn.type != eSceneNodePath || sn.name != _imp->selectedNodeName) continue;
         NodePtr node = sn.sourceNode.lock();
         if (!node) return false;

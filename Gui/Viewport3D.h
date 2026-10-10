@@ -198,6 +198,7 @@ private:
     void drawCameraMotionTrail(const SceneNode& sn, const std::vector<SceneNode>& all) const;
     void drawPathNode(const SceneNode& sn) const;
     bool pickPathPointAtPosition(int screenX, int screenY);
+    void drawZapEndpoints(const SceneNode& sn) const;
     void drawPointCloudNode(const SceneNode& sn) const;
     void drawGroupNode(const SceneNode& sn) const;
     void drawSphereNode(const SceneNode& sn) const;

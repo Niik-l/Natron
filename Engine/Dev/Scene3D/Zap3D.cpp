@@ -35,10 +35,12 @@
 #include "../../AppManager.h"
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
+#include "../../ChoiceOption.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
 #include "../../NodeMetadata.h"
 #include "../../Project.h"
+#include "../../TimeLine.h"
 #include "../../ViewIdx.h"
 
 #ifndef M_PI
@@ -250,11 +252,13 @@ struct Zap3DPrivate
     // Shape page
     KnobDoubleWPtr radius, branchScale;
     KnobIntWPtr sides;
-    // Transform page
+    // Point editor: the selected endpoint mirrored into translateX/Y/Z, which is
+    // what the viewport gizmo reads and writes (Path3D does the same). The mesh
+    // is published in a space that already subtracts them, so the consumers'
+    // translate step lands it back in world space.
+    KnobChoiceWPtr editPoint;
     KnobDoubleWPtr translateX, translateY, translateZ;
-    KnobDoubleWPtr rotateX, rotateY, rotateZ;
-    KnobDoubleWPtr scaleX, scaleY, scaleZ;
-    KnobDoubleWPtr uniformScale;
+    bool syncing = false;
     // Material page
     KnobColorWPtr baseColor;
     KnobDoubleWPtr roughness, metallic, specular;
@@ -289,7 +293,9 @@ Zap3D::getPluginDescription() const
               "Connect it to a Scene3D like any geometry. In Cycles the emission makes it a real light: "
               "it casts shadows, lights volumes and shows in reflections. FastVolumeRender places a "
               "chain of point lights along it (Lights page). The 3D viewport and ScanlineRender show "
-              "the tube (grey / white). Add the 2D Zap or Glare in comp for the glow.").toStdString();
+              "the tube (grey / white). Add the 2D Zap or Glare in comp for the glow.\n\n"
+              "Edit Point picks which end the Point X/Y/Z knobs and the viewport gizmo move; click an "
+              "endpoint of the selected node in the 3D viewport to pick it there.").toStdString();
 }
 
 std::string
@@ -419,6 +425,24 @@ Zap3D::initializeKnobs()
     _imp->tipFade = makeDouble(this, page, tr("Tip Fade"), "tipFade", 0.6, 0.0, 1.0,
                                tr("Tapers the last part of every bolt and branch towards its tip."), true, true, 0.0, true, 1.0);
     _imp->seed = makeInt(this, page, tr("Seed"), "seed", 1, 0, 100000, 100, tr("Random seed for the bolt shapes."), false);
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Edit Point"));
+        k->setName("editPoint");
+        std::vector<ChoiceOption> opts;
+        opts.push_back(ChoiceOption("Start", "", ""));
+        opts.push_back(ChoiceOption("End", "", ""));
+        k->populateChoices(opts);
+        k->setDefaultValue(0);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("Which endpoint the Point X/Y/Z knobs and the 3D viewport gizmo move. "
+                             "Clicking an endpoint of the selected node in the viewport picks it too."));
+        page->addKnob(k); _imp->editPoint = k;
+    }
+    _imp->translateX = makeDouble(this, page, tr("Point X"), "translateX", 0.0, -10.0, 10.0,
+                                  tr("The selected endpoint, in world space. Drag the gizmo in the 3D viewport to move it."), false);
+    _imp->translateY = makeDouble(this, page, tr("Point Y"), "translateY", 1.0, -10.0, 10.0, QString(), false);
+    _imp->translateZ = makeDouble(this, page, tr("Point Z"), "translateZ", 0.0, -10.0, 10.0, QString(), false);
 
     // ---- Shape page
     KnobPagePtr shapePage = AppManager::createKnob<KnobPage>(this, tr("Shape"));
@@ -427,20 +451,6 @@ Zap3D::initializeKnobs()
     _imp->sides = makeInt(this, shapePage, tr("Sides"), "sides", 6, 3, 32, 16, tr("Sides of the tube cross-section."), false);
     _imp->branchScale = makeDouble(this, shapePage, tr("Branch Scale"), "branchScale", 0.6, 0.2, 1.0,
                                    tr("Radius of each branch generation relative to its parent."), true, true, 0.05, true, 1.0);
-
-    // ---- Transform page (read by name by the SceneGraph / renderers)
-    KnobPagePtr xformPage = AppManager::createKnob<KnobPage>(this, tr("Transform"));
-    _imp->translateX = makeDouble(this, xformPage, tr("Translate X"), "translateX", 0.0, -100.0, 100.0, QString());
-    _imp->translateY = makeDouble(this, xformPage, tr("Translate Y"), "translateY", 0.0, -100.0, 100.0, QString());
-    _imp->translateZ = makeDouble(this, xformPage, tr("Translate Z"), "translateZ", 0.0, -100.0, 100.0, QString());
-    _imp->rotateX = makeDouble(this, xformPage, tr("Rotate X"), "rotateX", 0.0, -180.0, 180.0, QString());
-    _imp->rotateY = makeDouble(this, xformPage, tr("Rotate Y"), "rotateY", 0.0, -180.0, 180.0, QString());
-    _imp->rotateZ = makeDouble(this, xformPage, tr("Rotate Z"), "rotateZ", 0.0, -180.0, 180.0, QString());
-    _imp->scaleX = makeDouble(this, xformPage, tr("Scale X"), "scaleX", 1.0, 0.01, 10.0, QString());
-    _imp->scaleY = makeDouble(this, xformPage, tr("Scale Y"), "scaleY", 1.0, 0.01, 10.0, QString());
-    _imp->scaleZ = makeDouble(this, xformPage, tr("Scale Z"), "scaleZ", 1.0, 0.01, 10.0, QString());
-    _imp->uniformScale = makeDouble(this, xformPage, tr("Uniform Scale"), "uniformScale", 1.0, 0.001, 10.0,
-                                    tr("Multiplies all three axes together."));
 
     // ---- Material page
     KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));
@@ -483,6 +493,77 @@ Zap3D::initializeKnobs()
                                       true, true, 0.0);
     _imp->lightRange = makeDouble(this, lightPage, tr("Light Range"), "lightRange", 0.5, 0.0, 5.0,
                                   tr("Half-intensity distance of each point light (0 = the volume's diagonal)."), true, true, 0.0);
+}
+
+// ==================== Point editor (gizmo) ====================
+
+int
+Zap3D::selectedEndpoint() const
+{
+    KnobChoicePtr k = _imp->editPoint.lock();
+    return k ? std::max(0, std::min(1, k->getValue())) : 0;
+}
+
+void
+Zap3D::setSelectedEndpoint(int index)
+{
+    if (KnobChoicePtr k = _imp->editPoint.lock()) {
+        k->setValue(std::max(0, std::min(1, index)));
+    }
+}
+
+void
+Zap3D::syncEditor()
+{
+    KnobDoublePtr tx = _imp->translateX.lock(), ty = _imp->translateY.lock(), tz = _imp->translateZ.lock();
+    if (!tx || !ty || !tz) return;
+    double time = 0.;
+    if (getApp() && getApp()->getTimeLine()) time = getApp()->getTimeLine()->currentFrame();
+    double a[3], b[3];
+    endpoints(time, a, b);
+    const double* p = selectedEndpoint() == 0 ? a : b;
+    _imp->syncing = true;
+    tx->setValue(p[0]);
+    ty->setValue(p[1]);
+    tz->setValue(p[2]);
+    _imp->syncing = false;
+}
+
+void
+Zap3D::onKnobsLoaded()
+{
+    syncEditor();
+}
+
+bool
+Zap3D::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /*view*/,
+                   double time, bool /*originatedFromMainThread*/)
+{
+    if (!k || _imp->syncing) return false;
+    KnobDoublePtr tx = _imp->translateX.lock(), ty = _imp->translateY.lock(), tz = _imp->translateZ.lock();
+    if (k == _imp->editPoint.lock().get()) {
+        syncEditor();
+        return true;
+    }
+    if (tx && ty && tz && (k == tx.get() || k == ty.get() || k == tz.get())) {
+        // gizmo / Point X/Y/Z edit -> the selected endpoint
+        KnobDoublePtr dst = selectedEndpoint() == 0 ? _imp->start.lock() : _imp->end.lock();
+        if (dst) {
+            _imp->syncing = true;
+            const double v[3] = { tx->getValue(), ty->getValue(), tz->getValue() };
+            for (int i = 0; i < 3; ++i) {
+                if (dst->isAnimated(i)) dst->setValueAtTime(time, v[i], ViewSpec::all(), i);
+                else dst->setValue(v[i], ViewSpec::all(), i);
+            }
+            _imp->syncing = false;
+        }
+        return true;
+    }
+    if (k == _imp->start.lock().get() || k == _imp->end.lock().get()) {
+        syncEditor();
+        return true;
+    }
+    return false;
 }
 
 // ==================== RoD / Render (dummy image) ====================
@@ -589,7 +670,8 @@ Zap3D::paramHash(double time) const
     endpoints(time, a, b);
     for (int i = 0; i < 3; ++i) { mix(a[i]); mix(b[i]); }
     const KnobDoubleWPtr dk[] = {_imp->varyEnd, _imp->wrinkle, _imp->branchiness, _imp->branchAngle, _imp->branchLength,
-                                 _imp->progress, _imp->wiggle, _imp->boltVar, _imp->tipFade, _imp->radius, _imp->branchScale};
+                                 _imp->progress, _imp->wiggle, _imp->boltVar, _imp->tipFade, _imp->radius, _imp->branchScale,
+                                 _imp->translateX, _imp->translateY, _imp->translateZ};
     for (size_t i = 0; i < sizeof(dk) / sizeof(dk[0]); ++i) {
         KnobDoublePtr k = dk[i].lock();
         mix(k ? k->getValueAtTime(time) : 0.);
@@ -662,6 +744,14 @@ Zap3D::buildSnapshot(double time) const
     const int sides = std::max(3, std::min(64, ival(_imp->sides, 6)));
     const int branchDepth = std::max(0, ival(_imp->branchDepth, 2));
 
+    // the consumers apply translateX/Y/Z (the point editor) on top of the mesh:
+    // publish it shifted the other way so the bolt stays where Start/End say
+    V3 off = v3(0, 0, 0);
+    {
+        KnobDoublePtr tx = _imp->translateX.lock(), ty = _imp->translateY.lock(), tz = _imp->translateZ.lock();
+        if (tx && ty && tz) off = v3(tx->getValueAtTime(time), ty->getValueAtTime(time), tz->getValueAtTime(time));
+    }
+
     V3 e1, e2;
     basis(normalize(B - A), e1, e2);
 
@@ -720,7 +810,7 @@ Zap3D::buildSnapshot(double time) const
             const double rr = rbase * std::max(0.08, 1. - tipFade * fade);
             for (int s = 0; s < sides; ++s) {
                 const double th = 2. * M_PI * s / sides;
-                const V3 v = p.pts[i] + (f1[i] * std::cos(th) + f2[i] * std::sin(th)) * rr;
+                const V3 v = p.pts[i] + (f1[i] * std::cos(th) + f2[i] * std::sin(th)) * rr - off;
                 mesh->vertices.push_back((float)v.x);
                 mesh->vertices.push_back((float)v.y);
                 mesh->vertices.push_back((float)v.z);
@@ -747,7 +837,7 @@ Zap3D::buildSnapshot(double time) const
             }
             // light sample at the segment midpoint
             LightSample ls;
-            const V3 m = (p.pts[i] + p.pts[i + 1]) * 0.5;
+            const V3 m = (p.pts[i] + p.pts[i + 1]) * 0.5 - off;
             ls.pos[0] = (float)m.x; ls.pos[1] = (float)m.y; ls.pos[2] = (float)m.z;
             ls.weight = (float)(length(p.pts[i + 1] - p.pts[i]) * p.wscale * tubes[ti].gain);
             wsum += ls.weight;
