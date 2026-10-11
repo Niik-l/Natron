@@ -31,7 +31,9 @@ Recent milestones:
   translateX/Y/Z the way Path3D does, so the stock gizmo moves it; the viewport draws both points
   (selected one white, click to pick) and the node publishes its mesh pre-shifted by the mirror so
   the consumers' translate lands it back in world space. The Transform page is gone: Start / End
-  (or the from / to inputs) are the placement.
+  (or the from / to inputs) are the placement. Also a **Camera Visible** toggle on the Material
+  page: off clears PATH_RAY_CAMERA on the Cycles object, so the bolt lights the scene (shadows,
+  reflections, volumes) without the tube showing in frame (verified headless: same lit floor, no tube).
 - **nik-kit-natron bundled (2026-10-07)** — bespoke 2D tools now live in their own OpenFX plugin
   repo, https://github.com/Niik-l/nik-kit-natron (GPL-2.0+, CMake like openfx-misc, own
   Windows+Linux CI), so they also run in upstream Natron and other OFX hosts. The fork pins it

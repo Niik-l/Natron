@@ -72,6 +72,7 @@
 #include "Engine/Dev/Scene3D/CameraMath.h"
 #include "Engine/Dev/Scene3D/RotationConventions.h"
 #include "Engine/Dev/Scene3D/SceneGraph.h"
+#include "Engine/Dev/Scene3D/Zap3D.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/Card3D.h"
@@ -2805,6 +2806,16 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                        "Name mismatch? visMap has %d entries.\n",
                        sn.name.c_str(), (int)visibilityMap->size());
                 obj->set_visibility(0);
+            }
+        }
+
+        // Zap3D "Camera Visible" off: camera rays skip the tube; every other ray
+        // type still sees its emission, so the bolt keeps lighting the scene.
+        {
+            NodePtr zn = sn.sourceNode.lock();
+            Zap3D* zap = zn ? dynamic_cast<Zap3D*>(zn->getEffectInstance().get()) : NULL;
+            if (zap && !zap->isCameraVisible()) {
+                obj->set_visibility(obj->get_visibility() & ~ccl::PATH_RAY_CAMERA);
             }
         }
 

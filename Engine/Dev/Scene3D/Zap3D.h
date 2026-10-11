@@ -106,6 +106,9 @@ public:
     };
     void getLightSamples(double time, int maxN, std::vector<LightSample>& out) const;
     bool getAsLights() const;
+    /** Material page "Camera Visible": off = Cycles camera rays skip the tube while its
+     *  emission still lights the scene (the bolt becomes an invisible mesh light). */
+    bool isCameraVisible() const;
 
     /** Start / End in world space at `time` (inputs win over the knobs). */
     void getEndpoints(double time, double* start, double* end) const { endpoints(time, start, end); }

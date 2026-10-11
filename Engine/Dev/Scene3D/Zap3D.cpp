@@ -265,6 +265,7 @@ struct Zap3DPrivate
     KnobColorWPtr emissionColor;
     KnobDoubleWPtr emissionStrength;
     KnobDoubleWPtr transmission, ior;
+    KnobBoolWPtr cameraVisible;
     // Lights page (FastVolumeRender)
     KnobBoolWPtr asLights;
     KnobIntWPtr lightMax;
@@ -476,6 +477,15 @@ Zap3D::initializeKnobs()
                                         true, true, 0.0);
     _imp->transmission = makeDouble(this, matPage, tr("Transmission"), "transmission", 0.0, 0.0, 1.0, QString(), true, true, 0.0, true, 1.0);
     _imp->ior = makeDouble(this, matPage, tr("IOR"), "ior", 1.45, 1.0, 2.5, QString(), true, true, 1.0);
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Camera Visible"));
+        k->setName("cameraVisible"); k->setDefaultValue(true);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Off: Cycles camera rays skip the tube, so the bolt lights the scene (shadows, "
+                             "reflections, volumes) without showing in frame. Use the 2D Zap over the render for "
+                             "the visible bolt. Cycles only; the viewport and ScanlineRender still draw it."));
+        matPage->addKnob(k); _imp->cameraVisible = k;
+    }
 
     // ---- Lights page (FastVolumeRender)
     KnobPagePtr lightPage = AppManager::createKnob<KnobPage>(this, tr("Lights"));
@@ -874,6 +884,13 @@ Zap3D::getMeshData(double time) const
 }
 
 // ==================== Lights (FastVolumeRender) ====================
+
+bool
+Zap3D::isCameraVisible() const
+{
+    KnobBoolPtr k = _imp->cameraVisible.lock();
+    return k ? k->getValue() : true;
+}
 
 bool
 Zap3D::getAsLights() const
