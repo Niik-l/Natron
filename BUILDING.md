@@ -395,7 +395,8 @@ endif()
 
 ## 7. Install Plugins
 
-> **nik-kit-natron (NikKit.ofx, added 2026-10-07):** this fork's own OpenFX tools, pinned by
+> **nik-kit-natron (NikKit.ofx, added 2026-10-07):** the fork's testing ground for new tools, kept in a
+> separate repo so this one stays uncluttered (OpenFX, so they run in any host); pinned by
 > `NIK_KIT_REF` in `config.sh` and built like the other plugin repos (no patch). Menu group "Nik Kit";
 > its `pyplugs/` are installed under `Plugins/PyPlugs/NikKit`. Repo: https://github.com/Niik-l/nik-kit-natron
 >
