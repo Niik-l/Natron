@@ -481,7 +481,7 @@ rm ocio-configs.tar.gz
 
 > **Note:** If MSYS2's `curl` fails with a TLS or connection error, fall back to PowerShell `Invoke-WebRequest` or `git clone https://github.com/NatronGitHub/OpenColorIO-Configs.git`.
 
-**Alternative — `OCIO` environment variable.** If you have a `config.ocio` elsewhere, set it before launching to override the search path entirely:
+**Alternative — `OCIO` environment variable.** If you have a `config.ocio` elsewhere, set it before launching. Natron then lists it as the "Environment variable (OCIO)" entry in Preferences > Color Management and uses it by default; any other entry picked there overrides the variable for Natron only:
 ```bash
 export OCIO=/path/to/your/config.ocio
 ./Natron.exe
@@ -562,7 +562,7 @@ A few env vars are read at runtime — set them once in your shell profile or in
 |----------|---------|---------|
 | `OFX_PLUGIN_PATH` | Where Natron looks for OFX plugin bundles (`.ofx.bundle`). Use this if your plugins live outside the default `Plugins/OFX/Natron` install location. | `D:\my\OFX\Plugins` |
 | `NATRON_RV_PATH` | Path to the RV / OpenRV executable. When set, every new WriteNode's "RV Executable" knob is pre-filled with this value, and the "Open in RV" button uses it as a runtime fallback when the knob is empty. | `C:\Program Files\RV\bin\rv.exe` |
-| `OCIO` | Path to a `config.ocio` file. Overrides the bundled OpenColorIO config search (see step 8). | `C:\colorpipe\aces\config.ocio` |
+| `OCIO` | Path to a `config.ocio` file. Becomes the default "Environment variable (OCIO)" entry in Preferences > Color Management (see step 8); a different entry chosen there wins over the variable. | `C:\colorpipe\aces\config.ocio` |
 
 ### Setting them permanently on Windows
 

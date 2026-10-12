@@ -17,6 +17,18 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **OCIO preference wins over the `OCIO` environment variable (2026-10-12)** — a user with a
+  system-wide `OCIO` variable (ACES 1.0.3) reported that nothing chosen in Preferences > Color
+  Management ever took effect. Upstream `Settings::tryLoadOpenColorIOConfig()` read the variable
+  first and only looked at the dropdown when it was empty, then wrote the same path back into the
+  process environment, so the preference could never win. Now the dropdown decides: a new
+  "Environment variable (OCIO)" entry uses the value captured at startup and is the default
+  whenever the variable is set (upstream behaviour preserved, no startup-check nag for it); any
+  other entry overrides the variable for Natron only, so Blender/Resolve keep theirs. Settings
+  saved before the entry existed are switched to it once (hidden `ocioEnvEntryMigrated` flag) so
+  nobody's config changes on upgrade; if the saved entry is Environment but the variable is gone,
+  the bundled default loads with a log line. Bundled-config lookup factored into
+  `findBundledOcioConfig()`. README / BUILDING updated.
 - **Zap3D (2026-10-09)** — procedural lightning as 3D geometry, the sibling of the Nik Kit 2D
   Zap: the same midpoint-displacement bolt (branching, smooth Wiggle, Restrike, Flicker, Progress,
   tip taper, Bolt Variation) between Start/End knobs or the `from` / `to` inputs (any node with

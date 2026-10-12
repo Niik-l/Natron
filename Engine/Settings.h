@@ -520,6 +520,12 @@ private:
     KnobBoolPtr _warnOcioConfigKnobChanged;
     KnobBoolPtr _ocioStartupCheck;
     KnobFilePtr _customOcioConfigFile;
+    // Hidden. Settings saved before the "Environment variable (OCIO)" entry existed are switched to it
+    // once if the OCIO variable is set, so users who relied on the variable see no change.
+    KnobBoolPtr _ocioEnvEntryMigrated;
+    // Value of the OCIO environment variable when Natron started. Natron overwrites the variable in
+    // its own process once a config is loaded, so it can only be read before the first load.
+    QString _ocioEnvAtStartup;
 
     // Caching
     KnobPagePtr _cachingTab;
