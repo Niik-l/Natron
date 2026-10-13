@@ -70,6 +70,8 @@ struct EdgePrivate
     bool isOutputEdge;
     int inputNb;
     double angle;
+    int fanIndex;   // see Edge::setFanSlot; -1 = not part of the fan (mask / output)
+    int fanCount;
     NodeGraphSimpleTextItem* label;
     QPolygonF arrowHead;
     NodeGuiWPtr dest;
@@ -79,6 +81,8 @@ struct EdgePrivate
     bool useRenderingColor;
     bool useHighlight;
     bool useSelected;
+    bool dimmed;          // sibling of the hovered input arrow (see Edge::setDimmed)
+    bool hoverHighlight;  // the hovered input arrow itself
     bool paintWithDash;
     bool optional;
     bool paintBendPoint;
@@ -96,6 +100,8 @@ struct EdgePrivate
         , isOutputEdge(inputNb == -1)
         , inputNb(inputNb)
         , angle(angle)
+        , fanIndex(-1)
+        , fanCount(0)
         , label(NULL)
         , arrowHead()
         , dest()
@@ -105,6 +111,8 @@ struct EdgePrivate
         , useRenderingColor(false)
         , useHighlight(false)
         , useSelected(false)
+        , dimmed(false)
+        , hoverHighlight(false)
         , paintWithDash(false)
         , optional(false)
         , paintBendPoint(false)
@@ -225,6 +233,13 @@ void
 Edge::setAngle(double a)
 {
     _imp->angle = a;
+}
+
+void
+Edge::setFanSlot(int index, int count)
+{
+    _imp->fanIndex = index;
+    _imp->fanCount = count;
 }
 
 void
@@ -398,6 +413,29 @@ Edge::setUseSelected(bool val)
     update();
 }
 
+void
+Edge::setDimmed(bool dimmed)
+{
+    if (_imp->dimmed == dimmed) {
+        return;
+    }
+    _imp->dimmed = dimmed;
+    if (_imp->label) {
+        _imp->label->setOpacity(dimmed ? 0.25 : 1.0);
+    }
+    update();
+}
+
+void
+Edge::setHoverHighlight(bool highlight)
+{
+    if (_imp->hoverHighlight == highlight) {
+        return;
+    }
+    _imp->hoverHighlight = highlight;
+    update();
+}
+
 static void
 makeEdges(const QRectF & bbox,
           std::vector<QLineF> & edges)
@@ -467,14 +505,29 @@ Edge::initLine()
 
     QPointF srcpt;
 
+    // Disconnected input on a many-input node: start the arrow from its own
+    // slot along the top edge (index 0 rightmost, matching the fan order) and
+    // lean it 18 degrees per step off vertical, so the wider box actually
+    // spreads the arrows instead of them all radiating from the centre.
+    double fanAngle = _imp->angle;
+    bool spreadFan = false;
+    if ( !source && dest && _imp->fanIndex >= 0 && _imp->fanCount > 1 &&
+         dest->getManyInputsScale() > 1. ) {
+        spreadFan = true;
+        const double frac = (double)(_imp->fanCount - _imp->fanIndex) / (double)(_imp->fanCount + 1);
+        dst.setX( destBBOX.left() + destBBOX.width() * frac );
+        const double leanStep = 18. * M_PI / 180.;
+        fanAngle = M_PI_2 - ( (_imp->fanCount - 1) / 2. - _imp->fanIndex ) * leanStep;
+    }
+
     if (source && dest) {
         /// This is a connected edge, either input or output
         srcpt = sourceBBOX.center();
         setLine( dst.x(), dst.y(), srcpt.x(), srcpt.y() );
     } else if (!source && dest) {
         /// The edge is an input edge which is unconnected
-        srcpt = QPointF( dst.x() + (std::cos(_imp->angle) * 100000 * sc),
-                         dst.y() - (std::sin(_imp->angle) * 100000 * sc) );
+        srcpt = QPointF( dst.x() + (std::cos(fanAngle) * 100000 * sc),
+                         dst.y() - (std::sin(fanAngle) * 100000 * sc) );
         setLine( dst.x(), dst.y(), srcpt.x(), srcpt.y() );
     } else if (source && !dest) {
         /// The edge is an output edge which is unconnected
@@ -560,29 +613,44 @@ Edge::initLine()
         if (foundIntersection) {
             double distToCenter = std::sqrt( ( intersection.x() - dst.x() ) * ( intersection.x() - dst.x() ) +
                                              ( intersection.y() - dst.y() ) * ( intersection.y() - dst.y() ) );
-            distToCenter += TO_DPIY( appPTR->getCurrentSettings()->getDisconnectedArrowLength() );
+            // Many-input nodes get proportionally longer arrows, so the fan of
+            // labels above them spreads out instead of overlapping.
+            const double manyInputsScale = dest ? dest->getManyInputsScale() : 1.;
+            const double arrowScale = 1. + (manyInputsScale - 1.) * 2.;
+            distToCenter += TO_DPIY( appPTR->getCurrentSettings()->getDisconnectedArrowLength() ) * arrowScale;
 
-            srcpt = QPointF( dst.x() + (std::cos(_imp->angle) * distToCenter * sc),
-                             dst.y() - (std::sin(_imp->angle) * distToCenter * sc) );
+            srcpt = QPointF( dst.x() + (std::cos(fanAngle) * distToCenter * sc),
+                             dst.y() - (std::sin(fanAngle) * distToCenter * sc) );
             setLine( dst.x(), dst.y(), srcpt.x(), srcpt.y() );
 
             if (_imp->label) {
                 QFontMetrics fm(_imp->label->font(), 0);
-                double cosinus = std::cos(_imp->angle);
+                double cosinus = std::cos(fanAngle);
+                const int txtWidth = fm.horizontalAdvance( _imp->label->text() );
                 int yOffset = 0;
-                if (cosinus < 0) {
-                    yOffset = -fm.horizontalAdvance( _imp->label->text() );
-                } else if ( (cosinus >= -0.01) && (cosinus <= 0.01) ) {
-                    yOffset = +5;
+                if ( spreadFan || ( (cosinus >= -0.2) && (cosinus <= 0.2) ) ) {
+                    yOffset = -txtWidth / 2; // near-vertical arrow: centre the text on it
+                } else if (cosinus < 0) {
+                    yOffset = -txtWidth;
                 } else {
                     yOffset = +10;
                 }
 
-                /*adjusting dst to show label at the middle of the line*/
+                /*adjusting dst to show label at the middle of the line — or
+                  nearer the tip on many-input nodes, where neighbouring arrows
+                  are furthest apart*/
 
                 QPointF labelDst = dstIntersection; //QPointF( destBBOX.x(),destBBOX.y() ) + QPointF(dstNodeSize.width() / 2.,0);
+                // Many-input nodes: alternate inputs sit at two different
+                // distances along their (longer) arrows, so neighbours 22 degrees
+                // apart no longer share a height.
+                double t = 0.5;
+                if (manyInputsScale > 1.) {
+                    t = (_imp->inputNb % 2 == 0) ? 0.45 : 0.9;
+                }
 
-                _imp->label->setPos( ( ( labelDst.x() + srcpt.x() ) / 2. ) + yOffset, ( labelDst.y() + srcpt.y() ) / 2. - 20 );
+                _imp->label->setPos( labelDst.x() + ( srcpt.x() - labelDst.x() ) * t + yOffset,
+                                     labelDst.y() + ( srcpt.y() - labelDst.y() ) * t - 20 );
             }
         }
     }
@@ -777,10 +845,15 @@ Edge::paint(QPainter *painter,
     }
 
     QColor color, arrowColor;
-    if (_imp->useSelected) {
-        color = arrowColor = Qt::white;
-    } else if (_imp->useHighlight) {
+    if (_imp->useHighlight) {
         color = arrowColor = Qt::green;
+    } else if (_imp->hoverHighlight) {
+        // the input arrow under the cursor (see setHoverHighlight); wins over
+        // the selected-node white so it reads on a selected node too
+        color = arrowColor = QColor(140, 220, 255);
+        myPen.setWidthF( std::max(1.5, myPen.widthF() * 1.5) );
+    } else if (_imp->useSelected) {
+        color = arrowColor = Qt::white;
     } else if (_imp->useRenderingColor) {
         color = arrowColor = _imp->renderingColor;
     } else {
@@ -788,6 +861,12 @@ Edge::paint(QPainter *painter,
         if (_imp->optional && !_imp->paintWithDash) {
             color.setAlphaF(0.4);
         }
+    }
+    if (_imp->dimmed && !_imp->hoverHighlight && !_imp->useHighlight) {
+        // sibling of the hovered input arrow: fade line and head alike,
+        // whatever base colour (selected white included) it would have had
+        color.setAlphaF(color.alphaF() * 0.3);
+        arrowColor.setAlphaF(arrowColor.alphaF() * 0.3);
     }
     myPen.setColor(color);
     painter->setPen(myPen);

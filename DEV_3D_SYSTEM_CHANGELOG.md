@@ -17,6 +17,20 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Node graph: many-input nodes readable (2026-10-13)** — Material3D's seven input arrows fanned
+  out of a 100 px box with their labels piled on top of each other. `NodeGui::getManyInputsScale()`
+  (+25% per non-mask input beyond four, capped at 1.75; inspectors excluded) now widens the node box
+  and, doubled, lengthens its disconnected arrows. On such nodes each arrow starts from its own
+  slot along the top edge (`Edge::setFanSlot`, index 0 rightmost) with an 18-degree lean per step
+  instead of all radiating from the centre, labels are centred on their arrow and alternate between
+  45% and 90% along it, so the seven read as a two-row comb. New hover aid: moving over one input arrow (or its label) fades the
+  node's other input arrows and labels to 30% / 25% and draws the hovered one in light blue
+  (`Edge::setDimmed` / `setHoverHighlight`, driven from `NodeGraph::refreshInputHoverDim()` in the
+  idle mouse-move state, cleared on press and on leaving the view; tracked as node + input index,
+  never a raw Edge*, since `initializeInputs` recreates edges). Preferences > Node Graph > "Dim
+  sibling inputs on hover" (default on) disables it. Verified with a GUI script that grabs the
+  graph viewport and synthesises mouse moves (scratch nodegraph_probe.py).
+
 - **Material3D true displacement in Cycles (2026-10-13)** — the Displacement Map was always wired
   as `DISPLACE_BUMP`, so a height map only shaded and never moved anything. New **Displacement
   Method** knob (Bump / Displacement / Displacement + Bump, default Bump so existing projects
@@ -26,7 +40,7 @@ Recent milestones:
   vertex normals, so scans (Megascans LOD0) get real silhouettes and self-shadowing. There is
   still no subdivision — the mesh sync emits plain triangles — so a Card3D or low-poly primitive
   barely changes; adaptive subdivision (`Mesh::add_subd_face` + dicing camera, OpenSubdiv is
-  already compiled in on both platforms) is the follow-up. The 3D viewport and ScanlineRender
+  already compiled in on both platforms) landed the same day, see the next entry. The 3D viewport and ScanlineRender
   deliberately stay on bump/normal maps. No scene-hash work needed: CyclesRender already folds
   the material node's own `getHash()` in. Same day: Material3D gained a seventh image input,
   **Displacement**, so the height map can be graded in the comp before it displaces (a connected

@@ -81,6 +81,14 @@ public:
 
     void setAngle(double a);
 
+    /**
+     * @brief Position of this input in its node's fan of disconnected arrows
+     * (index among the non-mask inputs, and their count). On many-input nodes
+     * (NodeGui::getManyInputsScale() > 1) the arrows then start spread along
+     * the top edge with a gentle lean instead of all radiating from the centre.
+     **/
+    void setFanSlot(int index, int count);
+
     void turnOnRenderingColor();
 
     void turnOffRenderingColor();
@@ -88,6 +96,14 @@ public:
     void setUseHighlight(bool highlight);
 
     void setUseSelected(bool val);
+
+    /**
+     * @brief Hover legibility (NodeGraph mouse move, Preferences > Node Graph >
+     * "Dim sibling inputs on hover"): the hovered input arrow is drawn
+     * highlighted while its siblings on the same node are faded.
+     **/
+    void setDimmed(bool dimmed);
+    void setHoverHighlight(bool highlight);
 
     bool isOutputEdge() const;
 

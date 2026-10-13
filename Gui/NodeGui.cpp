@@ -27,6 +27,7 @@
 
 #include <cassert>
 #include <algorithm> // min, max
+#include <cmath> // lround
 #include <stdexcept>
 
 CLANG_DIAG_OFF(deprecated)
@@ -575,6 +576,34 @@ NodeGui::getSizeWithPreview(int *w,
     *h = *h + TO_DPIY(NATRON_PREVIEW_HEIGHT) + 10;
 }
 
+double
+NodeGui::getManyInputsScale() const
+{
+    NodePtr internalNode = getNode();
+    if (!internalNode) {
+        return 1.;
+    }
+    if ( dynamic_cast<InspectorNode*>( internalNode.get() ) ) {
+        return 1.;
+    }
+    EffectInstancePtr effect = internalNode->getEffectInstance();
+    if (!effect) {
+        return 1.;
+    }
+    int n = 0;
+    const int nInputs = effect->getNInputs();
+    for (int i = 0; i < nInputs; ++i) {
+        if ( !effect->isInputMask(i) && !effect->isInputRotoBrush(i) ) {
+            ++n;
+        }
+    }
+    if (n <= 4) {
+        return 1.;
+    }
+    // +25% per input beyond four, capped: 5 -> 1.25, 7 -> 1.75, 8+ -> 1.75
+    return std::min(1.75, 1. + 0.25 * (n - 4));
+}
+
 void
 NodeGui::getInitialSize(int *w,
                         int *h) const
@@ -587,10 +616,13 @@ NodeGui::getInitialSize(int *w,
     }
     const QString& iconFilePath = internalNode->getPlugin()->getIconFilePath();
 
+    // Wider box for many-input nodes so the input fan has room (see
+    // getManyInputsScale); the icon strip keeps its fixed width.
+    const int bodyWidth = (int)std::lround( TO_DPIX(NODE_WIDTH) * getManyInputsScale() );
     if ( !iconFilePath.isEmpty() && QFile::exists(iconFilePath) && appPTR->getCurrentSettings()->isPluginIconActivatedOnNodeGraph() ) {
-        *w = TO_DPIX(NODE_WIDTH) + TO_DPIX(NATRON_PLUGIN_ICON_SIZE) + TO_DPIX(PLUGIN_ICON_OFFSET) * 2;
+        *w = bodyWidth + TO_DPIX(NATRON_PLUGIN_ICON_SIZE) + TO_DPIX(PLUGIN_ICON_OFFSET) * 2;
     } else {
-        *w = TO_DPIX(NODE_WIDTH);
+        *w = bodyWidth;
     }
     *h = TO_DPIY(NODE_HEIGHT);
 }
@@ -1568,6 +1600,7 @@ NodeGui::initializeInputs()
         double piDividedbyX = M_PI / (inputsCount + 1);
         double angle =  piDividedbyX;
         int maskIndex = 0;
+        int fanIndex = 0;
         for (U32 i = 0; i < _inputEdges.size(); ++i) {
             if ( node && !node->getEffectInstance()->isInputRotoBrush(i) ) {
                 double edgeAngle;
@@ -1589,6 +1622,9 @@ NodeGui::initializeInputs()
                 }
                 _inputEdges[i]->setAngle(edgeAngle);
                 if (incrAngle) {
+                    // slot among the fanned (non-mask) inputs, for the
+                    // spread-along-the-top layout of many-input nodes
+                    _inputEdges[i]->setFanSlot(fanIndex++, inputsCount);
                     angle += piDividedbyX;
                 }
                 if ( !_inputEdges[i]->hasSource() ) {

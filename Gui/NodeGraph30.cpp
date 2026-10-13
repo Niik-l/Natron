@@ -152,6 +152,7 @@ NodeGraph::leaveEvent(QEvent* e)
     leaveEventBase();
     QGraphicsView::leaveEvent(e);
 
+    clearInputHoverDim();
     _imp->_nodeCreationShortcutEnabled = false;
     // setFocus();
 }

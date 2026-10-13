@@ -1380,6 +1380,13 @@ Settings::initializeKnobsNodeGraph()
                                                          "selected.") );
     _nodegraphTab->addKnob(_hideOptionalInputsAutomatically);
 
+    _dimSiblingInputsOnHover = AppManager::createKnob<KnobBool>( this, tr("Dim sibling inputs on hover") );
+    _dimSiblingInputsOnHover->setName("dimSiblingInputsOnHover");
+    _dimSiblingInputsOnHover->setHintToolTip( tr("When checked, hovering one input arrow of a node fades that node's "
+                                                 "other input arrows and labels, so nodes with many inputs "
+                                                 "(Material3D, Merge, Shuffle...) stay readable.") );
+    _nodegraphTab->addKnob(_dimSiblingInputsOnHover);
+
     _useInputAForMergeAutoConnect = AppManager::createKnob<KnobBool>( this, tr("Merge node connect to A input") );
     _useInputAForMergeAutoConnect->setName("mergeConnectToA");
     _useInputAForMergeAutoConnect->setHintToolTip( tr("If checked, upon creation of a new Merge node, or any other node with inputs named "
@@ -1758,6 +1765,7 @@ Settings::setDefaultValues()
     _maxUndoRedoNodeGraph->setDefaultValue(20, 0);
     _disconnectedArrowLength->setDefaultValue(30);
     _hideOptionalInputsAutomatically->setDefaultValue(true);
+    _dimSiblingInputsOnHover->setDefaultValue(true);
     _useInputAForMergeAutoConnect->setDefaultValue(true);
     _usePluginIconsInNodeGraph->setDefaultValue(true);
     _useAntiAliasing->setDefaultValue(true);
@@ -3623,6 +3631,12 @@ bool
 Settings::areOptionalInputsAutoHidden() const
 {
     return _hideOptionalInputsAutomatically->getValue();
+}
+
+bool
+Settings::isInputHoverDimmingEnabled() const
+{
+    return _dimSiblingInputsOnHover ? _dimSiblingInputsOnHover->getValue() : true;
 }
 
 void

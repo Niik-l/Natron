@@ -296,6 +296,10 @@ The size of a disconnected node input arrow in pixels.
 
 When checked, any diconnected mask input of a node in the nodegraph will be visible only when the mouse is hovering the node or when it is selected.
 
+**Dim sibling inputs on hover**
+
+When checked, hovering one input arrow of a node fades that node's other input arrows and labels, so nodes with many inputs (Material3D, Merge, Shuffle...) stay readable. Nodes with more than four image inputs are also drawn wider, with their disconnected input arrows spread along the top edge.
+
 **Merge node connect to A input**
 
 If checked, upon creation of a new Merge node, or any other node with inputs named A and B, input A is be preferred for auto-connection. When the node is disabled, B is always output, whether this is checked or not.

@@ -295,6 +295,15 @@ private:
                                       NodeGui** node,
                                       Edge** edge);
 
+    /**
+     * @brief Input-arrow hover dimming. refreshInputHoverDim() takes the input
+     * edge under the cursor (NULL for none) and fades its siblings on the same
+     * node; clearInputHoverDim() restores everything. Driven from
+     * mouseMoveEvent in the idle state, cleared on press and on leaving the view.
+     **/
+    void refreshInputHoverDim(Edge* hoveredInput);
+    void clearInputHoverDim();
+
     void moveRootInternal(double dx, double dy);
 
     void wheelEventInternal(bool ctrlDown, double delta);

@@ -77,6 +77,8 @@ NodeGraphPrivate::NodeGraphPrivate(NodeGraph* p,
     , _bL(NULL)
     , _refreshOverlays(false)
     , _highLightedEdge(NULL)
+    , _inputHoverNode()
+    , _inputHoverInputNb(-1)
     , _mergeHintNode()
     , _hintInputEdge(NULL)
     , _hintOutputEdge(NULL)

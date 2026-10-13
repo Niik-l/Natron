@@ -43,6 +43,8 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include "Engine/CreateNodeArgs.h"
 
 #include "Gui/BackdropGui.h"
+#include "Engine/Settings.h"
+
 #include "Gui/Edge.h"
 #include "Gui/Gui.h"
 #include "Gui/GuiAppInstance.h"
@@ -193,12 +195,72 @@ NodeGraph::hasItemNearbyMouse(const QPoint& mousePosViewport,
 } // NodeGraph::hasItemNearbyMouse
 
 void
+NodeGraph::clearInputHoverDim()
+{
+    NodeGuiPtr node = _imp->_inputHoverNode.lock();
+    _imp->_inputHoverNode.reset();
+    _imp->_inputHoverInputNb = -1;
+    if (!node) {
+        return;
+    }
+    const std::vector<Edge*>& edges = node->getInputsArrows();
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if (edges[i]) {
+            edges[i]->setDimmed(false);
+            edges[i]->setHoverHighlight(false);
+        }
+    }
+}
+
+void
+NodeGraph::refreshInputHoverDim(Edge* hoveredInput)
+{
+    if ( !hoveredInput || hoveredInput->isOutputEdge() ||
+         !appPTR->getCurrentSettings()->isInputHoverDimmingEnabled() ) {
+        clearInputHoverDim();
+        return;
+    }
+    NodeGuiPtr node = hoveredInput->getDest();
+    if (!node) {
+        clearInputHoverDim();
+        return;
+    }
+    const int inputNb = hoveredInput->getInputNumber();
+    if ( _imp->_inputHoverNode.lock() == node && _imp->_inputHoverInputNb == inputNb ) {
+        return; // unchanged
+    }
+    clearInputHoverDim();
+
+    const std::vector<Edge*>& edges = node->getInputsArrows();
+    int visibleInputs = 0;
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if ( edges[i] && edges[i]->isVisible() ) {
+            ++visibleInputs;
+        }
+    }
+    if (visibleInputs < 2) {
+        return; // nothing to tell apart
+    }
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if (!edges[i]) {
+            continue;
+        }
+        const bool isHovered = (edges[i] == hoveredInput);
+        edges[i]->setDimmed(!isHovered);
+        edges[i]->setHoverHighlight(isHovered);
+    }
+    _imp->_inputHoverNode = node;
+    _imp->_inputHoverInputNb = inputNb;
+}
+
+void
 NodeGraph::mousePressEvent(QMouseEvent* e)
 {
     assert(e);
 
     takeClickFocus();
 
+    clearInputHoverDim();
     _imp->_hasMovedOnce = false;
     _imp->_deltaSinceMousePress = QPointF(0, 0);
     if ( buttonDownIsMiddle(e) ) {

@@ -309,6 +309,10 @@ public:
     void setOptionalInputsAutoHidden(bool hidden);
     bool areOptionalInputsAutoHidden() const;
 
+    /** Node Graph > "Dim sibling inputs on hover": hovering one input arrow
+     *  fades the node's other input arrows so a many-input node stays legible. */
+    bool isInputHoverDimmingEnabled() const;
+
     void getPythonGroupsSearchPaths(std::list<std::string>* templates) const;
     void appendPythonGroupsPath(const std::string& path);
 
@@ -596,6 +600,7 @@ private:
     KnobIntPtr _maxUndoRedoNodeGraph;
     KnobIntPtr _disconnectedArrowLength;
     KnobBoolPtr _hideOptionalInputsAutomatically;
+    KnobBoolPtr _dimSiblingInputsOnHover;
     KnobBoolPtr _useInputAForMergeAutoConnect;
     KnobBoolPtr _usePluginIconsInNodeGraph;
     KnobBoolPtr _useAntiAliasing;

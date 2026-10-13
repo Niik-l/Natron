@@ -214,6 +214,15 @@ public:
         return _inputEdges;
     }
 
+    /**
+     * @brief > 1 for nodes with many (non-mask) inputs: the node box is drawn
+     * that much wider and its disconnected input arrows that much longer, so
+     * the arrow labels fanning out above it stop piling onto each other
+     * (Material3D's seven inputs). 1 for inspectors (Merge/Viewer grow their
+     * inputs on demand) and for everything with four inputs or fewer.
+     **/
+    double getManyInputsScale() const;
+
     Edge* getOutputArrow() const;
     Edge* getInputArrow(int inputNb) const;
 

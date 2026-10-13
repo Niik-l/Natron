@@ -27,6 +27,8 @@
 #include "NodeGraphPrivate.h"
 
 #include <cmath> // abs
+
+#include <QGraphicsSimpleTextItem>
 #include <stdexcept>
 
 GCC_DIAG_UNUSED_PRIVATE_FIELD_OFF
@@ -537,6 +539,28 @@ NodeGraph::mouseMoveEvent(QMouseEvent* e)
             NodeGui* nearbyNode = NULL;
             Edge* nearbyEdge = NULL;
             NearbyItemEnum nearbyItemCode = hasItemNearbyMouse(e->pos(), &nearbyNode, &nearbyEdge);
+
+            // Input-arrow hover dimming. hasItemNearbyMouse ignores text, so
+            // also accept the arrow's own label (a text item parented to it).
+            {
+                Edge* hoverInput = NULL;
+                if ( (nearbyItemCode == eNearbyItemNodeEdge) && nearbyEdge && !nearbyEdge->isOutputEdge() ) {
+                    hoverInput = nearbyEdge;
+                } else if (nearbyItemCode == eNearbyItemNone) {
+                    const QList<QGraphicsItem*> under = items( e->pos() );
+                    for (QList<QGraphicsItem*>::const_iterator it = under.begin(); it != under.end(); ++it) {
+                        if ( (*it)->type() != QGraphicsSimpleTextItem::Type ) {
+                            continue;
+                        }
+                        Edge* parentEdge = dynamic_cast<Edge*>( (*it)->parentItem() );
+                        if ( parentEdge && !parentEdge->isOutputEdge() ) {
+                            hoverInput = parentEdge;
+                            break;
+                        }
+                    }
+                }
+                refreshInputHoverDim(hoverInput);
+            }
 
             switch (nearbyItemCode) {
             case eNearbyItemNode:

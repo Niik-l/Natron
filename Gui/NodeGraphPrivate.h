@@ -185,6 +185,13 @@ public:
     Edge* _highLightedEdge;
     NodeGuiPtr _mergeHintNode;
 
+    // Input-arrow hover dimming (Preferences > Node Graph > "Dim sibling
+    // inputs on hover"): the node whose input arrows are currently dimmed and
+    // the hovered input's number. Kept as a weak node + index, never a raw
+    // Edge*, because NodeGui::initializeInputs deletes and recreates edges.
+    NodeGuiWPtr _inputHoverNode;
+    int _inputHoverInputNb;
+
     ///This is a hint edge we show when _highLightedEdge is not NULL to display a possible connection.
     Edge* _hintInputEdge;
     Edge* _hintOutputEdge;

@@ -61,7 +61,7 @@ a connected bg/Reformat drives the output res AND format, Nuke-style).
 Remaining:
 
 - [ ] **Revisit Transparency semantics** — the `transparency` knob (on = respect surface alpha, off = force opaque) shipped 2026-06-17 in `ffea831c4` (rode along with the Project3D projective-texturing commit, disclosed in the message). It's committed + working; what's still open is whether the intended behaviour vs Nuke is right — our renderer already alpha-blends, so confirm the desired semantics before relying on it.
-- [ ] **Tessellation max** — adaptive screen-space subdivision of polygons. Also the fix for the Spherical-projection pole/±180° seam distortion (coarse geo smears without it).
+- [ ] **Tessellation max** — adaptive screen-space subdivision of polygons. Also the fix for the Spherical-projection pole/±180° seam distortion (coarse geo smears without it). Cycles got this on 2026-10-13 (per-mesh `Subdivision (Cycles)` group via `SubdivisionProvider.h`, Cycles' own OpenSubdiv dicer); ScanlineRender still needs a tessellation step of its own.
 - [ ] **Z-blend (mode + range)** — blend intersecting / coplanar surfaces so they don't z-fight flicker (Nuke: none / smooth / linear + a range).
 - [ ] **Depth of field** — Nuke does it on the MultiSample tab via `focus diameter` + `samples` (orbit the camera around the focal distance per sample; no f-stop knob). Needs the camera's focal distance.
 
