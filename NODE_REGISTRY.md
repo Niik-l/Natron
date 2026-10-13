@@ -143,6 +143,12 @@ Updated: 2026-06-24
 | **ColorMatrix** | `fr.inria.built-in.ColorMatrix` | Registered | 3×3 color-channel matrix multiply with Invert toggle. Standard CC-pipeline building block. |
 | **Exposure** | `fr.inria.built-in.Exposure` | Registered | Exposure (stops) + linear multiplier. Operates in scene-linear. |
 
+## Filter (1 node)
+
+| Node | Plugin ID | Status | Description |
+|------|-----------|--------|-------------|
+| **PatchFill** | `fr.inria.built-in.PatchFill` | Registered (2026-10-13) | Paint-out by lattice fill: input 0 Source, input 1 Mask (a Roto shape; host mask-channel selector). The mask's bounding box is split into **Lattice Rows x Columns** cells; cells touching the **Sample Band** (ring just outside the mask, grown by **Grow Mask** px to skip a light's halo) take the average of those pixels and the inner cells are solved as the mean of their neighbours (cascadic Gauss-Seidel Laplace solve, chamfer distance transform for the band/feather), then bilinearly upsampled into the shape and blended through the (feathered) matte. Few cells = broad ramp, many = follows the surroundings; **Log Space** interpolates in signed-log so bright rims fall off like light; **Output** Result / Fill / Matte; Mix. Float throughout (HDRI-safe), whole-image render (no tiles), nothing is cloned so texture is not reproduced. Headless-verified: a 50-stop radial light on a colour ramp is removed to within 0.006 of the ramp (8x8), 0.001 (64x64). Use: Roto -> PatchFill.Mask over an HDRI to kill lights. |
+
 ## Matchmove / 3D Reconstruction (2 nodes)
 
 | Node | Plugin ID | Status | Description |
@@ -166,5 +172,6 @@ Updated: 2026-06-24
 | Channel | 1 | 0 | 1 |
 | Transform | 2 | 0 | 2 |
 | Color | 3 | 0 | 3 |
+| Filter | 1 | 0 | 1 |
 | Matchmove / 3D Reconstruction | 2 | 0 | 2 |
-| **Total** | **66** | **19** | **85** |
+| **Total** | **67** | **19** | **86** |

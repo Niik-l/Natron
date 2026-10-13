@@ -17,6 +17,21 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **PatchFill node (2026-10-13)** — paint-out by lattice fill, the user's idea for killing lights in
+  an HDRI without a clone/blur/merge stack. `Engine/Dev/PostFX/PatchFill.{h,cpp}`, Filter group,
+  inputs Source + Mask (`isInputMask` so Natron adds the mask-channel selector; a Roto node is the
+  usual source). Render (whole image, `supportsTiles` false): find the bbox of mask >= 0.5, chamfer
+  3-4 distance transform over that bbox padded by Grow + Band + Feather, blend matte = max(soft mask,
+  1 inside the grown shape, smoothstep feather outside), band samples = pixels with grow < d <= grow +
+  band weighted by (1 - mask). The samples are binned into a Rows x Columns lattice over the grown
+  bbox (known cells = band averages), unknown cells are solved by over-relaxed Gauss-Seidel with a
+  cascade of half-resolution lattices as the starting guess (so 64x64 converges in a few passes),
+  and the fill is a bilinear read of the lattice blended in through the matte. Optional signed-log
+  interpolation (`log1p` / `expm1`) for HDR rims. Output modes Result / Fill (lattice everywhere,
+  to inspect) / Matte. Knobs in pixels scale with the render scale. Verified headless
+  (scratch patchfill_test.py: Ramp + 50-stop Radial light, 120 px disc mask): the light vanishes
+  and the fill matches the ramp to 0.006 at 8x8 cells, 0.001 at 64x64; no-mask passes the source
+  through unchanged. Not cloned texture: a Clone Offset is the obvious follow-up if wanted.
 - **Node graph: many-input nodes readable (2026-10-13)** — Material3D's seven input arrows fanned
   out of a 100 px box with their labels piled on top of each other. `NodeGui::getManyInputsScale()`
   (+25% per non-mask input beyond four, capped at 1.75; inspectors excluded) now widens the node box
