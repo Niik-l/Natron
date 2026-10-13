@@ -273,6 +273,7 @@ executeCyclesPasses(CyclesRenderer&            renderer,
     // (no motion blur, or a scene where nothing moves) clear any previous
     // render's matrices, so a stale set can't blur a static frame.
     renderer.setMotionTransforms(prepared.motionOpen, prepared.motionClose);
+    renderer.setSubdivisionSettings(req.subdivision);
 
     const bool ok = renderer.renderToBufferWithCameraMultiPass(
         prepared.sceneGraph,

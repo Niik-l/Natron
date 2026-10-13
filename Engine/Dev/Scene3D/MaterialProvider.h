@@ -63,9 +63,13 @@ public:
     virtual std::string getMaterialTransmissionMapFile() const { return std::string(); }
     virtual double getMaterialNormalStrength(double /*time*/) const { return 1.0; }
 
-    // Specular level + height map. Height is applied as BUMP (shading normals
-    // only) — true displacement needs the mesh path to emit subdivision faces,
-    // which it doesn't yet, so a DISPLACE_TRUE shader would render unchanged.
+    // Specular level + height map. How the height map is applied is the
+    // material's choice (see getMaterialDisplacementMethod): Bump perturbs the
+    // shading normal only; True moves the mesh's existing vertices (real
+    // silhouette + self-shadowing, so it needs dense geometry — a scan, not a
+    // 2-triangle card: the mesh sync emits no subdivision faces yet); Both does
+    // the two together, which Blender's "Displacement and Bump" recommends for
+    // detail finer than the vertex spacing.
     virtual std::string getMaterialSpecularMapFile() const { return std::string(); }
 
     // Foliage pair. Opacity drives Principled's Alpha (atlas cutout); the
@@ -80,6 +84,12 @@ public:
     virtual std::string getMaterialDisplacementMapFile() const { return std::string(); }
     virtual double getMaterialDisplacementScale(double /*time*/) const { return 0.1; }
     virtual double getMaterialDisplacementMidlevel(double /*time*/) const { return 0.5; }
+    enum MaterialDisplacementMethod {
+        eMaterialDisplacementBump = 0,   // shading normals only (default, legacy behaviour)
+        eMaterialDisplacementTrue = 1,   // move vertices
+        eMaterialDisplacementBoth = 2    // move vertices + bump for sub-vertex detail
+    };
+    virtual MaterialDisplacementMethod getMaterialDisplacementMethod() const { return eMaterialDisplacementBump; }
 
     // Texture colorspace (for color textures — diffuse, emission)
     // Returns Cycles-compatible colorspace string: "sRGB", "Linear", "ACEScg", "Raw", "Non-Color"

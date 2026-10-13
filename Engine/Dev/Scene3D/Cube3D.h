@@ -34,6 +34,7 @@
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 #include "MaterialProvider.h"
+#include "SubdivisionProvider.h"
 #include "MaterialTextureBake.h"
 
 NATRON_NAMESPACE_ENTER
@@ -54,6 +55,7 @@ struct Cube3DPrivate;
 class Cube3D
     : public EffectInstance
     , public MaterialProvider
+    , public SubdivisionProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -65,6 +67,9 @@ public:
 
     Cube3D(NodePtr node);
     virtual ~Cube3D();
+
+    // SubdivisionProvider: Subdivision (Cycles) group, render-time dicing
+    virtual bool getSubdivisionParams(double time, SubdivisionParams* out) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }

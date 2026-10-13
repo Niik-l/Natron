@@ -17,6 +17,41 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Material3D true displacement in Cycles (2026-10-13)** — the Displacement Map was always wired
+  as `DISPLACE_BUMP`, so a height map only shaded and never moved anything. New **Displacement
+  Method** knob (Bump / Displacement / Displacement + Bump, default Bump so existing projects
+  render unchanged) is threaded through `MaterialProvider::getMaterialDisplacementMethod()` to
+  `Shader::set_displacement_method()`. With Displacement, Cycles evaluates the displacement
+  shader per vertex before the BVH build, moves the mesh's existing vertices and rebuilds the
+  vertex normals, so scans (Megascans LOD0) get real silhouettes and self-shadowing. There is
+  still no subdivision — the mesh sync emits plain triangles — so a Card3D or low-poly primitive
+  barely changes; adaptive subdivision (`Mesh::add_subd_face` + dicing camera, OpenSubdiv is
+  already compiled in on both platforms) is the follow-up. The 3D viewport and ScanlineRender
+  deliberately stay on bump/normal maps. No scene-hash work needed: CyclesRender already folds
+  the material node's own `getHash()` in. Same day: Material3D gained a seventh image input,
+  **Displacement**, so the height map can be graded in the comp before it displaces (a connected
+  input overrides the file knob). It bakes to a half-float EXR via the shapes' `bakeImageInputToExr`
+  rather than the colour maps' RGBE `.hdr`, whose 8-bit mantissa would stair-step the surface;
+  `getMaterialInputsHash` now spans `getNInputs()` so the bake and scene hash notice the new slot.
+- **Render-time adaptive subdivision in Cycles (2026-10-13)** — the second half of displacement.
+  Every mesh node (Card3D, Sphere3D, Cube3D, Cylinder3D, ReadGeo, ReadAlembicArchive, GeoBuilder)
+  gained a **Subdivision (Cycles)** group — Subdivide / Type (Linear, Catmull-Clark) / Dicing Rate
+  (px) / Max Level — through a new `SubdivisionProvider` interface
+  (`Engine/Dev/Scene3D/SubdivisionProvider.h`, header-only: shared knob factory + reader). With
+  Subdivide on, `CyclesRenderer` hands the node's polygons to Cycles as subdivision faces
+  (`buildSubdivisionMesh`: ReadGeo/Alembic keep their quads and n-gons; primitive triangles are
+  passed through, a 4-vertex card is rebuilt as one quad) with UVs in `subd_attributes`, and Cycles
+  dices them adaptively against `scene->dicing_camera`, which is now configured alongside the
+  render camera (same `configureCamera` lambda, plus Offscreen Dicing Scale). Deformation
+  motion-blur positions move to `subd_attributes` on subdivided meshes. CyclesRender gained Dicing
+  Scale / Preview Dicing Scale / Offscreen Dicing Scale (per-node rate x scale; preview renders use
+  the coarse scale like Blender's viewport/render split; RenderPass previews use 8, finals 1);
+  the scales are hashed. Headless-verified: an edge-on Card3D with a striped height map and true
+  displacement is flat without Subdivide and corrugated with it (silhouette coverage 19.6k -> 30.7k
+  px); Linear and Catmull-Clark both run on a Sphere3D; preview dicing renders. Render-only by
+  design: the 3D viewport and ScanlineRender keep drawing the base mesh. Not yet exercised:
+  deformation motion blur on a subdivided Alembic (code path moved, needs an animated asset).
+
 - **OCIO preference wins over the `OCIO` environment variable (2026-10-12)** — a user with a
   system-wide `OCIO` variable (ACES 1.0.3) reported that nothing chosen in Preferences > Color
   Management ever took effect. Upstream `Settings::tryLoadOpenColorIOConfig()` read the variable

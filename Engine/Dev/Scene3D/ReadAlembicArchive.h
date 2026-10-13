@@ -24,6 +24,7 @@
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 #include "MaterialProvider.h"
+#include "SubdivisionProvider.h"
 #include "MeshData.h"
 
 #include <string>
@@ -65,6 +66,7 @@ struct ArchiveTreeEntry
 class ReadAlembicArchive
     : public EffectInstance
     , public MaterialProvider
+    , public SubdivisionProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -84,6 +86,9 @@ public:
 
     ReadAlembicArchive(NodePtr node);
     virtual ~ReadAlembicArchive();
+
+    // SubdivisionProvider: Subdivision (Cycles) group, render-time dicing
+    virtual bool getSubdivisionParams(double time, SubdivisionParams* out) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }

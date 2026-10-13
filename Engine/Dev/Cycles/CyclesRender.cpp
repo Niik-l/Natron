@@ -80,6 +80,7 @@ struct CyclesRenderPrivate
     KnobDoubleWPtr deepAlphaMergeThreshold;
     KnobChoiceWPtr deepCompression;
     KnobBoolWPtr previewMode; // half-res render, upscaled to full
+    KnobDoubleWPtr dicingScale, previewDicingScale, offscreenDicingScale; // subdivision dicing
 
     // Explicit output size — does NOT come from upstream input format.
     // (Mirror of ScanlineRender's outputWidth/outputHeight. Required: without
@@ -245,6 +246,33 @@ CyclesRender::initializeKnobs()
         k->setName("previewMode"); k->setDefaultValue(true);
         k->setHintToolTip(tr("Render at half resolution and upscale. Faster for interactive work."));
         page->addKnob(k); _imp->previewMode = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Dicing Scale"));
+        k->setName("dicingScale"); k->setDefaultValue(1.0);
+        k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(8.0);
+        k->setHintToolTip(tr("Multiplies the Dicing Rate of every mesh node with Subdivide on "
+                             "(its Subdivision (Cycles) group). 1 = the nodes' own rates; "
+                             "larger = coarser dicing everywhere. Used for full-resolution renders."));
+        page->addKnob(k); _imp->dicingScale = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Preview Dicing Scale"));
+        k->setName("previewDicingScale"); k->setDefaultValue(8.0);
+        k->setMinimum(0.01); k->setDisplayMinimum(0.1); k->setDisplayMaximum(32.0);
+        k->setHintToolTip(tr("Dicing Scale used while Preview (half res) is on, so interactive "
+                             "renders do not tessellate at final quality. Blender's "
+                             "viewport/render split."));
+        page->addKnob(k); _imp->previewDicingScale = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Offscreen Dicing Scale"));
+        k->setName("offscreenDicingScale"); k->setDefaultValue(4.0);
+        k->setMinimum(1.0); k->setDisplayMinimum(1.0); k->setDisplayMaximum(16.0);
+        k->setHintToolTip(tr("How much coarser subdivided geometry outside the frame is diced. "
+                             "1 = same as on screen (needed when off-screen detail shows in "
+                             "reflections or shadows), 4 = four times coarser."));
+        page->addKnob(k); _imp->offscreenDicingScale = k;
     }
 
     // Output size — explicit knobs. Cycles no longer inherits resolution from
@@ -855,6 +883,16 @@ CyclesRender::render(const RenderActionArgs& args)
     if (dofParams.enabled) req.dof = &dofParams;
     if (mbParams.enabled)  req.mb  = &mbParams;
     req.integrator = &integParams;
+    // Subdivision dicing: per-node Dicing Rate x this scale. Preview renders
+    // use the coarser preview scale.
+    {
+        KnobDoublePtr ds = _imp->dicingScale.lock();
+        KnobDoublePtr ps = _imp->previewDicingScale.lock();
+        KnobDoublePtr os = _imp->offscreenDicingScale.lock();
+        const double scale = isPreview ? (ps ? ps->getValue() : 8.0) : (ds ? ds->getValue() : 1.0);
+        req.subdivision.dicingScale    = (float)std::max(0.01, scale);
+        req.subdivision.offscreenScale = (float)std::max(1.0, os ? os->getValue() : 4.0);
+    }
 
     // Deep output (kernel deep samples -> published DeepImage, see below)
     const bool deepEnabled = _imp->deepOutput.lock() && _imp->deepOutput.lock()->getValue();
@@ -914,6 +952,8 @@ CyclesRender::render(const RenderActionArgs& args)
         sceneHash = hashCombine(sceneHash, (U64)renderH);
         sceneHash = hashCombine(sceneHash, (U64)renderSamples);
         sceneHash = hashCombine(sceneHash, isPreview ? 1ULL : 0ULL);
+        hashFloat(req.subdivision.dicingScale);
+        hashFloat(req.subdivision.offscreenScale);
         sceneHash = hashCombine(sceneHash, deepEnabled ? 1ULL : 0ULL);
         sceneHash = hashCombine(sceneHash, (U64)deepMaxSamplesVal);
         sceneHash = hashCombine(sceneHash, deepAlphaOnly ? 1ULL : 0ULL);

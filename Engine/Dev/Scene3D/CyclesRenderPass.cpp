@@ -1229,6 +1229,7 @@ CyclesRenderPass::render(const RenderActionArgs& args)
     req.transparentBg   = false;
     req.denoise         = _imp->denoise.lock() && _imp->denoise.lock()->getValue();
     req.integrator      = &integParams;
+    req.subdivision.dicingScale = isPreview ? 8.0f : 1.0f; // coarse dicing for the live preview
     if (dofParams.enabled) req.dof = &dofParams;
     if (mbParams.enabled)  req.mb  = &mbParams;
     req.cameraOverride  = cam;
@@ -1503,6 +1504,7 @@ renderPassFrameToBuffers(CyclesRenderPass* self,
     req.transparentBg   = false;
     req.denoise         = denoise;
     req.integrator      = &integ;
+    req.subdivision.dicingScale = 1.0f; // final-quality dicing
     if (dof.enabled) req.dof = &dof;
     if (mb.enabled)  req.mb  = &mb;
     req.cameraOverride  = cam;

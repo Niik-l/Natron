@@ -270,6 +270,8 @@ walkObjectRecursive(const Alembic::AbcGeom::IObject& obj,
 
 struct ReadAlembicArchivePrivate
 {
+    SubdivisionKnobs subdKnobs;   // Subdivision (Cycles) group
+
     KnobFileWPtr filePath;
     KnobButtonWPtr reloadBtn;
     KnobStringWPtr objectFilter;
@@ -511,6 +513,8 @@ ReadAlembicArchive::initializeKnobs()
     // diamond locator in the 3D viewport. These let you hide them or resize them.
     // Read by name in Viewport3D::drawTransformNode (showLocators / locatorSize);
     // viewport-only (setEvaluateOnChange(false)) so changing them never re-renders.
+    createSubdivisionKnobs(this, page, _imp->subdKnobs);
+
     KnobPagePtr dispPage = AppManager::createKnob<KnobPage>(this, tr("Display"));
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Show Locators"));
@@ -1158,6 +1162,12 @@ ReadAlembicArchive::getConnectedMaterial() const
 {
     EffectInstancePtr inp = skipDots(getInput(0));
     return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
+}
+
+bool
+ReadAlembicArchive::getSubdivisionParams(double time, SubdivisionParams* out) const
+{
+    return readSubdivisionKnobs(_imp->subdKnobs, time, out);
 }
 
 NATRON_NAMESPACE_EXIT

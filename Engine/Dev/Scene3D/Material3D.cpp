@@ -111,6 +111,7 @@ struct Material3DPrivate
     KnobDoubleWPtr translucencyStrength;
     KnobFileWPtr displacementMapFile;
     KnobDoubleWPtr displacementScale, displacementMidlevel;
+    KnobChoiceWPtr displacementMethod;
     KnobDoubleWPtr normalStrength;
     KnobFileWPtr roughnessMapFile;
     KnobFileWPtr metallicMapFile;
@@ -122,7 +123,7 @@ struct Material3DPrivate
     KnobChoiceWPtr emissionColorspace;
 
     // Baked input texture temp file paths (from connected 2D nodes)
-    // Guards the six baked paths: bakeInputTextures writes them from the
+    // Guards the seven baked paths: bakeInputTextures writes them from the
     // Cycles render path while the getMaterial*File getters are read from the
     // scene-hash / shader-build threads — a torn std::string read is UB.
     std::mutex bakePathMutex;
@@ -139,6 +140,7 @@ struct Material3DPrivate
     std::string bakedEmissionPath;
     std::string bakedNormalPath;
     std::string bakedTransmissionPath;
+    std::string bakedDisplacementPath;
 };
 
 Material3D::Material3D(NodePtr node)
@@ -162,6 +164,7 @@ Material3D::getInputLabel(int inputNb) const
         case 3: return "Emission";
         case 4: return "Normal";
         case 5: return "Transmission";
+        case 6: return "Displacement";
         default: return std::string();
     }
 }
@@ -380,11 +383,39 @@ Material3D::initializeKnobs()
     {
         KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Displacement Map"));
         k->setName("displacementMapFile");
-        k->setHintToolTip(tr("Greyscale height map. Currently applied as BUMP — it perturbs "
-                             "shading normals, so surface detail lights correctly but the "
-                             "silhouette is unchanged. True displacement needs mesh "
-                             "subdivision and is not wired yet. Read as Non-Color."));
+        k->setHintToolTip(tr("Greyscale height map, read as Non-Color. The node's Displacement "
+                             "INPUT overrides this file when connected, so the map can be "
+                             "graded in the comp first (baked to a half-float EXR per render). "
+                             "Displacement Method below decides whether it only shades (Bump) "
+                             "or really moves the mesh (Displacement) in CyclesRender. The 3D "
+                             "viewport and ScanlineRender ignore it."));
         texPage->addKnob(k); _imp->displacementMapFile = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Displacement Method"));
+        k->setName("displacementMethod");
+        std::vector<ChoiceOption> entries;
+        entries.push_back( ChoiceOption("bump", "Bump",
+                                        "Perturb shading normals only. Detail lights and shades "
+                                        "correctly, the silhouette is unchanged. Cheapest; works "
+                                        "on any mesh.") );
+        entries.push_back( ChoiceOption("true", "Displacement",
+                                        "Move the mesh's vertices along their normals before "
+                                        "rendering: real silhouette, contact and self-shadowing. "
+                                        "Needs dense geometry (a scan, not a card) — there is no "
+                                        "subdivision, so a 2-triangle Card3D barely changes.") );
+        entries.push_back( ChoiceOption("both", "Displacement + Bump",
+                                        "Move the vertices AND bump the shading normal for detail "
+                                        "finer than the vertex spacing. Blender's recommended "
+                                        "setting for scanned assets.") );
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        k->setHintToolTip(tr("How CyclesRender applies the Displacement Map. Bump is the "
+                             "classic cheap shading trick; Displacement moves the existing "
+                             "vertices (no subdivision yet, so it only pays off on dense "
+                             "meshes such as Megascans LOD0); Displacement + Bump does both. "
+                             "Normals are rebuilt from the displaced mesh automatically."));
+        texPage->addKnob(k); _imp->displacementMethod = k;
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Displacement Scale"));
@@ -536,14 +567,19 @@ std::string Material3D::getMaterialNormalMapFile() const
 double Material3D::getMaterialNormalStrength(double time) const
 { KnobDoublePtr k = _imp->normalStrength.lock(); return k ? k->getValueAtTime(time) : 1.0; }
 
-// Specular + displacement are file-only: Material3D's six image inputs are
-// Diffuse/Metallic/Roughness/Emission/Normal/Transmission, so there is no input
-// to bake from — unlike the getters above, which prefer a baked input image.
+// Specular is file-only (no image input to bake from), unlike the getters
+// above, which prefer a baked input image.
 std::string Material3D::getMaterialSpecularMapFile() const
 { KnobFilePtr k = _imp->specularMapFile.lock(); return k ? k->getValue() : std::string(); }
 
 std::string Material3D::getMaterialDisplacementMapFile() const
-{ KnobFilePtr k = _imp->displacementMapFile.lock(); return k ? k->getValue() : std::string(); }
+{
+    {
+        std::lock_guard<std::mutex> lk(_imp->bakePathMutex);
+        if (!_imp->bakedDisplacementPath.empty()) return _imp->bakedDisplacementPath;
+    }
+    KnobFilePtr k = _imp->displacementMapFile.lock(); return k ? k->getValue() : std::string();
+}
 
 std::string Material3D::getMaterialOpacityMapFile() const
 { KnobFilePtr k = _imp->opacityMapFile.lock(); return k ? k->getValue() : std::string(); }
@@ -562,6 +598,22 @@ double Material3D::getMaterialDisplacementScale(double time) const
 
 double Material3D::getMaterialDisplacementMidlevel(double time) const
 { KnobDoublePtr k = _imp->displacementMidlevel.lock(); return k ? k->getValueAtTime(time) : 0.5; }
+
+MaterialProvider::MaterialDisplacementMethod
+Material3D::getMaterialDisplacementMethod() const
+{
+    KnobChoicePtr k = _imp->displacementMethod.lock();
+    if (!k) {
+        return eMaterialDisplacementBump;
+    }
+    // Match by entry id (ChoiceOption's FIRST argument; the label is the
+    // second), not index: ids survive reordering and are what a project
+    // file stores.
+    const std::string id = k->getActiveEntry().id;
+    if (id == "true") return eMaterialDisplacementTrue;
+    if (id == "both") return eMaterialDisplacementBoth;
+    return eMaterialDisplacementBump;
+}
 
 std::string Material3D::getMaterialRoughnessMapFile() const
 {
@@ -728,7 +780,7 @@ Material3D::getMaterialInputsHash(double /*time*/) const
     };
 
     unsigned long long h = 0;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < getNInputs(); ++i) {
         EffectInstancePtr input = getInput(i);
         // Mix the slot index either way, so connecting/disconnecting a map
         // changes the hash instead of two different wirings colliding.
@@ -875,12 +927,19 @@ Material3D::bakeInputTextures(double time)
     }
 
     // Input mapping: 0=Diffuse, 1=Metallic, 2=Roughness, 3=Emission, 4=Normal,
-    // 5=Transmission
+    // 5=Transmission, 6=Displacement
     // Bake into locals first, publish under the lock at the end — holding the
     // lock across renderInputToFile (a full render pull) would stall readers,
     // and writing the strings unlocked tears them under concurrent getters.
-    std::string local[6];
+    std::string local[7];
     const char* names[6] = {"diffuse", "metallic", "roughness", "emission", "normal", "transmission"};
+
+    // Displacement goes to a half-float EXR, not the RGBE .hdr the colour maps
+    // use: RGBE keeps an 8-bit mantissa, which would quantise a height map to
+    // 256 steps and stair-step the displaced surface.
+    if (EffectInstancePtr dispInput = getInput(6)) {
+        local[6] = bakeImageInputToExr(dispInput.get(), time, "mat3d_displacement", this);
+    }
 
     for (int i = 0; i < 6; ++i) {
         EffectInstancePtr input = getInput(i);
@@ -905,6 +964,7 @@ Material3D::bakeInputTextures(double time)
         _imp->bakedEmissionPath     = local[3];
         _imp->bakedNormalPath       = local[4];
         _imp->bakedTransmissionPath = local[5];
+        _imp->bakedDisplacementPath = local[6];
         _imp->lastBakeInputsHash    = inputsHash;
         _imp->lastBakeTime          = time;
         _imp->hasBakedOnce          = true;

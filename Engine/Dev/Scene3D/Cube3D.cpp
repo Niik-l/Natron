@@ -42,6 +42,8 @@ NATRON_NAMESPACE_ENTER
 
 struct Cube3DPrivate
 {
+    SubdivisionKnobs subdKnobs;   // Subdivision (Cycles) group
+
     // Transform
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
@@ -207,6 +209,8 @@ Cube3D::initializeKnobs()
     }
 
     // Material page
+    createSubdivisionKnobs(this, geoPage, _imp->subdKnobs);
+
     KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));
     {
         KnobColorPtr k = AppManager::createKnob<KnobColor>(this, tr("Base Color"), 3);
@@ -613,6 +617,12 @@ MaterialProvider* Cube3D::getConnectedMaterial() const
 {
     EffectInstancePtr inp = skipDots(getInput(1));
     return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
+}
+
+bool
+Cube3D::getSubdivisionParams(double time, SubdivisionParams* out) const
+{
+    return readSubdivisionKnobs(_imp->subdKnobs, time, out);
 }
 
 NATRON_NAMESPACE_EXIT

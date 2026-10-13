@@ -35,6 +35,7 @@
 #include "../../EngineFwd.h"
 #include "MaterialProvider.h"
 #include "MeshProvider.h"
+#include "SubdivisionProvider.h"
 #include "MeshData.h"
 
 NATRON_NAMESPACE_ENTER
@@ -48,6 +49,7 @@ struct ReadGeoPrivate;
 class ReadGeo
     : public EffectInstance
     , public MaterialProvider
+    , public SubdivisionProvider
     , public MeshProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
@@ -60,6 +62,9 @@ public:
 
     ReadGeo(NodePtr node);
     virtual ~ReadGeo();
+
+    // SubdivisionProvider: Subdivision (Cycles) group, render-time dicing
+    virtual bool getSubdivisionParams(double time, SubdivisionParams* out) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }

@@ -75,6 +75,8 @@ struct CyclesPassRequest
     const CyclesRenderer::DOFParams*        dof        = nullptr;
     const CyclesRenderer::MotionBlurParams* mb         = nullptr;
     const CyclesRenderer::IntegratorParams* integrator = nullptr;
+    // Dicing scale for meshes with Subdivide on (defaults = final-quality).
+    CyclesRenderer::SubdivisionSettings subdivision;
 
     // Optional scoping (sourced upstream from a CyclesRenderPass node when present).
     const std::map<std::string, ObjectVisibility>* visMap       = nullptr;

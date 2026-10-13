@@ -81,6 +81,7 @@
 #include "Engine/Dev/Scene3D/Cylinder3D.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
 #include "Engine/Dev/Scene3D/MeshProvider.h"
+#include "Engine/Dev/Scene3D/SubdivisionProvider.h"
 #include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
 #include "Engine/Dev/Scene3D/CyclesRenderPass.h"
 #include "Engine/Dev/Scene3D/ReadVDB.h"
@@ -360,6 +361,9 @@ struct CyclesRenderer::Impl
     // appears directly AND in reflections (shader AOVs can't, they're camera-only).
     bool emissiveMatteMode = false;
 
+    // Dicing scale for SubdivisionProvider meshes (see setSubdivisionSettings).
+    CyclesRenderer::SubdivisionSettings subdSettings;
+
     Impl() {}
     ~Impl()
     {
@@ -603,6 +607,141 @@ static ccl::Transform natronMatrixToCyclesTransform(const float m[16])
 }
 
 // ============================================================================
+// Subdivision faces (SubdivisionProvider). When a mesh node has Subdivide on,
+// its polygons go to Cycles as subd faces (Mesh::add_subd_face) and are diced
+// adaptively against scene->dicing_camera at render time, instead of as the
+// fixed triangles the rest of this file emits. That is what gives a 2-triangle
+// Card3D enough vertices for true displacement (DISPLACE_TRUE) to carve relief.
+//
+// ReadGeo / Alembic meshes keep their polygon soup (quads and n-gons intact,
+// which Catmull-Clark wants). Primitive generators only hand us triangles; a
+// 4-vertex / 2-triangle card is rebuilt as one quad so the subdivision does
+// not see a diagonal crease. Returns false when nothing usable was found; the
+// caller then falls back to the triangle path.
+// ============================================================================
+
+static bool buildSubdivisionMesh(ccl::Mesh* mesh,
+                                 const std::vector<ccl::float3>& verts,
+                                 const std::vector<int>& triVerts,
+                                 const std::vector<ccl::float2>& uvs,         // per-vertex (primitives) or per-triangle-corner (meshes)
+                                 const std::vector<int>& faceIndices,        // polygon soup when the source kept it
+                                 const std::vector<int>& faceCounts,
+                                 const std::vector<ccl::float2>& cornerUVs,  // parallel to faceIndices
+                                 const SubdivisionParams& params,
+                                 float dicingScale,
+                                 const ccl::Transform& objectToWorld)
+{
+    const int nv = (int)verts.size();
+    if (nv == 0) return false;
+
+    std::vector<int> fIdx, fCnt;
+    std::vector<ccl::float2> fUV;
+    bool haveUV = false;
+
+    if (!faceCounts.empty()) {
+        haveUV = cornerUVs.size() == faceIndices.size();
+        size_t off = 0;
+        for (size_t f = 0; f < faceCounts.size(); ++f) {
+            const int c = faceCounts[f];
+            if (c < 3 || off + (size_t)c > faceIndices.size()) {
+                off += (size_t)std::max(0, c);
+                continue;
+            }
+            bool ok = true;
+            for (int i = 0; i < c; ++i) {
+                const int v = faceIndices[off + i];
+                if (v < 0 || v >= nv) { ok = false; break; }
+            }
+            if (ok) {
+                fCnt.push_back(c);
+                for (int i = 0; i < c; ++i) {
+                    fIdx.push_back(faceIndices[off + i]);
+                    if (haveUV) fUV.push_back(cornerUVs[off + i]);
+                }
+            }
+            off += (size_t)c;
+        }
+    } else {
+        const int numTris = (int)triVerts.size() / 3;
+        const bool perVertexUV = (int)uvs.size() == nv;
+        const bool perCornerUV = !perVertexUV && (int)uvs.size() == numTris * 3;
+        haveUV = perVertexUV || perCornerUV;
+        auto uvAt = [&](int tri, int corner) -> ccl::float2 {
+            if (perCornerUV) return uvs[tri * 3 + corner];
+            const int v = triVerts[tri * 3 + corner];
+            return (perVertexUV && v >= 0 && v < nv) ? uvs[v] : ccl::make_float2(0.0f, 0.0f);
+        };
+        bool merged = false;
+        if (nv == 4 && numTris == 2) {
+            const int a = triVerts[0], b = triVerts[1], c = triVerts[2];
+            int d = -1, dCorner = -1;
+            for (int k = 0; k < 3; ++k) {
+                const int v = triVerts[3 + k];
+                if (v != a && v != b && v != c) { d = v; dCorner = k; }
+            }
+            if (d >= 0) {
+                const int s0 = triVerts[3 + (dCorner + 1) % 3];
+                const int s1 = triVerts[3 + (dCorner + 2) % 3];
+                auto isEdge = [&](int p, int q) { return (s0 == p && s1 == q) || (s0 == q && s1 == p); };
+                // quad corners as (triangle, corner) pairs so UVs follow
+                int tri[4] = {0, 0, 0, 0}, cor[4] = {0, 1, 2, 0};
+                if (isEdge(a, c))      { tri[3] = 1; cor[3] = dCorner; }                          // a b c d
+                else if (isEdge(b, c)) { tri[2] = 1; cor[2] = dCorner; tri[3] = 0; cor[3] = 2; }  // a b d c
+                else if (isEdge(a, b)) { tri[1] = 1; cor[1] = dCorner; tri[2] = 0; cor[2] = 1; tri[3] = 0; cor[3] = 2; } // a d b c
+                else                   { tri[0] = -1; }
+                if (tri[0] >= 0) {
+                    fCnt.push_back(4);
+                    for (int k = 0; k < 4; ++k) {
+                        fIdx.push_back(triVerts[tri[k] * 3 + cor[k]]);
+                        if (haveUV) fUV.push_back(uvAt(tri[k], cor[k]));
+                    }
+                    merged = true;
+                }
+            }
+        }
+        if (!merged) {
+            for (int t = 0; t < numTris; ++t) {
+                const int i0 = triVerts[t * 3], i1 = triVerts[t * 3 + 1], i2 = triVerts[t * 3 + 2];
+                if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= nv || i1 >= nv || i2 >= nv) continue;
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue; // degenerate pole fans
+                fCnt.push_back(3);
+                fIdx.push_back(i0); fIdx.push_back(i1); fIdx.push_back(i2);
+                if (haveUV) { fUV.push_back(uvAt(t, 0)); fUV.push_back(uvAt(t, 1)); fUV.push_back(uvAt(t, 2)); }
+            }
+        }
+    }
+    if (fCnt.empty()) return false;
+
+    mesh->set_subdivision_type(params.type == 1 ? ccl::Mesh::SUBDIVISION_CATMULL_CLARK
+                                                : ccl::Mesh::SUBDIVISION_LINEAR);
+    mesh->reserve_mesh(nv, 0);
+    for (int v = 0; v < nv; ++v) {
+        mesh->add_vertex(verts[v]);
+    }
+    mesh->reserve_subd_faces((int)fCnt.size(), (int)fIdx.size());
+    size_t off = 0;
+    for (size_t f = 0; f < fCnt.size(); ++f) {
+        mesh->add_subd_face(&fIdx[off], fCnt[f], 0, true);
+        off += (size_t)fCnt[f];
+    }
+    if (haveUV && fUV.size() == fIdx.size()) {
+        ccl::Attribute* uvAttr = mesh->subd_attributes.add(ccl::ATTR_STD_UV, ccl::ustring("UVMap"));
+        ccl::float2* dst = uvAttr->data_float2();
+        for (size_t c = 0; c < fUV.size(); ++c) {
+            dst[c] = fUV[c];
+        }
+    }
+    // Pixel-space adaptive dicing against scene->dicing_camera (configured
+    // alongside the render camera in syncSceneWithCamera). The object
+    // transform is needed so edge lengths are measured in world space.
+    mesh->set_subd_adaptive_space(ccl::Mesh::SUBDIVISION_ADAPTIVE_SPACE_PIXEL);
+    mesh->set_subd_dicing_rate(std::max(0.1f, (float)params.dicingRate * std::max(0.01f, dicingScale)));
+    mesh->set_subd_max_level(std::max(1, std::min(12, params.maxLevel)));
+    mesh->set_subd_objecttoworld(objectToWorld);
+    return true;
+}
+
+// ============================================================================
 // Material shader creation helper
 // ============================================================================
 
@@ -830,11 +969,13 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         graph->connect(specTex->output("Color"), principled->input("Specular IOR Level"));
     }
 
-    // Displacement map — wired as BUMP for now: the height map perturbs shading
-    // normals, so surface detail lights and shades correctly, but the silhouette
-    // is unchanged. DISPLACE_TRUE would need the mesh sync path to emit
-    // subdivision faces (Mesh::add_subd_face, which this renderer never calls),
-    // so selecting it today would render identically while costing dicing time.
+    // Displacement map. The material picks the method: DISPLACE_BUMP perturbs
+    // shading normals only (legacy default); DISPLACE_TRUE makes Cycles run the
+    // displacement shader per vertex before the BVH build and move the mesh's
+    // existing vertices, then rebuild vertex normals (GeometryManager::displace),
+    // so it is only as detailed as the geometry is dense — the mesh sync emits
+    // plain triangles, no subdivision faces, so a Card3D will not grow relief;
+    // DISPLACE_BOTH moves vertices and bumps the normal for sub-vertex detail.
     std::string dispFile = resolveTextureFrame(mat->getMaterialDisplacementMapFile(), frame);
     if (!dispFile.empty()) {
         ccl::ImageTextureNode* dispTex = graph->create_node<ccl::ImageTextureNode>();
@@ -846,7 +987,14 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         graph->connect(texCoord->output("UV"), dispTex->input("Vector"));
         graph->connect(dispTex->output("Color"), disp->input("Height"));
         graph->connect(disp->output("Displacement"), graph->output()->input("Displacement"));
-        shader->set_displacement_method(ccl::DISPLACE_BUMP);
+        ccl::DisplacementMethod method = ccl::DISPLACE_BUMP;
+        switch (mat->getMaterialDisplacementMethod()) {
+            case MaterialProvider::eMaterialDisplacementTrue: method = ccl::DISPLACE_TRUE; break;
+            case MaterialProvider::eMaterialDisplacementBoth: method = ccl::DISPLACE_BOTH; break;
+            case MaterialProvider::eMaterialDisplacementBump:
+            default: break;
+        }
+        shader->set_displacement_method(method);
     }
 
     // Metallic map
@@ -986,6 +1134,12 @@ CyclesRenderer::setMotionTransforms(const MotionMatrixMap& open,
 {
     _impl->motionOpen  = open;
     _impl->motionClose = close;
+}
+
+void
+CyclesRenderer::setSubdivisionSettings(const SubdivisionSettings& sd)
+{
+    _impl->subdSettings = sd;
 }
 
 bool
@@ -1459,56 +1613,67 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         cameraTfm.y = ccl::make_float4( r01,  r11, -r21, (float)camTY);
         cameraTfm.z = ccl::make_float4( r02,  r12, -r22, (float)camTZ);
 
-        scene->camera->set_matrix(cameraTfm);
-        scene->camera->set_camera_type(ccl::CAMERA_PERSPECTIVE);
+        // Applied to BOTH scene->camera and scene->dicing_camera: Cycles dices
+        // subdivision meshes (SubdivisionProvider) against the dicing camera,
+        // so it must see the same view and the same pixel size as the render.
+        auto configureCamera = [&](ccl::Camera* cam) {
+            cam->set_matrix(cameraTfm);
+            cam->set_camera_type(ccl::CAMERA_PERSPECTIVE);
 
-        // Independent fovH/fovV from both apertures via CameraMath. Cycles' default
-        // landscape viewplane is (aspect, 1.0) which makes set_fov() be interpreted
-        // as VERTICAL FOV with horizontal angle derived from render aspect — same
-        // class of bug that bit ScanlineRender. Override the viewplane explicitly
-        // so X extent reflects the camera's actual H aperture, not render aspect.
-        double fovH = 0, fovV = 0;
-        CameraMath::computeFovs(focalLength, hAperture, vAperture, fovH, fovV);
-        float fovHf = (float)fovH;
-        float fovVf = (float)fovV;
-        if (fovVf < 0.01f || fovVf > 3.0f) { fovVf = 45.0f * (float)M_PI / 180.0f; fovHf = fovVf; }
+            // Independent fovH/fovV from both apertures via CameraMath. Cycles' default
+            // landscape viewplane is (aspect, 1.0) which makes set_fov() be interpreted
+            // as VERTICAL FOV with horizontal angle derived from render aspect — same
+            // class of bug that bit ScanlineRender. Override the viewplane explicitly
+            // so X extent reflects the camera's actual H aperture, not render aspect.
+            double fovH = 0, fovV = 0;
+            CameraMath::computeFovs(focalLength, hAperture, vAperture, fovH, fovV);
+            float fovHf = (float)fovH;
+            float fovVf = (float)fovV;
+            if (fovVf < 0.01f || fovVf > 3.0f) { fovVf = 45.0f * (float)M_PI / 180.0f; fovHf = fovVf; }
 
-        scene->camera->set_fov(fovVf); // Cycles uses this as the short-axis FOV.
+            cam->set_fov(fovVf); // Cycles uses this as the short-axis FOV.
 
-        // Override viewplane so horizontal extent at z=1 = tan(fovH/2) instead of
-        // aspect * tan(fovV/2). Vertical stays at ±1 (= tan(fovV/2) after fov scale).
-        const float halfRatio = tanf(fovHf * 0.5f) / tanf(fovVf * 0.5f);
-        scene->camera->viewplane.left   = -halfRatio;
-        scene->camera->viewplane.right  =  halfRatio;
-        scene->camera->viewplane.bottom = -1.0f;
-        scene->camera->viewplane.top    =  1.0f;
+            // Override viewplane so horizontal extent at z=1 = tan(fovH/2) instead of
+            // aspect * tan(fovV/2). Vertical stays at ±1 (= tan(fovV/2) after fov scale).
+            const float halfRatio = tanf(fovHf * 0.5f) / tanf(fovVf * 0.5f);
+            cam->viewplane.left   = -halfRatio;
+            cam->viewplane.right  =  halfRatio;
+            cam->viewplane.bottom = -1.0f;
+            cam->viewplane.top    =  1.0f;
 
-        // Sensor metadata (in METERS — Cycles defaults are 0.036 / 0.024 for FF35).
-        // Not used in projection math; exposed to OSL/shader Camera Data nodes.
-        scene->camera->set_sensorwidth((float)hAperture * 0.001f);
-        scene->camera->set_sensorheight((float)vAperture * 0.001f);
+            // Sensor metadata (in METERS — Cycles defaults are 0.036 / 0.024 for FF35).
+            // Not used in projection math; exposed to OSL/shader Camera Data nodes.
+            cam->set_sensorwidth((float)hAperture * 0.001f);
+            cam->set_sensorheight((float)vAperture * 0.001f);
 
-        scene->camera->set_full_width(_impl->width);
-        scene->camera->set_full_height(_impl->height);
-        scene->camera->set_nearclip(0.1f);
-        scene->camera->set_farclip(10000.0f);
+            cam->set_full_width(_impl->width);
+            cam->set_full_height(_impl->height);
+            cam->set_nearclip(0.1f);
+            cam->set_farclip(10000.0f);
 
-        // Depth of Field
-        if (dof && dof->enabled) {
-            scene->camera->set_aperturesize(dof->apertureSize);
-            scene->camera->set_focaldistance(dof->focusDistance);
-            scene->camera->set_blades(dof->blades);
-            scene->camera->set_bladesrotation(dof->bladeRotation);
+            // Depth of Field
+            if (dof && dof->enabled) {
+                cam->set_aperturesize(dof->apertureSize);
+                cam->set_focaldistance(dof->focusDistance);
+                cam->set_blades(dof->blades);
+                cam->set_bladesrotation(dof->bladeRotation);
+            }
+
+            // Motion blur camera shutter
+            if (motionBlur && motionBlur->enabled) {
+                cam->set_shuttertime(motionBlur->shutterTime);
+                cam->set_motion_position(
+                    (ccl::MotionPosition)motionBlur->shutterPosition);
+            }
+
+            cam->update(scene);
+        };
+        configureCamera(scene->camera);
+        if (scene->dicing_camera) {
+            configureCamera(scene->dicing_camera);
+            scene->dicing_camera->set_offscreen_dicing_scale(std::max(1.0f, _impl->subdSettings.offscreenScale));
+            scene->dicing_camera->update(scene);
         }
-
-        // Motion blur camera shutter
-        if (motionBlur && motionBlur->enabled) {
-            scene->camera->set_shuttertime(motionBlur->shutterTime);
-            scene->camera->set_motion_position(
-                (ccl::MotionPosition)motionBlur->shutterPosition);
-        }
-
-        scene->camera->update(scene);
     }
 
     // --- Render passes ---
@@ -2432,6 +2597,25 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         std::vector<ccl::float2> uvs; // per-vertex UVs
         std::vector<ccl::float3> normals; // per-vertex normals from a primitive's generator (empty: Cycles averages)
 
+        // Render-time subdivision (the node's "Subdivision (Cycles)" group):
+        // the polygons go to Cycles as subd faces and are diced against the
+        // camera instead of being emitted as fixed triangles.
+        SubdivisionParams subdParams;
+        bool useSubd = false;
+        {
+            NodePtr subdSrc = sn.sourceNode.lock();
+            if (subdSrc) {
+                const SubdivisionProvider* sp =
+                    dynamic_cast<const SubdivisionProvider*>(subdSrc->getEffectInstance().get());
+                if (sp) {
+                    useSubd = sp->getSubdivisionParams(time, &subdParams) && subdParams.enabled;
+                }
+            }
+        }
+        std::vector<int> subdFaceIndices;         // polygon soup kept for subd faces (meshes only)
+        std::vector<int> subdFaceCounts;
+        std::vector<ccl::float2> subdCornerUVs;   // per corner, parallel to subdFaceIndices
+
         switch (sn.type) {
             case eSceneNodeSphere: {
                 if (Sphere3D* n = sceneNodeAs<Sphere3D>(sn)) {
@@ -2540,6 +2724,19 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     idxOffset += count;
                 }
 
+                // Subdivision wants the original polygons (quads / n-gons
+                // intact), not the fan triangles above.
+                if (useSubd) {
+                    subdFaceIndices = meshData->faceIndices;
+                    subdFaceCounts  = meshData->faceCounts;
+                    if (hasUV && meshData->uvs.size() >= meshData->faceIndices.size() * 2) {
+                        subdCornerUVs.resize(meshData->faceIndices.size());
+                        for (size_t c = 0; c < subdCornerUVs.size(); ++c) {
+                            subdCornerUVs[c] = ccl::make_float2(uvData[c * 2], uvData[c * 2 + 1]);
+                        }
+                    }
+                }
+
                 // Use triUVs as per-corner UVs (overrides the per-vertex uvs path below)
                 if (hasUV && !triUVs.empty()) {
                     uvs.clear(); // clear per-vertex uvs so the general path doesn't override
@@ -2622,42 +2819,55 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             mesh->set_used_shaders(used_shaders);
         }
 
-        mesh->reserve_mesh(verts.size(), numTris);
-        for (size_t v = 0; v < verts.size(); ++v) {
-            mesh->add_vertex(verts[v]);
-        }
-        for (int t = 0; t < numTris; ++t) {
-            mesh->add_triangle(triVerts[t * 3 + 0], triVerts[t * 3 + 1], triVerts[t * 3 + 2], 0, true);
-        }
-
-        // Per-vertex normals supplied by the primitive generators (see
-        // nodeMeshToCycles). When present Cycles skips its own averaging.
-        if (normals.size() == verts.size() && !normals.empty()) {
-            ccl::Attribute* nAttr = mesh->attributes.add(ccl::ATTR_STD_VERTEX_NORMAL);
-            ccl::float3* nDst = nAttr->data_float3();
-            for (size_t v = 0; v < normals.size(); ++v) {
-                nDst[v] = normals[v];
+        bool subdivided = false;
+        if (useSubd) {
+            subdivided = buildSubdivisionMesh(mesh, verts, triVerts, uvs,
+                                              subdFaceIndices, subdFaceCounts, subdCornerUVs,
+                                              subdParams, _impl->subdSettings.dicingScale,
+                                              natronMatrixToCyclesTransform(sn.worldMatrix));
+            if (!subdivided) {
+                fprintf(stderr, "[Cycles] '%s': no usable polygons for subdivision, rendering plain triangles\n", sn.name.c_str());
             }
         }
+        if (!subdivided) {
+            mesh->reserve_mesh(verts.size(), numTris);
+            for (size_t v = 0; v < verts.size(); ++v) {
+                mesh->add_vertex(verts[v]);
+            }
+            for (int t = 0; t < numTris; ++t) {
+                mesh->add_triangle(triVerts[t * 3 + 0], triVerts[t * 3 + 1], triVerts[t * 3 + 2], 0, true);
+            }
 
-        // Add UV attribute (per-corner, 3 per triangle)
-        if (!uvs.empty()) {
-            ccl::Attribute* uvAttr = mesh->attributes.add(ccl::ATTR_STD_UV, ccl::ustring("UVMap"));
-            ccl::float2* uvDst = uvAttr->data_float2();
-            if ((int)uvs.size() == numTris * 3) {
-                // Per-corner UVs (ReadGeo Alembic meshes) — copy directly
-                for (int c = 0; c < numTris * 3; ++c) {
-                    uvDst[c] = uvs[c];
-                }
-            } else {
-                // Per-vertex UVs (procedural shapes) — index by vertex
-                for (int t = 0; t < numTris; ++t) {
-                    int i0 = triVerts[t*3+0], i1 = triVerts[t*3+1], i2 = triVerts[t*3+2];
-                    uvDst[t*3+0] = (i0 < (int)uvs.size()) ? uvs[i0] : ccl::make_float2(0,0);
-                    uvDst[t*3+1] = (i1 < (int)uvs.size()) ? uvs[i1] : ccl::make_float2(0,0);
-                    uvDst[t*3+2] = (i2 < (int)uvs.size()) ? uvs[i2] : ccl::make_float2(0,0);
+            // Per-vertex normals supplied by the primitive generators (see
+            // nodeMeshToCycles). When present Cycles skips its own averaging.
+            if (normals.size() == verts.size() && !normals.empty()) {
+                ccl::Attribute* nAttr = mesh->attributes.add(ccl::ATTR_STD_VERTEX_NORMAL);
+                ccl::float3* nDst = nAttr->data_float3();
+                for (size_t v = 0; v < normals.size(); ++v) {
+                    nDst[v] = normals[v];
                 }
             }
+
+            // Add UV attribute (per-corner, 3 per triangle)
+            if (!uvs.empty()) {
+                ccl::Attribute* uvAttr = mesh->attributes.add(ccl::ATTR_STD_UV, ccl::ustring("UVMap"));
+                ccl::float2* uvDst = uvAttr->data_float2();
+                if ((int)uvs.size() == numTris * 3) {
+                    // Per-corner UVs (ReadGeo Alembic meshes) — copy directly
+                    for (int c = 0; c < numTris * 3; ++c) {
+                        uvDst[c] = uvs[c];
+                    }
+                } else {
+                    // Per-vertex UVs (procedural shapes) — index by vertex
+                    for (int t = 0; t < numTris; ++t) {
+                        int i0 = triVerts[t*3+0], i1 = triVerts[t*3+1], i2 = triVerts[t*3+2];
+                        uvDst[t*3+0] = (i0 < (int)uvs.size()) ? uvs[i0] : ccl::make_float2(0,0);
+                        uvDst[t*3+1] = (i1 < (int)uvs.size()) ? uvs[i1] : ccl::make_float2(0,0);
+                        uvDst[t*3+2] = (i2 < (int)uvs.size()) ? uvs[i2] : ccl::make_float2(0,0);
+                    }
+                }
+            }
+
         }
 
         // Motion blur for animated meshes (vertex deformation only — Cycles
@@ -2709,7 +2919,10 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 vertsClose.size() == N * 3) {
                 mesh->set_use_motion_blur(true);
                 mesh->set_motion_steps(3);
-                ccl::Attribute* attrMotion = mesh->attributes.add(ccl::ATTR_STD_MOTION_VERTEX_POSITION);
+                // Subdivision meshes carry motion on the base cage; Cycles
+                // interpolates it onto the diced vertices.
+                ccl::Attribute* attrMotion = (subdivided ? mesh->subd_attributes : mesh->attributes)
+                                                 .add(ccl::ATTR_STD_MOTION_VERTEX_POSITION);
                 ccl::float3* motionData = attrMotion->data_float3();
                 // Layout: [step 0: open verts] [step 2: close verts] —
                 // motion_steps = 3 means (steps - 1) = 2 motion samples, the

@@ -34,6 +34,7 @@
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 #include "MaterialProvider.h"
+#include "SubdivisionProvider.h"
 #include "MaterialTextureBake.h"
 
 NATRON_NAMESPACE_ENTER
@@ -56,6 +57,7 @@ struct Sphere3DPrivate;
 class Sphere3D
     : public EffectInstance
     , public MaterialProvider
+    , public SubdivisionProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -67,6 +69,9 @@ public:
 
     Sphere3D(NodePtr node);
     virtual ~Sphere3D();
+
+    // SubdivisionProvider: Subdivision (Cycles) group, render-time dicing
+    virtual bool getSubdivisionParams(double time, SubdivisionParams* out) const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }

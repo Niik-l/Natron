@@ -121,6 +121,19 @@ public:
         float aoDistance = 10.0f;
     };
 
+    /**
+     * @brief Global dicing controls for meshes whose node has Subdivide on
+     * (SubdivisionProvider). dicingScale multiplies every node's Dicing Rate
+     * (pixels per edge): 1 for final renders, larger for previews, like
+     * Blender's render/viewport dicing split. offscreenScale coarsens
+     * geometry outside the frame (Cycles' Camera::offscreen_dicing_scale).
+     */
+    struct SubdivisionSettings {
+        float dicingScale    = 1.0f;
+        float offscreenScale = 4.0f;
+    };
+    void setSubdivisionSettings(const SubdivisionSettings& s);
+
     void syncSceneWithCamera(const SceneGraph& sg,
                              double camTX, double camTY, double camTZ,
                              double camRX, double camRY, double camRZ,

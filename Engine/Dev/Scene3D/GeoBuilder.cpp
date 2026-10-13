@@ -59,6 +59,8 @@ NATRON_NAMESPACE_ENTER
 
 struct GeoBuilderPrivate
 {
+    SubdivisionKnobs subdKnobs;   // Subdivision (Cycles) group
+
     // 2D grids (the node's state) + their persistent home
     std::vector<GeoBuilder::Grid> grids;
     KnobStringWPtr gridsData;       // hidden, persistent: serialised grid list
@@ -396,6 +398,8 @@ GeoBuilder::initializeKnobs()
     _imp->uniformScale.lock()->setHintToolTip(tr("Multiplies Scale X/Y/Z, so the whole model resizes from one knob."));
 
     // ---------------- Material page (same as ReadGeo) ----------------
+    createSubdivisionKnobs(this, gridPage, _imp->subdKnobs);
+
     KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));
     {
         KnobColorPtr k = AppManager::createKnob<KnobColor>(this, tr("Base Color"), 3);
@@ -1721,6 +1725,12 @@ MaterialProvider* GeoBuilder::getConnectedMaterial() const
 {
     EffectInstancePtr inp = skipDots(getInput(0));
     return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
+}
+
+bool
+GeoBuilder::getSubdivisionParams(double time, SubdivisionParams* out) const
+{
+    return readSubdivisionKnobs(_imp->subdKnobs, time, out);
 }
 
 NATRON_NAMESPACE_EXIT
