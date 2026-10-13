@@ -49,7 +49,15 @@ struct PatchFillPrivate;
  * flat wall, hide a sensor dust spot. Nothing is cloned, so texture is not
  * reproduced; the fill is only ever a ramp.
  *
+ * Detail pass (optional): the ramp is only ever smooth, so a Detail Amount
+ * above zero scatters soft-edged clone stamps over the fill, each a
+ * high-passed patch taken at a random position from the ring outside the
+ * shape (or a user rectangle, or the Detail input) with random rotation,
+ * scale and flip, composited one over another so texture contrast survives.
+ * The ramp keeps the brightness and colour, the stamps bring the texture.
+ *
  * Input 0: Source. Input 1: Mask (any alpha; a Roto node is the usual source).
+ * Input 2: Detail (optional texture / grain plate sampled at the hole's position).
  */
 class PatchFill
     : public EffectInstance
@@ -67,7 +75,7 @@ public:
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 2; }
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 3; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
@@ -82,10 +90,10 @@ public:
     { grouping->push_back(PLUGIN_GROUP_FILTER); }
 
     virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return inputNb == 0 ? "Source" : "Mask"; }
+    { return inputNb == 0 ? "Source" : (inputNb == 1 ? "Mask" : "Detail"); }
 
     virtual bool isInputOptional(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return inputNb == 1; }
+    { return inputNb != 0; }
 
     virtual bool isInputMask(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return inputNb == 1; }

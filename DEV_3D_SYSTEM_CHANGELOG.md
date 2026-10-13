@@ -17,6 +17,24 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **PatchFill Detail tab: texture-bombed clone stamps (2026-10-13)** — the user's follow-up: the
+  lattice ramp is only ever smooth, so bring texture back the way texture bombing does. Third
+  input **Detail**, Detail page: Amount, Source (Band ring / Region rect / Detail input at the
+  hole's position), Stamp Size, Stamp Density, Rotation / Scale Variation, Flip, Detail Frequency,
+  Stamp Filter (Bilinear / Nearest), Seed; Output mode **Detail** shows the layer over mid grey.
+  Implementation (`buildDetailLayer`): a `Plane` of the clone source with per-pixel validity (the
+  grown shape and the feathered matte are never cloned), a validity-normalised separable box blur
+  gives the low-pass, stamps copy `src - lowpass` through a rigid transform (flip, rotate, 1/scale)
+  with a flat-core / soft-rim disc kernel composited "over" (later stamps win, so overlaps don't
+  average the texture away), then a coverage pass walks the fill pixels in random order and stamps
+  wherever coverage < 0.6, because random scatter leaves Poisson gaps and band stamps whose source
+  touched the hole drop pixels. Band centres sit 1.1-3 stamp widths outside the grown shape. Log
+  Space applies to the stamps too. Lessons: the first kernel `(1-r^2)^2` left only each stamp's core
+  visible (sparse 10 px blobs at 32 px stamps, half the texture energy); bilinear resampling of
+  per-pixel noise costs ~1/3 of its energy by construction, hence the Nearest option. Headless
+  (static Noise plate over the ramp, 50-stop light, disc mask): high-pass energy inside the fill vs
+  the surrounding ring = 0.0001 with Detail off, 0.054 Bilinear, 0.0835 Nearest, 0.0848 Detail
+  input, against 0.0846 outside; the smooth-fill regression test is unchanged (0.005).
 - **Zap3D endpoint handles drawn in the wrong space (2026-10-13)** — user report with a screenshot:
   the Start / End points and their line floated away from the bolt. `Viewport3D` called
   `drawZapEndpoints` inside the mesh node's `glPushMatrix` / `glMultMatrixf(sn.worldMatrix)` block,
