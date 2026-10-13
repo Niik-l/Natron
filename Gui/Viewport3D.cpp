@@ -1729,11 +1729,17 @@ Viewport3D::paintGL()
         if (sn.type == eSceneNodeCamera && sn.name == _imp->selectedNodeName) {
             drawCameraMotionTrail(sn, sceneNodes);   // world space: before the push
         }
+        if (sn.type == eSceneNodeMesh) {
+            // Zap3D Start / End are world coordinates: draw them before the
+            // node's world matrix is pushed, or they land offset by the node's
+            // translate (= the selected endpoint) and float away from the bolt.
+            drawZapEndpoints(sn);
+        }
         glPushMatrix();
         glMultMatrixf(sn.worldMatrix);
 
         switch (sn.type) {
-            case eSceneNodeMesh:       drawMeshNode(sn); drawZapEndpoints(sn); break;
+            case eSceneNodeMesh:       drawMeshNode(sn); break;
             case eSceneNodeCard:       drawCardNode(sn); break;
             case eSceneNodeCamera:     drawCameraNode(sn); break;
             case eSceneNodePointCloud: drawPointCloudNode(sn); break;

@@ -17,6 +17,12 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Zap3D endpoint handles drawn in the wrong space (2026-10-13)** — user report with a screenshot:
+  the Start / End points and their line floated away from the bolt. `Viewport3D` called
+  `drawZapEndpoints` inside the mesh node's `glPushMatrix` / `glMultMatrixf(sn.worldMatrix)` block,
+  so the world-space endpoints were shifted by the node's translate (which, for Zap3D, IS the selected
+  endpoint). The mesh and the pick code were right; only the drawing was off. Now drawn before the
+  push, like the camera motion trail.
 - **PatchFill node (2026-10-13)** — paint-out by lattice fill, the user's idea for killing lights in
   an HDRI without a clone/blur/merge stack. `Engine/Dev/PostFX/PatchFill.{h,cpp}`, Filter group,
   inputs Source + Mask (`isInputMask` so Natron adds the mask-channel selector; a Roto node is the
