@@ -30,6 +30,51 @@
 
 NATRON_NAMESPACE_ENTER
 
+// --- shared math helpers for the archive importers/evaluators ---------------
+
+void
+geoArchiveMatIdentity(float m[16])
+{
+    for (int i = 0; i < 16; ++i) m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+}
+
+// out = a * b (column-major; out must not alias a or b)
+void
+geoArchiveMatMul(const float a[16], const float b[16], float out[16])
+{
+    float r[16];
+    for (int c = 0; c < 4; ++c) {
+        for (int rw = 0; rw < 4; ++rw) {
+            float s = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                s += a[k * 4 + rw] * b[c * 4 + k];
+            }
+            r[c * 4 + rw] = s;
+        }
+    }
+    std::memcpy(out, r, sizeof(r));
+}
+
+// Column-major TRS composition from translation + (x,y,z,w) quaternion +
+// per-axis scale — the glTF node transform and the rest pose of FBX nodes.
+void
+geoArchiveComposeTRS(const float t[3], const float q[4], const float s[3], float out[16])
+{
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+
+    const float xy = 2.0f * x * y, xz = 2.0f * x * z, yz = 2.0f * y * z;
+    const float wx = 2.0f * w * x, wy = 2.0f * w * y, wz = 2.0f * w * z;
+    const float xx = 2.0f * x * x, yy = 2.0f * y * y, zz = 2.0f * z * z;
+
+    out[0]  = (1.0f - yy - zz) * s[0]; out[1]  = (xy + wz) * s[0];
+    out[2]  = (xz - wy) * s[0];        out[3]  = 0.0f;
+    out[4]  = (xy - wz) * s[1];        out[5]  = (1.0f - xx - zz) * s[1];
+    out[6]  = (yz + wx) * s[1];        out[7]  = 0.0f;
+    out[8]  = (xz + wy) * s[2];        out[9]  = (yz - wx) * s[2];
+    out[10] = (1.0f - xx - yy) * s[2]; out[11] = 0.0f;
+    out[12] = t[0]; out[13] = t[1]; out[14] = t[2]; out[15] = 1.0f;
+}
+
 void
 importBakeXform(std::vector<float>& verts, const float m[16])
 {

@@ -1,0 +1,967 @@
+/* ***** BEGIN LICENSE BLOCK *****
+ * This file is part of Natron <https://natrongithub.github.io/>,
+ * (C) 2018-2023 The Natron developers
+ *
+ * Natron is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * Natron is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Natron.  If not, see <http://www.gnu.org/licenses/gpl-2.0.html>
+ * ***** END LICENSE BLOCK ***** */
+
+// ***** BEGIN PYTHON BLOCK *****
+#include <Python.h>
+// ***** END PYTHON BLOCK *****
+
+// ReadGeoArchive node implementation. Structure mirrors ReadAlembicArchive
+// (same knobs, same ArchiveProvider multi-emit contract); the per-frame data
+// comes from the ReadGeoImport archive contract:
+//
+//   load     : loadGltfArchiveImport / loadFbxArchiveImport (file -> entries)
+//   per frame: evaluateGltfArchiveFrame / evaluateFbxArchiveFrame
+//              -> GeoArchiveFrameEval (node local matrices + deformed meshes)
+//
+// Frame cache: keyed by the integer Natron frame offset from frame 1
+// (k = floor(time) - 1 - frameOffset; sourceTime = k / fps). Filled lazily
+// on first request per frame, kept for the session (the pre-load spirit of
+// ReadGeo's Alembic sample cache, without paying for unvisited frames).
+// Sub-frame sampling (motion blur): node matrices interpolate linearly
+// between the cached bracket frames — the same matrix-lerp policy
+// ReadAlembicArchive uses; skinned vertices snap per frame (G1 in-place
+// caveat of the Alembic machinery applies; tracked separately).
+
+#include "ReadGeoArchive.h"
+#include "../DotUtils.h"
+
+#include "../../NodeMetadata.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <sstream>
+#include <vector>
+
+#include "../../AppInstance.h"
+#include "../../ChoiceOption.h"
+#include "../../Image.h"
+#include "../../ImagePlaneDesc.h"
+#include "../../KnobFile.h"
+#include "../../KnobTypes.h"
+#include "../../Node.h"
+#include "../../ViewIdx.h"
+
+NATRON_NAMESPACE_ENTER
+
+namespace {
+
+// Simple glob match: '*' matches any substring (same as ReadAlembicArchive's).
+bool
+arcGlobMatch(const std::string& pattern, const std::string& text)
+{
+    if (pattern.empty()) return true;
+    const int m = (int)pattern.size();
+    const int n = (int)text.size();
+    std::vector<std::vector<char>> dp(m + 1, std::vector<char>(n + 1, 0));
+    dp[0][0] = 1;
+    for (int i = 1; i <= m; ++i) {
+        if (pattern[i - 1] == '*') dp[i][0] = dp[i - 1][0];
+    }
+    for (int i = 1; i <= m; ++i) {
+        for (int j = 1; j <= n; ++j) {
+            if (pattern[i - 1] == '*') {
+                dp[i][j] = (char)(dp[i - 1][j] || dp[i][j - 1]);
+            } else {
+                dp[i][j] = (char)(pattern[i - 1] == text[j - 1] && dp[i - 1][j - 1]);
+            }
+        }
+    }
+    return dp[m][n] != 0;
+}
+
+// One evaluated frame = GeoArchiveFrameEval (node local matrices +
+// per-mesh deformed payloads), see ReadGeoImport.h.
+typedef GeoArchiveFrameEval ArcFrameState;
+
+} // anonymous namespace
+
+struct ReadGeoArchivePrivate
+{
+    KnobFileWPtr filePath;
+    KnobButtonWPtr reloadBtn;
+    KnobStringWPtr objectFilter;
+    KnobBoolWPtr includeMeshes;
+    KnobBoolWPtr reverseNormals;
+    KnobIntWPtr frameOffset;
+    KnobDoubleWPtr fps;
+    KnobStringWPtr excludedPaths;
+    KnobStringWPtr info;
+
+    // Parsed archive. Guarded by archiveMutex: loadArchiveFile (GUI thread)
+    // clears and refills while the SceneGraph accessors read from render
+    // workers and the viewport paint.
+    mutable std::mutex archiveMutex;
+    GeoArchiveResult data;                   // entries + meshes + skins + anims
+    std::vector<int> visible;                // entry indices exposed to SceneGraph
+    std::string loadedFilePath;
+
+    // Format backend: a live ufbx_scene for .fbx (per-frame evaluation runs
+    // against it), NULL for glTF (channels are pre-copied plain data).
+    void* fbxScene = NULL;
+    bool isFbx = false;
+
+    // Per-frame evaluation cache.
+    mutable std::mutex frameMutex;
+    mutable std::map<int, std::shared_ptr<const ArcFrameState>> frameCache;
+
+    // True when the file carries animation.
+    bool hasAnimation = false;
+    double animTimeBegin = 0.0;
+    double animTimeEnd = 0.0;
+
+    ~ReadGeoArchivePrivate()
+    {
+        if (fbxScene) freeFbxArchiveScene(fbxScene);
+    }
+
+    int frameOffsetKnobValue() const
+    {
+        return frameOffset.lock() ? frameOffset.lock()->getValue() : 0;
+    }
+};
+
+// Returns the cached (or freshly evaluated) frame state for integer frame
+// key `key` (k = floor(time) - 1 - frameOffset; srcTime = k / fps).
+// Callers hold archiveMutex (entry data is read); frameMutex guards the map.
+// `fps` is resolved by the caller (knob, else project rate) because getApp()
+// is a KnobHolder member — free helpers can't reach it.
+std::shared_ptr<const ArcFrameState>
+arcEnsureFrameState(ReadGeoArchivePrivate& imp, double fps, int key)
+{
+    {
+        std::lock_guard<std::mutex> fl(imp.frameMutex);
+        std::map<int, std::shared_ptr<const ArcFrameState>>::const_iterator it =
+            imp.frameCache.find(key);
+        if (it != imp.frameCache.end()) return it->second;
+    }
+
+    ArcFrameState* st = new ArcFrameState();
+    std::shared_ptr<const ArcFrameState> state(st);
+
+    const double srcTime = (double)key / (fps > 0.0 ? fps : 24.0);
+
+    if (imp.isFbx) {
+        std::string err;
+        if (!evaluateFbxArchiveFrame(imp.fbxScene, imp.data, srcTime, *st, err)) {
+            // Evaluation failure: identity locals + rest meshes — never a
+            // half-evaluated scene.
+            st->nodeLocals.assign(imp.data.nodes.size() * 16, 0.0f);
+            for (std::size_t i = 0; i < imp.data.nodes.size(); ++i) {
+                geoArchiveMatIdentity(&st->nodeLocals[i * 16]);
+            }
+            st->deformed.resize(imp.data.meshes.size());
+            for (std::size_t m = 0; m < imp.data.meshes.size(); ++m) {
+                st->deformed[m] = imp.data.meshes[m].mesh;
+            }
+        }
+    } else {
+        evaluateGltfArchiveFrame(imp.data, srcTime, *st);
+    }
+
+    std::lock_guard<std::mutex> fl(imp.frameMutex);
+    std::pair<std::map<int, std::shared_ptr<const ArcFrameState>>::iterator, bool> ins =
+        imp.frameCache.insert(std::make_pair(key, state));
+    return ins.first->second;
+}
+
+// Entry's local matrix at Natron `time`, interpolating linearly between the
+// cached bracket frames (callers hold archiveMutex).
+void
+arcEntryLocalAt(ReadGeoArchivePrivate& imp, double fps, int frameOffset,
+                int entryIdx, double time, float out[16])
+{
+    geoArchiveMatIdentity(out);
+    if (entryIdx < 0 || entryIdx >= (int)imp.data.nodes.size()) return;
+
+    const double f = time - 1.0 - (double)frameOffset;
+    const int k0 = (int)std::floor(f);
+    const double frac = f - (double)k0;
+
+    std::shared_ptr<const ArcFrameState> st0 = arcEnsureFrameState(imp, fps, k0);
+    std::shared_ptr<const ArcFrameState> st1 = st0;
+    if (frac > 1e-9) {
+        st1 = arcEnsureFrameState(imp, fps, k0 + 1);
+    }
+
+    const float* a = &st0->nodeLocals[(std::size_t)entryIdx * 16];
+    const float* b = &st1->nodeLocals[(std::size_t)entryIdx * 16];
+    if (st0 == st1 || frac < 1e-9) {
+        std::memcpy(out, a, 16 * sizeof(float));
+    } else {
+        const float al = (float)frac;
+        const float oneMinusA = 1.0f - al;
+        for (int i = 0; i < 16; ++i) {
+            out[i] = a[i] * oneMinusA + b[i] * al;
+        }
+    }
+}
+
+// --- construction / description ---------------------------------------------
+
+// FPS used for time mapping: the knob, else the project frame rate.
+double
+ReadGeoArchive::archiveFps() const
+{
+    const double fpsKnob = _imp->fps.lock() ? _imp->fps.lock()->getValue() : 0.0;
+    return fpsKnob > 0.0 ? fpsKnob : (getApp() ? getApp()->getProjectFrameRate() : 24.0);
+}
+
+ReadGeoArchive::ReadGeoArchive(NodePtr node)
+    : EffectInstance(node)
+    , _imp(new ReadGeoArchivePrivate())
+{
+    setSupportsRenderScaleMaybe(eSupportsNo);
+}
+
+ReadGeoArchive::~ReadGeoArchive()
+{
+}
+
+std::string
+ReadGeoArchive::getPluginDescription() const
+{
+    return tr(
+        "One-node import of a whole scene-format file: .glb/.gltf (glTF 2.0) and "
+        ".fbx (binary + ASCII).\n\n"
+        "Walks the file's full hierarchy and exposes every node / mesh as an "
+        "entry in Natron's SceneGraph, preserving parent-child relationships. "
+        "Node transforms and skinned vertices animate on the timeline (frame "
+        "cache; rigid transforms interpolate for motion blur, skinned vertices "
+        "snap per frame). The file's first PBR material is offered through the "
+        "material interface; wire a Material3D into input 0 to override it for "
+        "the whole archive.\n\n"
+        "Animation knobs: Frame Offset + FPS (0 = project frame rate).\n\n"
+        "Morph targets / blend shapes and per-entry material assignment from "
+        "the file are not supported yet.").toStdString();
+}
+
+void
+ReadGeoArchive::addAcceptedComponents(int /*inputNb*/, std::list<ImagePlaneDesc>* comps)
+{
+    comps->push_back(ImagePlaneDesc::getRGBAComponents());
+}
+
+void
+ReadGeoArchive::addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const
+{
+    depths->push_back(eImageBitDepthFloat);
+}
+
+bool
+ReadGeoArchive::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
+{
+    return false;
+}
+
+// --- knobs -------------------------------------------------------------------
+
+void
+ReadGeoArchive::initializeKnobs()
+{
+    KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("File"));
+
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("File"));
+        k->setName("filename");
+        k->setHintToolTip(tr("Path to a .glb/.gltf (glTF) or .fbx scene file."));
+        k->setAnimationEnabled(false);
+        page->addKnob(k);
+        _imp->filePath = k;
+    }
+
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Reload"));
+        k->setName("reload");
+        k->setHintToolTip(tr("Re-read the file and refresh the hierarchy."));
+        page->addKnob(k);
+        _imp->reloadBtn = k;
+    }
+
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Object Filter"));
+        k->setName("objectFilter");
+        k->setDefaultValue(std::string());
+        k->setHintToolTip(tr("Glob pattern matched against each entry's full path. "
+                             "Use '*' for any substring. Empty = import everything."));
+        page->addKnob(k);
+        _imp->objectFilter = k;
+    }
+
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Include Meshes"));
+        k->setName("includeMeshes");
+        k->setDefaultValue(true);
+        k->setHintToolTip(tr("If unchecked, mesh entries are skipped — useful for "
+                             "locator/animation-only imports."));
+        page->addKnob(k);
+        _imp->includeMeshes = k;
+    }
+
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Reverse Normals"));
+        k->setName("reverseNormals");
+        k->setDefaultValue(false);
+        k->setHintToolTip(tr("Flip the face winding of every mesh in the archive so "
+                             "normals point the other way. Use the 3D viewport's Face "
+                             "Orientation shading mode to check: blue = facing you, "
+                             "red = facing away."));
+        page->addKnob(k);
+        _imp->reverseNormals = k;
+    }
+
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Frame Offset"));
+        k->setName("frameOffset");
+        k->setDefaultValue(0);
+        k->setHintToolTip(tr("Offset the file's animation relative to the Natron timeline."));
+        page->addKnob(k);
+        _imp->frameOffset = k;
+    }
+
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("FPS"));
+        k->setName("fps");
+        k->setDefaultValue(0.0);
+        k->setMinimum(0.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(120.0);
+        k->setHintToolTip(tr("Frames per second used to map the file's animation "
+                             "time onto the Natron timeline. 0 = use the project "
+                             "frame rate. glTF/FBX animation time is continuous "
+                             "seconds; this sets how many timeline frames span one "
+                             "second of source animation."));
+        page->addKnob(k);
+        _imp->fps = k;
+    }
+
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Excluded Paths"));
+        k->setName("excludedPaths");
+        k->setAsMultiLine();
+        k->setDefaultValue(std::string());
+        k->setSecret(true);
+        k->setHintToolTip(tr("Newline-separated entry paths to exclude from import. "
+                             "Empty = nothing excluded."));
+        page->addKnob(k);
+        _imp->excludedPaths = k;
+    }
+
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Info"));
+        k->setName("info");
+        k->setAsMultiLine();
+        k->setAsLabel();
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setIsPersistent(false);
+        k->setHintToolTip(tr("Summary of the loaded file."));
+        page->addKnob(k);
+        _imp->info = k;
+    }
+
+    // --- Transform: user T/R/S applied to the WHOLE archive ----------------
+    // Read in SceneGraph::rebuild and placed on the archive's root SceneNode,
+    // so it propagates to every entry via the worldMatrix chain (same as
+    // ReadAlembicArchive; read by name).
+    KnobPagePtr xformPage = AppManager::createKnob<KnobPage>(this, tr("Transform"));
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate X")); k->setName("translateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate Y")); k->setName("translateY"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Translate Z")); k->setName("translateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate X")); k->setName("rotateX"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Y")); k->setName("rotateY"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Rotate Z")); k->setName("rotateZ"); k->setDefaultValue(0.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale X")); k->setName("scaleX"); k->setDefaultValue(1.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale Y")); k->setName("scaleY"); k->setDefaultValue(1.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Scale Z")); k->setName("scaleZ"); k->setDefaultValue(1.0); k->setAnimationEnabled(true); xformPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Uniform Scale"));
+        k->setName("uniformScale"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Multiplies all three scale axes — quick way to scale the whole archive up or down."));
+        xformPage->addKnob(k);
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Rotation Pivot"));
+        k->setName("rotationPivot");
+        std::vector<ChoiceOption> opts;
+        opts.push_back(ChoiceOption("Bounding-Box Center", "", ""));
+        opts.push_back(ChoiceOption("Authored Origin", "", ""));
+        opts.push_back(ChoiceOption("World Origin", "", ""));
+        k->populateChoices(opts);
+        k->setDefaultValue(0);  // Bounding-Box Center
+        k->setHintToolTip(tr("Point the Translate/Rotate/Scale knobs pivot around."));
+        xformPage->addKnob(k);
+    }
+
+    // --- Display: viewport-only controls for locator gizmos ----------------
+    // Read by name in Viewport3D::drawTransformNode (showLocators / locatorSize).
+    KnobPagePtr dispPage = AppManager::createKnob<KnobPage>(this, tr("Display"));
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Show Locators"));
+        k->setName("showLocators");
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("Draw a small locator at each transform node in the 3D "
+                             "viewport. Turn off to declutter archives with many "
+                             "transform nodes."));
+        dispPage->addKnob(k);
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Locator Size"));
+        k->setName("locatorSize");
+        k->setDefaultValue(0.8);
+        k->setMinimum(0.0);
+        k->setDisplayMinimum(0.0);
+        k->setDisplayMaximum(5.0);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("World-space size of the locator gizmos in the 3D viewport."));
+        dispPage->addKnob(k);
+    }
+}
+
+bool
+ReadGeoArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
+                            ViewSpec /*view*/, double /*time*/,
+                            bool /*originatedFromMainThread*/)
+{
+    if (!k) return false;
+    KnobIPtr fpKnob = _imp->filePath.lock();
+    KnobIPtr reloadKnob = _imp->reloadBtn.lock();
+    KnobIPtr filterKnob = _imp->objectFilter.lock();
+    KnobIPtr includeKnob = _imp->includeMeshes.lock();
+    KnobIPtr excludedKnob = _imp->excludedPaths.lock();
+    KnobIPtr revNormKnob = _imp->reverseNormals.lock();
+
+    const bool isFileChange = (fpKnob && k == fpKnob.get());
+    const bool isReload     = (reloadKnob && k == reloadKnob.get());
+    const bool isFilter     = (filterKnob && k == filterKnob.get())
+                            || (includeKnob && k == includeKnob.get())
+                            || (excludedKnob && k == excludedKnob.get())
+                            || (revNormKnob && k == revNormKnob.get());
+
+    if (isFileChange || isReload) {
+        if (fpKnob) {
+            KnobFile* fp = dynamic_cast<KnobFile*>(fpKnob.get());
+            if (fp) {
+                loadArchiveFile(fp->getValue());
+            }
+        }
+        // Re-read metadata so getPreferredMetadata picks up the new entries'
+        // animation flags (ScanlineRender's cache would otherwise freeze).
+        refreshMetadata_public(true);
+        return true;
+    }
+    if (isFilter) {
+        // Re-apply the filter: re-parse from the loaded path (cheap relative
+        // to a file read; keeps applied state == knob state).
+        loadArchiveFile(_imp->loadedFilePath);
+        refreshMetadata_public(true);
+        return true;
+    }
+    return false;
+}
+
+void
+ReadGeoArchive::onKnobsLoaded()
+{
+    KnobFilePtr fp = _imp->filePath.lock();
+    if (fp) {
+        const std::string path = fp->getValue();
+        if (!path.empty()) {
+            loadArchiveFile(path);
+            refreshMetadata_public(true);
+        }
+    }
+}
+
+// --- loading -----------------------------------------------------------------
+
+void
+ReadGeoArchive::loadArchiveFile(const std::string& path)
+{
+    // Hold the archive lock for the whole (re)load — render threads holding
+    // entries / frame states must not see them freed mid-walk.
+    std::unique_lock<std::mutex> lk(_imp->archiveMutex);
+
+    // Drop the parsed archive + frame cache first.
+    GeoArchiveResult empty;
+    _imp->data = empty;
+    _imp->visible.clear();
+    _imp->hasAnimation = false;
+    _imp->animTimeBegin = 0.0;
+    _imp->animTimeEnd = 0.0;
+    _imp->isFbx = false;
+    {
+        std::lock_guard<std::mutex> fl(_imp->frameMutex);
+        _imp->frameCache.clear();
+    }
+    if (_imp->fbxScene) {
+        freeFbxArchiveScene(_imp->fbxScene);
+        _imp->fbxScene = NULL;
+    }
+
+    if (path.empty()) {
+        if (_imp->info.lock()) {
+            _imp->info.lock()->setValue(std::string("No file selected."));
+        }
+        return;
+    }
+
+    // Format dispatch.
+    std::string ext;
+    {
+        const std::size_t dot = path.find_last_of('.');
+        if (dot != std::string::npos) {
+            ext = path.substr(dot);
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c){ return (char)std::tolower(c); });
+        }
+    }
+
+    GeoArchiveResult data;
+    if (ext == ".glb" || ext == ".gltf") {
+        data = loadGltfArchiveImport(path);
+    } else if (ext == ".fbx") {
+        _imp->isFbx = true;
+        data = loadFbxArchiveImport(path, &_imp->fbxScene);
+    } else {
+        setPersistentMessage(eMessageTypeError,
+            "Unsupported file extension for ReadGeoArchive. Use .glb, .gltf or .fbx "
+            "(.abc belongs in ReadAlembicArchive, .obj in ReadGeo).");
+        return;
+    }
+
+    if (!data.ok) {
+        setPersistentMessage(eMessageTypeError, data.error);
+        return;
+    }
+
+    _imp->data = std::move(data);
+
+    // Reverse Normals: flip every rest mesh's winding (applied at load so the
+    // knob toggle re-runs the load — matches the ReadGeo/Alembic policy).
+    if (_imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue()) {
+        for (GeoArchiveMeshData& md : _imp->data.meshes) {
+            if (md.mesh) reverseMeshWinding(*md.mesh);
+        }
+    }
+
+    // Animation detection: glTF channel bindings, skinned payloads, or an FBX
+    // file with an animation stack (FBX marks every node animated — the
+    // evaluated scene serves the whole tree; conservative and cheap).
+    bool anyAnimated = false;
+    for (const GeoArchiveNodeData& nd : _imp->data.nodes) {
+        if (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) { anyAnimated = true; break; }
+    }
+    if (!anyAnimated) {
+        for (const GeoArchiveMeshData& md : _imp->data.meshes) {
+            if (md.skinIndex >= 0) { anyAnimated = true; break; }
+        }
+    }
+    if (_imp->isFbx && _imp->data.animTimeEnd > _imp->data.animTimeBegin) {
+        anyAnimated = true;
+    }
+    _imp->hasAnimation = anyAnimated;
+    _imp->animTimeBegin = _imp->data.animTimeBegin;
+    _imp->animTimeEnd = _imp->data.animTimeEnd;
+
+    // Apply objectFilter + includeMeshes + excludedPaths (same rules as
+    // ReadAlembicArchive).
+    const std::string pattern = _imp->objectFilter.lock() ? _imp->objectFilter.lock()->getValue() : std::string();
+    const bool includeMeshes = _imp->includeMeshes.lock() ? _imp->includeMeshes.lock()->getValue() : true;
+    const std::string excludedRaw = _imp->excludedPaths.lock() ? _imp->excludedPaths.lock()->getValue() : std::string();
+    std::set<std::string> excluded;
+    {
+        std::size_t pos = 0;
+        while (pos <= excludedRaw.size()) {
+            std::size_t nl = excludedRaw.find('\n', pos);
+            if (nl == std::string::npos) nl = excludedRaw.size();
+            std::string line = excludedRaw.substr(pos, nl - pos);
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+            std::size_t lead = 0;
+            while (lead < line.size() && (line[lead] == ' ' || line[lead] == '\t')) ++lead;
+            if (lead) line.erase(0, lead);
+            if (!line.empty()) excluded.insert(line);
+            if (nl == excludedRaw.size()) break;
+            pos = nl + 1;
+        }
+    }
+
+    for (int i = 0; i < (int)_imp->data.nodes.size(); ++i) {
+        const GeoArchiveNodeData& nd = _imp->data.nodes[i];
+        if (!includeMeshes && nd.isMesh) continue;
+        if (!arcGlobMatch(pattern, nd.fullPath)) continue;
+        if (excluded.count(nd.fullPath)) continue;
+        _imp->visible.push_back(i);
+    }
+
+    // Info string.
+    std::size_t numXforms = 0, numMeshes = 0;
+    for (std::size_t i = 0; i < _imp->data.nodes.size(); ++i) {
+        if (_imp->data.nodes[i].isMesh) ++numMeshes; else ++numXforms;
+    }
+    std::ostringstream ss;
+    ss << "Total entries: " << _imp->data.nodes.size()
+       << " (nodes: " << numXforms
+       << ", meshes: " << numMeshes << ")"
+       << " | Visible after filter: " << _imp->visible.size();
+    if (_imp->hasAnimation) {
+        const double dur = _imp->animTimeEnd - _imp->animTimeBegin;
+        if (dur > 0.0) {
+            const double fpsKnob = _imp->fps.lock() ? _imp->fps.lock()->getValue() : 0.0;
+            const double fps = fpsKnob > 0.0 ? fpsKnob
+                                             : (getApp() ? getApp()->getProjectFrameRate() : 24.0);
+            ss << " | Animated: " << dur << "s (~" << (int)(dur * fps) << " frames)";
+        } else {
+            ss << " | Animated";
+        }
+    }
+    if (_imp->isFbx) {
+        ss << " | FBX";
+    }
+    if (_imp->info.lock()) _imp->info.lock()->setValue(ss.str());
+
+    _imp->loadedFilePath = path;
+    clearPersistentMessage(false);
+
+    // Release BEFORE the emit: settings-panel slots run synchronously off
+    // archiveReloaded and re-enter getEntryTree(), which takes this same
+    // non-recursive mutex (self-deadlock guard, same as ReadAlembicArchive).
+    lk.unlock();
+    Q_EMIT archiveReloaded();
+}
+
+// --- ArchiveProvider interface -----------------------------------------------
+
+int
+ReadGeoArchive::getSceneNodeCount() const
+{
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+    return (int)_imp->visible.size();
+}
+
+std::vector<ArchiveTreeEntry>
+ReadGeoArchive::getEntryTree() const
+{
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+    std::vector<ArchiveTreeEntry> out;
+    out.reserve(_imp->data.nodes.size());
+    for (std::size_t i = 0; i < _imp->data.nodes.size(); ++i) {
+        const GeoArchiveNodeData& nd = _imp->data.nodes[i];
+        ArchiveTreeEntry te;
+        te.fullPath = nd.fullPath;
+        te.name = nd.name;
+        te.parentLocalIdx = nd.parentIndex;
+        te.isMesh = nd.isMesh;
+        te.sampleCount = (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) ? 1 : 0;
+        te.numVertices = (nd.isMesh && nd.meshIndex >= 0 &&
+                          nd.meshIndex < (int)_imp->data.meshes.size() &&
+                          _imp->data.meshes[nd.meshIndex].mesh)
+                             ? (int)_imp->data.meshes[nd.meshIndex].mesh->numVertices : 0;
+        out.push_back(te);
+    }
+    return out;
+}
+
+bool
+ReadGeoArchive::getSceneNodeAt(int idx, double time,
+                               std::string& outName,
+                               int& outParentLocalIndex,
+                               bool& outIsMesh,
+                               float outLocalMatrix[16]) const
+{
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+    if (idx < 0 || idx >= (int)_imp->visible.size()) return false;
+    const int srcIdx = _imp->visible[idx];
+    const GeoArchiveNodeData& nd = _imp->data.nodes[srcIdx];
+
+    outName = nd.fullPath;
+    outIsMesh = nd.isMesh;
+
+    // Translate parentIndex from "index into nodes[]" to "index into visible[]".
+    outParentLocalIndex = -1;
+    if (nd.parentIndex >= 0) {
+        for (int v = 0; v < (int)_imp->visible.size(); ++v) {
+            if (_imp->visible[v] == nd.parentIndex) { outParentLocalIndex = v; break; }
+        }
+        // Parent filtered out → this entry attaches to the archive root (-1).
+    }
+
+    arcEntryLocalAt(*_imp, archiveFps(), _imp->frameOffsetKnobValue(), srcIdx, time, outLocalMatrix);
+    return true;
+}
+
+MeshDataPtr
+ReadGeoArchive::getMeshDataAt(int idx, double time) const
+{
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+    if (idx < 0 || idx >= (int)_imp->visible.size()) return MeshDataPtr();
+    const int srcIdx = _imp->visible[idx];
+    const GeoArchiveNodeData& nd = _imp->data.nodes[srcIdx];
+    if (!nd.isMesh || nd.meshIndex < 0 || nd.meshIndex >= (int)_imp->data.meshes.size()) {
+        return MeshDataPtr();
+    }
+    const GeoArchiveMeshData& md = _imp->data.meshes[nd.meshIndex];
+    if (!md.mesh) return MeshDataPtr();
+
+    // Rigid meshes: the node's own transform animates; vertices are static.
+    if (!md.mesh || md.skinIndex < 0 || time < 0.0) {
+        return md.mesh;
+    }
+
+    // Skinned: per-frame CPU skinning via the frame cache. Snaps per frame
+    // (the sub-frame motion-blur interpolation the Alembic machinery does on
+    // vertex samples is not applied to skinning yet — documented limitation).
+    const int frameOffset = _imp->frameOffsetKnobValue();
+    int key = (int)std::floor(time - 1.0 - (double)frameOffset);
+    if (key < 0) key = 0;
+    std::shared_ptr<const ArcFrameState> st = arcEnsureFrameState(*_imp, archiveFps(), key);
+    if (nd.meshIndex < (int)st->deformed.size() && st->deformed[nd.meshIndex]) {
+        return st->deformed[nd.meshIndex];
+    }
+    return md.mesh;
+}
+
+bool
+ReadGeoArchive::getEntryWorldMatrix(int idx, double time, float outWorld[16]) const
+{
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+    if (idx < 0 || idx >= (int)_imp->visible.size()) return false;
+
+    geoArchiveMatIdentity(outWorld);
+
+    // Walk parent chain from entry → root, collect entries in order
+    // (root → ... → this), then compose: world = root.local * ... * this.local.
+    // Parents that were filtered out still contribute their matrices (they
+    // remain in data.nodes — filtering only hides the entry itself).
+    std::vector<int> chain;
+    int cur = _imp->visible[idx];
+    while (cur >= 0) {
+        chain.push_back(cur);
+        cur = (cur < (int)_imp->data.nodes.size()) ? _imp->data.nodes[cur].parentIndex : -1;
+    }
+
+    for (int ci = (int)chain.size() - 1; ci >= 0; --ci) {
+        float local[16];
+        arcEntryLocalAt(*_imp, archiveFps(), _imp->frameOffsetKnobValue(), chain[ci], time, local);
+
+        // outWorld = outWorld * local (column-major).
+        float r[16];
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                float sum = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    sum += outWorld[k * 4 + row] * local[col * 4 + k];
+                }
+                r[col * 4 + row] = sum;
+            }
+        }
+        std::memcpy(outWorld, r, sizeof(r));
+    }
+    return true;
+}
+
+// --- EffectInstance overrides ------------------------------------------------
+
+StatusEnum
+ReadGeoArchive::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
+                                      ViewIdx /*view*/, RectD* rod)
+{
+    // Generator node — 1x1 dummy RoD; the real output goes through SceneGraph.
+    rod->x1 = 0;
+    rod->y1 = 0;
+    rod->x2 = 1;
+    rod->y2 = 1;
+    return eStatusOK;
+}
+
+StatusEnum
+ReadGeoArchive::getPreferredMetadata(NodeMetadata& metadata)
+{
+    // Declare frame-varying when any entry carries animation (node channels,
+    // skinned payload, or an FBX animation stack). Required so Scene3D +
+    // ScanlineRender hashes change per frame — same reason as ReadGeo /
+    // ReadAlembicArchive.
+    if (_imp && _imp->hasAnimation) {
+        metadata.setIsFrameVarying(true);
+    }
+    return eStatusOK;
+}
+
+StatusEnum
+ReadGeoArchive::render(const RenderActionArgs& /*args*/)
+{
+    return eStatusOK;
+}
+
+// --- Inputs / MaterialProvider -------------------------------------------------
+
+std::string
+ReadGeoArchive::getInputLabel(int inputNb) const
+{
+    if (inputNb == 0) return "Material";
+    if (inputNb == 1) return "Image";
+    return std::string();
+}
+
+// The archive forwards every material query to the Material3D wired into
+// input 0 (if any). When none is connected, the FIRST material authored in
+// the file is offered — so an imported GLB/FBX renders with its authored
+// look without extra wiring. Per-entry materials need SceneNode-level
+// material plumbing (GeoMaterialOverride covers it today).
+
+void
+ReadGeoArchive::getMaterialBaseColor(double time, double& r, double& g, double& b) const
+{
+    if (MaterialProvider* mat = getConnectedMaterial()) {
+        mat->getMaterialBaseColor(time, r, g, b);
+        return;
+    }
+    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
+        r = _imp->data.materials[0].baseColor[0];
+        g = _imp->data.materials[0].baseColor[1];
+        b = _imp->data.materials[0].baseColor[2];
+        return;
+    }
+    r = 0.7; g = 0.7; b = 0.7;
+}
+
+double
+ReadGeoArchive::getMaterialRoughness(double time) const
+{
+    if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialRoughness(time);
+    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
+        return _imp->data.materials[0].roughness;
+    }
+    return 0.5;
+}
+
+double
+ReadGeoArchive::getMaterialMetallic(double time) const
+{
+    if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialMetallic(time);
+    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
+        return _imp->data.materials[0].metallic;
+    }
+    return 0.0;
+}
+
+double
+ReadGeoArchive::getMaterialSpecular(double time) const
+{
+    if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialSpecular(time);
+    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
+        return _imp->data.materials[0].specular;
+    }
+    return 0.5;
+}
+
+void
+ReadGeoArchive::getMaterialEmission(double time, double& r, double& g, double& b, double& strength) const
+{
+    if (MaterialProvider* mat = getConnectedMaterial()) {
+        mat->getMaterialEmission(time, r, g, b, strength);
+        return;
+    }
+    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
+        r = _imp->data.materials[0].emission[0];
+        g = _imp->data.materials[0].emission[1];
+        b = _imp->data.materials[0].emission[2];
+        strength = _imp->data.materials[0].emissionStrength;
+        return;
+    }
+    r = 1.0; g = 1.0; b = 1.0; strength = 0.0;
+}
+
+double
+ReadGeoArchive::getMaterialTransmission(double time) const
+{
+    if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialTransmission(time);
+    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
+        return _imp->data.materials[0].transmission;
+    }
+    return 0.0;
+}
+
+double
+ReadGeoArchive::getMaterialIOR(double time) const
+{
+    if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialIOR(time);
+    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
+        return _imp->data.materials[0].ior;
+    }
+    return 1.45;
+}
+
+std::string
+ReadGeoArchive::getMaterialTextureFile() const
+{
+    if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialTextureFile();
+    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
+        return _imp->data.materials[0].diffuseMapPath;
+    }
+    return std::string();
+}
+
+std::string
+ReadGeoArchive::getMaterialDiffuseColorspace() const
+{
+    if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialDiffuseColorspace();
+    return "sRGB";
+}
+
+bool
+ReadGeoArchive::hasMaterialInput() const
+{
+    EffectInstancePtr inp = skipDots(getInput(0));
+    return inp && dynamic_cast<MaterialProvider*>(inp.get()) != nullptr;
+}
+
+MaterialProvider*
+ReadGeoArchive::getConnectedMaterial() const
+{
+    EffectInstancePtr inp = skipDots(getInput(0));
+    return inp ? dynamic_cast<MaterialProvider*>(inp.get()) : nullptr;
+}
+
+NATRON_NAMESPACE_EXIT
+
+#include "moc_ReadGeoArchive.cpp"
