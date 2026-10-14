@@ -60,6 +60,30 @@ struct Rng
     float range(float a, float b) { return a + (b - a) * uniform(); }
 };
 
+// Lattice value noise in [0,1], two octaves: enough for edge breakup.
+inline float hash2(int x, int y, unsigned int seed)
+{
+    unsigned int h = (unsigned int)x * 374761393u + (unsigned int)y * 668265263u + seed * 2246822519u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    return (h & 0xFFFFFFu) * (1.0f / 16777216.0f);
+}
+inline float valueNoise(float x, float y, unsigned int seed)
+{
+    const int xi = (int)std::floor(x), yi = (int)std::floor(y);
+    float tx = x - xi, ty = y - yi;
+    tx = tx * tx * (3.0f - 2.0f * tx);
+    ty = ty * ty * (3.0f - 2.0f * ty);
+    const float a = hash2(xi, yi, seed), b = hash2(xi + 1, yi, seed);
+    const float c = hash2(xi, yi + 1, seed), d = hash2(xi + 1, yi + 1, seed);
+    const float top = a + (b - a) * tx, bot = c + (d - c) * tx;
+    return top + (bot - top) * ty;
+}
+inline float fbm2(float x, float y, unsigned int seed)
+{
+    return 0.6667f * valueNoise(x, y, seed) + 0.3333f * valueNoise(x * 2.0f + 7.3f, y * 2.0f + 3.1f, seed + 1u);
+}
+
 inline float
 smoothstep01(float edge0, float edge1, float x)
 {
@@ -284,6 +308,10 @@ struct DetailParams
     int   freq = 8;              // high-pass box radius, px
     int   seed = 1;
     bool  nearest = false;       // sample stamps with nearest-neighbour (crisp grain) instead of bilinear
+    float softness = 0.5f;       // fraction of the stamp radius that is soft rim
+    float breakup = 0.5f;        // noise amplitude warping the stamp outline
+    float breakupScale = 2.0f;   // noise cycles across a stamp
+    float opacityVar = 0.0f;     // random per-stamp opacity reduction
     RectI region;                // eDetailSourceRegion: source rectangle (pixels)
 };
 
@@ -387,8 +415,13 @@ buildDetailLayer(const DetailParams& P, const Plane& src, const RectI& work,
         const float fx  = (P.flip && rng.uniform() < 0.5f) ? -1.0f : 1.0f;
         const float ca = std::cos(ang), sa = std::sin(ang);
         const float Rt = R * rng.range(0.8f, 1.2f);                 // stamp footprint on the target
-        const int bx0 = (int)std::floor(tcx - Rt), bx1 = (int)std::ceil(tcx + Rt);
-        const int by0 = (int)std::floor(tcy - Rt), by1 = (int)std::ceil(tcy + Rt);
+        const unsigned int nseed = rng.next();
+        const float nox = rng.range(0.0f, 100.0f), noy = rng.range(0.0f, 100.0f);
+        const float opacity = 1.0f - P.opacityVar * rng.uniform();
+        const float core = 1.0f - std::max(0.02f, std::min(1.0f, P.softness));
+        const float reach = Rt * (1.0f + 0.4f * P.breakup);         // the warped outline can poke past Rt
+        const int bx0 = (int)std::floor(tcx - reach), bx1 = (int)std::ceil(tcx + reach);
+        const int by0 = (int)std::floor(tcy - reach), by1 = (int)std::ceil(tcy + reach);
         for (int py = by0; py <= by1; ++py) {
             if (py < work.y1 || py >= work.y2) continue;
             for (int px = bx0; px <= bx1; ++px) {
@@ -396,11 +429,18 @@ buildDetailLayer(const DetailParams& P, const Plane& src, const RectI& work,
                 const size_t k = (size_t)(py - work.y1) * WW + (px - work.x1);
                 if (alpha[k] <= 0.0f) continue;
                 const float dx = px + 0.5f - tcx, dy = py + 0.5f - tcy;
-                const float rr = (dx * dx + dy * dy) / (Rt * Rt);
-                if (rr >= 1.0f) continue;
-                // flat core, soft rim: most of the stamp replaces outright so overlapping
-                // stamps don't average each other's texture away
-                const float w = rr <= 0.45f ? 1.0f : smoothstep01(1.0f, 0.45f, rr);
+                float r = std::sqrt(dx * dx + dy * dy) / Rt;
+                if (P.breakup > 0.0f) {
+                    // warp the outline with the stamp's own noise so it reads as a torn
+                    // patch rather than a disc
+                    const float n = fbm2(dx / Rt * P.breakupScale + nox, dy / Rt * P.breakupScale + noy, nseed);
+                    r += (n - 0.5f) * 0.8f * P.breakup;
+                }
+                if (r >= 1.0f) continue;
+                // flat core, soft rim: the core replaces outright so overlapping stamps
+                // don't average each other's texture away
+                const float w = (r <= core ? 1.0f : smoothstep01(1.0f, core, r)) * opacity;
+                if (w <= 0.0f) continue;
                 // target offset -> source offset: flip, rotate, scale
                 const float ox = fx * dx, oy = dy;
                 const float sx = scx + (ca * ox - sa * oy) / sc;
@@ -457,6 +497,8 @@ struct PatchFillPrivate
     KnobIntWPtr    detailFrequency, detailSeed;
     KnobChoiceWPtr stampFilter;
     KnobDoubleWPtr regionCenter, regionSize;
+    KnobDoubleWPtr edgeSoftness, edgeBreakup, breakupScale, opacityVar;
+    KnobDoubleWPtr matteBreakup, matteBreakupScale;
 };
 
 PatchFill::PatchFill(NodePtr node)
@@ -572,6 +614,28 @@ PatchFill::initializeKnobs()
         k->setHintToolTip(tr("Soften the edge of the fill over this many pixels outside the grown mask. "
                              "The Roto shape's own feather is honoured as well."));
         page->addKnob(k); _imp->feather = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Matte Breakup"));
+        k->setName("matteBreakup");
+        k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Noise the feathered edge of the fill so the patch boundary is not the Roto "
+                             "shape. Needs Feather > 0: the edge wanders within the feather band and only "
+                             "outward, the shape itself always stays fully covered."));
+        page->addKnob(k); _imp->matteBreakup = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Matte Breakup Scale"));
+        k->setName("matteBreakupScale");
+        k->setDefaultValue(40.0);
+        k->setMinimum(1.0); k->setMaximum(10000.0);
+        k->setDisplayMinimum(4.0); k->setDisplayMaximum(400.0);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Size in pixels of the noise that breaks up the matte edge."));
+        page->addKnob(k); _imp->matteBreakupScale = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Log Space"));
@@ -705,6 +769,50 @@ PatchFill::initializeKnobs()
         dpage->addKnob(k); _imp->flipStamps = k;
     }
     {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Edge Softness"));
+        k->setName("edgeSoftness");
+        k->setDefaultValue(0.5);
+        k->setMinimum(0.02); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.02); k->setDisplayMaximum(1.0);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Fraction of each stamp's radius that fades out. Small = hard-edged stamps "
+                             "that keep full texture contrast; large = stamps that melt into each other."));
+        dpage->addKnob(k); _imp->edgeSoftness = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Edge Breakup"));
+        k->setName("edgeBreakup");
+        k->setDefaultValue(0.5);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Warp each stamp's outline with noise so it reads as a torn patch instead "
+                             "of a disc. 0 = perfect discs."));
+        dpage->addKnob(k); _imp->edgeBreakup = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Breakup Scale"));
+        k->setName("breakupScale");
+        k->setDefaultValue(2.0);
+        k->setMinimum(0.25); k->setMaximum(16.0);
+        k->setDisplayMinimum(0.5); k->setDisplayMaximum(8.0);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("How many noise lobes there are across a stamp. Low = a few big bites out "
+                             "of the outline, high = a ragged edge."));
+        dpage->addKnob(k); _imp->breakupScale = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Opacity Variation"));
+        k->setName("opacityVariation");
+        k->setDefaultValue(0.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Each stamp gets a random opacity between 1 and 1 minus this, so stamps "
+                             "blend through each other. Trades some contrast for less visible stamp shapes."));
+        dpage->addKnob(k); _imp->opacityVar = k;
+    }
+    {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Detail Frequency"));
         k->setName("detailFrequency");
         k->setDefaultValue(8);
@@ -800,6 +908,12 @@ PatchFill::render(const RenderActionArgs& args)
     DP.freq      = std::max(1, (int)std::lround(_imp->detailFrequency.lock()->getValueAtTime(args.time) * pxScale));
     DP.seed      = _imp->detailSeed.lock()->getValueAtTime(args.time);
     DP.nearest   = _imp->stampFilter.lock()->getValue() == 1;
+    DP.softness  = (float)_imp->edgeSoftness.lock()->getValueAtTime(args.time);
+    DP.breakup   = (float)std::max(0.0, std::min(1.0, _imp->edgeBreakup.lock()->getValueAtTime(args.time)));
+    DP.breakupScale = (float)std::max(0.25, _imp->breakupScale.lock()->getValueAtTime(args.time));
+    DP.opacityVar = (float)std::max(0.0, std::min(1.0, _imp->opacityVar.lock()->getValueAtTime(args.time)));
+    const float matteBreakup = (float)std::max(0.0, std::min(1.0, _imp->matteBreakup.lock()->getValueAtTime(args.time)));
+    const float matteScale   = (float)std::max(1.0, _imp->matteBreakupScale.lock()->getValueAtTime(args.time) * pxScale);
     {
         KnobDoublePtr rc = _imp->regionCenter.lock(), rs = _imp->regionSize.lock();
         const double cx = rc->getValueAtTime(args.time, 0) * pxScale, cy = rc->getValueAtTime(args.time, 1) * pxScale;
@@ -923,7 +1037,15 @@ PatchFill::render(const RenderActionArgs& args)
                 if (d <= grow) {
                     a = 1.0f;
                 } else if (feather > 0.0f) {
-                    a = 1.0f - smoothstep01(grow, grow + feather, d);
+                    float dEff = d;
+                    if (matteBreakup > 0.0f) {
+                        // wander the feather edge with noise; the grown shape itself (d <= grow)
+                        // is untouched, so the fill only ever grows outward
+                        const int px = work.x1 + x, py = work.y1 + y;
+                        const float n = fbm2(px / matteScale, py / matteScale, (unsigned int)DP.seed + 77u);
+                        dEff = std::max(grow + 1e-3f, d + (n - 0.5f) * 2.0f * matteBreakup * feather);
+                    }
+                    a = 1.0f - smoothstep01(grow, grow + feather, dEff);
                 } else {
                     a = 0.0f;
                 }

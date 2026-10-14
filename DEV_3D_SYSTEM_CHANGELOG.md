@@ -35,6 +35,19 @@ Recent milestones:
   (static Noise plate over the ramp, 50-stop light, disc mask): high-pass energy inside the fill vs
   the surrounding ring = 0.0001 with Detail off, 0.054 Bilinear, 0.0835 Nearest, 0.0848 Detail
   input, against 0.0846 outside; the smooth-fill regression test is unchanged (0.005).
+- **PatchFill: stamp and matte edge breakup (2026-10-13)** — the user's first GUI test (a city plate,
+  ~150 px stamps) showed the stamps as discs with visible rims and the Roto rectangle as a hard
+  patch boundary. Each stamp now has its own two-octave value noise (`fbm2`, hash-seeded from the
+  stamp RNG) that warps the outline: `r += (n - 0.5) * 0.8 * Edge Breakup` before the flat-core /
+  soft-rim kernel, whose rim width is **Edge Softness** (was fixed at 0.55 of the radius); the
+  stamp's bounding box grows by `1 + 0.4 * breakup` to hold the warped outline. **Opacity Variation**
+  scales each stamp's weight by a random 1 - [0, v]. **Matte Breakup** / **Matte Breakup Scale** on
+  the Controls page add world-space noise to the chamfer distance inside the feather band only
+  (`dEff = max(grow + eps, d + (n - 0.5) * 2 * breakup * feather)`), so the fill boundary wanders
+  but never retreats inside the grown shape (a light can't leak back). Checkerboard-plate detail
+  views: breakup 0 = discs, breakup 1 = torn patches; matte view = disc with a ragged feather. The
+  noise-plate numbers are unchanged (Nearest 0.0836 vs 0.0846 outside) and the smooth-fill
+  regression still measures 0.005.
 - **Zap3D endpoint handles drawn in the wrong space (2026-10-13)** — user report with a screenshot:
   the Start / End points and their line floated away from the bolt. `Viewport3D` called
   `drawZapEndpoints` inside the mesh node's `glPushMatrix` / `glMultMatrixf(sn.worldMatrix)` block,
