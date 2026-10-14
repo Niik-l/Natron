@@ -743,7 +743,7 @@ Gui::createMenuActions()
         menu3D->addAction(a);
 
         a = new QAction(tr("Megascans Asset..."), this);
-        a->setStatusTip(tr("Load a Quixel Megascans folder: picks a LOD mesh (.abc/.obj), wires "
+        a->setStatusTip(tr("Load a Quixel Megascans folder: picks a LOD mesh (.abc/.obj/.fbx), wires "
                            "albedo through a Read + roughness/normal/specular/displacement onto a "
                            "Material3D, and scales the asset from centimetres to metres"));
         QObject::connect(a, SIGNAL(triggered()), this, SLOT(createTemplateMegascansAsset()));

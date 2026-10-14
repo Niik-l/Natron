@@ -1017,13 +1017,14 @@ Gui::createTemplateMegascansAsset()
 
     // Meshes we can actually read, found RECURSIVELY: a "3d asset" keeps its
     // LODs beside the textures, while a "3dplant" puts each variation in its own
-    // Var1/…Var19/ subfolder. FBX is deliberately absent — ReadGeo handles .abc
-    // and .obj only, and Bridge exports all three, so the fix is a re-download.
+    // Var1/…Var19/ subfolder. ReadGeo handles .abc, .obj and .fbx (via ufbx),
+    // and Bridge exports all three, so an FBX-only folder is now usable.
     QDir d(dir);
     QStringList meshRelPaths;
     {
         QStringList meshFilter;
-        meshFilter << QString::fromUtf8("*.abc") << QString::fromUtf8("*.obj");
+        meshFilter << QString::fromUtf8("*.abc") << QString::fromUtf8("*.obj")
+                   << QString::fromUtf8("*.fbx");
         QDirIterator it(dir, meshFilter, QDir::Files, QDirIterator::Subdirectories);
         while ( it.hasNext() ) {
             it.next();
@@ -1031,14 +1032,8 @@ Gui::createTemplateMegascansAsset()
         }
     }
     if ( meshRelPaths.isEmpty() ) {
-        QDirIterator fbxIt(dir, QStringList() << QString::fromUtf8("*.fbx"),
-                           QDir::Files, QDirIterator::Subdirectories);
         Dialogs::errorDialog(tr("Megascans").toStdString(),
-            (fbxIt.hasNext()
-                ? tr("This asset only contains .fbx meshes, which Natron cannot read yet.\n\n"
-                     "Re-download it from Bridge with the Alembic (.abc) or OBJ format "
-                     "selected — Quixel publishes all three for every LOD.")
-                : tr("No .abc or .obj mesh found in that folder (searched subfolders too).")).toStdString());
+            tr("No .abc, .obj or .fbx mesh found in that folder (searched subfolders too).").toStdString());
         return;
     }
 

@@ -2800,6 +2800,15 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                         uvs[ti] = triUVs[ti];
                     }
                 }
+                if (scDebugEnabled()) {
+                    fprintf(stderr, "[Cycles GEO] '%s' verts=%zu faces=%d tri=%zu "
+                            "v0=(%.4f,%.4f,%.4f) uv=%zu faceIdx0=%d\n",
+                            sn.name.c_str(), verts.size(),
+                            (int)meshData->numFaces, triVerts.size() / 3,
+                            verts[0].x, verts[0].y, verts[0].z,
+                            uvs.size(),
+                            meshData->faceIndices.empty() ? -1 : meshData->faceIndices[0]);
+                }
                 break;
             }
             default:
