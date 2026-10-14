@@ -35,6 +35,23 @@ Recent milestones:
   (static Noise plate over the ramp, 50-stop light, disc mask): high-pass energy inside the fill vs
   the surrounding ring = 0.0001 with Detail off, 0.054 Bilinear, 0.0835 Nearest, 0.0848 Detail
   input, against 0.0846 outside; the smooth-fill regression test is unchanged (0.005).
+- **ContentFill node: PatchMatch content-aware fill (2026-10-14)** — the tier above PatchFill the
+  user asked for: "a grid that samples outside the roto to replace what's within, pretty much a
+  content aware, does that need AI?" No: `Engine/Dev/PostFX/ContentFill.{h,cpp}`, Filter group,
+  inputs Source / Mask / Sample (both masks via `isInputMask`). Classical PatchMatch completion:
+  work window = hole bbox + Search Radius; chamfer matte as in PatchFill; `Level` pyramid
+  (`downsample`: 2x2 means that ignore hole pixels, hole = any, allowed = all); `diffuseInit` at
+  the coarsest level; per level `buildTargets` (hole dilated by the patch radius), `initNNF` (from
+  the coarser field x2 + parity, else random allowed centre), `nnfIterate` (alternating-scan
+  propagation + exponential random search, `patchDist` = mean SSD with the target side on the
+  current estimate and the source side on known pixels only, early-out past the current best),
+  `vote` (every target patch votes its source pixels into the hole pixels it covers, weight
+  exp(-d / mean d)), `upsampleInto` (bilinear). Allowed centres exclude the hole, the window margin
+  and anything outside the Sample mask. Headless (contentfill_test.py): ramp rebuilt to 0.0000
+  (iso-lines of a linear ramp are exact patch matches), vertical stripes 0.00025, noise plate
+  100% texture energy, no mask = pass-through; ~7 px patches, 4 search passes, 3 refinements,
+  auto levels. Single-threaded search for now (the vote and compose are the easy OpenMP targets if
+  it gets slow on big holes). Not done: a direction bias; sample-region visualisation.
 - **PatchFill Fill Method: Stretch (2026-10-14)** — the user's sketch for a bridge pillar in front of a
   building: grids either side of the shape whose rows line up, i.e. carry the surroundings straight
   across. New **Fill Method** (Lattice / Stretch), **Stretch Direction** (deg) and **Stretch Blend**.
