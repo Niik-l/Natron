@@ -264,4 +264,8 @@ target_compile_definitions(NatronEngine
         ${XDG_DEFS}
         $<$<BOOL:${OpenImageIO_FOUND}>:NATRON_HAVE_OPENIMAGEIO>
         $<$<BOOL:${NATRON_HAVE_ALEMBIC}>:NATRON_HAVE_ALEMBIC>
+        NATRON_HAVE_UFBX
+        NATRON_HAVE_CGLTF
 )
+# ufbx (FBX) and cgltf (glTF/GLB) — vendored static libs under libs/, always on.
+target_link_libraries(NatronEngine PRIVATE ufbx cgltf)

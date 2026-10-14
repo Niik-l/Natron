@@ -37,13 +37,15 @@
 #include "MeshProvider.h"
 #include "SubdivisionProvider.h"
 #include "MeshData.h"
+#include "ReadGeoImport.h"
 
 NATRON_NAMESPACE_ENTER
 
 struct ReadGeoPrivate;
 
 /**
- * @brief Import geometry from .abc (Alembic) or .obj (Wavefront) files.
+ * @brief Import geometry from .glb/.gltf (glTF), .fbx, .abc (Alembic) or
+ * .obj (Wavefront) files.
  * Parser dispatches on file extension. Displays meshes in the 3D viewport.
  */
 class ReadGeo
@@ -142,6 +144,18 @@ private:
 
     void loadAlembicGeo(const std::string& path);
     void loadObjGeo(const std::string& path);
+    // glTF 2.0 (.gltf/.glb) via cgltf and FBX (.fbx) via ufbx. The format
+    // parsers live in ReadGeoGltf.cpp / ReadGeoFbx.cpp; these build the
+    // Object dropdown ("All parts (merged)" + one entry per part), the
+    // MeshData for the selection, and apply the part's PBR material to the
+    // node's material knobs.
+    void loadGltfGeo(const std::string& path);
+    void loadFbxGeo(const std::string& path);
+    // Shared finalization for cgltf/ufbx imports: parts -> dropdown + MeshData.
+    void applyImportResult(const char* fmtName, const GeoImportResult& result);
+    // Write file-authored PBR values into the material knobs (Material page +
+    // Texture Maps page). Only called when the file actually had a material.
+    void applyImportedMaterialKnobs(const GeoImportMaterial& material);
     // Dispatch on file extension (.obj/.abc), guarded by _imp->isLoading, then
     // refresh metadata. Shared by knobChanged (file/reload/object change) and
     // onKnobsLoaded (project load).

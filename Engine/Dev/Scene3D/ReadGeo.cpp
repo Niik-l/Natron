@@ -22,6 +22,7 @@
 // ***** END PYTHON BLOCK *****
 
 #include "ReadGeo.h"
+#include "ReadGeoImport.h"
 #include "../DotUtils.h"
 
 #include "../../NodeMetadata.h"
@@ -256,15 +257,21 @@ ReadGeo::getPluginDescription() const
 {
     return tr(
 #ifdef NATRON_HAVE_ALEMBIC
-       "Import geometry from .abc (Alembic) or .obj (Wavefront) files. "
-       "The parser dispatches on the file extension.\n\n"
+       "Import geometry from .glb/.gltf (glTF), .fbx, .abc (Alembic) or .obj "
+       "(Wavefront) files. The parser dispatches on the file extension.\n\n"
        "Alembic: PolyMesh, SubD, and Points objects. Object dropdown picks "
        "which entry from a multi-mesh archive to load.\n\n"
 #else
-       "Import geometry from .obj (Wavefront) files. "
+       "Import geometry from .glb/.gltf (glTF), .fbx, or .obj (Wavefront) "
+       "files. The parser dispatches on the file extension.\n\n"
        "Alembic (.abc) support is not built into this binary — rebuild with "
        "Alembic to enable it.\n\n"
 #endif
+       "glTF/FBX: the Object dropdown lists \"All parts (merged)\" (the whole "
+       "asset, each part's file transform baked in) plus one entry per part. "
+       "The file's PBR material (base color, roughness, metallic, emission, "
+       "transmission, IOR, diffuse texture) is applied to the node's Material "
+       "and Texture Maps pages. Animation and skinning are not read yet.\n\n"
        "OBJ: positions, texture coords, and n-gon faces are honored. Group/"
        "object directives populate the Object dropdown when present; "
        "otherwise the file loads as a single mesh."
@@ -313,7 +320,7 @@ ReadGeo::initializeKnobs()
     {
         KnobFilePtr fp = AppManager::createKnob<KnobFile>(this, tr("File"));
         fp->setName("filename");
-        fp->setHintToolTip(tr("Path to a .abc (Alembic) or .obj (Wavefront) geometry file."));
+        fp->setHintToolTip(tr("Path to a .glb/.gltf (glTF), .fbx, .abc (Alembic) or .obj (Wavefront) geometry file."));
         fp->setAnimationEnabled(false);
         page->addKnob(fp);
         _imp->filePath = fp;
@@ -322,7 +329,10 @@ ReadGeo::initializeKnobs()
     {
         KnobChoicePtr obj = AppManager::createKnob<KnobChoice>(this, tr("Object"));
         obj->setName("objectPath");
-        obj->setHintToolTip(tr("Select which geometry object to load."));
+        obj->setHintToolTip(tr("Select which geometry object to load. "
+                               "\"All parts (merged)\" loads the whole asset with each "
+                               "part's file transform baked in; the individual entries "
+                               "load a single part."));
         page->addKnob(obj);
         _imp->objectPath = obj;
     }
@@ -351,7 +361,7 @@ ReadGeo::initializeKnobs()
         infoKnob->setAnimationEnabled(false);
         infoKnob->setEvaluateOnChange(false);
         infoKnob->setIsPersistent(false);
-        infoKnob->setDefaultValue("Set file path to a .abc or .obj file.");
+        infoKnob->setDefaultValue("Set file path to a .glb/.gltf, .fbx, .abc or .obj file.");
         page->addKnob(infoKnob);
         _imp->info = infoKnob;
     }
@@ -575,9 +585,13 @@ ReadGeo::loadGeoFromFile(const std::string& path)
             "Alembic support not built into this Natron binary. "
             "Use a .obj file, or rebuild Natron with Alembic.");
 #endif
+    } else if (e == ".gltf" || e == ".glb") {
+        loadGltfGeo(path);
+    } else if (e == ".fbx") {
+        loadFbxGeo(path);
     } else {
         setPersistentMessage(eMessageTypeError,
-            "Unsupported file extension. Use .abc (Alembic) or .obj (Wavefront).");
+            "Unsupported file extension. Use .glb/.gltf, .fbx, .abc (Alembic) or .obj (Wavefront).");
     }
 
     _imp->isLoading = false;
@@ -1081,6 +1095,173 @@ ReadGeo::loadObjGeo(const std::string& path)
     _imp->info.lock()->setValue(ss.str());
 
     clearPersistentMessage(false);
+}
+
+// ---------------------------------------------------------------------------
+// glTF / FBX loading (parsers in ReadGeoGltf.cpp / ReadGeoFbx.cpp)
+// ---------------------------------------------------------------------------
+
+void
+ReadGeo::loadGltfGeo(const std::string& path)
+{
+    // Label by the file's actual container: .glb vs .gltf (XML/JSON).
+    const std::size_t dot = path.find_last_of('.');
+    const bool isGlb = (dot != std::string::npos) &&
+        _stricmp(path.c_str() + dot, ".glb") == 0;
+    applyImportResult(isGlb ? "GLB" : "glTF", loadGltfGeoImport(path));
+}
+
+void
+ReadGeo::loadFbxGeo(const std::string& path)
+{
+    applyImportResult("FBX", loadFbxGeoImport(path));
+}
+
+void
+ReadGeo::applyImportedMaterialKnobs(const GeoImportMaterial& m)
+{
+    if (!m.present) return;
+
+    if (KnobColorPtr c = _imp->baseColor.lock()) {
+        c->setValue(m.baseColor[0], ViewSpec::all(), 0);
+        c->setValue(m.baseColor[1], ViewSpec::all(), 1);
+        c->setValue(m.baseColor[2], ViewSpec::all(), 2);
+    }
+    if (KnobDoublePtr k = _imp->roughness.lock()) k->setValue(m.roughness);
+    if (KnobDoublePtr k = _imp->metallic.lock()) k->setValue(m.metallic);
+    if (KnobDoublePtr k = _imp->specular.lock()) k->setValue(m.specular);
+    if (KnobColorPtr c = _imp->emissionColor.lock()) {
+        c->setValue(m.emission[0], ViewSpec::all(), 0);
+        c->setValue(m.emission[1], ViewSpec::all(), 1);
+        c->setValue(m.emission[2], ViewSpec::all(), 2);
+    }
+    if (KnobDoublePtr k = _imp->emissionStrength.lock()) k->setValue(m.emissionStrength);
+    if (KnobDoublePtr k = _imp->transmission.lock()) k->setValue(m.transmission);
+    if (KnobDoublePtr k = _imp->ior.lock()) k->setValue(m.ior);
+    // Diffuse map: write the resolved path, including clearing it when the
+    // file's material has no texture — knob state must match file state
+    // (a stale texture from a previously loaded file is worse than a blank).
+    if (KnobFilePtr k = _imp->textureFile.lock()) k->setValue(m.diffuseMapPath);
+}
+
+void
+ReadGeo::applyImportResult(const char* fmtName, const GeoImportResult& result)
+{
+    const GeoImportResult* res = &result;
+    if (!res->ok || res->parts.empty()) {
+        setPersistentMessage(eMessageTypeError, res->error);
+        return;
+    }
+    if (!res->error.empty()) {
+        // Parse succeeded with skipped content — surface it as a message.
+        setPersistentMessage(eMessageTypeWarning, fmtName + std::string(": ") + res->error);
+    }
+
+    // --- Populate the Object dropdown: entry 0 is the merged asset, then
+    // one entry per part (scene paths like "Car/Body").
+    std::vector<std::string> labels;
+    labels.reserve(res->parts.size() + 1);
+    labels.push_back(std::string("All parts (merged)"));
+    for (std::size_t i = 0; i < res->parts.size(); ++i) {
+        labels.push_back(res->parts[i].label);
+    }
+    _imp->geoPaths = labels;
+
+    KnobChoicePtr objKnob = _imp->objectPath.lock();
+    int chosenIdx = 0;
+    if (objKnob) {
+        std::vector<ChoiceOption> entries;
+        for (std::size_t i = 0; i < labels.size(); ++i) {
+            entries.push_back(ChoiceOption(labels[i], "", ""));
+        }
+        objKnob->populateChoices(entries);
+        chosenIdx = objKnob->getValue();
+        if (chosenIdx < 0 || (std::size_t)chosenIdx >= labels.size()) {
+            chosenIdx = 0;
+            objKnob->setValue(0);
+        }
+    }
+
+    // --- Build the MeshData for the selection.
+    MeshDataPtr mesh(new MeshData);
+    const GeoImportPart* singlePart = (chosenIdx > 0) ? &res->parts[chosenIdx - 1] : NULL;
+    if (singlePart) {
+        importAppendPart(*singlePart, mesh.get());
+    } else {
+        for (std::size_t i = 0; i < res->parts.size(); ++i) {
+            importAppendPart(res->parts[i], mesh.get());
+        }
+    }
+    importBuildEdgeIndices(mesh.get());
+
+    // Geometry-loader diagnostics gate (same pattern as NATRON_DEBUG_SC):
+    // set env NATRON_DEBUG_GEOIO=1 to dump the raw parsed geometry (vertex
+    // values, not just counts) so headless tests can verify what the loader
+    // actually produced — a degenerate all-zero vertex array renders as an
+    // empty scene and is invisible in the counts alone.
+    if (std::getenv("NATRON_DEBUG_GEOIO")) {
+        std::ostringstream dbg;
+        dbg << "[GEOIO] fmt=" << fmtName << " verts=" << mesh->numVertices
+            << " faces=" << mesh->numFaces << " uvslots=" << (mesh->uvs.size() / 2)
+            << " v0..v5=";
+        for (std::size_t i = 0; i < mesh->vertices.size() && i < 6; ++i) {
+            dbg << mesh->vertices[i] << ",";
+        }
+        dbg << " faceCounts0..3=";
+        for (std::size_t i = 0; i < mesh->faceCounts.size() && i < 4; ++i) {
+            dbg << mesh->faceCounts[i] << ",";
+        }
+        dbg << " faceIdx0..5=";
+        for (std::size_t i = 0; i < mesh->faceIndices.size() && i < 6; ++i) {
+            dbg << mesh->faceIndices[i] << ",";
+        }
+        fprintf(stderr, "%s\n", dbg.str().c_str());
+    }
+
+    // The file-authored transforms are already baked into the vertices, so
+    // MeshData::transform stays identity and the node's own Transform page
+    // applies user offsets on top (same policy as the OBJ path).
+    for (int i = 0; i < 16; ++i) mesh->transform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+
+    if (_imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue()) {
+        reverseMeshWinding(*mesh);
+    }
+
+    // --- Material: the selected part's (single mode), else the first part
+    // that carries one in the file. With no material in the file the knobs
+    // are left alone (user's manual settings stay).
+    const GeoImportMaterial* mat = NULL;
+    if (singlePart) {
+        if (singlePart->material.present) mat = &singlePart->material;
+    } else {
+        for (std::size_t i = 0; i < res->parts.size() && !mat; ++i) {
+            if (res->parts[i].material.present) mat = &res->parts[i].material;
+        }
+    }
+    if (mat) {
+        applyImportedMaterialKnobs(*mat);
+    }
+
+    // --- Store result + Info line.
+    _lastMeshData = mesh;
+    _imp->loadedFilePath = res->parts[0].label; // not meaningful for scene formats
+    _imp->loadedObjectPath = labels[chosenIdx];
+
+    std::ostringstream ss;
+    ss << fmtName << ": " << _imp->loadedObjectPath
+       << " | Vertices: " << mesh->numVertices
+       << " | Faces: " << mesh->numFaces
+       << " | Parts: " << res->parts.size()
+       << " | Materials: " << res->numMaterials
+       << " | UVs: " << (mesh->hasUVs ? "yes" : "no");
+    if (!mat) {
+        ss << " | No material in file";
+    }
+    _imp->info.lock()->setValue(ss.str());
+
+    if (res->error.empty()) {
+        clearPersistentMessage(false);
+    }
 }
 
 // ---------------------------------------------------------------------------
