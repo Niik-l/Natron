@@ -35,6 +35,19 @@ Recent milestones:
   (static Noise plate over the ramp, 50-stop light, disc mask): high-pass energy inside the fill vs
   the surrounding ring = 0.0001 with Detail off, 0.054 Bilinear, 0.0835 Nearest, 0.0848 Detail
   input, against 0.0846 outside; the smooth-fill regression test is unchanged (0.005).
+- **PatchFill Fill Method: Stretch (2026-10-14)** — the user's sketch for a bridge pillar in front of a
+  building: grids either side of the shape whose rows line up, i.e. carry the surroundings straight
+  across. New **Fill Method** (Lattice / Stretch), **Stretch Direction** (deg) and **Stretch Blend**.
+  Per fill pixel, two rays along +-direction march (in work-region space, 1 px steps) until
+  `dist > grow && alpha == 0`, average the first Sample Band clean source pixels (log space when
+  Log Space is on), and the fill is `lerp(left, right, smoothstep(0.5 - blend/2, 0.5 + blend/2,
+  tLeft / (tLeft + tRight)))`; one side only when the other ray leaves the work region; neither =
+  the lattice ramp (so the lattice is always solved first). Detail stamps still layer on top.
+  OpenMP over rows. Headless (vertical stripes + ramp, 120 px disc): Stretch at 90 deg reproduces
+  the plate to 0.004 mean error, the lattice ramp 0.125, Stretch at 0 deg (wrong direction) 0.123;
+  on the plain ramp Stretch 0.004 vs lattice 0.001; smooth-fill regression unchanged. This is Nuke
+  Inpaint's Stretch Amount / Direction, done as a full method rather than a bias. Next tier if wanted:
+  a PatchMatch content-aware fill with a sampling-region mask (the user's grids), classical, no AI.
 - **PatchFill: stamp and matte edge breakup (2026-10-13)** — the user's first GUI test (a city plate,
   ~150 px stamps) showed the stamps as discs with visible rims and the Roto rectangle as a hard
   patch boundary. Each stamp now has its own two-octave value noise (`fbm2`, hash-seeded from the

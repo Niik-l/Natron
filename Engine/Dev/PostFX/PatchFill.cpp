@@ -43,6 +43,12 @@ enum OutputModeEnum
     eOutputDetail = 3, // the detail layer alone over mid grey
 };
 
+enum FillMethodEnum
+{
+    eFillLattice = 0, // smooth ramp solved on the lattice
+    eFillStretch = 1, // carry the pixels either side of the hole across it along a direction
+};
+
 enum DetailSourceEnum
 {
     eDetailSourceBand   = 0, // the ring outside the grown shape
@@ -481,6 +487,8 @@ buildDetailLayer(const DetailParams& P, const Plane& src, const RectI& work,
 
 struct PatchFillPrivate
 {
+    KnobChoiceWPtr fillMethod;
+    KnobDoubleWPtr stretchDirection, stretchBlend;
     KnobIntWPtr    rows;
     KnobIntWPtr    cols;
     KnobDoubleWPtr grow;
@@ -526,6 +534,10 @@ PatchFill::getPluginDescription() const
            "follows the surroundings more closely. Nothing is cloned, so texture is not reproduced.\n\n"
            "Works in float, so HDR values are kept. Use Grow Mask to push the sample band past a "
            "light's halo, and Log Space when a bright rim bleeds into the patch.\n\n"
+           "Fill Method Stretch instead carries the pixels either side of the shape straight across it "
+           "along Stretch Direction and crossfades them, so floors, roads and horizons continue "
+           "through the patch. Pixels with no clean pixel on either side along that line fall back to "
+           "the lattice ramp.\n\n"
            "Detail tab: the ramp is only ever smooth, so Detail Amount above zero scatters soft "
            "clone stamps over the fill, each a high-passed patch taken at a random position from "
            "the ring outside the shape (or a rectangle you point at, or the Detail input) with "
@@ -559,6 +571,43 @@ PatchFill::initializeKnobs()
 {
     KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Controls"));
 
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Fill Method"));
+        k->setName("fillMethod");
+        std::vector<ChoiceOption> opts;
+        opts.push_back(ChoiceOption("lattice", "Lattice",
+                                    "A smooth ramp pinned to the pixels around the shape (Lattice Rows / Columns). "
+                                    "Best for skies, walls and lights."));
+        opts.push_back(ChoiceOption("stretch", "Stretch",
+                                    "Carry the pixels either side of the shape across it along Stretch Direction and "
+                                    "crossfade them, so lines continue through the patch. Best for buildings, roads, horizons."));
+        k->populateChoices(opts);
+        k->setDefaultValue(eFillLattice);
+        k->setHintToolTip(tr("How the inside of the shape is rebuilt before any Detail stamps are added."));
+        page->addKnob(k); _imp->fillMethod = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Stretch Direction"));
+        k->setName("stretchDirection");
+        k->setDefaultValue(0.0);
+        k->setMinimum(-360.0); k->setMaximum(360.0);
+        k->setDisplayMinimum(-180.0); k->setDisplayMaximum(180.0);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Stretch: the direction, in degrees, along which the surrounding pixels are carried "
+                             "across the shape. 0 = horizontal (floors, horizons), 90 = vertical (columns, poles)."));
+        page->addKnob(k); _imp->stretchDirection = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Stretch Blend"));
+        k->setName("stretchBlend");
+        k->setDefaultValue(1.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(1.0);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip(tr("Stretch: how wide the crossfade between the two sides is, as a fraction of the span. "
+                             "1 = a smooth dissolve across the whole patch, 0 = a hard cut in the middle."));
+        page->addKnob(k); _imp->stretchBlend = k;
+    }
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Lattice Rows"));
         k->setName("rows");
@@ -888,6 +937,9 @@ PatchFill::render(const RenderActionArgs& args)
     if (!outImg) return eStatusFailed;
 
     const double pxScale = args.mappedScale.toOfxPointD().x;
+    const int   method   = _imp->fillMethod.lock()->getValue();
+    const float stretchDir = (float)(_imp->stretchDirection.lock()->getValueAtTime(args.time) * M_PI / 180.0);
+    const float stretchBlend = (float)std::max(0.0, std::min(1.0, _imp->stretchBlend.lock()->getValueAtTime(args.time)));
     const int   rows     = std::max(1, _imp->rows.lock()->getValueAtTime(args.time));
     const int   cols     = std::max(1, _imp->cols.lock()->getValueAtTime(args.time));
     const float grow     = (float)(std::max(0.0, _imp->grow.lock()->getValueAtTime(args.time)) * pxScale);
@@ -975,6 +1027,8 @@ PatchFill::render(const RenderActionArgs& args)
     std::vector<float> mval, dist, alpha;
     std::vector<float> detailRGB, detailCover;
     bool haveDetail = false;
+    std::vector<float> stretchRGB;   // work-region sized, 3 floats; valid where stretchOK
+    std::vector<char>  stretchOK;
     Lattice lattice;
     RectI box; // lattice box: grown shape + band
     bool haveFill = false;
@@ -1078,6 +1132,72 @@ PatchFill::render(const RenderActionArgs& args)
             haveFill = true;
         }
 
+        // ---- 4a. Stretch: carry the pixels either side of the hole across it.
+        if (haveFill && method == eFillStretch) {
+            stretchRGB.assign((size_t)WW * WH * 3, 0.0f);
+            stretchOK.assign((size_t)WW * WH, 0);
+            const float ux = std::cos(stretchDir), uy = std::sin(stretchDir);
+            const int maxSteps = WW + WH;
+            const int nAvg = std::max(1, (int)std::lround(band));
+            // colour of the first `nAvg` clean pixels from (x,y) along +-u; false when the ray
+            // leaves the work region before finding any
+            auto probe = [&](int x, int y, float sgn, float* col, float* tOut) -> bool {
+                float acc[3] = {0, 0, 0};
+                int n = 0;
+                float tFirst = -1.0f;
+                for (int t = 1; t <= maxSteps; ++t) {
+                    const int sx = (int)std::floor(x + 0.5f + sgn * ux * t);
+                    const int sy = (int)std::floor(y + 0.5f + sgn * uy * t);
+                    if (sx < 0 || sx >= WW || sy < 0 || sy >= WH) break;
+                    const size_t k = (size_t)sy * WW + sx;
+                    if (dist[k] <= grow || alpha[k] > 0.0f) {
+                        if (n) break;          // clean run ended (re-entered the shape)
+                        continue;
+                    }
+                    const int px = work.x1 + sx, py = work.y1 + sy;
+                    const float* sp = (px >= srcBounds.x1 && px < srcBounds.x2 && py >= srcBounds.y1 && py < srcBounds.y2)
+                                    ? (const float*)srcRa.pixelAt(px, py) : NULL;
+                    if (!sp) break;
+                    if (tFirst < 0.0f) tFirst = (float)t;
+                    float r0 = srcNComp >= 1 ? sp[0] : 0.0f, g0 = srcNComp >= 2 ? sp[1] : r0, b0 = srcNComp >= 3 ? sp[2] : r0;
+                    if (logSpace) { r0 = toLog(r0); g0 = toLog(g0); b0 = toLog(b0); }
+                    acc[0] += r0; acc[1] += g0; acc[2] += b0;
+                    if (++n >= nAvg) break;
+                }
+                if (!n) return false;
+                col[0] = acc[0] / n; col[1] = acc[1] / n; col[2] = acc[2] / n;
+                *tOut = tFirst;
+                return true;
+            };
+            #ifdef _OPENMP
+            #pragma omp parallel for
+            #endif
+            for (int y = 0; y < WH; ++y) {
+                for (int x = 0; x < WW; ++x) {
+                    const size_t k = (size_t)y * WW + x;
+                    if (alpha[k] <= 0.0f) continue;
+                    float ca[3], cb[3], ta = 0.0f, tb = 0.0f;
+                    const bool okA = probe(x, y, -1.0f, ca, &ta);
+                    const bool okB = probe(x, y, +1.0f, cb, &tb);
+                    if (!okA && !okB) continue;
+                    float* o = &stretchRGB[k * 3];
+                    if (okA && okB) {
+                        // crossfade by distance; Stretch Blend narrows the dissolve around the middle
+                        float t = ta / (ta + tb);
+                        const float half = 0.5f * std::max(0.001f, stretchBlend);
+                        t = smoothstep01(0.5f - half, 0.5f + half, t);
+                        o[0] = ca[0] + (cb[0] - ca[0]) * t;
+                        o[1] = ca[1] + (cb[1] - ca[1]) * t;
+                        o[2] = ca[2] + (cb[2] - ca[2]) * t;
+                    } else {
+                        const float* c = okA ? ca : cb;
+                        o[0] = c[0]; o[1] = c[1]; o[2] = c[2];
+                    }
+                    stretchOK[k] = 1;
+                }
+            }
+        }
+
         // ---- 4b. Detail: texture-bombed clone stamps over the fill.
         if (haveFill && wantDetail) {
             Plane plane;
@@ -1156,6 +1276,10 @@ PatchFill::render(const RenderActionArgs& args)
             if (needFill) {
                 float f[3];
                 sampleLattice(lattice, (x + 0.5f - box.x1) / boxW, (y + 0.5f - box.y1) / boxH, f);
+                if (!stretchOK.empty() && x >= work.x1 && x < work.x2 && y >= work.y1 && y < work.y2) {
+                    const size_t k = (size_t)(y - work.y1) * WW + (x - work.x1);
+                    if (stretchOK[k]) { f[0] = stretchRGB[k * 3]; f[1] = stretchRGB[k * 3 + 1]; f[2] = stretchRGB[k * 3 + 2]; }
+                }
                 if (haveDetail && x >= work.x1 && x < work.x2 && y >= work.y1 && y < work.y2) {
                     const size_t k = (size_t)(y - work.y1) * WW + (x - work.x1);
                     dR = detailRGB[k * 3] * detailAmount;
