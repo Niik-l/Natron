@@ -48,6 +48,7 @@
 #include "ReadAlembicCamera.h"
 #include "ReadAlembicTransform.h"
 #include "ReadAlembicArchive.h"
+#include "ArchiveProvider.h"
 #include "ReadGeo.h"
 #include "GeoMaterialOverride.h"
 #include "../DotUtils.h"
@@ -403,7 +404,7 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         }
 
         // --- ReadAlembicArchive (multi-emit: one Natron node → many SceneNodes) ---
-        ReadAlembicArchive* abcArchive = dynamic_cast<ReadAlembicArchive*>(effect.get());
+        ArchiveProvider* abcArchive = dynamic_cast<ArchiveProvider*>(effect.get());
         if (abcArchive) {
             const int count = abcArchive->getSceneNodeCount();
             // Rotation pivot. The archive-wide pivot drives the root handle; each

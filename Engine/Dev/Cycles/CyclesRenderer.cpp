@@ -84,6 +84,7 @@
 #include "Engine/Dev/Scene3D/MeshProvider.h"
 #include "Engine/Dev/Scene3D/SubdivisionProvider.h"
 #include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
+#include "Engine/Dev/Scene3D/ArchiveProvider.h"
 #include "Engine/Dev/Scene3D/CyclesRenderPass.h"
 #include "Engine/Dev/Scene3D/ReadVDB.h"
 #include "Engine/Dev/Scene3D/Volume3D.h"
@@ -2802,12 +2803,15 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 }
                 if (scDebugEnabled()) {
                     fprintf(stderr, "[Cycles GEO] '%s' verts=%zu faces=%d tri=%zu "
-                            "v0=(%.4f,%.4f,%.4f) uv=%zu faceIdx0=%d\n",
+                            "v0=(%.4f,%.4f,%.4f) uv=%zu faceIdx0=%d "
+                            "worldtr=(%.3f,%.3f,%.3f) wdiag=(%.4f,%.4f,%.4f)\n",
                             sn.name.c_str(), verts.size(),
                             (int)meshData->numFaces, triVerts.size() / 3,
                             verts[0].x, verts[0].y, verts[0].z,
                             uvs.size(),
-                            meshData->faceIndices.empty() ? -1 : meshData->faceIndices[0]);
+                            meshData->faceIndices.empty() ? -1 : meshData->faceIndices[0],
+                            sn.worldMatrix[12], sn.worldMatrix[13], sn.worldMatrix[14],
+                            sn.worldMatrix[0], sn.worldMatrix[5], sn.worldMatrix[10]);
                 }
                 break;
             }
@@ -2935,7 +2939,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         // SceneGraph parent chain at sub-time — deferred.
         if (mbEnabled && sn.type == eSceneNodeMesh && srcNode) {
             EffectInstancePtr effInst = srcNode->getEffectInstance();
-            ReadAlembicArchive* abcArch = dynamic_cast<ReadAlembicArchive*>(effInst.get());
+            ArchiveProvider* abcArch = dynamic_cast<ArchiveProvider*>(effInst.get());
             MeshProvider*       meshProv = dynamic_cast<MeshProvider*>(effInst.get());   // ReadGeo, GeoBuilder
 
             // Number of vertices on the Cycles mesh — also the size in float3s

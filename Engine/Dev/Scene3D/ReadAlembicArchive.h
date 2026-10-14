@@ -23,6 +23,7 @@
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
+#include "ArchiveProvider.h"
 #include "MaterialProvider.h"
 #include "SubdivisionProvider.h"
 #include "MeshData.h"
@@ -34,39 +35,22 @@ NATRON_NAMESPACE_ENTER
 
 struct ReadAlembicArchivePrivate;
 
-/**
- * @brief One entry in the loaded Alembic archive's hierarchy, returned by
- * ReadAlembicArchive::getEntryTree() for UI consumers (AlembicTreeWidget).
- */
-struct ArchiveTreeEntry
-{
-    std::string fullPath;        // "/Camera01Trackers/Tracker1"
-    std::string name;            // leaf name, "Tracker1"
-    int parentLocalIdx;          // -1 = archive-root; otherwise index into the same vector
-    bool isMesh;                 // true => IPolyMesh, false => IXform locator
-    int sampleCount;             // xform sample count (0 for meshes)
-    int numVertices;             // mesh vertex count (0 for xforms)
-};
+// ArchiveTreeEntry now lives in ArchiveProvider.h (the format-neutral
+// multi-emit interface this class implements).
 
 /**
  * @brief One-node import of an entire Alembic archive's transform / mesh hierarchy.
  *
  * Walks the .abc file once on load, caches every IXform and IPolyMesh entry
  * with its parent index, and exposes the resulting subtree to the SceneGraph
- * builder via getSceneNodeCount / getSceneNodeAtTime.
- *
- * Phase A (current): locator-only — xforms emit SceneNodes of type
- * eSceneNodeTransform; meshes are visible in the entry tree but render
- * as locators too (no geometry yet). Sufficient for SynthEyes tracker
- * imports and pipeline-level testing of the multi-emit plumbing.
- *
- * Phase B (next): wire mesh data through SceneNode::meshData so cars,
- * character rigs, set props all import as one node with their geometry.
+ * builder via the ArchiveProvider multi-emit API (getSceneNodeCount /
+ * getSceneNodeAt / getMeshDataAt / ...).
  */
 class ReadAlembicArchive
     : public EffectInstance
     , public MaterialProvider
     , public SubdivisionProvider
+    , public ArchiveProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -121,11 +105,11 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
-    // --- Scene-graph multi-emit API ---
+    // --- Scene-graph multi-emit API (ArchiveProvider interface) ---
     // SceneGraph::rebuild() calls these to emit one SceneNode per archive entry.
 
     /** @brief How many entries this archive currently exposes (after filtering). */
-    int getSceneNodeCount() const;
+    int getSceneNodeCount() const OVERRIDE;
 
     /** @brief Fill out the per-entry scene info for emission.
      *  @param idx Entry index in [0, getSceneNodeCount()).
@@ -140,7 +124,7 @@ public:
                         std::string& outName,
                         int& outParentLocalIndex,
                         bool& outIsMesh,
-                        float outLocalMatrix[16]) const;
+                        float outLocalMatrix[16]) const OVERRIDE;
 
     /** @brief Fetch the mesh data for a mesh entry at the given time.
      *  Returns nullptr if the entry isn't a mesh, or no mesh data was read.
@@ -152,7 +136,7 @@ public:
      *  Mesh vertices are in the parent xform's local frame — SceneGraph composes
      *  the parent chain when computing the world transform.
      */
-    MeshDataPtr getMeshDataAt(int idx, double time = -1.0) const;
+    MeshDataPtr getMeshDataAt(int idx, double time = -1.0) const OVERRIDE;
 
     // MaterialProvider interface — every archive mesh entry shares a single
     // material taken from the optional Material3D input on input 0. When no
@@ -175,7 +159,7 @@ public:
      *  parents always come before their children. parentLocalIdx is the index
      *  within the returned vector.
      */
-    std::vector<ArchiveTreeEntry> getEntryTree() const;
+    std::vector<ArchiveTreeEntry> getEntryTree() const OVERRIDE;
 
     /** @brief Compute the world-space transform for a visible entry at the given time.
      *
@@ -186,7 +170,7 @@ public:
      *
      *  @return true on success; false if idx is out of range.
      */
-    bool getEntryWorldMatrix(int idx, double time, float outWorld[16]) const;
+    bool getEntryWorldMatrix(int idx, double time, float outWorld[16]) const OVERRIDE;
 
 private:
 

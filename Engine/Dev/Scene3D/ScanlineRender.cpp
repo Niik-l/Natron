@@ -51,6 +51,7 @@
 #include "../Particles/ParticleProvider.h"
 #include "ReadVDB.h"
 #include "ReadAlembicArchive.h"
+#include "ArchiveProvider.h"
 #include "Volume3D.h"
 #include "Cube3D.h"
 #include "Cylinder3D.h"
@@ -2212,12 +2213,12 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
         return;
     }
 
-    ReadAlembicArchive* abcArchive = dynamic_cast<ReadAlembicArchive*>(effect.get());
+    ArchiveProvider* abcArchive = dynamic_cast<ArchiveProvider*>(effect.get());
     if (abcArchive) {
         ImagePtr sharedTex;
-        if (abcArchive->getInput(1)) {
+        if (effect->getInput(1)) {
             RectI roi;
-            sharedTex = abcArchive->getImage(1, time, RenderScale(), view, NULL, NULL, false, true, eStorageModeRAM, 0, &roi);
+            sharedTex = effect->getImage(1, time, RenderScale(), view, NULL, NULL, false, true, eStorageModeRAM, 0, &roi);
         }
 
         // Project3D / MergeMat on the archive's material input: the archive has
