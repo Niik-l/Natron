@@ -23,12 +23,12 @@
 // glTF 2.0 (.gltf / .glb) ARCHIVE import for ReadGeoArchive, backed by the
 // vendored cgltf parser (libs/cgltf, MIT).
 //
-// Unlike the flat ReadGeo path (ReadGeoGltf.cpp — one part per renderable,
-// file transforms baked in), this parser returns the file's OWN hierarchy:
-// node entries + per-primitive mesh entries in the node-local frame, skins
-// (joint node indices + inverse bind matrices) and animation channels as
-// plain copied data. Animation evaluation happens later, per frame, in
-// evaluateGltfArchiveFrame() — scrubbing never re-parses the file.
+// Shared archive parser for both ReadGeo and ReadGeoArchive (ReadGeoImport.h):
+// the file's OWN hierarchy — node entries + per-primitive mesh entries in
+// the node-local frame, skins (joint node indices + inverse bind matrices)
+// and animation channels as plain copied data. Animation evaluation happens
+// later, per frame, in evaluateGltfArchiveFrame() — scrubbing never
+// re-parses the file.
 //
 // Indexing note: cgltf stores nodes/skins/materials in flat arrays, so any
 // cgltf_node* maps to its flat index by pointer subtraction. Skins are a
@@ -62,6 +62,85 @@ accessorNumComponents(const cgltf_accessor* acc)
         case cgltf_type_vec4: return 4;
         default: return 0;
     }
+}
+
+// --- embedded-image extraction ---------------------------------------------
+
+bool
+decodeBase64(const std::string& in, std::vector<unsigned char>& out)
+{
+    static const int table[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, // 0x00-0x0F
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, // 0x10-0x1F
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,-1,63, // 0x20-0x2F  '+' '/'
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1, 0,-1,-1, // 0x30-0x3F  '0'-'9' '='
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14, // 0x40-0x4F  'A'-'O'
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1, // 0x50-0x5F  'P'-'Z'
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40, // 0x60-0x6F  'a'-'o'
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1, // 0x70-0x7F  'p'-'z'
+    };
+    out.clear();
+    out.reserve(in.size() / 4 * 3);
+    unsigned int buf = 0;
+    int bits = 0;
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        const int v = table[(unsigned char)in[i]];
+        if (v < 0) {
+            if (in[i] == '=') break; // padding
+            continue; // tolerate whitespace
+        }
+        buf = (buf << 6) | (unsigned)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((unsigned char)((buf >> bits) & 0xFF));
+        }
+    }
+    return !out.empty();
+}
+
+// Resolve a cgltf image (file URI, data URI, or buffer view) to a usable
+// texture file path. External URIs resolve relative to the .gltf directory;
+// embedded content is written to a content-hashed temp file. Ported from the
+// retired flat loader (ReadGeoGltf.cpp) so embedded GLB textures reach both
+// node façades.
+std::string
+resolveCgltfImage(const cgltf_image* image, const std::string& dir)
+{
+    if (!image) return std::string();
+
+    if (image->buffer_view) {
+        const unsigned char* bytes = cgltf_buffer_view_data(image->buffer_view);
+        if (bytes && image->buffer_view->size > 0) {
+            return importWriteEmbeddedTexture(bytes, image->buffer_view->size, "gltf_tex");
+        }
+        return std::string();
+    }
+
+    if (!image->uri) return std::string();
+    const std::string uri = image->uri;
+
+    if (uri.rfind("data:", 0) == 0) {
+        // data:image/png;base64,<payload>
+        const std::size_t b64 = uri.find("base64,");
+        if (b64 != std::string::npos) {
+            std::vector<unsigned char> decoded;
+            if (decodeBase64(uri.substr(b64 + 7), decoded)) {
+                return importWriteEmbeddedTexture(decoded.data(), decoded.size(), "gltf_tex");
+            }
+        }
+        return std::string();
+    }
+
+    // External file URI — resolve relative to the .gltf file's directory.
+    // (Backslashes are tolerated; URL percent-encoding is not handled.)
+    if (uri.empty()) return std::string();
+    if (dir.empty()) return uri;
+    const char last = dir[dir.size() - 1];
+    if (last == '/' || last == '\\') {
+        return dir + uri;
+    }
+    return dir + "/" + uri;
 }
 
 // --- animation channel sampling ---------------------------------------------
@@ -198,16 +277,11 @@ loadGltfArchiveImport(const std::string& path)
         if (cm->has_transmission) mat.transmission = cm->transmission.transmission_factor;
         if (cm->has_ior) mat.ior = cm->ior.ior;
         if (cm->has_specular) mat.specular = cm->specular.specular_factor;
-        // Diffuse texture: external file URI relative to the .gltf directory.
-        // Embedded (data URI / buffer view) images are deferred for the
-        // archive path — the flat ReadGeo loader handles those.
-        if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image &&
-            pbr.base_color_texture.texture->image->uri &&
-            pbr.base_color_texture.texture->image->uri[0] != '\0' &&
-            strncmp(pbr.base_color_texture.texture->image->uri, "data:", 5) != 0) {
-            const std::string uri = pbr.base_color_texture.texture->image->uri;
-            mat.diffuseMapPath = dir.empty() ? uri : (dir.back() == '/' || dir.back() == '\\'
-                                                      ? dir + uri : dir + "/" + uri);
+        // Diffuse texture: external file URI relative to the .gltf directory,
+        // or embedded content (data URI / buffer view) extracted to a
+        // content-hashed temp file.
+        if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
+            mat.diffuseMapPath = resolveCgltfImage(pbr.base_color_texture.texture->image, dir);
         }
     }
 

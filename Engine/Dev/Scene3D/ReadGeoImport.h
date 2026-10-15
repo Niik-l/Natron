@@ -19,28 +19,34 @@
 #ifndef NATRON_ENGINE_READGEOIMPORT_H
 #define NATRON_ENGINE_READGEOIMPORT_H
 
-// Shared interface for the ReadGeo file-format importers that are backed by
-// vendored third-party parsers:
+// Shared interface for the ReadGeo / ReadGeoArchive scene-format importers,
+// backed by vendored third-party parsers:
 //
-//   glTF 2.0 / GLB -> cgltf   (libs/cgltf, MIT)  - ReadGeoGltf.cpp
-//   FBX            -> ufbx    (libs/ufbx,  MIT)  - ReadGeoFbx.cpp
+//   glTF 2.0 / GLB -> cgltf   (libs/cgltf, MIT)  - ReadGeoArchiveGltf.cpp
+//   FBX            -> ufbx    (libs/ufbx,  MIT)  - ReadGeoArchiveFbx.cpp
 //
 // Both formats are scene formats: they carry a node hierarchy, per-node
-// transforms, and per-part PBR materials. The stage-1 contract with ReadGeo
-// is:
+// transforms, per-part PBR materials, skins and animation channels. The
+// parsers return the FILE'S OWN hierarchy (GeoArchiveResult below); the two
+// node façades consume it:
 //
-//   - the loader parses the WHOLE file and returns every renderable part
-//     (a part = one glTF primitive / one FBX mesh x material) with its
-//     file-authored transform ALREADY BAKED into the vertex positions, so
-//     multi-part assets appear assembled exactly as in the authoring DCC;
-//   - ReadGeo fills the Object dropdown with "All parts (merged)" plus one
-//     entry per part, and builds the requested MeshData from the part list;
-//   - MeshData::transform stays identity — the node's own Transform page
-//     applies user offsets on top (same policy as the OBJ path).
+//   - ReadGeoArchive (ArchiveProvider) emits every entry with its parent
+//     chain intact — transforms are carried structurally, never baked;
+//   - ReadGeo (MeshProvider) builds ONE MeshData per fetch: "All parts
+//     (merged)" bakes each part's evaluated world matrix into the vertex
+//     positions (so a multi-part asset appears assembled), single-part
+//     selection keeps node-local vertices and rides the part's world matrix
+//     in MeshData::transform.
+//
+// A single frame evaluation (GeoArchiveFrameEval) is cached per integer
+// frame by GeoArchiveRuntime and shared by both façades.
 
 #include "MeshData.h"
 
 #include <cstddef>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -63,42 +69,15 @@ struct GeoImportMaterial
     std::string diffuseMapPath;   // resolved texture file path (empty = none)
 };
 
-/** One renderable part of the file (glTF primitive / FBX mesh+material). */
-struct GeoImportPart
-{
-    std::string label;               // scene path, e.g. "Car/Body" or "Car/Body/Steel"
-    std::vector<float> vertices;     // x,y,z interleaved, world-space (baked)
-    std::vector<int> faceIndices;    // flattened polygon-vertex indices
-    std::vector<int> faceCounts;     // per-face vertex count (n-gon capable)
-    std::vector<float> uvs;          // per face-vertex (u,v), parallel to faceIndices
-    bool hasUVs = false;
-    GeoImportMaterial material;
-};
-
-struct GeoImportResult
-{
-    bool ok = false;
-    std::string error;
-    std::vector<GeoImportPart> parts;
-    int numMaterials = 0;            // total materials in the file (for the Info line)
-};
-
-/** glTF 2.0 (ASCII .gltf + binary .glb) via cgltf. Implemented in ReadGeoGltf.cpp. */
-GeoImportResult loadGltfGeoImport(const std::string& path);
-
-/** FBX (binary + ASCII) via ufbx. Implemented in ReadGeoFbx.cpp. */
-GeoImportResult loadFbxGeoImport(const std::string& path);
-
-// --- Archive import (hierarchy-preserving) for ReadGeoArchive ---------------
+// --- Archive import (hierarchy-preserving) ----------------------------------
 //
-// Where the flat loaders above return "one part per renderable with file
-// transforms baked in", the archive parsers return the FILE'S OWN hierarchy:
-// node entries (parents before children) + mesh entries (one per glTF
-// primitive / FBX material part, attached to their owning node), rest-pose
-// vertex data in the node-local frame, per-part materials, skins (joint node
-// indices + inverse bind matrices) and animation channels as plain data.
-// Animation evaluation happens at render time (evaluateXxxArchiveFrame below)
-// so scrubbing never re-parses the file.
+// The parsers return the FILE'S OWN hierarchy: node entries (parents before
+// children) + mesh entries (one per glTF primitive / FBX material part,
+// attached to their owning node), rest-pose vertex data in the node-local
+// frame, per-part materials, skins (joint node indices + inverse bind
+// matrices) and animation channels as plain data. Animation evaluation
+// happens at render time (evaluateXxxArchiveFrame below) so scrubbing never
+// re-parses the file.
 
 /** Animation channel target paths (bitmask for node channels). */
 enum GeoArchiveChannelPath {
@@ -226,16 +205,72 @@ bool evaluateFbxArchiveFrame(void* scene,
  *  ReadGeoArchiveFbx.cpp (keeps ufbx.h out of this header). */
 void freeFbxArchiveScene(void* scene);
 
+// --- shared per-frame runtime (GeoArchiveRuntime, ReadGeoImport.cpp) -------
+//
+// Both ReadGeo and ReadGeoArchive embed one: the parsed archive, the live
+// ufbx scene, animation flags, the lazily-filled per-frame evaluation cache
+// and the time-mapping helpers. Locking discipline: the frame cache has its
+// own mutex (frameMutex); the archive data (data / fbxScene / isFbx /
+// animation flags) is guarded by the OWNING NODE's data mutex — every
+// method that reads `data` requires the caller to hold it. ReadGeoArchive
+// holds its archiveMutex for the duration of loadArchiveFile and around
+// every accessor; ReadGeo holds its _meshMutex (its load path and
+// getMeshData already serialise on it).
+
+struct GeoArchiveRuntime
+{
+    // Archive data + format backend. Guarded by the owning node's data mutex.
+    GeoArchiveResult data;
+    void* fbxScene = NULL;    // live ufbx_scene when the file is .fbx (owned)
+    bool isFbx = false;
+    bool hasAnimation = false;
+    double animTimeBegin = 0.0;
+    double animTimeEnd = 0.0;
+
+    GeoArchiveRuntime();
+    ~GeoArchiveRuntime();
+    GeoArchiveRuntime(const GeoArchiveRuntime&) = delete;
+    GeoArchiveRuntime& operator=(const GeoArchiveRuntime&) = delete;
+
+    /** Free the ufbx scene, reset the parsed data, flags and frame cache. */
+    void clear();
+
+    /** Frame state for integer cache key `key` (frame 1 = key 0;
+     *  srcTime = key / fps). Filled lazily on first request and kept for the
+     *  session. Caller holds the data guard. */
+    std::shared_ptr<const GeoArchiveFrameEval>
+    ensureFrameState(double fps, int key) const;
+
+    /** The entry's node-local matrix at Natron `time` — frameOffset applied,
+     *  linearly interpolated between the bracket frames for sub-frame
+     *  sampling (motion blur). Caller holds the data guard. */
+    void nodeLocalAt(int nodeIdx, double time, double fps, int frameOffset,
+                     float out[16]) const;
+
+    /** The entry's world matrix: its parent chain composed root -> ... ->
+     *  entry (parents filtered out of the node's visible list still
+     *  contribute — they remain in data.nodes). Caller holds the data guard. */
+    void worldMatrixAt(int nodeIdx, double time, double fps, int frameOffset,
+                       float out[16]) const;
+
+    /** Parse + store `path` (extension dispatch: .glb/.gltf via cgltf, .fbx
+     *  via ufbx). Flips every rest mesh's winding when reverseWinding.
+     *  Detects animation into hasAnimation / animTimeBegin / animTimeEnd
+     *  (channel bindings, skinned payloads, or an FBX animation stack).
+     *  Caller holds the data guard. Returns false with `err` filled when
+     *  the file cannot be read or parsed. */
+    bool loadFile(const std::string& path, bool reverseWinding, std::string& err);
+
+private:
+    mutable std::mutex frameMutex;
+    mutable std::map<int, std::shared_ptr<const GeoArchiveFrameEval>> frameCache;
+};
+
 // --- helpers shared by the importers (ReadGeoImport.cpp) -------------------
 
 /** Transform every xyz position in `verts` in place by the column-major 4x4
  *  matrix `m` (bakes the file-authored node transform into the vertices). */
 void importBakeXform(std::vector<float>& verts, const float m[16]);
-
-/** Append `part`'s geometry to `mesh`, re-basing vertex indices by
- *  mesh->numVertices and expanding part UVs (or zero-padding when the part
- *  has none). Call importBuildEdgeIndices() once after all parts are added. */
-void importAppendPart(const GeoImportPart& part, MeshData* mesh);
 
 /** Rebuild mesh->edgeIndices from faceIndices/faceCounts (wireframe). */
 void importBuildEdgeIndices(MeshData* mesh);

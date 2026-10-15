@@ -144,15 +144,20 @@ private:
 
     void loadAlembicGeo(const std::string& path);
     void loadObjGeo(const std::string& path);
-    // glTF 2.0 (.gltf/.glb) via cgltf and FBX (.fbx) via ufbx. The format
-    // parsers live in ReadGeoGltf.cpp / ReadGeoFbx.cpp; these build the
-    // Object dropdown ("All parts (merged)" + one entry per part), the
-    // MeshData for the selection, and apply the part's PBR material to the
-    // node's material knobs.
-    void loadGltfGeo(const std::string& path);
-    void loadFbxGeo(const std::string& path);
-    // Shared finalization for cgltf/ufbx imports: parts -> dropdown + MeshData.
-    void applyImportResult(const char* fmtName, const GeoImportResult& result);
+    // glTF 2.0 (.gltf/.glb) via cgltf and FBX (.fbx) via ufbx, read through
+    // the shared GeoArchiveRuntime (ReadGeoImport.h) — the same parse +
+    // per-frame evaluation machinery ReadGeoArchive uses. Loads the whole
+    // scene once, fills the Object dropdown ("All parts (merged)" + one entry
+    // per mesh part) and publishes the initial mesh; per-frame fetches go
+    // through buildSceneMesh().
+    void loadSceneGeo(const std::string& path);
+    // Build the MeshData for the current selection at `time` (caller holds
+    // _meshMutex): merged = every mesh entry's evaluated vertices baked
+    // through its world matrix, concatenated; single part = that part's
+    // vertices with its world matrix either baked (Bake Transforms on) or
+    // carried in MeshData::transform (off). Cached per (frame, selection,
+    // bake) — a merged animated asset costs one bake per visited frame.
+    MeshDataPtr buildSceneMesh(double time) const;
     // Write file-authored PBR values into the material knobs (Material page +
     // Texture Maps page). Only called when the file actually had a material.
     void applyImportedMaterialKnobs(const GeoImportMaterial& material);

@@ -22,10 +22,10 @@
 
 // ReadGeoArchive node implementation. Structure mirrors ReadAlembicArchive
 // (same knobs, same ArchiveProvider multi-emit contract); the per-frame data
-// comes from the ReadGeoImport archive contract:
+// comes from the ReadGeoImport archive contract shared with ReadGeo:
 //
-//   load     : loadGltfArchiveImport / loadFbxArchiveImport (file -> entries)
-//   per frame: evaluateGltfArchiveFrame / evaluateFbxArchiveFrame
+//   load     : GeoArchiveRuntime::loadFile (file -> parsed archive + flags)
+//   per frame: GeoArchiveRuntime::ensureFrameState
 //              -> GeoArchiveFrameEval (node local matrices + deformed meshes)
 //
 // Frame cache: keyed by the integer Natron frame offset from frame 1
@@ -36,6 +36,7 @@
 // between the cached bracket frames — the same matrix-lerp policy
 // ReadAlembicArchive uses; skinned vertices snap per frame (G1 in-place
 // caveat of the Alembic machinery applies; tracked separately).
+// The runtime + locking discipline live in ReadGeoImport.h (GeoArchiveRuntime).
 
 #include "ReadGeoArchive.h"
 #include "../DotUtils.h"
@@ -89,10 +90,6 @@ arcGlobMatch(const std::string& pattern, const std::string& text)
     return dp[m][n] != 0;
 }
 
-// One evaluated frame = GeoArchiveFrameEval (node local matrices +
-// per-mesh deformed payloads), see ReadGeoImport.h.
-typedef GeoArchiveFrameEval ArcFrameState;
-
 } // anonymous namespace
 
 struct ReadGeoArchivePrivate
@@ -107,114 +104,19 @@ struct ReadGeoArchivePrivate
     KnobStringWPtr excludedPaths;
     KnobStringWPtr info;
 
-    // Parsed archive. Guarded by archiveMutex: loadArchiveFile (GUI thread)
-    // clears and refills while the SceneGraph accessors read from render
-    // workers and the viewport paint.
+    // Parsed archive + frame cache. rt (and the visible list) are guarded by
+    // archiveMutex: loadArchiveFile (GUI thread) clears and refills while the
+    // SceneGraph accessors read from render workers and the viewport paint.
     mutable std::mutex archiveMutex;
-    GeoArchiveResult data;                   // entries + meshes + skins + anims
+    GeoArchiveRuntime rt;
     std::vector<int> visible;                // entry indices exposed to SceneGraph
     std::string loadedFilePath;
-
-    // Format backend: a live ufbx_scene for .fbx (per-frame evaluation runs
-    // against it), NULL for glTF (channels are pre-copied plain data).
-    void* fbxScene = NULL;
-    bool isFbx = false;
-
-    // Per-frame evaluation cache.
-    mutable std::mutex frameMutex;
-    mutable std::map<int, std::shared_ptr<const ArcFrameState>> frameCache;
-
-    // True when the file carries animation.
-    bool hasAnimation = false;
-    double animTimeBegin = 0.0;
-    double animTimeEnd = 0.0;
-
-    ~ReadGeoArchivePrivate()
-    {
-        if (fbxScene) freeFbxArchiveScene(fbxScene);
-    }
 
     int frameOffsetKnobValue() const
     {
         return frameOffset.lock() ? frameOffset.lock()->getValue() : 0;
     }
 };
-
-// Returns the cached (or freshly evaluated) frame state for integer frame
-// key `key` (k = floor(time) - 1 - frameOffset; srcTime = k / fps).
-// Callers hold archiveMutex (entry data is read); frameMutex guards the map.
-// `fps` is resolved by the caller (knob, else project rate) because getApp()
-// is a KnobHolder member — free helpers can't reach it.
-std::shared_ptr<const ArcFrameState>
-arcEnsureFrameState(ReadGeoArchivePrivate& imp, double fps, int key)
-{
-    {
-        std::lock_guard<std::mutex> fl(imp.frameMutex);
-        std::map<int, std::shared_ptr<const ArcFrameState>>::const_iterator it =
-            imp.frameCache.find(key);
-        if (it != imp.frameCache.end()) return it->second;
-    }
-
-    ArcFrameState* st = new ArcFrameState();
-    std::shared_ptr<const ArcFrameState> state(st);
-
-    const double srcTime = (double)key / (fps > 0.0 ? fps : 24.0);
-
-    if (imp.isFbx) {
-        std::string err;
-        if (!evaluateFbxArchiveFrame(imp.fbxScene, imp.data, srcTime, *st, err)) {
-            // Evaluation failure: identity locals + rest meshes — never a
-            // half-evaluated scene.
-            st->nodeLocals.assign(imp.data.nodes.size() * 16, 0.0f);
-            for (std::size_t i = 0; i < imp.data.nodes.size(); ++i) {
-                geoArchiveMatIdentity(&st->nodeLocals[i * 16]);
-            }
-            st->deformed.resize(imp.data.meshes.size());
-            for (std::size_t m = 0; m < imp.data.meshes.size(); ++m) {
-                st->deformed[m] = imp.data.meshes[m].mesh;
-            }
-        }
-    } else {
-        evaluateGltfArchiveFrame(imp.data, srcTime, *st);
-    }
-
-    std::lock_guard<std::mutex> fl(imp.frameMutex);
-    std::pair<std::map<int, std::shared_ptr<const ArcFrameState>>::iterator, bool> ins =
-        imp.frameCache.insert(std::make_pair(key, state));
-    return ins.first->second;
-}
-
-// Entry's local matrix at Natron `time`, interpolating linearly between the
-// cached bracket frames (callers hold archiveMutex).
-void
-arcEntryLocalAt(ReadGeoArchivePrivate& imp, double fps, int frameOffset,
-                int entryIdx, double time, float out[16])
-{
-    geoArchiveMatIdentity(out);
-    if (entryIdx < 0 || entryIdx >= (int)imp.data.nodes.size()) return;
-
-    const double f = time - 1.0 - (double)frameOffset;
-    const int k0 = (int)std::floor(f);
-    const double frac = f - (double)k0;
-
-    std::shared_ptr<const ArcFrameState> st0 = arcEnsureFrameState(imp, fps, k0);
-    std::shared_ptr<const ArcFrameState> st1 = st0;
-    if (frac > 1e-9) {
-        st1 = arcEnsureFrameState(imp, fps, k0 + 1);
-    }
-
-    const float* a = &st0->nodeLocals[(std::size_t)entryIdx * 16];
-    const float* b = &st1->nodeLocals[(std::size_t)entryIdx * 16];
-    if (st0 == st1 || frac < 1e-9) {
-        std::memcpy(out, a, 16 * sizeof(float));
-    } else {
-        const float al = (float)frac;
-        const float oneMinusA = 1.0f - al;
-        for (int i = 0; i < 16; ++i) {
-            out[i] = a[i] * oneMinusA + b[i] * al;
-        }
-    }
-}
 
 // --- construction / description ---------------------------------------------
 
@@ -522,21 +424,8 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
     std::unique_lock<std::mutex> lk(_imp->archiveMutex);
 
     // Drop the parsed archive + frame cache first.
-    GeoArchiveResult empty;
-    _imp->data = empty;
     _imp->visible.clear();
-    _imp->hasAnimation = false;
-    _imp->animTimeBegin = 0.0;
-    _imp->animTimeEnd = 0.0;
-    _imp->isFbx = false;
-    {
-        std::lock_guard<std::mutex> fl(_imp->frameMutex);
-        _imp->frameCache.clear();
-    }
-    if (_imp->fbxScene) {
-        freeFbxArchiveScene(_imp->fbxScene);
-        _imp->fbxScene = NULL;
-    }
+    _imp->rt.clear();
 
     if (path.empty()) {
         if (_imp->info.lock()) {
@@ -545,63 +434,34 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
         return;
     }
 
-    // Format dispatch.
-    std::string ext;
+    // Parse. The runtime reports unsupported extensions generically; keep the
+    // archive-specific hint for .abc/.obj files here.
     {
-        const std::size_t dot = path.find_last_of('.');
-        if (dot != std::string::npos) {
-            ext = path.substr(dot);
-            std::transform(ext.begin(), ext.end(), ext.begin(),
-                           [](unsigned char c){ return (char)std::tolower(c); });
+        std::string ext;
+        {
+            const std::size_t dot = path.find_last_of('.');
+            if (dot != std::string::npos) {
+                ext = path.substr(dot);
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c){ return (char)std::tolower(c); });
+            }
+        }
+        if (ext == ".abc" || ext == ".obj") {
+            setPersistentMessage(eMessageTypeError,
+                ext == ".abc"
+                    ? "Use ReadAlembicArchive for .abc files."
+                    : "Use ReadGeo for .obj files.");
+            return;
         }
     }
 
-    GeoArchiveResult data;
-    if (ext == ".glb" || ext == ".gltf") {
-        data = loadGltfArchiveImport(path);
-    } else if (ext == ".fbx") {
-        _imp->isFbx = true;
-        data = loadFbxArchiveImport(path, &_imp->fbxScene);
-    } else {
-        setPersistentMessage(eMessageTypeError,
-            "Unsupported file extension for ReadGeoArchive. Use .glb, .gltf or .fbx "
-            "(.abc belongs in ReadAlembicArchive, .obj in ReadGeo).");
+    const bool reverse = _imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue();
+    std::string err;
+    if (!_imp->rt.loadFile(path, reverse, err)) {
+        setPersistentMessage(eMessageTypeError, err);
         return;
     }
-
-    if (!data.ok) {
-        setPersistentMessage(eMessageTypeError, data.error);
-        return;
-    }
-
-    _imp->data = std::move(data);
-
-    // Reverse Normals: flip every rest mesh's winding (applied at load so the
-    // knob toggle re-runs the load — matches the ReadGeo/Alembic policy).
-    if (_imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue()) {
-        for (GeoArchiveMeshData& md : _imp->data.meshes) {
-            if (md.mesh) reverseMeshWinding(*md.mesh);
-        }
-    }
-
-    // Animation detection: glTF channel bindings, skinned payloads, or an FBX
-    // file with an animation stack (FBX marks every node animated — the
-    // evaluated scene serves the whole tree; conservative and cheap).
-    bool anyAnimated = false;
-    for (const GeoArchiveNodeData& nd : _imp->data.nodes) {
-        if (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) { anyAnimated = true; break; }
-    }
-    if (!anyAnimated) {
-        for (const GeoArchiveMeshData& md : _imp->data.meshes) {
-            if (md.skinIndex >= 0) { anyAnimated = true; break; }
-        }
-    }
-    if (_imp->isFbx && _imp->data.animTimeEnd > _imp->data.animTimeBegin) {
-        anyAnimated = true;
-    }
-    _imp->hasAnimation = anyAnimated;
-    _imp->animTimeBegin = _imp->data.animTimeBegin;
-    _imp->animTimeEnd = _imp->data.animTimeEnd;
+    const GeoArchiveResult& data = _imp->rt.data;
 
     // Apply objectFilter + includeMeshes + excludedPaths (same rules as
     // ReadAlembicArchive).
@@ -625,8 +485,8 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
         }
     }
 
-    for (int i = 0; i < (int)_imp->data.nodes.size(); ++i) {
-        const GeoArchiveNodeData& nd = _imp->data.nodes[i];
+    for (int i = 0; i < (int)data.nodes.size(); ++i) {
+        const GeoArchiveNodeData& nd = data.nodes[i];
         if (!includeMeshes && nd.isMesh) continue;
         if (!arcGlobMatch(pattern, nd.fullPath)) continue;
         if (excluded.count(nd.fullPath)) continue;
@@ -635,16 +495,16 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
 
     // Info string.
     std::size_t numXforms = 0, numMeshes = 0;
-    for (std::size_t i = 0; i < _imp->data.nodes.size(); ++i) {
-        if (_imp->data.nodes[i].isMesh) ++numMeshes; else ++numXforms;
+    for (std::size_t i = 0; i < data.nodes.size(); ++i) {
+        if (data.nodes[i].isMesh) ++numMeshes; else ++numXforms;
     }
     std::ostringstream ss;
-    ss << "Total entries: " << _imp->data.nodes.size()
+    ss << "Total entries: " << data.nodes.size()
        << " (nodes: " << numXforms
        << ", meshes: " << numMeshes << ")"
        << " | Visible after filter: " << _imp->visible.size();
-    if (_imp->hasAnimation) {
-        const double dur = _imp->animTimeEnd - _imp->animTimeBegin;
+    if (_imp->rt.hasAnimation) {
+        const double dur = _imp->rt.animTimeEnd - _imp->rt.animTimeBegin;
         if (dur > 0.0) {
             const double fpsKnob = _imp->fps.lock() ? _imp->fps.lock()->getValue() : 0.0;
             const double fps = fpsKnob > 0.0 ? fpsKnob
@@ -654,7 +514,7 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
             ss << " | Animated";
         }
     }
-    if (_imp->isFbx) {
+    if (_imp->rt.isFbx) {
         ss << " | FBX";
     }
     if (_imp->info.lock()) _imp->info.lock()->setValue(ss.str());
@@ -682,10 +542,11 @@ std::vector<ArchiveTreeEntry>
 ReadGeoArchive::getEntryTree() const
 {
     std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+    const GeoArchiveResult& data = _imp->rt.data;
     std::vector<ArchiveTreeEntry> out;
-    out.reserve(_imp->data.nodes.size());
-    for (std::size_t i = 0; i < _imp->data.nodes.size(); ++i) {
-        const GeoArchiveNodeData& nd = _imp->data.nodes[i];
+    out.reserve(_imp->rt.data.nodes.size());
+    for (std::size_t i = 0; i < data.nodes.size(); ++i) {
+        const GeoArchiveNodeData& nd = data.nodes[i];
         ArchiveTreeEntry te;
         te.fullPath = nd.fullPath;
         te.name = nd.name;
@@ -693,9 +554,9 @@ ReadGeoArchive::getEntryTree() const
         te.isMesh = nd.isMesh;
         te.sampleCount = (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) ? 1 : 0;
         te.numVertices = (nd.isMesh && nd.meshIndex >= 0 &&
-                          nd.meshIndex < (int)_imp->data.meshes.size() &&
-                          _imp->data.meshes[nd.meshIndex].mesh)
-                             ? (int)_imp->data.meshes[nd.meshIndex].mesh->numVertices : 0;
+                          nd.meshIndex < (int)data.meshes.size() &&
+                          data.meshes[nd.meshIndex].mesh)
+                             ? (int)data.meshes[nd.meshIndex].mesh->numVertices : 0;
         out.push_back(te);
     }
     return out;
@@ -711,7 +572,7 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
     std::lock_guard<std::mutex> lk(_imp->archiveMutex);
     if (idx < 0 || idx >= (int)_imp->visible.size()) return false;
     const int srcIdx = _imp->visible[idx];
-    const GeoArchiveNodeData& nd = _imp->data.nodes[srcIdx];
+    const GeoArchiveNodeData& nd = _imp->rt.data.nodes[srcIdx];
 
     outName = nd.fullPath;
     outIsMesh = nd.isMesh;
@@ -725,7 +586,7 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
         // Parent filtered out → this entry attaches to the archive root (-1).
     }
 
-    arcEntryLocalAt(*_imp, archiveFps(), _imp->frameOffsetKnobValue(), srcIdx, time, outLocalMatrix);
+    _imp->rt.nodeLocalAt(srcIdx, time, archiveFps(), _imp->frameOffsetKnobValue(), outLocalMatrix);
     return true;
 }
 
@@ -735,11 +596,11 @@ ReadGeoArchive::getMeshDataAt(int idx, double time) const
     std::lock_guard<std::mutex> lk(_imp->archiveMutex);
     if (idx < 0 || idx >= (int)_imp->visible.size()) return MeshDataPtr();
     const int srcIdx = _imp->visible[idx];
-    const GeoArchiveNodeData& nd = _imp->data.nodes[srcIdx];
-    if (!nd.isMesh || nd.meshIndex < 0 || nd.meshIndex >= (int)_imp->data.meshes.size()) {
+    const GeoArchiveNodeData& nd = _imp->rt.data.nodes[srcIdx];
+    if (!nd.isMesh || nd.meshIndex < 0 || nd.meshIndex >= (int)_imp->rt.data.meshes.size()) {
         return MeshDataPtr();
     }
-    const GeoArchiveMeshData& md = _imp->data.meshes[nd.meshIndex];
+    const GeoArchiveMeshData& md = _imp->rt.data.meshes[nd.meshIndex];
     if (!md.mesh) return MeshDataPtr();
 
     // Rigid meshes: the node's own transform animates; vertices are static.
@@ -753,7 +614,8 @@ ReadGeoArchive::getMeshDataAt(int idx, double time) const
     const int frameOffset = _imp->frameOffsetKnobValue();
     int key = (int)std::floor(time - 1.0 - (double)frameOffset);
     if (key < 0) key = 0;
-    std::shared_ptr<const ArcFrameState> st = arcEnsureFrameState(*_imp, archiveFps(), key);
+    std::shared_ptr<const GeoArchiveFrameEval> st =
+        _imp->rt.ensureFrameState(archiveFps(), key);
     if (nd.meshIndex < (int)st->deformed.size() && st->deformed[nd.meshIndex]) {
         return st->deformed[nd.meshIndex];
     }
@@ -765,37 +627,8 @@ ReadGeoArchive::getEntryWorldMatrix(int idx, double time, float outWorld[16]) co
 {
     std::lock_guard<std::mutex> lk(_imp->archiveMutex);
     if (idx < 0 || idx >= (int)_imp->visible.size()) return false;
-
-    geoArchiveMatIdentity(outWorld);
-
-    // Walk parent chain from entry → root, collect entries in order
-    // (root → ... → this), then compose: world = root.local * ... * this.local.
-    // Parents that were filtered out still contribute their matrices (they
-    // remain in data.nodes — filtering only hides the entry itself).
-    std::vector<int> chain;
-    int cur = _imp->visible[idx];
-    while (cur >= 0) {
-        chain.push_back(cur);
-        cur = (cur < (int)_imp->data.nodes.size()) ? _imp->data.nodes[cur].parentIndex : -1;
-    }
-
-    for (int ci = (int)chain.size() - 1; ci >= 0; --ci) {
-        float local[16];
-        arcEntryLocalAt(*_imp, archiveFps(), _imp->frameOffsetKnobValue(), chain[ci], time, local);
-
-        // outWorld = outWorld * local (column-major).
-        float r[16];
-        for (int row = 0; row < 4; ++row) {
-            for (int col = 0; col < 4; ++col) {
-                float sum = 0.0f;
-                for (int k = 0; k < 4; ++k) {
-                    sum += outWorld[k * 4 + row] * local[col * 4 + k];
-                }
-                r[col * 4 + row] = sum;
-            }
-        }
-        std::memcpy(outWorld, r, sizeof(r));
-    }
+    _imp->rt.worldMatrixAt(_imp->visible[idx], time, archiveFps(),
+                           _imp->frameOffsetKnobValue(), outWorld);
     return true;
 }
 
@@ -820,7 +653,7 @@ ReadGeoArchive::getPreferredMetadata(NodeMetadata& metadata)
     // skinned payload, or an FBX animation stack). Required so Scene3D +
     // ScanlineRender hashes change per frame — same reason as ReadGeo /
     // ReadAlembicArchive.
-    if (_imp && _imp->hasAnimation) {
+    if (_imp && _imp->rt.hasAnimation) {
         metadata.setIsFrameVarying(true);
     }
     return eStatusOK;
@@ -855,10 +688,10 @@ ReadGeoArchive::getMaterialBaseColor(double time, double& r, double& g, double& 
         mat->getMaterialBaseColor(time, r, g, b);
         return;
     }
-    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
-        r = _imp->data.materials[0].baseColor[0];
-        g = _imp->data.materials[0].baseColor[1];
-        b = _imp->data.materials[0].baseColor[2];
+    if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+        r = _imp->rt.data.materials[0].baseColor[0];
+        g = _imp->rt.data.materials[0].baseColor[1];
+        b = _imp->rt.data.materials[0].baseColor[2];
         return;
     }
     r = 0.7; g = 0.7; b = 0.7;
@@ -868,8 +701,8 @@ double
 ReadGeoArchive::getMaterialRoughness(double time) const
 {
     if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialRoughness(time);
-    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
-        return _imp->data.materials[0].roughness;
+    if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+        return _imp->rt.data.materials[0].roughness;
     }
     return 0.5;
 }
@@ -878,8 +711,8 @@ double
 ReadGeoArchive::getMaterialMetallic(double time) const
 {
     if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialMetallic(time);
-    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
-        return _imp->data.materials[0].metallic;
+    if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+        return _imp->rt.data.materials[0].metallic;
     }
     return 0.0;
 }
@@ -888,8 +721,8 @@ double
 ReadGeoArchive::getMaterialSpecular(double time) const
 {
     if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialSpecular(time);
-    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
-        return _imp->data.materials[0].specular;
+    if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+        return _imp->rt.data.materials[0].specular;
     }
     return 0.5;
 }
@@ -901,11 +734,11 @@ ReadGeoArchive::getMaterialEmission(double time, double& r, double& g, double& b
         mat->getMaterialEmission(time, r, g, b, strength);
         return;
     }
-    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
-        r = _imp->data.materials[0].emission[0];
-        g = _imp->data.materials[0].emission[1];
-        b = _imp->data.materials[0].emission[2];
-        strength = _imp->data.materials[0].emissionStrength;
+    if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+        r = _imp->rt.data.materials[0].emission[0];
+        g = _imp->rt.data.materials[0].emission[1];
+        b = _imp->rt.data.materials[0].emission[2];
+        strength = _imp->rt.data.materials[0].emissionStrength;
         return;
     }
     r = 1.0; g = 1.0; b = 1.0; strength = 0.0;
@@ -915,8 +748,8 @@ double
 ReadGeoArchive::getMaterialTransmission(double time) const
 {
     if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialTransmission(time);
-    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
-        return _imp->data.materials[0].transmission;
+    if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+        return _imp->rt.data.materials[0].transmission;
     }
     return 0.0;
 }
@@ -925,8 +758,8 @@ double
 ReadGeoArchive::getMaterialIOR(double time) const
 {
     if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialIOR(time);
-    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
-        return _imp->data.materials[0].ior;
+    if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+        return _imp->rt.data.materials[0].ior;
     }
     return 1.45;
 }
@@ -935,8 +768,8 @@ std::string
 ReadGeoArchive::getMaterialTextureFile() const
 {
     if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialTextureFile();
-    if (_imp && !_imp->data.materials.empty() && _imp->data.materials[0].present) {
-        return _imp->data.materials[0].diffuseMapPath;
+    if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+        return _imp->rt.data.materials[0].diffuseMapPath;
     }
     return std::string();
 }

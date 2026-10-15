@@ -23,6 +23,7 @@
 #include "ReadGeoImport.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -115,37 +116,6 @@ importBuildEdgeIndices(MeshData* mesh)
     }
 }
 
-void
-importAppendPart(const GeoImportPart& part, MeshData* mesh)
-{
-    const std::size_t vertexOffset = mesh->numVertices;
-
-    mesh->vertices.insert(mesh->vertices.end(), part.vertices.begin(), part.vertices.end());
-    mesh->numVertices += part.vertices.size() / 3;
-
-    const std::size_t faceIdxBegin = mesh->faceIndices.size();
-    for (std::size_t i = 0; i < part.faceIndices.size(); ++i) {
-        mesh->faceIndices.push_back(part.faceIndices[i] + (int)vertexOffset);
-    }
-    mesh->faceCounts.insert(mesh->faceCounts.end(), part.faceCounts.begin(), part.faceCounts.end());
-    mesh->numFaces += part.faceCounts.size();
-
-    // UVs are per face-vertex, parallel to faceIndices. Parts without UVs
-    // contribute zero-padded slots so the interleaving stays aligned.
-    if (part.hasUVs) {
-        mesh->hasUVs = true;
-        mesh->texCoordComponents = 2;
-    }
-    if (mesh->hasUVs && mesh->texCoordComponents == 2) {
-        mesh->uvs.resize(faceIdxBegin * 2, 0.0f);
-        if (part.hasUVs) {
-            mesh->uvs.insert(mesh->uvs.end(), part.uvs.begin(), part.uvs.end());
-        } else {
-            mesh->uvs.resize(faceIdxBegin * 2 + part.faceIndices.size() * 2, 0.0f);
-        }
-    }
-}
-
 std::string
 importWriteEmbeddedTexture(const void* bytes, std::size_t size, const char* tag)
 {
@@ -192,6 +162,200 @@ importWriteEmbeddedTexture(const void* bytes, std::size_t size, const char* tag)
         return std::string();
     }
     return std::string(tmpPath);
+}
+
+// --- GeoArchiveRuntime ------------------------------------------------------
+
+// Shared per-frame runtime for the archive-backed nodes (ReadGeo,
+// ReadGeoArchive). The archive data itself is guarded by the OWNING NODE's
+// data mutex (ReadGeoArchive's archiveMutex / ReadGeo's _meshMutex); only the
+// frame cache is guarded here.
+
+GeoArchiveRuntime::GeoArchiveRuntime() = default;
+
+GeoArchiveRuntime::~GeoArchiveRuntime()
+{
+    if (fbxScene) freeFbxArchiveScene(fbxScene);
+}
+
+void
+GeoArchiveRuntime::clear()
+{
+    if (fbxScene) {
+        freeFbxArchiveScene(fbxScene);
+        fbxScene = NULL;
+    }
+    isFbx = false;
+    hasAnimation = false;
+    animTimeBegin = 0.0;
+    animTimeEnd = 0.0;
+    data = GeoArchiveResult();
+    {
+        std::lock_guard<std::mutex> fl(frameMutex);
+        frameCache.clear();
+    }
+}
+
+std::shared_ptr<const GeoArchiveFrameEval>
+GeoArchiveRuntime::ensureFrameState(double fps, int key) const
+{
+    {
+        std::lock_guard<std::mutex> fl(frameMutex);
+        std::map<int, std::shared_ptr<const GeoArchiveFrameEval>>::const_iterator it =
+            frameCache.find(key);
+        if (it != frameCache.end()) return it->second;
+    }
+
+    GeoArchiveFrameEval* st = new GeoArchiveFrameEval();
+    std::shared_ptr<const GeoArchiveFrameEval> state(st);
+
+    const double srcTime = (double)key / (fps > 0.0 ? fps : 24.0);
+
+    if (isFbx) {
+        std::string err;
+        if (!evaluateFbxArchiveFrame(fbxScene, data, srcTime, *st, err)) {
+            // Evaluation failure: identity locals + rest meshes — never a
+            // half-evaluated scene.
+            st->nodeLocals.assign(data.nodes.size() * 16, 0.0f);
+            for (std::size_t i = 0; i < data.nodes.size(); ++i) {
+                geoArchiveMatIdentity(&st->nodeLocals[i * 16]);
+            }
+            st->deformed.resize(data.meshes.size());
+            for (std::size_t m = 0; m < data.meshes.size(); ++m) {
+                st->deformed[m] = data.meshes[m].mesh;
+            }
+        }
+    } else {
+        evaluateGltfArchiveFrame(data, srcTime, *st);
+    }
+
+    std::lock_guard<std::mutex> fl(frameMutex);
+    std::pair<std::map<int, std::shared_ptr<const GeoArchiveFrameEval>>::iterator, bool> ins =
+        frameCache.insert(std::make_pair(key, state));
+    return ins.first->second;
+}
+
+void
+GeoArchiveRuntime::nodeLocalAt(int nodeIdx, double time, double fps,
+                               int frameOffset, float out[16]) const
+{
+    geoArchiveMatIdentity(out);
+    if (nodeIdx < 0 || nodeIdx >= (int)data.nodes.size()) return;
+
+    const double f = time - 1.0 - (double)frameOffset;
+    const int k0 = (int)std::floor(f);
+    const double frac = f - (double)k0;
+
+    std::shared_ptr<const GeoArchiveFrameEval> st0 = ensureFrameState(fps, k0);
+    std::shared_ptr<const GeoArchiveFrameEval> st1 = st0;
+    if (frac > 1e-9) {
+        st1 = ensureFrameState(fps, k0 + 1);
+    }
+
+    const float* a = &st0->nodeLocals[(std::size_t)nodeIdx * 16];
+    const float* b = &st1->nodeLocals[(std::size_t)nodeIdx * 16];
+    if (st0 == st1 || frac < 1e-9) {
+        std::memcpy(out, a, 16 * sizeof(float));
+    } else {
+        const float al = (float)frac;
+        const float oneMinusA = 1.0f - al;
+        for (int i = 0; i < 16; ++i) {
+            out[i] = a[i] * oneMinusA + b[i] * al;
+        }
+    }
+}
+
+void
+GeoArchiveRuntime::worldMatrixAt(int nodeIdx, double time, double fps,
+                                 int frameOffset, float outWorld[16]) const
+{
+    geoArchiveMatIdentity(outWorld);
+    if (nodeIdx < 0 || nodeIdx >= (int)data.nodes.size()) return;
+
+    // Walk the parent chain from the entry to the root, then compose
+    // root -> ... -> entry (column-major).
+    std::vector<int> chain;
+    int cur = nodeIdx;
+    while (cur >= 0) {
+        chain.push_back(cur);
+        cur = (cur < (int)data.nodes.size()) ? data.nodes[cur].parentIndex : -1;
+    }
+
+    for (int ci = (int)chain.size() - 1; ci >= 0; --ci) {
+        float local[16];
+        nodeLocalAt(chain[ci], time, fps, frameOffset, local);
+
+        // outWorld = outWorld * local (column-major).
+        float r[16];
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                float sum = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    sum += outWorld[k * 4 + row] * local[col * 4 + k];
+                }
+                r[col * 4 + row] = sum;
+            }
+        }
+        std::memcpy(outWorld, r, sizeof(r));
+    }
+}
+
+bool
+GeoArchiveRuntime::loadFile(const std::string& path, bool reverseWinding, std::string& err)
+{
+    clear();
+
+    // Format dispatch on the lowercase extension.
+    std::string ext;
+    {
+        const std::size_t dot = path.find_last_of('.');
+        if (dot != std::string::npos) {
+            ext = path.substr(dot);
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+        }
+    }
+
+    if (ext == ".glb" || ext == ".gltf") {
+        data = loadGltfArchiveImport(path);
+    } else if (ext == ".fbx") {
+        isFbx = true;
+        data = loadFbxArchiveImport(path, &fbxScene);
+    } else {
+        err = "Unsupported file extension for the scene-format reader. Use .glb, .gltf or .fbx.";
+        return false;
+    }
+
+    if (!data.ok) {
+        err = data.error.empty() ? std::string("The file could not be parsed.") : data.error;
+        return false;
+    }
+
+    if (reverseWinding) {
+        for (GeoArchiveMeshData& md : data.meshes) {
+            if (md.mesh) reverseMeshWinding(*md.mesh);
+        }
+    }
+
+    // Animation detection: glTF channel bindings, skinned payloads, or an
+    // FBX file with an animation stack (FBX marks every node animated — the
+    // evaluated scene serves the whole tree; conservative and cheap).
+    bool anyAnimated = false;
+    for (const GeoArchiveNodeData& nd : data.nodes) {
+        if (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) { anyAnimated = true; break; }
+    }
+    if (!anyAnimated) {
+        for (const GeoArchiveMeshData& md : data.meshes) {
+            if (md.skinIndex >= 0) { anyAnimated = true; break; }
+        }
+    }
+    if (isFbx && data.animTimeEnd > data.animTimeBegin) {
+        anyAnimated = true;
+    }
+    hasAnimation = anyAnimated;
+    animTimeBegin = data.animTimeBegin;
+    animTimeEnd = data.animTimeEnd;
+    return true;
 }
 
 NATRON_NAMESPACE_EXIT

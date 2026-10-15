@@ -34,8 +34,10 @@
 #include <cstdlib> // strtol
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "../../AppInstance.h"
@@ -216,9 +218,29 @@ struct ReadGeoPrivate
     KnobFileWPtr textureFile;
     KnobChoiceWPtr diffuseColorspace;
 
+    // Static-frame controls for animated scene files (glTF/FBX; also applies
+    // to .abc sampling) — "show static frame X":
+    KnobBoolWPtr freezeAtFrame;
+    KnobIntWPtr freezeFrame;
+    // Single-part selection: bake the part's evaluated world matrix into the
+    // vertices instead of carrying it in MeshData::transform.
+    KnobBoolWPtr bakeTransforms;
+
     // Re-entrancy guard: prevents recursive knobChanged calls
     // when we programmatically update knobs during loading.
     bool isLoading = false;
+
+    // Scene formats (glTF/FBX) read through the shared archive runtime — the
+    // same parse + per-frame evaluation machinery ReadGeoArchive uses. Guarded
+    // by _meshMutex (loadGeoFromFile and getMeshData both take it).
+    GeoArchiveRuntime rt;
+    bool sceneLoaded = false;
+    std::vector<int> meshEntries;         // indices into rt.data.nodes (isMesh)
+    std::vector<std::string> partLabels;  // Object dropdown labels
+
+    // Built merged/single meshes, keyed by (frame key, Object selection,
+    // Bake Transforms). Cleared on load and on freeze/bake knob changes.
+    mutable std::map<std::tuple<int, int, bool>, MeshDataPtr> builtCache;
 
     // Cached Xform data for animated transforms
     bool hasAnimatedXform = false;
@@ -269,9 +291,12 @@ ReadGeo::getPluginDescription() const
 #endif
        "glTF/FBX: the Object dropdown lists \"All parts (merged)\" (the whole "
        "asset, each part's file transform baked in) plus one entry per part. "
-       "The file's PBR material (base color, roughness, metallic, emission, "
-       "transmission, IOR, diffuse texture) is applied to the node's Material "
-       "and Texture Maps pages. Animation and skinning are not read yet.\n\n"
+       "Animated glTF/FBX files play on the timeline: node transforms and "
+       "skinned vertices are evaluated per frame (rigid transforms interpolate "
+       "for motion blur). Freeze at Frame pins the evaluation to a fixed frame "
+       "— the static-snapshot mode. The file's PBR material (base color, "
+       "roughness, metallic, emission, transmission, IOR, diffuse texture) is "
+       "applied to the node's Material and Texture Maps pages.\n\n"
        "OBJ: positions, texture coords, and n-gon faces are honored. Group/"
        "object directives populate the Object dropdown when present; "
        "otherwise the file loads as a single mesh."
@@ -331,8 +356,8 @@ ReadGeo::initializeKnobs()
         obj->setName("objectPath");
         obj->setHintToolTip(tr("Select which geometry object to load. "
                                "\"All parts (merged)\" loads the whole asset with each "
-                               "part's file transform baked in; the individual entries "
-                               "load a single part."));
+                               "part's file transform baked in at the evaluated frame; "
+                               "the individual entries load a single part."));
         page->addKnob(obj);
         _imp->objectPath = obj;
     }
@@ -353,6 +378,42 @@ ReadGeo::initializeKnobs()
                               "blue = facing you, red = facing away."));
         page->addKnob(rn);
         _imp->reverseNormals = rn;
+    }
+
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Freeze at Frame"));
+        k->setName("freezeAtFrame");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Evaluate the file at a fixed frame instead of following the "
+                             "timeline. Turns an animated glTF/FBX (or .abc) into a static "
+                             "snapshot — the built mesh never changes with the playhead."));
+        page->addKnob(k);
+        _imp->freezeAtFrame = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Freeze Frame"));
+        k->setName("freezeFrame");
+        k->setDefaultValue(1);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("The frame the file is evaluated at while Freeze at Frame is on. "
+                             "Changing it re-evaluates the snapshot immediately."));
+        page->addKnob(k);
+        _imp->freezeFrame = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Bake Transforms"));
+        k->setName("bakeTransforms");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Bake the part's file-authored transform into the vertices at "
+                             "the evaluated frame. Only applies when a single part is picked "
+                             "in the Object dropdown — merged mode always bakes. When off, "
+                             "the part keeps its node-local vertices and the file's transform "
+                             "animates through the node's transform slot (the user "
+                             "Translate/Rotate/Scale composes on top of it)."));
+        page->addKnob(k);
+        _imp->bakeTransforms = k;
     }
 
     {
@@ -543,6 +604,27 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         return true;
     }
 
+    // Freeze at Frame / Freeze Frame: the built-mesh cache is keyed by the
+    // source frame key, so a freeze change remaps what a key evaluates to —
+    // drop the built meshes. Freezing also toggles frame-varying metadata
+    // (a frozen file is static), so refresh it.
+    if (_imp->freezeAtFrame.lock().get() == k || _imp->freezeFrame.lock().get() == k) {
+        {
+            std::lock_guard<std::mutex> lk(_meshMutex);
+            _imp->builtCache.clear();
+        }
+        refreshMetadata_public(true);
+        return true;
+    }
+
+    // Bake Transforms: only re-keys the single-part build (no timing change),
+    // so drop the built meshes but leave the metadata alone.
+    if (_imp->bakeTransforms.lock().get() == k) {
+        std::lock_guard<std::mutex> lk(_meshMutex);
+        _imp->builtCache.clear();
+        return true;
+    }
+
     return false;
 }
 
@@ -555,6 +637,12 @@ ReadGeo::loadGeoFromFile(const std::string& path)
     // Drop the previous geometry FIRST — clearing the path or a failed load
     // must not keep serving the old mesh (stale-render class).
     _lastMeshData.reset();
+
+    // Any non-scene load below clears the scene-format state; a scene load
+    // re-populates it (loadSceneGeo). Clearing also covers the built-mesh
+    // cache (keyed by frame/selection/bake — meaningless across files).
+    _imp->sceneLoaded = false;
+    _imp->builtCache.clear();
 
     if (path.empty()) {
         refreshMetadata_public(true);
@@ -585,10 +673,8 @@ ReadGeo::loadGeoFromFile(const std::string& path)
             "Alembic support not built into this Natron binary. "
             "Use a .obj file, or rebuild Natron with Alembic.");
 #endif
-    } else if (e == ".gltf" || e == ".glb") {
-        loadGltfGeo(path);
-    } else if (e == ".fbx") {
-        loadFbxGeo(path);
+    } else if (e == ".gltf" || e == ".glb" || e == ".fbx") {
+        loadSceneGeo(path);
     } else {
         setPersistentMessage(eMessageTypeError,
             "Unsupported file extension. Use .glb/.gltf, .fbx, .abc (Alembic) or .obj (Wavefront).");
@@ -1098,23 +1184,301 @@ ReadGeo::loadObjGeo(const std::string& path)
 }
 
 // ---------------------------------------------------------------------------
-// glTF / FBX loading (parsers in ReadGeoGltf.cpp / ReadGeoFbx.cpp)
+// glTF / FBX loading through the shared archive runtime
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// Append `src` to `dst`, baking the entry's world matrix `world` into the
+// appended vertices (identity for skinned glTF entries — their deformed
+// vertices are already in world space) and re-basing vertex indices. UVs are
+// per face-vertex, parallel to faceIndices: parts without UVs contribute
+// zero-padded slots so the interleaving stays aligned. Call
+// importBuildEdgeIndices() once after all parts are appended.
 void
-ReadGeo::loadGltfGeo(const std::string& path)
+appendArchiveMesh(const MeshData& src, const float world[16], MeshData* dst)
 {
-    // Label by the file's actual container: .glb vs .gltf (XML/JSON).
-    const std::size_t dot = path.find_last_of('.');
-    const bool isGlb = (dot != std::string::npos) &&
-        _stricmp(path.c_str() + dot, ".glb") == 0;
-    applyImportResult(isGlb ? "GLB" : "glTF", loadGltfGeoImport(path));
+    const std::size_t vertexOffset = dst->numVertices;
+    const std::size_t faceIdxBegin = dst->faceIndices.size();
+
+    // Vertices: copy, then bake `world` over the appended slice only.
+    dst->vertices.reserve(dst->vertices.size() + src.vertices.size());
+    dst->vertices.insert(dst->vertices.end(), src.vertices.begin(), src.vertices.end());
+    if (world) {
+        const std::size_t end = dst->vertices.size();
+        for (std::size_t i = vertexOffset * 3; i + 2 < end; i += 3) {
+            const float x = dst->vertices[i];
+            const float y = dst->vertices[i + 1];
+            const float z = dst->vertices[i + 2];
+            dst->vertices[i]     = world[0]  * x + world[4]  * y + world[8]  * z + world[12];
+            dst->vertices[i + 1] = world[1]  * x + world[5]  * y + world[9]  * z + world[13];
+            dst->vertices[i + 2] = world[2]  * x + world[6]  * y + world[10] * z + world[14];
+        }
+    }
+    dst->numVertices += src.numVertices;
+
+    for (std::size_t i = 0; i < src.faceIndices.size(); ++i) {
+        dst->faceIndices.push_back(src.faceIndices[i] + (int)vertexOffset);
+    }
+    dst->faceCounts.insert(dst->faceCounts.end(),
+                           src.faceCounts.begin(), src.faceCounts.end());
+    dst->numFaces += src.faceCounts.size();
+
+    const bool srcUVs = src.hasUVs && src.texCoordComponents == 2;
+    if (srcUVs) {
+        dst->hasUVs = true;
+        dst->texCoordComponents = 2;
+    }
+    if (dst->hasUVs && dst->texCoordComponents == 2) {
+        // Zero-pad any earlier parts that had no UVs so the slots stay aligned.
+        dst->uvs.resize(faceIdxBegin * 2, 0.0f);
+        if (srcUVs) {
+            dst->uvs.insert(dst->uvs.end(), src.uvs.begin(), src.uvs.end());
+        } else {
+            dst->uvs.resize(faceIdxBegin * 2 + src.faceIndices.size() * 2, 0.0f);
+        }
+    }
 }
 
+} // anon
+
 void
-ReadGeo::loadFbxGeo(const std::string& path)
+ReadGeo::loadSceneGeo(const std::string& path)
 {
-    applyImportResult("FBX", loadFbxGeoImport(path));
+    // Caller (loadGeoFromFile) holds _meshMutex and the isLoading guard.
+
+    // Label by the file's actual container: .glb vs .gltf (XML/JSON) vs .fbx.
+    const std::size_t dot = path.find_last_of('.');
+    const bool isFbx = (dot != std::string::npos) &&
+        _stricmp(path.c_str() + dot, ".fbx") == 0;
+    const bool isGlb = (dot != std::string::npos) &&
+        _stricmp(path.c_str() + dot, ".glb") == 0;
+    const char* fmtName = isFbx ? "FBX" : (isGlb ? "GLB" : "glTF");
+
+    // Reset the scene-format state: the runtime re-parses from scratch and
+    // the built-mesh cache is invalidated with it (freezes/bakes/selections
+    // all re-evaluate from the new file).
+    _imp->sceneLoaded = false;
+    _imp->meshEntries.clear();
+    _imp->partLabels.clear();
+    _imp->builtCache.clear();
+    _imp->rt.clear();
+
+    const bool reverse = _imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue();
+    std::string err;
+    if (!_imp->rt.loadFile(path, reverse, err)) {
+        setPersistentMessage(eMessageTypeError, err);
+        return;
+    }
+    const GeoArchiveResult& data = _imp->rt.data;
+
+    // Mesh entries are the renderable parts (glTF primitives / FBX
+    // mesh x material); transform-only nodes are skipped.
+    for (int i = 0; i < (int)data.nodes.size(); ++i) {
+        if (data.nodes[i].isMesh) _imp->meshEntries.push_back(i);
+    }
+    if (_imp->meshEntries.empty()) {
+        setPersistentMessage(eMessageTypeError,
+            std::string(fmtName) + ": no triangle geometry found in the file");
+        return;
+    }
+
+    // Object dropdown: entry 0 is the merged asset, then one entry per part
+    // (scene paths like "/Car/Body").
+    _imp->partLabels.push_back(std::string("All parts (merged)"));
+    for (std::size_t i = 0; i < _imp->meshEntries.size(); ++i) {
+        _imp->partLabels.push_back(data.nodes[_imp->meshEntries[i]].fullPath);
+    }
+    KnobChoicePtr objKnob = _imp->objectPath.lock();
+    int chosenIdx = 0;
+    if (objKnob) {
+        std::vector<ChoiceOption> entries;
+        for (std::size_t i = 0; i < _imp->partLabels.size(); ++i) {
+            entries.push_back(ChoiceOption(_imp->partLabels[i], "", ""));
+        }
+        objKnob->populateChoices(entries);
+        chosenIdx = objKnob->getValue();
+        if (chosenIdx < 0 || (std::size_t)chosenIdx >= _imp->partLabels.size()) {
+            chosenIdx = 0;
+            objKnob->setValue(0);
+        }
+    }
+
+    _imp->sceneLoaded = true;
+
+    // Publish the initial mesh (frame 1). Per-frame fetches go through
+    // getMeshData -> buildSceneMesh from here on.
+    MeshDataPtr mesh = buildSceneMesh(1.0);
+
+    // Material: the selected part's (single mode), else the first part that
+    // carries one in the file. With no material in the file the knobs are
+    // left alone (user's manual settings stay).
+    const GeoImportMaterial* mat = NULL;
+    if (chosenIdx > 0) {
+        const GeoArchiveNodeData& nd = data.nodes[_imp->meshEntries[chosenIdx - 1]];
+        const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
+        if (md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
+            data.materials[md.materialIndex].present) {
+            mat = &data.materials[md.materialIndex];
+        }
+    } else {
+        for (std::size_t i = 0; i < _imp->meshEntries.size() && !mat; ++i) {
+            const GeoArchiveNodeData& nd = data.nodes[_imp->meshEntries[i]];
+            const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
+            if (md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
+                data.materials[md.materialIndex].present) {
+                mat = &data.materials[md.materialIndex];
+            }
+        }
+    }
+    if (mat) {
+        applyImportedMaterialKnobs(*mat);
+    }
+
+    _imp->loadedFilePath = path;
+    _imp->loadedObjectPath = _imp->partLabels[chosenIdx];
+
+    std::ostringstream ss;
+    ss << fmtName << ": " << _imp->loadedObjectPath
+       << " | Vertices: " << (mesh ? mesh->numVertices : 0)
+       << " | Faces: " << (mesh ? mesh->numFaces : 0)
+       << " | Parts: " << _imp->meshEntries.size()
+       << " | Materials: " << data.materials.size()
+       << " | UVs: " << (mesh && mesh->hasUVs ? "yes" : "no");
+    if (_imp->rt.hasAnimation) {
+        ss << " | Animated";
+        if (_imp->freezeAtFrame.lock() && _imp->freezeAtFrame.lock()->getValue()) {
+            ss << " (frozen at frame "
+               << (_imp->freezeFrame.lock() ? _imp->freezeFrame.lock()->getValue() : 1) << ")";
+        }
+    }
+    if (!mat) {
+        ss << " | No material in file";
+    }
+    _imp->info.lock()->setValue(ss.str());
+
+    clearPersistentMessage(false);
+}
+
+MeshDataPtr
+ReadGeo::buildSceneMesh(double time) const
+{
+    // Caller holds _meshMutex (getMeshData / loadGeoFromFile serialise on it,
+    // which also guards the archive data and the built-mesh cache below).
+    ReadGeoPrivate* imp = _imp.get();
+
+    // Frozen evaluation: frame N maps to source key N-1 (frame 1 = key 0).
+    const bool frozen = imp->freezeAtFrame.lock() && imp->freezeAtFrame.lock()->getValue();
+    const int frozenFrame = imp->freezeFrame.lock() ? imp->freezeFrame.lock()->getValue() : 1;
+    int key;
+    if (frozen) {
+        key = frozenFrame > 1 ? frozenFrame - 1 : 0;
+    } else {
+        const double f = time - 1.0;
+        key = (int)std::floor(f);
+        if (key < 0) key = 0;
+    }
+
+    const KnobChoicePtr objKnob = imp->objectPath.lock();
+    int chosenIdx = objKnob ? objKnob->getValue() : 0;
+    if (chosenIdx < 0 || (std::size_t)chosenIdx >= imp->partLabels.size()) {
+        chosenIdx = 0;
+    }
+
+    const bool bake = imp->bakeTransforms.lock() && imp->bakeTransforms.lock()->getValue();
+
+    const std::tuple<int, int, bool> cacheKey(key, chosenIdx, bake);
+    {
+        std::map<std::tuple<int, int, bool>, MeshDataPtr>::const_iterator it =
+            imp->builtCache.find(cacheKey);
+        if (it != imp->builtCache.end()) return it->second;
+    }
+
+    const double fps = getApp() ? getApp()->getProjectFrameRate() : 24.0;
+    // Non-frozen sub-frame time (motion blur) lerps rigid transforms via
+    // worldMatrixAt; the frozen evaluation maps to the exact frame.
+    const double timeEff = frozen ? (double)(key + 1) : time;
+    const std::shared_ptr<const GeoArchiveFrameEval> st = imp->rt.ensureFrameState(fps, key);
+
+    MeshDataPtr mesh(new MeshData);
+    const GeoArchiveResult& data = imp->rt.data;
+
+    if (chosenIdx == 0) {
+        // Merged: every mesh entry's evaluated vertices baked through its
+        // world matrix, concatenated — the whole asset as one mesh.
+        for (std::size_t e = 0; e < imp->meshEntries.size(); ++e) {
+            const int nodeIdx = imp->meshEntries[e];
+            if (nodeIdx >= (int)data.nodes.size()) continue;
+            const GeoArchiveNodeData& nd = data.nodes[nodeIdx];
+            if (nd.meshIndex < 0 || nd.meshIndex >= (int)st->deformed.size() ||
+                !st->deformed[nd.meshIndex]) {
+                continue;
+            }
+            float world[16];
+            imp->rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, world);
+            appendArchiveMesh(*st->deformed[nd.meshIndex], world, mesh.get());
+        }
+    } else if (chosenIdx - 1 < (int)imp->meshEntries.size()) {
+        // Single part.
+        const int nodeIdx = imp->meshEntries[chosenIdx - 1];
+        if (nodeIdx < (int)data.nodes.size()) {
+            const GeoArchiveNodeData& nd = data.nodes[nodeIdx];
+            MeshDataPtr src;
+            if (nd.meshIndex >= 0 && nd.meshIndex < (int)st->deformed.size()) {
+                src = st->deformed[nd.meshIndex];
+            }
+            if (src) {
+                if (bake) {
+                    // Baked: the part's evaluated world matrix goes into the
+                    // vertices; MeshData::transform stays identity.
+                    float world[16];
+                    imp->rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, world);
+                    appendArchiveMesh(*src, world, mesh.get());
+                } else {
+                    // Non-baked: the part keeps its node-local vertices and
+                    // the part's world matrix rides in MeshData::transform —
+                    // the animation keeps flowing through it and the user
+                    // T/R/S composes on top in every consumer.
+                    float identity[16];
+                    geoArchiveMatIdentity(identity);
+                    appendArchiveMesh(*src, identity, mesh.get());
+                    imp->rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, mesh->transform);
+                }
+            }
+        }
+    }
+    importBuildEdgeIndices(mesh.get());
+
+    // Geometry-loader diagnostics gate (same pattern as NATRON_DEBUG_SC):
+    // set env NATRON_DEBUG_GEOIO=1 to dump the raw built geometry (vertex
+    // values, not just counts) so headless tests can verify what the loader
+    // actually produced — a degenerate all-zero vertex array renders as an
+    // empty scene and is invisible in the counts alone.
+    if (std::getenv("NATRON_DEBUG_GEOIO")) {
+        std::ostringstream dbg;
+        dbg << "[GEOIO] fmt=" << (imp->rt.isFbx ? "FBX" : "glTF")
+            << " frame=" << (key + 1) << " sel=" << imp->partLabels[chosenIdx]
+            << " bake=" << (bake ? 1 : 0)
+            << " verts=" << mesh->numVertices
+            << " faces=" << mesh->numFaces
+            << " uvslots=" << (mesh->uvs.size() / 2)
+            << " v0..v5=";
+        for (std::size_t i = 0; i < mesh->vertices.size() && i < 6; ++i) {
+            dbg << mesh->vertices[i] << ",";
+        }
+        dbg << " faceCounts0..3=";
+        for (std::size_t i = 0; i < mesh->faceCounts.size() && i < 4; ++i) {
+            dbg << mesh->faceCounts[i] << ",";
+        }
+        dbg << " faceIdx0..5=";
+        for (std::size_t i = 0; i < mesh->faceIndices.size() && i < 6; ++i) {
+            dbg << mesh->faceIndices[i] << ",";
+        }
+        fprintf(stderr, "%s\n", dbg.str().c_str());
+    }
+
+    imp->builtCache.insert(std::make_pair(cacheKey, mesh));
+    return mesh;
 }
 
 void
@@ -1144,126 +1508,6 @@ ReadGeo::applyImportedMaterialKnobs(const GeoImportMaterial& m)
     if (KnobFilePtr k = _imp->textureFile.lock()) k->setValue(m.diffuseMapPath);
 }
 
-void
-ReadGeo::applyImportResult(const char* fmtName, const GeoImportResult& result)
-{
-    const GeoImportResult* res = &result;
-    if (!res->ok || res->parts.empty()) {
-        setPersistentMessage(eMessageTypeError, res->error);
-        return;
-    }
-    if (!res->error.empty()) {
-        // Parse succeeded with skipped content — surface it as a message.
-        setPersistentMessage(eMessageTypeWarning, fmtName + std::string(": ") + res->error);
-    }
-
-    // --- Populate the Object dropdown: entry 0 is the merged asset, then
-    // one entry per part (scene paths like "Car/Body").
-    std::vector<std::string> labels;
-    labels.reserve(res->parts.size() + 1);
-    labels.push_back(std::string("All parts (merged)"));
-    for (std::size_t i = 0; i < res->parts.size(); ++i) {
-        labels.push_back(res->parts[i].label);
-    }
-    _imp->geoPaths = labels;
-
-    KnobChoicePtr objKnob = _imp->objectPath.lock();
-    int chosenIdx = 0;
-    if (objKnob) {
-        std::vector<ChoiceOption> entries;
-        for (std::size_t i = 0; i < labels.size(); ++i) {
-            entries.push_back(ChoiceOption(labels[i], "", ""));
-        }
-        objKnob->populateChoices(entries);
-        chosenIdx = objKnob->getValue();
-        if (chosenIdx < 0 || (std::size_t)chosenIdx >= labels.size()) {
-            chosenIdx = 0;
-            objKnob->setValue(0);
-        }
-    }
-
-    // --- Build the MeshData for the selection.
-    MeshDataPtr mesh(new MeshData);
-    const GeoImportPart* singlePart = (chosenIdx > 0) ? &res->parts[chosenIdx - 1] : NULL;
-    if (singlePart) {
-        importAppendPart(*singlePart, mesh.get());
-    } else {
-        for (std::size_t i = 0; i < res->parts.size(); ++i) {
-            importAppendPart(res->parts[i], mesh.get());
-        }
-    }
-    importBuildEdgeIndices(mesh.get());
-
-    // Geometry-loader diagnostics gate (same pattern as NATRON_DEBUG_SC):
-    // set env NATRON_DEBUG_GEOIO=1 to dump the raw parsed geometry (vertex
-    // values, not just counts) so headless tests can verify what the loader
-    // actually produced — a degenerate all-zero vertex array renders as an
-    // empty scene and is invisible in the counts alone.
-    if (std::getenv("NATRON_DEBUG_GEOIO")) {
-        std::ostringstream dbg;
-        dbg << "[GEOIO] fmt=" << fmtName << " verts=" << mesh->numVertices
-            << " faces=" << mesh->numFaces << " uvslots=" << (mesh->uvs.size() / 2)
-            << " v0..v5=";
-        for (std::size_t i = 0; i < mesh->vertices.size() && i < 6; ++i) {
-            dbg << mesh->vertices[i] << ",";
-        }
-        dbg << " faceCounts0..3=";
-        for (std::size_t i = 0; i < mesh->faceCounts.size() && i < 4; ++i) {
-            dbg << mesh->faceCounts[i] << ",";
-        }
-        dbg << " faceIdx0..5=";
-        for (std::size_t i = 0; i < mesh->faceIndices.size() && i < 6; ++i) {
-            dbg << mesh->faceIndices[i] << ",";
-        }
-        fprintf(stderr, "%s\n", dbg.str().c_str());
-    }
-
-    // The file-authored transforms are already baked into the vertices, so
-    // MeshData::transform stays identity and the node's own Transform page
-    // applies user offsets on top (same policy as the OBJ path).
-    for (int i = 0; i < 16; ++i) mesh->transform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
-
-    if (_imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue()) {
-        reverseMeshWinding(*mesh);
-    }
-
-    // --- Material: the selected part's (single mode), else the first part
-    // that carries one in the file. With no material in the file the knobs
-    // are left alone (user's manual settings stay).
-    const GeoImportMaterial* mat = NULL;
-    if (singlePart) {
-        if (singlePart->material.present) mat = &singlePart->material;
-    } else {
-        for (std::size_t i = 0; i < res->parts.size() && !mat; ++i) {
-            if (res->parts[i].material.present) mat = &res->parts[i].material;
-        }
-    }
-    if (mat) {
-        applyImportedMaterialKnobs(*mat);
-    }
-
-    // --- Store result + Info line.
-    _lastMeshData = mesh;
-    _imp->loadedFilePath = res->parts[0].label; // not meaningful for scene formats
-    _imp->loadedObjectPath = labels[chosenIdx];
-
-    std::ostringstream ss;
-    ss << fmtName << ": " << _imp->loadedObjectPath
-       << " | Vertices: " << mesh->numVertices
-       << " | Faces: " << mesh->numFaces
-       << " | Parts: " << res->parts.size()
-       << " | Materials: " << res->numMaterials
-       << " | UVs: " << (mesh->hasUVs ? "yes" : "no");
-    if (!mat) {
-        ss << " | No material in file";
-    }
-    _imp->info.lock()->setValue(ss.str());
-
-    if (res->error.empty()) {
-        clearPersistentMessage(false);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Mesh data access
 // ---------------------------------------------------------------------------
@@ -1277,14 +1521,29 @@ ReadGeo::getMeshData(double time) const
     // different times) — that is the G1 copy-on-read fix, tracked separately.
     std::lock_guard<std::mutex> lk(_meshMutex);
 
-    if (_lastMeshData && time >= 0 && _imp) {
+    // Scene formats (glTF/FBX) always go through the per-frame builder, which
+    // caches its builds — frozen files evaluate at the frozen frame, animated
+    // ones at the requested time.
+    if (_imp && _imp->sceneLoaded) {
+        return buildSceneMesh(time);
+    }
+
+    // Frozen evaluation for .abc: substitute the frozen frame for the
+    // timeline (the same freeze semantics the scene formats get).
+    double effTime = time;
+    if (_imp && _imp->freezeAtFrame.lock() && _imp->freezeAtFrame.lock()->getValue()) {
+        effTime = (double)(_imp->freezeFrame.lock()
+                               ? _imp->freezeFrame.lock()->getValue() : 1);
+    }
+
+    if (_lastMeshData && effTime >= 0 && _imp) {
         if (_imp->hasAnimatedXform && _imp->numXformSamples > 0 &&
             !_imp->xformMatrices.empty()) {
-            updateTransformAtTime(_lastMeshData.get(), time);
+            updateTransformAtTime(_lastMeshData.get(), effTime);
         }
         if (_imp->hasAnimatedVerts && _imp->numVertexSamples > 0 &&
             !_imp->vertexSamples.empty()) {
-            updateVerticesAtTime(_lastMeshData.get(), time);
+            updateVerticesAtTime(_lastMeshData.get(), effTime);
         }
     }
     return _lastMeshData;
@@ -1398,17 +1657,33 @@ ReadGeo::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale&
 StatusEnum
 ReadGeo::getPreferredMetadata(NodeMetadata& metadata)
 {
-    // Declare this node as frame-varying when the loaded .abc carries
-    // animated content (transform samples OR vertex samples). Required so
-    // downstream Scene3D + ScanlineRender hashes change per frame, otherwise
-    // the image cache freezes the render output on a single frame even though
-    // the geometry actually animates. The 3D viewport bypasses this cache so
-    // it always shows live motion; CyclesRender sets frame-varying on its own
-    // node which is why Cycles worked while ScanlineRender did not.
+    // Declare this node as frame-varying when the loaded file carries
+    // animated content: scene formats via the archive runtime's animation
+    // flags (node channels / skins / FBX animation stack), .abc via the
+    // transform/vertex sample counts. Required so downstream Scene3D +
+    // ScanlineRender hashes change per frame, otherwise the image cache
+    // freezes the render output on a single frame even though the geometry
+    // actually animates. The 3D viewport bypasses this cache so it always
+    // shows live motion; CyclesRender sets frame-varying on its own node
+    // which is why Cycles worked while ScanlineRender did not.
     //
-    // Static .obj / single-sample .abc imports stay non-frame-varying so the
+    // A frozen file is static by definition — never frame-varying, so the
     // cache does its job (one render reused across all frames).
-    if (_imp && (_imp->hasAnimatedXform || _imp->hasAnimatedVerts)) {
+    if (!_imp) {
+        return eStatusOK;
+    }
+    const bool frozen = _imp->freezeAtFrame.lock() &&
+                        _imp->freezeAtFrame.lock()->getValue();
+    if (frozen) {
+        return eStatusOK;
+    }
+    if (_imp->sceneLoaded) {
+        if (_imp->rt.hasAnimation) {
+            metadata.setIsFrameVarying(true);
+        }
+        return eStatusOK;
+    }
+    if (_imp->hasAnimatedXform || _imp->hasAnimatedVerts) {
         metadata.setIsFrameVarying(true);
     }
     return eStatusOK;

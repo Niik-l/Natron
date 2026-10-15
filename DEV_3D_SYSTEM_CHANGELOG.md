@@ -1,23 +1,31 @@
-# Natron 3D System — Developer Reference
-
-> **Status: live doc — updated alongside `RB-2.6` work.** Previous revisions are
-> in git history (`git log -- DEV_3D_SYSTEM_CHANGELOG.md`).
->
-> Companion docs:
-> - [`NODE_REGISTRY.md`](NODE_REGISTRY.md) — registered-node list with one-line descriptions
-> - [`Engine/Dev/WIKI.md`](Engine/Dev/WIKI.md) — user-facing knob/workflow reference
-> - [`Engine/Dev/TODO.md`](Engine/Dev/TODO.md) — running completed/in-progress/blocked lists per subsystem
-> - [`GIT_WORKFLOW.md`](GIT_WORKFLOW.md) — branch / commit conventions
-
-## Overview
-
-The 3D system adds a 3D viewport, Cycles renderer, GLSL/MRT scanline renderer,
-material system, Alembic I/O, OpenVDB support, lighting, deep compositing, and
-a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
-
-Recent milestones:
-
-- **LensDefocus stack merged (2026-10-23/24)** — another agent's work, merged by three fast-forwards
+# Natron 3D System
+- **ReadGeo universal — glTF/FBX animation, Freeze at Frame, Bake Transforms
+  (2026-10-15)** — ReadGeo and ReadGeoArchive now share one parse + evaluation
+  engine (`GeoArchiveRuntime` in ReadGeoImport.{h,cpp}: the parsed archive, the
+  live ufbx scene, the lazily-filled per-frame cache and the matrix time-mapping
+  helpers); the flat stage-1 loaders (ReadGeoGltf.cpp / ReadGeoFbx.cpp, the
+  GeoImportResult contract) are deleted. ReadGeo's glTF/FBX merged mode
+  **animates**: each visited frame re-bakes every part's evaluated world matrix
+  into the concatenated vertex array (cache keyed by source frame + Object
+  selection + Bake Transforms, so an unvisited frame is the only build cost).
+  Rigid single-part selection animates through `MeshData::transform` (sub-frame
+  matrix lerp, so motion blur samples smoothly); skinned parts deform per frame.
+  New File-page knobs: **Freeze at Frame** (+ Freeze Frame) pins the evaluation
+  to a fixed frame — the "show static frame X" snapshot, also honored by the
+  `.abc` sample path — and **Bake Transforms** (single-part: the part's world
+  matrix goes into the vertices instead of the transform slot, reproducing the
+  old always-baked behaviour). Frame-varying metadata follows the freeze state
+  (frozen = static = cache-friendly). ReadGeoArchive behaviour is unchanged by
+  the refactor; its glTF loader gained the embedded-texture extraction (data
+  URI / buffer view → content-hashed temp file) ported from the retired flat
+  loader, so embedded GLB textures reach the archive node too. Verified
+  headlessly through Cycles (assets in `tools/geoio-tests/`): BoxAnimated merged
+  rotates (f1 vs f40 pixel content differs), frozen f1 == f40 (byte-identical
+  except the EXR frame-stamp header field), bake-on/off renders hash-equal,
+  RiggedFigure walk cycle animates (distinct deformed states per frame), the
+  19-piece FBX spider renders as one assembled merged mesh, Avocado keeps its
+  embedded texture. The `NATRON_DEBUG_GEOIO` dump now reports the built
+  merged/single geometry (frame, selection, bake flag). - **LensDefocus stack merged (2026-10-23/24)** — another agent's work, merged by three fast-forwards
   (RB-2.6 62d278bbb, b84b6d484, f13f6b4f8; Cycles fork feature/cycles-deep 3a20cc0b1). Per-commit
   details, probes, the regression testbed and the known limitations live OUTSIDE the repo in
   `complex_tools/zdefocus/HANDOFF.md`, `MERGE.md`, `MERGE_2.md` (the local tree only). In short:
@@ -420,7 +428,25 @@ Recent milestones:
   (Rocky/EPEL packages + libcdr 0.1.9 and ImageMagick 7.1.2 from source; the image's HarfBuzz
   rebuilt with GLib, without which Rocky's pango fails to load: `hb_glib_script_from_script`).
   The 9-distro matrix now renders an SVG through the bundled plugin, which is what caught that.
-  README lists openfx-arena as bundled on both platforms.
+  README lists openfx-arena as bundled on both platforms.— Developer  behaviour under ACES — check in the GUI. Linux followed on 2026-10-02 (entry above).Reference
+
+> **Status: live doc — updated alongside `RB-2.6` work.** Previous revisions are
+> in git history (`git log -- DEV_3D_SYSTEM_CHANGELOG.md`).
+>
+> Companion docs:
+> - [`NODE_REGISTRY.md`](NODE_REGISTRY.md) — registered-node list with one-line descriptions
+> - [`Engine/Dev/WIKI.md`](Engine/Dev/WIKI.md) — user-facing knob/workflow reference
+> - [`Engine/Dev/TODO.md`](Engine/Dev/TODO.md) — running completed/in-progress/blocked lists per subsystem
+> - [`GIT_WORKFLOW.md`](GIT_WORKFLOW.md) — branch / commit conventions
+
+## Overview
+
+The 3D system adds a 3D viewport, Cycles renderer, GLSL/MRT scanline renderer,
+material system, Alembic I/O, OpenVDB support, lighting, deep compositing, and
+a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
+
+Recent milestones:
+
 - **openfx-arena in the Windows package (2026-10-01)** — user feedback: no SVG import.
   ReadSVG lives in openfx-arena, which the fork had never built on either platform (the
   README had wrongly claimed it until 2026-09-21). `tools/win-build` now clones, patches,
@@ -432,7 +458,7 @@ Recent milestones:
   Verified headless: ReadSVG -> Write renders a test SVG to PNG. Arena carries its own copy of
   OpenFX-IO's GenericReader/GenericOCIO (newer than our pinned openfx-io; our colorspace patch
   does not apply there), so its readers may still show the old `default`-colorspace
-  behaviour under ACES — check in the GUI. Linux followed on 2026-10-02 (entry above).
+  behaviour under ACES — check in the GUI. Linux (ASWF image) still to do.
 - **Preferences > 3D Viewport page (2026-09-21)** — from VIEWPORT3D_SETTINGS_PLAN.md.
   User doc + screenshot: [wiki: 3D Viewport preferences](https://github.com/Niik-l/Natron/wiki/3D-Viewport-Preferences)
   ([image](https://raw.githubusercontent.com/wiki/Niik-l/Natron/images/viewport3d-preferences.png)).
