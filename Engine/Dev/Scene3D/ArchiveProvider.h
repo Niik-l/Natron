@@ -32,6 +32,7 @@
 
 #include "MeshData.h"
 #include "ReadGeoImport.h"
+#include "MaterialProvider.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -101,6 +102,14 @@ public:
      *  local matrix so the emitted parent chain resolves in normalized space.
      *  @return false = identity (the default). */
     virtual bool getRootMatrix(float outRoot[16]) const { geoArchiveMatIdentity(outRoot); return false; }
+
+    /** @brief The FILE-AUTHORED material for one entry (glTF primitive /
+     *  FBX mesh+material), or nullptr when the entry has none / the format
+     *  doesn't carry per-entry materials (Alembic). Renderers fall back to
+     *  the node-level material (Material3D input / first file material)
+     *  when null. Precedence in every consumer: downstream override >
+     *  GeoMaterialOverride per-part > THIS entry material > node material. */
+    virtual MaterialProvider* getEntryMaterialProvider(int idx) const { (void)idx; return nullptr; }
 };
 
 NATRON_NAMESPACE_EXIT

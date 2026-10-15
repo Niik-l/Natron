@@ -63,6 +63,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/Cube3D.h"
 #include "Engine/Dev/Scene3D/Cylinder3D.h"
 #include "Engine/Dev/Scene3D/MeshProvider.h"
+#include "Engine/Dev/Scene3D/ArchiveProvider.h"
 #include "Engine/Dev/Scene3D/Path3D.h"
 #include "Engine/Dev/Scene3D/Zap3D.h"
 #include "Engine/Dev/Scene3D/ReadAlembicCamera.h"
@@ -3574,12 +3575,31 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
     }
     const bool meshHasTex = (texPixels != NULL);
 
+    // Per-entry file color: an archive entry's own material tints the fill
+    // (Cycles shades it as a full per-entry material; the viewport draws
+    // the base color). Falls back to the classic grey.
+    float entryColor[3] = { 0.45f, 0.45f, 0.45f };
+    bool haveEntryColor = false;
+    {
+        ArchiveProvider* ap = dynamic_cast<ArchiveProvider*>(meshSrc->getEffectInstance().get());
+        if (ap && sn.archiveEntryIdx >= 0) {
+            if (MaterialProvider* ep = ap->getEntryMaterialProvider(sn.archiveEntryIdx)) {
+                double r, g, b;
+                ep->getMaterialBaseColor(meshTime, r, g, b);
+                entryColor[0] = (float)r; entryColor[1] = (float)g; entryColor[2] = (float)b;
+                haveEntryColor = true;
+            }
+        }
+    }
+
     // ----- Fast path: GPU-cached buffers -----
     // Plain and material-textured meshes (the big scans) draw from a cached VBO
     // with the headlight in a shader. Projection materials (UVProject / Project3D
     // / MergeMat rewrite texture coordinates per paint) keep the immediate-mode
     // path below for now; so does a mesh too large for the cache budget.
-    if (projLayers.empty() && projComp == 0 && _imp->meshShaderReady) {
+    // Archive entries with a file base color also keep the immediate-mode path:
+    // the cached shader draws the flat grey only.
+    if (projLayers.empty() && projComp == 0 && _imp->meshShaderReady && !haveEntryColor) {
         const Viewport3DMeshCache::Entry* E = _imp->meshCache.acquire(mesh, _imp->paintSerial);
         if (E) {
             if (mode != eWireframe) {
@@ -3618,7 +3638,6 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
         const float baseGrey = 0.45f;
         float mvForLit[16];
         if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
-
         // One fill pass: a single UVProject/material texture, the grey fallback (hasTexPass=false),
         // or one MergeMat projection layer. Called once normally, or once per layer (blended).
         auto drawMeshPass = [&](const float* tPix, int tW, int tH, bool wrapRep, const float* border,
@@ -3656,9 +3675,12 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
                     const float* p2 = &mesh->vertices[v2*3];
                     float f = ViewportFaceLitFactor(p0, p1, p2, mvForLit);
                     if (hasTexPass) glColor4f(f, f, f, 0.95f);
+                    else if (haveEntryColor) glColor3f(entryColor[0]*f, entryColor[1]*f, entryColor[2]*f);
                     else            glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
                 } else if (hasTexPass) {
                     glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+                } else if (haveEntryColor) {
+                    glColor3f(entryColor[0], entryColor[1], entryColor[2]);
                 }
                 const bool triCulled = !vCulled.empty() &&
                     ( v0 < (int)vCulled.size() && v1 < (int)vCulled.size() &&

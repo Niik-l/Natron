@@ -1,4 +1,24 @@
 # Natron 3D System
+- **Per-entry file materials (2026-10-15, user report: the roundtrip rotcube
+  imported from Blender showed one flat color, not the six randomized side
+  colors)** — the roundtrip test (Blender 5.2 → FBX → Natron, scripts in
+  `tools/geoio-tests/roundtrip/`) exposed that every mesh entry of a
+  ReadGeoArchive shaded with the node-level material — the file's FIRST PBR
+  material — so a six-material cube rendered single-colored. The archive
+  parse already carried per-entry materials (`GeoArchiveMeshData::materialIndex`);
+  they just weren't consumed. New `ArchiveProvider::getEntryMaterialProvider`
+  (default nullptr): ReadGeoArchive returns an immutable per-entry adapter
+  (`EntryMaterialProvider`) over the entry's `GeoImportMaterial` snapshot —
+  base color, roughness, metallic, specular, emission, transmission, IOR,
+  diffuse map — cached per entry, reset on reload, safe against reload during
+  render (shared_ptr snapshot). CyclesRenderer's mesh branch assigns the
+  entry material per object (precedence: downstream/per-pass override >
+  GeoMaterialOverride > **entry material** > node material); Viewport3D's
+  mesh fill tints with the entry's base color (lit: color × face factor,
+  flat: plain color) instead of the fixed grey. Verified headlessly through
+  Cycles: the rotcube's sampled face hue shifts across frames as the cube
+  rotates (R-dominant → G-dominant → mixed); Avocado's embedded texture and
+  the full battery regress clean.
 - **Filtered-parent fold + panel polish (2026-10-15, user feedback round)** —
   **ReadGeo's Info knob reverted** (it had been switched to a multi-line label
   unasked — an expanding QTextEdit that ate the File page; back to the plain

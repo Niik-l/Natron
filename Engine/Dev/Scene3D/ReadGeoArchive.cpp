@@ -92,6 +92,29 @@ arcGlobMatch(const std::string& pattern, const std::string& text)
 
 } // anonymous namespace
 
+// Per-entry FILE material exposed as a MaterialProvider: one immutable
+// GeoImportMaterial snapshot per adapter (shared_ptr — the archive data can be
+// freed by a reload while a render thread still holds the adapter).
+struct EntryMaterialProvider : public MaterialProvider
+{
+    std::shared_ptr<const GeoImportMaterial> mat;
+
+    explicit EntryMaterialProvider(const GeoImportMaterial& m)
+        : mat(std::make_shared<const GeoImportMaterial>(m)) {}
+
+    void getMaterialBaseColor(double, double& r, double& g, double& b) const OVERRIDE
+    { r = mat->baseColor[0]; g = mat->baseColor[1]; b = mat->baseColor[2]; }
+    double getMaterialRoughness(double) const OVERRIDE { return mat->roughness; }
+    double getMaterialMetallic(double) const OVERRIDE { return mat->metallic; }
+    double getMaterialSpecular(double) const OVERRIDE { return mat->specular; }
+    void getMaterialEmission(double, double& r, double& g, double& b, double& strength) const OVERRIDE
+    { r = mat->emission[0]; g = mat->emission[1]; b = mat->emission[2]; strength = mat->emissionStrength; }
+    double getMaterialTransmission(double) const OVERRIDE { return mat->transmission; }
+    double getMaterialIOR(double) const OVERRIDE { return mat->ior; }
+    std::string getMaterialTextureFile() const OVERRIDE { return mat->diffuseMapPath; }
+    std::string getMaterialDiffuseColorspace() const OVERRIDE { return "sRGB"; }
+};
+
 struct ReadGeoArchivePrivate
 {
     KnobFileWPtr filePath;
@@ -112,6 +135,11 @@ struct ReadGeoArchivePrivate
     GeoArchiveRuntime rt;
     std::vector<int> visible;                // entry indices exposed to SceneGraph
     std::string loadedFilePath;
+
+    // Per-entry file-material adapters (ArchiveProvider::getEntryMaterialProvider).
+    // key = entry index into data.nodes; reset on load. Guarded by archiveMutex
+    // (built lazily under it by the renderer's query).
+    mutable std::map<int, std::shared_ptr<EntryMaterialProvider>> entryMaterials;
 
     int frameOffsetKnobValue() const
     {
@@ -464,6 +492,7 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
 
     // Drop the parsed archive + frame cache first.
     _imp->visible.clear();
+    _imp->entryMaterials.clear();
     _imp->rt.clear();
 
     if (path.empty()) {
@@ -747,6 +776,33 @@ ReadGeoArchive::getRootMatrix(float outRoot[16]) const
     }
     std::memcpy(outRoot, _imp->rt.data.rootMatrix.data(), 16 * sizeof(float));
     return true;
+}
+
+MaterialProvider*
+ReadGeoArchive::getEntryMaterialProvider(int idx) const
+{
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+    if (idx < 0 || idx >= (int)_imp->rt.data.nodes.size()) return nullptr;
+    const GeoArchiveNodeData& nd = _imp->rt.data.nodes[idx];
+    if (!nd.isMesh || nd.meshIndex < 0 || nd.meshIndex >= (int)_imp->rt.data.meshes.size()) {
+        return nullptr;
+    }
+
+    // Cached adapter?
+    std::map<int, std::shared_ptr<EntryMaterialProvider>>::const_iterator it =
+        _imp->entryMaterials.find(idx);
+    if (it != _imp->entryMaterials.end()) return it->second.get();
+
+    const GeoArchiveMeshData& md = _imp->rt.data.meshes[nd.meshIndex];
+    if (md.materialIndex < 0 || md.materialIndex >= (int)_imp->rt.data.materials.size() ||
+        !_imp->rt.data.materials[md.materialIndex].present) {
+        return nullptr;
+    }
+
+    std::shared_ptr<EntryMaterialProvider> adapter =
+        std::make_shared<EntryMaterialProvider>(_imp->rt.data.materials[md.materialIndex]);
+    _imp->entryMaterials[idx] = adapter;
+    return adapter.get();
 }
 
 // --- EffectInstance overrides ------------------------------------------------

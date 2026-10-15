@@ -2864,10 +2864,23 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             if (mp) {
                 objShader = createMaterialShader(scene, mp, time);
             }
-        } else if (srcNode) {
-            MaterialProvider* matProv = dynamic_cast<MaterialProvider*>(srcNode->getEffectInstance().get());
-            if (matProv) {
-                objShader = createMaterialShader(scene, matProv, time);
+        } else {
+            // The archive entry's own file-authored material (glTF primitive
+            // material / FBX mesh+material), then the node-level material.
+            // (No EffectInstance is in scope here — the archive comes from
+            // the SceneNode's sourceNode, which SceneGraph set to the
+            // archive node for every entry it emitted.)
+            ArchiveProvider* entryArch = srcNode
+                ? dynamic_cast<ArchiveProvider*>(srcNode->getEffectInstance().get()) : nullptr;
+            MaterialProvider* entryMat = (entryArch && sn.archiveEntryIdx >= 0)
+                ? entryArch->getEntryMaterialProvider(sn.archiveEntryIdx) : nullptr;
+            if (entryMat) {
+                objShader = createMaterialShader(scene, entryMat, time);
+            } else if (srcNode) {
+                MaterialProvider* matProv = dynamic_cast<MaterialProvider*>(srcNode->getEffectInstance().get());
+                if (matProv) {
+                    objShader = createMaterialShader(scene, matProv, time);
+                }
             }
         }
 
