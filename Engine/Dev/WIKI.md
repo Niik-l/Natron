@@ -291,23 +291,76 @@ DeepRecolor → DeepToPoints (camera input) → PointsToParticles → Scene3D �
 
 ---
 
-### ParticleInstance
-**Group:** Particles | **Inputs:** 5 (particles, geo A-D) | **Output:** particles (pass-through)
+### Scatter3D
+**Group:** Particles | **Inputs:** 2 (surface, density) | **Output:** static particles with a surface normal
 
-Instance geometry at particle positions. Each particle gets assigned a source geo based on the distribution mode.
+Scatter points over the surface of a geo node for instancing: ReadGeo, GeoBuilder,
+ReadAlembicArchive or a primitive on `surface`; an optional mask on `density`, looked up
+through the surface's UVs (white = full density, black = none). Points are area-weighted
+(as many per square metre on a big triangle as on a small one) and carry the face normal.
 
 | Knob | Type | Default | Description |
 |------|------|---------|-------------|
-| Distribution | Choice | Random | Sequential (round-robin), Random (by particle ID), By ID (modulo) |
-| Orient to Velocity | Bool | false | Rotate instances to face velocity direction |
-| Scale Multiplier | Double | 1.0 | Global scale on all instances |
-| Max Instances | Int | 10000 | Performance limit |
+| Count | Int | 1000 | Points to place. Rejections (slope, density, distance) can leave fewer; Info says how many. |
+| Seed | Int | 0 | Reshuffle. |
+| Size | Double min/max | 1 / 1 | Particle size per point, uniform in the range. ParticleInstance multiplies the prototype by it. |
+| Slope Limit | Double | 90 | Steepest face (degrees from horizontal) that gets points. 90 = everything up to vertical walls, 30 = gentle slopes only, 180 = also faces pointing down. |
+| Min Distance | Double | 0 | Minimum spacing in world units (0 = off). Even, non-clumping spread at the cost of reaching Count. |
+| Normal | Choice | Surface | Surface (face normal), Surface (Flipped) for inside-out meshes, World Up (+Y). |
+| Density Gamma | Double | 1 | Contrast of the density mask (>1 thins greys). |
+| Invert Density | Bool | false | Scatter where the mask is black. |
+| Display Size | Double | 1 | Viewport-only multiplier on the drawn point size. Renders and ParticleInstance ignore it; turn it down when tiny Size values for small prototypes make the preview points look huge. |
+| Info | String | — | "N points on T tris (area)" plus the rejection breakdown when short of Count. |
+
+Static (infinite life, zero velocity), white, IDs 0..N-1; cached per node hash and frame.
+The density mask needs UVs on the surface (Info says when it was ignored).
 
 **Pipeline:**
 ```
-ParticleSolver → ParticleInstance → Scene → ScanlineRender
+ReadGeo (terrain) → Scatter3D → ParticleInstance → Scene3D → CyclesRender
+         Read (density map) ↗         ↑ ↑ ↑ ↑
+                   ReadGeo + Material3D (Megascans rock / plant variants on geo A-D)
+```
+
+---
+
+### ParticleInstance
+**Group:** Particles | **Inputs:** 5 (particles, geo A-D) | **Output:** particles (pass-through)
+
+Instance geometry at particle positions. Each particle gets one source geo (Distribution) and is
+drawn with that prototype's material. Geo inputs take **any geo the 3D system renders**: Cube3D /
+Sphere3D / Card3D / Cylinder3D, ReadGeo (a Megascans asset with its Material3D), GeoBuilder,
+ReadAlembicArchive. Particles from Scatter3D carry a surface normal; Align to Normal stands the
+prototype up along it.
+
+| Knob | Type | Default | Description |
+|------|------|---------|-------------|
+| Distribution | Choice | Random | Sequential (round-robin), Random (by particle ID + Seed), By ID (modulo) |
+| Orient to Velocity | Bool | false | Rotate instances to face velocity direction (+Z). Wins over Align to Normal while moving. |
+| Align to Normal | Bool | true | Turn the prototype's Up Axis onto the particle's surface normal (Scatter3D). Particles without a normal stay upright. |
+| Up Axis | Choice | Y | Which prototype axis is up: Y (Natron, Maya, Megascans) or Z (Blender, Houdini exports). |
+| Random Rotation | Double x/y/z | 0 / 0 / 0 | Random angle in [-range, +range] degrees per axis, in the prototype's own frame (before alignment). Up axis 360 = free spin, a few degrees on the others = natural lean. |
+| Scale Multiplier | Double | 1.0 | Global scale on all instances (times the particle size) |
+| Random Scale | Double min/max | 1 / 1 | Per-instance uniform scale factor in the range. |
+| Seed | Int | 0 | Reshuffles Random Rotation / Random Scale / Random distribution. |
+| Apply Prototype Transform | Bool | true | Include each prototype node's own T/R/S (a ReadGeo scaled cm→m instances at the right size). Off = raw mesh. |
+| Max Instances | Int | 10000 | Performance limit |
+
+Random values are keyed on the particle ID, so an instance keeps its rotation and scale from
+frame to frame. CyclesRender shares one mesh (and BVH) between all instances of a prototype, so
+tens of thousands of instances cost little more than one. ScanlineRender and the 3D viewport
+show the prototype with its Material3D diffuse texture; the viewport falls back to bounding
+boxes above 1.5M triangles in total.
+
+**Pipelines:**
+```
+ParticleSolver → ParticleInstance → Scene → ScanlineRender          (classic: cubes/spheres on a sim)
                      ↑ ↑ ↑ ↑
                  Cube3D Sphere3D (geo A, B, C, D)
+
+Scatter3D (ground) → ParticleInstance → Scene3D → CyclesRender      (set dressing)
+                         ↑ ↑ ↑ ↑
+         ReadGeo + Material3D (Megascans debris / plants, Random Rotation y=360, Random Scale 0.7-1.3)
 ```
 
 ---

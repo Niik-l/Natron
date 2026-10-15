@@ -17,6 +17,54 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **3D viewport: GPU-cached meshes (2026-10-15)** - orbiting a 1.5M+ triangle scan was sluggish
+  because `Viewport3D::drawMeshNode` re-sent every triangle in immediate mode on every paint (CPU
+  headlight per face + ~10 GL calls per triangle, then the edge list again for the wire pass).
+  New `Gui/Viewport3DMeshCache`: each MeshData is uploaded once as a flat corner array (position,
+  face normal as GL_BYTE, uv; 24 B/corner) + the original vertices and polygon edge list as an
+  index buffer, drawn with one glDrawArrays / glDrawElements through a small compat-profile
+  shader that reproduces the old headlight (ambient 0.15 + abs(N.L)) and texture modulate.
+  Keyed by MeshData address (weak_ptr guarded) + new `MeshData::version`, bumped by
+  `bumpMeshVersion()` in ReadGeo / ReadAlembicArchive per-frame vertex updates and
+  `reverseMeshWinding`. 1.5 GB budget with least-recently-painted eviction; context recreation
+  forgets the names (initializeGL). Still on the immediate-mode path: UVProject / Project3D /
+  MergeMat projections (per-paint texcoords), Face Orientation mode, meshes over budget.
+  Measured with a GUI probe (scratch vp_probe.py, grabFramebuffer timing) on a 925K-triangle OBJ:
+  86.8 ms/paint (installed build) -> 18.6 ms/paint (new), identical frame. Next: fast navigate
+  while dragging, projection layers on the buffer path, ParticleInstance prototypes via the cache.
+- **Scatter / instancing: Scatter3D + mesh prototypes in ParticleInstance (2026-10-14)** — the
+  user's "scatter points on a ground, instance Megascans debris, foliage on a hilltop" ask. Before:
+  ParticleInstance prototypes were hard-coded to Cube3D / Sphere3D in both renderers, with a fixed
+  orange shader, and nothing could sample a mesh surface. Now: (1) `Engine/Dev/Scene3D/GeoExtract`
+  flattens any renderable geo (primitives via their generators with winding fixed to the analytic
+  normals, MeshProvider meshes fan-triangulated with per-corner UVs, ReadAlembicArchive entries baked
+  with their entry matrices) into a `TriMesh` with the node's own transform and its MaterialProvider;
+  (2) `ParticleInstance::getPrototypeMesh` wraps it, `GeoInstance::m` is the full instance matrix
+  (T x base rotation x per-ID random rotation x scale), base rotation = velocity (as before) else
+  Align to Normal (Rodrigues from Up Axis onto the particle normal), new knobs Align to Normal, Up
+  Axis, Random Rotation x/y/z, Random Scale min/max, Seed, Apply Prototype Transform; (3) CyclesRender
+  builds one shared `ccl::Mesh` per prototype (UVs, normals) with `createMaterialShader` on the
+  prototype's material (so a Megascans ReadGeo + Material3D instances with its textures), `tfm =
+  inst.m x protoLocal`, motion blur as before; ScanlineRender extracts prototypes the same way,
+  `buildFlatGeo` takes per-corner UVs, the instance shader gained `u_tex` with the Material3D
+  diffuse preview texture; the 3D viewport draws the real prototype meshes (face-lit, textured via
+  the preview texture cache) under a 1.5M-triangle budget and the prototype's real bounding box
+  above it; (4) `Particle` gained `nx, ny, nz` (zero = no normal); (5) new **Scatter3D** node
+  (Particles group): surface geo in, optional density mask through the surface UVs, area-weighted
+  triangle CDF + uniform barycentric sampling, Slope Limit / Min Distance (hash grid) / density
+  rejection, Normal mode, static particles with the face normal, cached per (hash, time). Headless:
+  Card3D ground + Scatter3D + ParticleInstance (red Cube3D by its own knobs, green Sphere3D through a
+  Material3D) rendered in Cycles; see the test notes in TODO. Not done: subdivision / true
+  displacement on instanced prototypes (the shader-level bump path works), per-instance material
+  variation, GPU hardware instancing in ScanlineRender (still one draw per instance).
+  First GUI pass (same day): vertical surfaces at the default Slope Limit 90 lost every sample to
+  the cos(90) = 6e-17 float edge (tolerance added); Size min/max clamped at 0; the 3D viewport's
+  bare-particle point sprites used a fixed 500 px-per-unit constant and did not match the
+  instancer or the renders, now sized from the active projection ([1][1] of the projection matrix
+  x half the GL viewport height, so the orbit camera and a looked-through Camera3D both match,
+  512 px cap; Volume3D/ReadVDB splat previews keep the old scale); Scatter3D gained a
+  viewport-only **Display Size** multiplier (read by Viewport3D by knob name `displaySize`,
+  no evaluate-on-change, repaint via knobChanged).
 - **PatchFill Detail tab: texture-bombed clone stamps (2026-10-13)** — the user's follow-up: the
   lattice ramp is only ever smooth, so bring texture back the way texture bombing does. Third
   input **Detail**, Detail page: Amount, Source (Band ring / Region rect / Detail input at the
