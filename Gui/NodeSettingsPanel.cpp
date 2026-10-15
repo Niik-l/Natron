@@ -45,10 +45,10 @@
 #include "Engine/NodeSerialization.h"
 #include "Engine/RotoLayer.h"
 #include "Engine/Utils.h" // convertFromPlainText
-#include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
+#include "Engine/Dev/Scene3D/ArchiveProvider.h"
 #include "Engine/Dev/Scene3D/GeoMaterialOverride.h"
 
-#include "Gui/AlembicTreeWidget.h"
+#include "Gui/ArchiveTreeWidget.h"
 #include "Gui/MaterialOverridePickerWidget.h"
 #include "Gui/Button.h"
 #include "Gui/Gui.h"
@@ -175,10 +175,11 @@ NodeSettingsPanel::initializeExtraGui(QVBoxLayout* layout)
     if (node) {
         EffectInstancePtr effect = node->getEffectInstance();
         if (effect) {
-            // ReadAlembicArchive — show a tree view of the archive's contents
-            // with per-entry checkboxes (drives the node's excludedPaths knob).
-            if (ReadAlembicArchive* archive = dynamic_cast<ReadAlembicArchive*>(effect.get())) {
-                AlembicTreeWidget* tree = new AlembicTreeWidget(archive, this);
+            // Archive nodes (ReadAlembicArchive / ReadGeoArchive) — show a
+            // tree view of the archive's contents with per-entry checkboxes
+            // (drives the node's excludedPaths knob).
+            if (dynamic_cast<ArchiveProvider*>(effect.get())) {
+                ArchiveTreeWidget* tree = new ArchiveTreeWidget(effect.get(), this);
                 layout->addWidget(tree);
             }
             // GeoMaterialOverride — show a checkable surface picker reading the

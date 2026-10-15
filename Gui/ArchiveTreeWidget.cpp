@@ -13,7 +13,7 @@
 #include <Python.h>
 // ***** END PYTHON BLOCK *****
 
-#include "AlembicTreeWidget.h"
+#include "ArchiveTreeWidget.h"
 
 #include <set>
 #include <sstream>
@@ -37,7 +37,8 @@ CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 
 #include "Engine/KnobTypes.h"
-#include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
+#include "Engine/EffectInstance.h"
+#include "Engine/Dev/Scene3D/ArchiveProvider.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -65,9 +66,10 @@ makeTypeIcon(bool isMesh)
     return QIcon(pix);
 }
 
-AlembicTreeWidget::AlembicTreeWidget(ReadAlembicArchive* archive, QWidget* parent)
+ArchiveTreeWidget::ArchiveTreeWidget(EffectInstance* archive, QWidget* parent)
     : QWidget(parent)
     , _archive(archive)
+    , _provider(archive ? dynamic_cast<ArchiveProvider*>(archive) : NULL)
     , _search(nullptr)
     , _tree(nullptr)
     , _suppressItemChanged(false)
@@ -91,15 +93,15 @@ AlembicTreeWidget::AlembicTreeWidget(ReadAlembicArchive* archive, QWidget* paren
 
     QPushButton* refreshBtn = new QPushButton(tr("Refresh"), this);
     refreshBtn->setToolTip(tr("Rebuild the tree from the archive's current state."));
-    QObject::connect(refreshBtn, &QPushButton::clicked, this, &AlembicTreeWidget::onRefreshClicked);
+    QObject::connect(refreshBtn, &QPushButton::clicked, this, &ArchiveTreeWidget::onRefreshClicked);
     toolbar->addWidget(refreshBtn);
 
     QPushButton* checkAllBtn = new QPushButton(tr("Check All"), this);
-    QObject::connect(checkAllBtn, &QPushButton::clicked, this, &AlembicTreeWidget::onCheckAllClicked);
+    QObject::connect(checkAllBtn, &QPushButton::clicked, this, &ArchiveTreeWidget::onCheckAllClicked);
     toolbar->addWidget(checkAllBtn);
 
     QPushButton* uncheckAllBtn = new QPushButton(tr("Uncheck All"), this);
-    QObject::connect(uncheckAllBtn, &QPushButton::clicked, this, &AlembicTreeWidget::onUncheckAllClicked);
+    QObject::connect(uncheckAllBtn, &QPushButton::clicked, this, &ArchiveTreeWidget::onUncheckAllClicked);
     toolbar->addWidget(uncheckAllBtn);
 
     mainLayout->addLayout(toolbar);
@@ -108,7 +110,7 @@ AlembicTreeWidget::AlembicTreeWidget(ReadAlembicArchive* archive, QWidget* paren
     _search = new QLineEdit(this);
     _search->setPlaceholderText(tr("Filter by name..."));
     _search->setClearButtonEnabled(true);
-    QObject::connect(_search, &QLineEdit::textChanged, this, &AlembicTreeWidget::onSearchTextChanged);
+    QObject::connect(_search, &QLineEdit::textChanged, this, &ArchiveTreeWidget::onSearchTextChanged);
     mainLayout->addWidget(_search);
 
     // Tree
@@ -163,37 +165,39 @@ AlembicTreeWidget::AlembicTreeWidget(ReadAlembicArchive* archive, QWidget* paren
     }
     _tree->setMinimumHeight(180);
 
-    QObject::connect(_tree, &QTreeWidget::itemChanged, this, &AlembicTreeWidget::onItemChanged);
+    QObject::connect(_tree, &QTreeWidget::itemChanged, this, &ArchiveTreeWidget::onItemChanged);
 
     // Right-click context menu
     _tree->setContextMenuPolicy(Qt::CustomContextMenu);
     QObject::connect(_tree, &QTreeWidget::customContextMenuRequested,
-                     this, &AlembicTreeWidget::onTreeContextMenuRequested);
+                     this, &ArchiveTreeWidget::onTreeContextMenuRequested);
 
     mainLayout->addWidget(_tree);
 
-    // Live refresh — when the archive reloads (filename change, Reload click,
-    // filter knob change), the tree rebuilds automatically.
+    // Live refresh - when the archive reloads (filename change, Reload click,
+    // filter knob change), the tree rebuilds automatically. Both archive nodes
+    // (ReadAlembicArchive / ReadGeoArchive) declare the same archiveReloaded()
+    // signal, so the connection is string-based to stay class-agnostic.
     if (_archive) {
-        QObject::connect(_archive, &ReadAlembicArchive::archiveReloaded,
-                         this, &AlembicTreeWidget::refresh);
+        QObject::connect(_archive, SIGNAL(archiveReloaded()),
+                         this, SLOT(refresh()));
     }
 
     rebuildFromArchive();
 }
 
-AlembicTreeWidget::~AlembicTreeWidget()
+ArchiveTreeWidget::~ArchiveTreeWidget()
 {
 }
 
 void
-AlembicTreeWidget::refresh()
+ArchiveTreeWidget::refresh()
 {
     // Skip the rebuild when WE triggered the reload by writing excludedPaths: the
     // archive's entry set is unchanged (only its visibility filter), the tree
     // already shows the right check states, and rebuilding here would run
     // _tree->clear() synchronously inside the itemChanged signal that started the
-    // write — deleting the clicked item out from under Qt (use-after-free crash).
+    // write - deleting the clicked item out from under Qt (use-after-free crash).
     // Legitimate reloads (file change, Reload button) still rebuild, and the
     // Refresh button calls rebuildFromArchive() directly.
     if (_applyingExcluded) return;
@@ -201,20 +205,20 @@ AlembicTreeWidget::refresh()
 }
 
 void
-AlembicTreeWidget::onRefreshClicked()
+ArchiveTreeWidget::onRefreshClicked()
 {
     rebuildFromArchive();
 }
 
 void
-AlembicTreeWidget::rebuildFromArchive()
+ArchiveTreeWidget::rebuildFromArchive()
 {
-    if (!_archive || !_tree) return;
+    if (!_archive || !_provider || !_tree) return;
 
     _suppressItemChanged = true;
     _tree->clear();
 
-    const std::vector<ArchiveTreeEntry> entries = _archive->getEntryTree();
+    const std::vector<ArchiveTreeEntry> entries = _provider->getEntryTree();
 
     // Read the current excluded set from the knob.
     std::set<std::string> excluded;
@@ -269,13 +273,13 @@ AlembicTreeWidget::rebuildFromArchive()
 }
 
 void
-AlembicTreeWidget::onSearchTextChanged(const QString& text)
+ArchiveTreeWidget::onSearchTextChanged(const QString& text)
 {
     applySearchFilter(text);
 }
 
 void
-AlembicTreeWidget::applySearchFilter(const QString& text)
+ArchiveTreeWidget::applySearchFilter(const QString& text)
 {
     if (!_tree) return;
     const QString needle = text.trimmed().toLower();
@@ -307,7 +311,7 @@ AlembicTreeWidget::applySearchFilter(const QString& text)
 }
 
 void
-AlembicTreeWidget::onTreeContextMenuRequested(const QPoint& pos)
+ArchiveTreeWidget::onTreeContextMenuRequested(const QPoint& pos)
 {
     if (!_tree) return;
     QMenu menu(_tree);
@@ -321,28 +325,28 @@ AlembicTreeWidget::onTreeContextMenuRequested(const QPoint& pos)
     checkBranch->setEnabled(haveItem);
     uncheckBranch->setEnabled(haveItem);
 
-    QObject::connect(expandAll,     &QAction::triggered, this, &AlembicTreeWidget::onExpandAllTriggered);
-    QObject::connect(collapseAll,   &QAction::triggered, this, &AlembicTreeWidget::onCollapseAllTriggered);
-    QObject::connect(checkBranch,   &QAction::triggered, this, &AlembicTreeWidget::onCheckBranchTriggered);
-    QObject::connect(uncheckBranch, &QAction::triggered, this, &AlembicTreeWidget::onUncheckBranchTriggered);
+    QObject::connect(expandAll,     &QAction::triggered, this, &ArchiveTreeWidget::onExpandAllTriggered);
+    QObject::connect(collapseAll,   &QAction::triggered, this, &ArchiveTreeWidget::onCollapseAllTriggered);
+    QObject::connect(checkBranch,   &QAction::triggered, this, &ArchiveTreeWidget::onCheckBranchTriggered);
+    QObject::connect(uncheckBranch, &QAction::triggered, this, &ArchiveTreeWidget::onUncheckBranchTriggered);
 
     menu.exec(_tree->viewport()->mapToGlobal(pos));
 }
 
 void
-AlembicTreeWidget::onExpandAllTriggered()
+ArchiveTreeWidget::onExpandAllTriggered()
 {
     if (_tree) _tree->expandAll();
 }
 
 void
-AlembicTreeWidget::onCollapseAllTriggered()
+ArchiveTreeWidget::onCollapseAllTriggered()
 {
     if (_tree) _tree->collapseAll();
 }
 
 void
-AlembicTreeWidget::setBranchChecked(QTreeWidgetItem* root, bool checked)
+ArchiveTreeWidget::setBranchChecked(QTreeWidgetItem* root, bool checked)
 {
     if (!root) return;
     _suppressItemChanged = true;
@@ -354,7 +358,7 @@ AlembicTreeWidget::setBranchChecked(QTreeWidgetItem* root, bool checked)
 }
 
 void
-AlembicTreeWidget::onCheckBranchTriggered()
+ArchiveTreeWidget::onCheckBranchTriggered()
 {
     if (!_tree) return;
     QTreeWidgetItem* sel = _tree->currentItem();
@@ -364,7 +368,7 @@ AlembicTreeWidget::onCheckBranchTriggered()
 }
 
 void
-AlembicTreeWidget::onUncheckBranchTriggered()
+ArchiveTreeWidget::onUncheckBranchTriggered()
 {
     if (!_tree) return;
     QTreeWidgetItem* sel = _tree->currentItem();
@@ -374,7 +378,7 @@ AlembicTreeWidget::onUncheckBranchTriggered()
 }
 
 void
-AlembicTreeWidget::onItemChanged(QTreeWidgetItem* /*item*/, int column)
+ArchiveTreeWidget::onItemChanged(QTreeWidgetItem* /*item*/, int column)
 {
     if (_suppressItemChanged) return;
     if (column != 0) return; // only the checkbox column matters
@@ -382,7 +386,7 @@ AlembicTreeWidget::onItemChanged(QTreeWidgetItem* /*item*/, int column)
 }
 
 void
-AlembicTreeWidget::onCheckAllClicked()
+ArchiveTreeWidget::onCheckAllClicked()
 {
     if (!_tree) return;
     _suppressItemChanged = true;
@@ -393,7 +397,7 @@ AlembicTreeWidget::onCheckAllClicked()
 }
 
 void
-AlembicTreeWidget::onUncheckAllClicked()
+ArchiveTreeWidget::onUncheckAllClicked()
 {
     if (!_tree) return;
     _suppressItemChanged = true;
@@ -404,7 +408,7 @@ AlembicTreeWidget::onUncheckAllClicked()
 }
 
 void
-AlembicTreeWidget::writeExcludedPathsToKnob()
+ArchiveTreeWidget::writeExcludedPathsToKnob()
 {
     if (!_archive || !_tree) return;
 
@@ -428,16 +432,16 @@ AlembicTreeWidget::writeExcludedPathsToKnob()
     KnobIPtr ep = _archive->getKnobByName("excludedPaths");
     KnobString* es = dynamic_cast<KnobString*>(ep.get());
     if (es) {
-        // setValue → knobChanged → loadAlembicFile → archiveReloaded → refresh().
+        // setValue -> knobChanged -> loadAlembicFile -> archiveReloaded -> refresh().
         // That cascade is synchronous and we're inside an itemChanged signal, so
         // guard refresh() against rebuilding the tree (and freeing the live item)
         // until this returns.
         _applyingExcluded = true;
-        es->setValue(ss.str()); // triggers knobChanged → archive re-filters
+        es->setValue(ss.str()); // triggers knobChanged -> archive re-filters
         _applyingExcluded = false;
     }
 }
 
 NATRON_NAMESPACE_EXIT
 
-#include "moc_AlembicTreeWidget.cpp"
+#include "moc_ArchiveTreeWidget.cpp"

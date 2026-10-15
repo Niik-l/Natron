@@ -35,7 +35,7 @@
 NATRON_NAMESPACE_ENTER
 
 /** One entry in a loaded archive's hierarchy, returned by
- *  ArchiveProvider::getEntryTree() for UI consumers (AlembicTreeWidget). */
+ *  ArchiveProvider::getEntryTree() for UI consumers (ArchiveTreeWidget). */
 struct ArchiveTreeEntry
 {
     std::string fullPath;        // "/Camera01Trackers/Tracker1"

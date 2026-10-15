@@ -1,4 +1,23 @@
 # Natron 3D System
+- **ArchiveTreeWidget: checkable entry tree for every archive node
+  (2026-10-15)** — the ReadAlembicArchive-only settings-panel tree is
+  generalized into `Gui/ArchiveTreeWidget.{h,cpp}`: it now takes any
+  EffectInstance implementing the `ArchiveProvider` interface, reads
+  `getEntryTree()` through the interface, writes the node's hidden
+  `excludedPaths` knob per checkbox (the filter machinery both archive
+  nodes already shared) and connects to the `archiveReloaded()` signal
+  by name (both ReadAlembicArchive and ReadGeoArchive declare it), so the
+  connection is class-agnostic. **ReadGeoArchive's settings panel now has
+  the same checkable hierarchy view as ReadAlembicArchive** — every
+  node/mesh entry listed with type/vertex columns, searchable, check/
+  uncheck all, branch check/uncheck, driving the live filter. Verified
+  headlessly by driving `excludedPaths` directly (the same knob the widget
+  writes): excluding "/node" on BoxAnimated.glb drops the visible entry
+  count and empties the render; clearing it restores the scene; the
+  refactored shared-runtime archive node still animates (f1 != f40).
+  GUI pass of the widget itself pending (it is the same widget logic
+  ReadAlembicArchive has been using).
+
 - **ReadGeo universal — glTF/FBX animation, Freeze at Frame, Bake Transforms
   (2026-10-15)** — ReadGeo and ReadGeoArchive now share one parse + evaluation
   engine (`GeoArchiveRuntime` in ReadGeoImport.{h,cpp}: the parsed archive, the
@@ -25,7 +44,8 @@
   RiggedFigure walk cycle animates (distinct deformed states per frame), the
   19-piece FBX spider renders as one assembled merged mesh, Avocado keeps its
   embedded texture. The `NATRON_DEBUG_GEOIO` dump now reports the built
-  merged/single geometry (frame, selection, bake flag). - **LensDefocus stack merged (2026-10-23/24)** — another agent's work, merged by three fast-forwards
+  merged/single geometry (frame, selection, bake flag).
+- **LensDefocus stack merged (2026-10-23/24)** — another agent's work, merged by three fast-forwards
   (RB-2.6 62d278bbb, b84b6d484, f13f6b4f8; Cycles fork feature/cycles-deep 3a20cc0b1). Per-commit
   details, probes, the regression testbed and the known limitations live OUTSIDE the repo in
   `complex_tools/zdefocus/HANDOFF.md`, `MERGE.md`, `MERGE_2.md` (the local tree only). In short:

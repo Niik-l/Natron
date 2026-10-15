@@ -9,8 +9,8 @@
  * (at your option) any later version.
  * ***** END LICENSE BLOCK ***** */
 
-#ifndef NATRON_GUI_ALEMBICTREEWIDGET_H
-#define NATRON_GUI_ALEMBICTREEWIDGET_H
+#ifndef NATRON_GUI_ARCHIVETREEWIDGET_H
+#define NATRON_GUI_ARCHIVETREEWIDGET_H
 
 // ***** BEGIN PYTHON BLOCK *****
 #include <Python.h>
@@ -30,13 +30,14 @@ class QTreeWidgetItem;
 
 NATRON_NAMESPACE_ENTER
 
-class ReadAlembicArchive;
+class EffectInstance;
 
 /**
- * @brief Tree-view widget for ReadAlembicArchive.
+ * @brief Tree-view widget for archive nodes (any EffectInstance implementing
+ * ArchiveProvider — ReadAlembicArchive, ReadGeoArchive).
  *
  * Lives in the node's settings panel (added by NodeSettingsPanel::initializeExtraGui
- * when the node is a ReadAlembicArchive). Displays the archive's full hierarchy
+ * when the node implements ArchiveProvider). Displays the archive's full hierarchy
  * with type/vertex/sample columns and checkboxes for selective import.
  *
  * State persistence: each checkbox toggle rewrites the archive's hidden
@@ -44,7 +45,7 @@ class ReadAlembicArchive;
  * knobChanged handler then triggers a filter-only reload that respects the new
  * exclusion set. Saved with the project; restored on load.
  */
-class AlembicTreeWidget
+class ArchiveTreeWidget
     : public QWidget
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
@@ -52,8 +53,10 @@ GCC_DIAG_SUGGEST_OVERRIDE_OFF
 GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
-    AlembicTreeWidget(ReadAlembicArchive* archive, QWidget* parent = nullptr);
-    virtual ~AlembicTreeWidget();
+    /** @param archive The archive node — must implement ArchiveProvider and
+     *  declare an archiveReloaded() signal (both archive nodes do). Not owned. */
+    ArchiveTreeWidget(EffectInstance* archive, QWidget* parent = nullptr);
+    virtual ~ArchiveTreeWidget();
 
 public Q_SLOTS:
     /** @brief Rebuild the tree from the archive's current parsed hierarchy.
@@ -79,7 +82,8 @@ private:
     void setBranchChecked(QTreeWidgetItem* root, bool checked);
     void applySearchFilter(const QString& text);
 
-    ReadAlembicArchive* _archive;     // not owned
+    EffectInstance* _archive;         // not owned (the archive EffectInstance)
+    class ArchiveProvider* _provider; // the archive's ArchiveProvider interface (not owned)
     QLineEdit* _search;
     QTreeWidget* _tree;
     bool _suppressItemChanged;        // prevent recursion while we build the tree
@@ -90,4 +94,4 @@ private:
 
 NATRON_NAMESPACE_EXIT
 
-#endif // NATRON_GUI_ALEMBICTREEWIDGET_H
+#endif // NATRON_GUI_ARCHIVETREEWIDGET_H
