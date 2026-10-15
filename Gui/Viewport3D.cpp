@@ -1119,10 +1119,12 @@ Viewport3D::initializeGL()
         const char* vtxSrc =
             "#version 430 compatibility\n"
             "attribute float psize;\n"
+            "uniform float u_pxPerUnit;\n"   // pixels per world unit at depth 1: viewH / (2 tan(fov/2))
+            "uniform float u_maxPx;\n"       // cap so a camera inside the cloud cannot white out the view
             "varying vec4 vColor;\n"
             "void main() {\n"
             "    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
-            "    gl_PointSize = max(1.0, psize * 500.0 / gl_Position.w);\n"
+            "    gl_PointSize = clamp(psize * u_pxPerUnit / max(gl_Position.w, 1e-4), 1.0, u_maxPx);\n"
             "    vColor = gl_Color;\n"
             "}\n";
         const char* fragSrc =
@@ -4797,6 +4799,10 @@ drawSoftSplatBuffer(const std::vector<float>& buf, GLuint shaderProg, bool shade
 
     if (shaderReady) {
         glUseProgram(shaderProg);
+        // Volume splats keep the historical fixed scale (their "size" is a
+        // preview splat radius, not a geometric diameter).
+        glUniform1f(glGetUniformLocation(shaderProg, "u_pxPerUnit"), 500.0f);
+        glUniform1f(glGetUniformLocation(shaderProg, "u_maxPx"), 4096.0f);
         glEnable(GL_PROGRAM_POINT_SIZE);
         glEnable(GL_POINT_SPRITE);
         glEnableClientState(GL_VERTEX_ARRAY);
@@ -5412,6 +5418,15 @@ Viewport3D::drawParticlesNode(const SceneNode& sn) const
 
     int count = data->numParticles();
 
+    // Optional viewport-only size multiplier (Scatter3D "Display Size"): lets the
+    // preview points be shrunk when the Size values are tiny for small prototypes.
+    float displayScale = 1.0f;
+    {
+        KnobIPtr dk = effect->getKnobByName("displaySize");
+        KnobDouble* dd = dk ? dynamic_cast<KnobDouble*>(dk.get()) : NULL;
+        if (dd) displayScale = std::max(0.0f, (float)dd->getValueAtTime(time));
+    }
+
     // Build interleaved buffer: [px, py, pz, r, g, b, a, size] per particle
     const int FLOATS_PER_PARTICLE = 8;
     std::vector<float> buf(count * FLOATS_PER_PARTICLE);
@@ -5426,7 +5441,7 @@ Viewport3D::drawParticlesNode(const SceneNode& sn) const
         buf[i * FLOATS_PER_PARTICLE + 4] = p.g;
         buf[i * FLOATS_PER_PARTICLE + 5] = p.b;
         buf[i * FLOATS_PER_PARTICLE + 6] = alpha;
-        buf[i * FLOATS_PER_PARTICLE + 7] = p.size;
+        buf[i * FLOATS_PER_PARTICLE + 7] = p.size * displayScale;
     }
 
     // Upload to VBO
@@ -5444,6 +5459,19 @@ Viewport3D::drawParticlesNode(const SceneNode& sn) const
     if (_imp->particleShaderReady) {
         // Shader path: per-particle size via gl_PointSize + soft circle
         glUseProgram(_imp->particleShaderProgram);
+        // Particle size is a world-space diameter (ScanlineRender / Cycles /
+        // ParticleInstance all use size * 0.5 as the radius), so project it
+        // exactly: pixels = size * (viewH / (2 tan(fov/2))) / depth. The
+        // projection matrix [1][1] is 1/tan(fov/2) for both the orbit camera
+        // and a looked-through Camera3D; the GL viewport height is the camera
+        // gate when one is active.
+        {
+            GLint vp[4] = {0, 0, 0, 0};
+            glGetIntegerv(GL_VIEWPORT, vp);
+            const float pxPerUnit = _imp->cameraProjection[5] * 0.5f * (float)std::max(1, (int)vp[3]);
+            glUniform1f(glGetUniformLocation(_imp->particleShaderProgram, "u_pxPerUnit"), pxPerUnit);
+            glUniform1f(glGetUniformLocation(_imp->particleShaderProgram, "u_maxPx"), 512.0f);
+        }
         glEnable(GL_PROGRAM_POINT_SIZE);
         glEnable(GL_POINT_SPRITE);
 
