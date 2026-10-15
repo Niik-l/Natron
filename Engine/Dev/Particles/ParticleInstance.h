@@ -31,6 +31,7 @@
 #include "../../EffectInstance.h"
 #include "ParticleData.h"
 #include "ParticleProvider.h"
+#include "../Scene3D/GeoExtract.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 
@@ -105,6 +106,9 @@ public:
         float sx, sy, sz;        // scale (from particle size)
         float r, g, b, a;        // color tint
         float vx, vy, vz;        // velocity (for motion blur / orientation in renderer)
+        float m[16];             // instance matrix, column-major: translate * rotate * scale. Renderers
+                                 // use this (rx/ry/rz cannot express normal alignment) and post-multiply
+                                 // the prototype's own transform from getPrototypeMesh().
     };
 
     void getInstances(double time, std::vector<GeoInstance>& outInstances);
@@ -115,6 +119,14 @@ public:
      *  ParticleData is a shared immutable snapshot and must not be mutated. */
     void getInstancesFromData(const ParticleDataPtr& pdata, double time,
                               std::vector<GeoInstance>& outInstances);
+
+    /** The prototype on geo input `geoIdx` (0-3) as a triangle soup, with its
+     *  material and its own transform (identity when Apply Prototype Transform
+     *  is off). Any geo the 3D system renders works: primitives, ReadGeo,
+     *  GeoBuilder, ReadAlembicArchive. False when nothing usable is connected. */
+    bool getPrototypeMesh(int geoIdx, double time, TriMesh& out) const;
+
+    bool getApplyPrototypeTransform() const;
 
 private:
 

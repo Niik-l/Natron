@@ -5267,50 +5267,135 @@ Viewport3D::drawParticlesNode(const SceneNode& sn) const
     if (!app) return;
     double time = app->getTimeLine()->currentFrame();
 
-    // If this is a ParticleInstance node, draw instanced geo wireframes
+    // If this is a ParticleInstance node, draw the instanced prototypes.
     ParticleInstance* instancer = dynamic_cast<ParticleInstance*>(effect.get());
     if (instancer) {
         std::vector<ParticleInstance::GeoInstance> instances;
         instancer->getInstances(time, instances);
         if (instances.empty()) return;
 
-        // Limit viewport preview to avoid slowdown
-        int maxPreview = std::min((int)instances.size(), 2000);
+        // Prototypes once per paint. Shaded (and textured, through the material's
+        // viewport preview texture) while the total triangle count stays under a
+        // budget; above it each instance is its prototype's bounding box in wire.
+        struct Proto {
+            TriMesh mesh;
+            bool valid;
+            const float* texPix; int texW, texH;
+            Material3D::CachedTexturePtr texHold;   // keeps the pixels alive while we read them
+            float baseCol[3];
+            Proto() : valid(false), texPix(NULL), texW(0), texH(0) { baseCol[0] = baseCol[1] = baseCol[2] = 0.45f; }
+        };
+        Proto protos[4];
+        size_t instPerProto[4] = {0, 0, 0, 0};
+        for (size_t i = 0; i < instances.size(); ++i) {
+            const int gi = instances[i].geoSourceIndex;
+            if (gi >= 0 && gi < 4) ++instPerProto[gi];
+        }
+        size_t totalTris = 0;
+        for (int g = 0; g < 4; ++g) {
+            if (!instPerProto[g]) continue;
+            Proto& P = protos[g];
+            P.valid = instancer->getPrototypeMesh(g, time, P.mesh);
+            if (!P.valid) continue;
+            totalTris += P.mesh.numTris() * instPerProto[g];
+            if (P.mesh.material) {
+                MaterialProvider* mat = P.mesh.material;
+                if (mat->hasMaterialInput() && mat->getConnectedMaterial()) mat = mat->getConnectedMaterial();
+                double cr, cg, cb;
+                mat->getMaterialBaseColor(time, cr, cg, cb);
+                P.baseCol[0] = (float)cr; P.baseCol[1] = (float)cg; P.baseCol[2] = (float)cb;
+                if (Material3D* m3d = dynamic_cast<Material3D*>(mat)) {
+                    m3d->updateCachedTexture(time);
+                    P.texHold = m3d->getCachedTexture();
+                    if (P.texHold && P.texHold->width > 0 && P.texHold->height > 0 &&
+                        !P.texHold->pixels.empty() && P.mesh.hasUVs()) {
+                        P.texPix = P.texHold->pixels.data();
+                        P.texW = P.texHold->width;
+                        P.texH = P.texHold->height;
+                    }
+                }
+            }
+        }
+        const size_t kTriBudget = 1500000;
+        const bool drawMeshes = totalTris > 0 && totalTris <= kTriBudget;
+        const size_t maxPreview = drawMeshes ? instances.size() : std::min<size_t>(instances.size(), 20000);
+        const ShadingMode mode = _imp->shadingMode;
+        const bool lit = (mode == eShaded || mode == eShadedWire);
+        float baseMV[16];
+        glGetFloatv(GL_MODELVIEW_MATRIX, baseMV);
 
         glEnable(GL_DEPTH_TEST);
         glLineWidth(1.0f);
 
-        for (int i = 0; i < maxPreview; ++i) {
+        for (size_t i = 0; i < maxPreview; ++i) {
             const ParticleInstance::GeoInstance& inst = instances[i];
+            const int gi = inst.geoSourceIndex;
+            if (gi < 0 || gi >= 4 || !protos[gi].valid) continue;
+            const Proto& P = protos[gi];
 
+            float full[16];
+            geoMat4Mul(full, inst.m, P.mesh.localMatrix);
             glPushMatrix();
-            glTranslatef(inst.px, inst.py, inst.pz);
-            if (inst.ry != 0) glRotatef(inst.ry, 0, 1, 0);
-            if (inst.rx != 0) glRotatef(inst.rx, 1, 0, 0);
-            if (inst.rz != 0) glRotatef(inst.rz, 0, 0, 1);
-            glScalef(inst.sx, inst.sy, inst.sz);
+            glMultMatrixf(full);
 
-            glColor4f(inst.r * 0.8f, inst.g * 0.8f, inst.b * 0.8f, 0.6f);
-
-            // Draw a simple wireframe box as proxy for any geo type
-            float s = 0.5f;
-            glBegin(GL_LINES);
-            // Bottom
-            glVertex3f(-s,-s,-s); glVertex3f( s,-s,-s);
-            glVertex3f( s,-s,-s); glVertex3f( s,-s, s);
-            glVertex3f( s,-s, s); glVertex3f(-s,-s, s);
-            glVertex3f(-s,-s, s); glVertex3f(-s,-s,-s);
-            // Top
-            glVertex3f(-s, s,-s); glVertex3f( s, s,-s);
-            glVertex3f( s, s,-s); glVertex3f( s, s, s);
-            glVertex3f( s, s, s); glVertex3f(-s, s, s);
-            glVertex3f(-s, s, s); glVertex3f(-s, s,-s);
-            // Verticals
-            glVertex3f(-s,-s,-s); glVertex3f(-s, s,-s);
-            glVertex3f( s,-s,-s); glVertex3f( s, s,-s);
-            glVertex3f( s,-s, s); glVertex3f( s, s, s);
-            glVertex3f(-s,-s, s); glVertex3f(-s, s, s);
-            glEnd();
+            if (drawMeshes && mode != eWireframe) {
+                float mv[16];
+                geoMat4Mul(mv, baseMV, full);
+                const bool tex = P.texPix != NULL;
+                if (tex) {
+                    bindPreviewTextureCached(_imp->previewGlTextures, _imp->paintSerial,
+                                             P.texPix, P.texW, P.texH, GL_REPEAT, GL_REPEAT, NULL);
+                    glEnable(GL_TEXTURE_2D);
+                }
+                const float cr = inst.r * (tex ? 1.f : P.baseCol[0]);
+                const float cg = inst.g * (tex ? 1.f : P.baseCol[1]);
+                const float cb = inst.b * (tex ? 1.f : P.baseCol[2]);
+                const std::vector<float>& V = P.mesh.verts;
+                const std::vector<int>& T = P.mesh.tris;
+                const std::vector<float>& UV = P.mesh.uvs;
+                glBegin(GL_TRIANGLES);
+                const size_t nt = P.mesh.numTris();
+                for (size_t t = 0; t < nt; ++t) {
+                    const float* pa = &V[(size_t)T[t * 3] * 3];
+                    const float* pb = &V[(size_t)T[t * 3 + 1] * 3];
+                    const float* pc = &V[(size_t)T[t * 3 + 2] * 3];
+                    const float f = lit ? ViewportFaceLitFactor(pa, pb, pc, mv) : 1.f;
+                    glColor3f(cr * f, cg * f, cb * f);
+                    if (tex) glTexCoord2f(UV[(t * 3) * 2], UV[(t * 3) * 2 + 1]);
+                    glVertex3fv(pa);
+                    if (tex) glTexCoord2f(UV[(t * 3 + 1) * 2], UV[(t * 3 + 1) * 2 + 1]);
+                    glVertex3fv(pb);
+                    if (tex) glTexCoord2f(UV[(t * 3 + 2) * 2], UV[(t * 3 + 2) * 2 + 1]);
+                    glVertex3fv(pc);
+                }
+                glEnd();
+                if (tex) {
+                    glDisable(GL_TEXTURE_2D);
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                }
+            } else {
+                // Wire proxy: the prototype's real bounding box.
+                const float* mn = P.mesh.bboxMin;
+                const float* mx = P.mesh.bboxMax;
+                glColor4f(inst.r * 0.8f, inst.g * 0.8f, inst.b * 0.8f, 0.6f);
+                glBegin(GL_LINES);
+                // Bottom
+                glVertex3f(mn[0], mn[1], mn[2]); glVertex3f(mx[0], mn[1], mn[2]);
+                glVertex3f(mx[0], mn[1], mn[2]); glVertex3f(mx[0], mn[1], mx[2]);
+                glVertex3f(mx[0], mn[1], mx[2]); glVertex3f(mn[0], mn[1], mx[2]);
+                glVertex3f(mn[0], mn[1], mx[2]); glVertex3f(mn[0], mn[1], mn[2]);
+                // Top
+                glVertex3f(mn[0], mx[1], mn[2]); glVertex3f(mx[0], mx[1], mn[2]);
+                glVertex3f(mx[0], mx[1], mn[2]); glVertex3f(mx[0], mx[1], mx[2]);
+                glVertex3f(mx[0], mx[1], mx[2]); glVertex3f(mn[0], mx[1], mx[2]);
+                glVertex3f(mn[0], mx[1], mx[2]); glVertex3f(mn[0], mx[1], mn[2]);
+                // Verticals
+                glVertex3f(mn[0], mn[1], mn[2]); glVertex3f(mn[0], mx[1], mn[2]);
+                glVertex3f(mx[0], mn[1], mn[2]); glVertex3f(mx[0], mx[1], mn[2]);
+                glVertex3f(mx[0], mn[1], mx[2]); glVertex3f(mx[0], mx[1], mx[2]);
+                glVertex3f(mn[0], mn[1], mx[2]); glVertex3f(mn[0], mx[1], mx[2]);
+                glEnd();
+            }
 
             glPopMatrix();
         }

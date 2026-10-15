@@ -66,6 +66,8 @@
 #include "ReadGeo.h"
 #include "../../CameraTrackerNode.h"
 #include "SceneGraph.h"
+#include "GeoExtract.h"
+#include "Material3D.h"
 #include "Sphere3D.h"
 #include "UVProject.h"
 #include "Project3D.h"
@@ -1486,12 +1488,16 @@ static const char* kInstanceFrag =
     "uniform int  u_writePref;\n"
     "uniform int  u_writeVelocity;\n"
     "uniform vec2 u_viewportSize;\n"
+    "uniform sampler2D u_tex;        // prototype material diffuse map (u_hasTexture == 1)\n"
+    "uniform int  u_hasTexture;\n"
     "layout(location = 0) out vec4 out_color;\n"
     "layout(location = 1) out vec4 out_normal;\n"
     "layout(location = 2) out vec4 out_uv;\n"
     "layout(location = 3) out vec4 out_pref;\n"
     "layout(location = 4) out vec4 out_velocity;\n"
     "void main() {\n"
+    "    vec4 col = v_color;\n"
+    "    if (u_hasTexture == 1) { vec4 tc = texture(u_tex, v_uv); col = vec4(col.rgb * tc.rgb, col.a * tc.a); }\n"
     "    if (u_shadingMode == 2) {\n"
     "        out_color = vec4(1.0);\n"
     "    } else if (u_shadingMode == 0) {\n"
@@ -1503,10 +1509,10 @@ static const char* kInstanceFrag =
     "            L = normalize(u_cameraPos - v_worldPos); lCol = vec3(1.0); lInt = 1.0;\n"
     "        }\n"
     "        float NL = max(0.0, dot(N, L));\n"
-    "        vec3 lit = v_color.rgb * (u_ambient + NL * lCol * lInt);\n"
-    "        out_color = vec4(lit, v_color.a);\n"
+    "        vec3 lit = col.rgb * (u_ambient + NL * lCol * lInt);\n"
+    "        out_color = vec4(lit, col.a);\n"
     "    } else {\n"
-    "        out_color = v_color;\n"
+    "        out_color = col;\n"
     "    }\n"
     "    if (u_transparency == 0) out_color.a = 1.0;\n"
     "    out_normal = (u_writeNormal == 1)   ? vec4(normalize(v_worldNormal), 1.0) : vec4(0.0);\n"
@@ -3873,6 +3879,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                 int numVerts = 0;
                 GLuint vao = 0;
                 GLuint vbo = 0;
+                GLuint tex = 0;                 // prototype material diffuse map (0 = none)
                 bool valid = false;
                 float bboxCenterY = 0.0f;
                 float bboxHalfY   = 1.0f;
@@ -3889,7 +3896,8 @@ ScanlineRender::render(const RenderActionArgs& args)
                                    const std::vector<int>& tris) {
                 const int numTris = (int)(tris.size() / 3);
                 g.interleaved.assign((size_t)numTris * 3 * 8, 0.0f);
-                const bool hasUvs = ((int)uvs.size() >= ((int)verts.size() / 3) * 2);
+                const bool cornerUvs = !uvs.empty() && uvs.size() == tris.size() * 2; // TriMesh: one uv per corner
+                const bool hasUvs = cornerUvs || ((int)uvs.size() >= ((int)verts.size() / 3) * 2);
                 for (int t = 0; t < numTris; ++t) {
                     int i0 = tris[t*3 + 0];
                     int i1 = tris[t*3 + 1];
@@ -3910,7 +3918,10 @@ ScanlineRender::render(const RenderActionArgs& args)
                         float* row = &g.interleaved[(size_t)(t*3 + k) * 8];
                         row[0] = pos[k][0]; row[1] = pos[k][1]; row[2] = pos[k][2];
                         row[3] = nx;        row[4] = ny;        row[5] = nz;
-                        if (hasUvs) {
+                        if (cornerUvs) {
+                            row[6] = uvs[(size_t)(t*3 + k)*2 + 0];
+                            row[7] = uvs[(size_t)(t*3 + k)*2 + 1];
+                        } else if (hasUvs) {
                             row[6] = uvs[idx[k]*2 + 0];
                             row[7] = uvs[idx[k]*2 + 1];
                         }
@@ -3920,74 +3931,46 @@ ScanlineRender::render(const RenderActionArgs& args)
                 g.valid = (g.numVerts > 0);
             };
 
-            // Extract local meshes from each connected geo input.
+            // Extract local meshes from each connected geo input. GeoExtract covers
+            // every geo the 3D system renders (primitives, ReadGeo, GeoBuilder,
+            // ReadAlembicArchive), so an instanced Megascans ReadGeo draws here too.
+            // protoLocal = each prototype's own transform, post-multiplied per instance.
+            float protoLocal[4][16];
             for (int g = 0; g < 4; ++g) {
-                EffectInstancePtr geoInput = particleInstancer->getInput(g + 1);
-                if (!geoInput) continue;
-
-                std::vector<float> verts;
-                std::vector<float> uvs;
-                std::vector<int> tris;
-
-                // Try Cube3D
-                Cube3D* cube = dynamic_cast<Cube3D*>(geoInput.get());
-                if (cube) {
-                    std::vector<Cube3D::CubeVertex> cv;
-                    cube->generateCubeMesh(args.time, cv, tris);
-                    verts.resize(cv.size() * 3);
-                    uvs.resize(cv.size() * 2);
-                    for (size_t v = 0; v < cv.size(); ++v) {
-                        verts[v*3]   = cv[v].x;
-                        verts[v*3+1] = cv[v].y;
-                        verts[v*3+2] = cv[v].z;
-                        uvs[v*2]     = cv[v].u;
-                        uvs[v*2+1]   = cv[v].v;
-                    }
-                } else {
-                    // Try Sphere3D — generate a simple unit-radius mesh with
-                    // spherical UVs (longitude=u, latitude=v).
-                    Sphere3D* sphere = dynamic_cast<Sphere3D*>(geoInput.get());
-                    if (sphere) {
-                        const int rings = 16, sectors = 24;
-                        float rad = 0.5f;
-                        for (int r = 0; r <= rings; ++r) {
-                            float phi = (float)M_PI * r / rings;
-                            float vCoord = (float)r / (float)rings;
-                            for (int s = 0; s <= sectors; ++s) {
-                                float theta = 2.0f * (float)M_PI * s / sectors;
-                                float uCoord = (float)s / (float)sectors;
-                                verts.push_back(rad * std::sin(phi) * std::cos(theta));
-                                verts.push_back(rad * std::cos(phi));
-                                verts.push_back(rad * std::sin(phi) * std::sin(theta));
-                                uvs.push_back(uCoord);
-                                uvs.push_back(vCoord);
-                            }
-                        }
-                        for (int r = 0; r < rings; ++r) {
-                            for (int s = 0; s < sectors; ++s) {
-                                int i0 = r * (sectors + 1) + s;
-                                int i1 = i0 + sectors + 1;
-                                tris.push_back(i0);     tris.push_back(i1);     tris.push_back(i0 + 1);
-                                tris.push_back(i0 + 1); tris.push_back(i1);     tris.push_back(i1 + 1);
-                            }
-                        }
-                    }
-                }
-
-                if (verts.empty() || tris.empty()) continue;
+                SceneGraph::buildTRS(0,0,0, 0,0,0, 1,1,1, protoLocal[g]);
+                TriMesh pm;
+                if (!particleInstancer->getPrototypeMesh(g, args.time, pm)) continue;
+                std::memcpy(protoLocal[g], pm.localMatrix, sizeof(protoLocal[g]));
 
                 // Y-axis bbox for cheat-mode stretch-fade uniforms.
-                float mnY = verts[1], mxY = verts[1];
-                for (size_t v = 0; v < verts.size() / 3; ++v) {
-                    float y = verts[v * 3 + 1];
-                    if (y < mnY) mnY = y;
-                    if (y > mxY) mxY = y;
-                }
-                geos[g].bboxCenterY = (mnY + mxY) * 0.5f;
-                geos[g].bboxHalfY   = std::max(0.0001f, (mxY - mnY) * 0.5f);
+                geos[g].bboxCenterY = (pm.bboxMin[1] + pm.bboxMax[1]) * 0.5f;
+                geos[g].bboxHalfY   = std::max(0.0001f, (pm.bboxMax[1] - pm.bboxMin[1]) * 0.5f);
 
-                buildFlatGeo(geos[g], verts, uvs, tris);
+                buildFlatGeo(geos[g], pm.verts, pm.uvs, pm.tris);
                 if (!geos[g].valid) continue;
+
+                // The prototype material's Diffuse map (Material3D input 0), the same
+                // preview-size texture the 3D viewport shows, so instances are textured.
+                if (pm.material && pm.material->hasMaterialInput() && pm.hasUVs()) {
+                    Material3D* m3d = dynamic_cast<Material3D*>(pm.material->getConnectedMaterial());
+                    if (m3d) {
+                        m3d->updateCachedTexture(args.time);
+                        Material3D::CachedTexturePtr ct = m3d->getCachedTexture();
+                        if (ct && ct->width > 0 && ct->height > 0 &&
+                            ct->pixels.size() >= (size_t)ct->width * (size_t)ct->height * 4) {
+                            glGenTextures(1, &geos[g].tex);
+                            glActiveTexture(GL_TEXTURE0);
+                            glBindTexture(GL_TEXTURE_2D, geos[g].tex);
+                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+                            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F_ARB, ct->width, ct->height, 0,
+                                         GL_RGBA, GL_FLOAT, ct->pixels.data());
+                            glBindTexture(GL_TEXTURE_2D, 0);
+                        }
+                    }
+                }
 
                 // Upload to a per-geo-type VBO/VAO, reused across all instances.
                 glGenVertexArrays(1, &geos[g].vao);
@@ -4021,6 +4004,9 @@ ScanlineRender::render(const RenderActionArgs& args)
             const GLint locFadeOn        = glGetUniformLocation(glslInstanceProg, "u_fadeEnabled");
             const GLint locFadeCenterY   = glGetUniformLocation(glslInstanceProg, "u_fadeCenterY");
             const GLint locFadeHalfY     = glGetUniformLocation(glslInstanceProg, "u_fadeHalfY");
+            const GLint locTex           = glGetUniformLocation(glslInstanceProg, "u_tex");
+            const GLint locHasTexture    = glGetUniformLocation(glslInstanceProg, "u_hasTexture");
+            if (locTex >= 0) glUniform1i(locTex, 0);
             const GLint locShadingMode   = glGetUniformLocation(glslInstanceProg, "u_shadingMode");
             const GLint locHasLight      = glGetUniformLocation(glslInstanceProg, "u_hasLight");
             const GLint locLightPos      = glGetUniformLocation(glslInstanceProg, "u_lightPos");
@@ -4187,8 +4173,21 @@ ScanlineRender::render(const RenderActionArgs& args)
                     std::memcpy(RS, tmp, sizeof(RS));
                 }
 
+                // Full instance matrix. The velocity-stretch cheat keeps its own T*RS
+                // build; otherwise the instancer's matrix (normal alignment, random
+                // rotation / scale) at the sub-frame position. Then the prototype's own
+                // transform, so a ReadGeo scaled cm->m instances at the right size.
                 float localMatrix[16];
-                mat4Mul(localMatrix, T, RS);
+                {
+                    float instM[16];
+                    if (fadeEnabled) {
+                        mat4Mul(instM, T, RS);
+                    } else {
+                        std::memcpy(instM, inst.m, sizeof(instM));
+                        instM[12] = instPx; instM[13] = instPy; instM[14] = instPz;
+                    }
+                    mat4Mul(localMatrix, instM, protoLocal[gi]);
+                }
 
                 // normalMatrix = transpose(inverse(localMatrix3x3)). Uses
                 // the same trick as renderGeoObjectGlsl: embed 3x3 in a 4x4,
@@ -4219,9 +4218,9 @@ ScanlineRender::render(const RenderActionArgs& args)
                 // velocity vector across the shutter.
                 float prevLocalMatrix[16];
                 std::memcpy(prevLocalMatrix, localMatrix, sizeof(prevLocalMatrix));
-                prevLocalMatrix[12] = instPx - inst.vx;
-                prevLocalMatrix[13] = instPy - inst.vy;
-                prevLocalMatrix[14] = instPz - inst.vz;
+                prevLocalMatrix[12] = localMatrix[12] - inst.vx;
+                prevLocalMatrix[13] = localMatrix[13] - inst.vy;
+                prevLocalMatrix[14] = localMatrix[14] - inst.vz;
 
                 if (locLocal      >= 0) glUniformMatrix4fv(locLocal,     1, GL_FALSE, localMatrix);
                 if (locPrevLocal  >= 0) glUniformMatrix4fv(locPrevLocal, 1, GL_FALSE, prevLocalMatrix);
@@ -4231,9 +4230,16 @@ ScanlineRender::render(const RenderActionArgs& args)
                 if (locFadeCenterY>= 0) glUniform1f(locFadeCenterY, geo.bboxCenterY);
                 if (locFadeHalfY  >= 0) glUniform1f(locFadeHalfY,   geo.bboxHalfY);
 
+                if (locHasTexture >= 0) glUniform1i(locHasTexture, geo.tex ? 1 : 0);
+                if (geo.tex) {
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, geo.tex);
+                }
+
                 glBindVertexArray(geo.vao);
                 glDrawArrays(GL_TRIANGLES, 0, geo.numVerts);
             }
+            glBindTexture(GL_TEXTURE_2D, 0);
 
             glBindVertexArray(0);
             glUseProgram(0);
@@ -4242,6 +4248,7 @@ ScanlineRender::render(const RenderActionArgs& args)
             for (int g = 0; g < 4; ++g) {
                 if (geos[g].vbo) glDeleteBuffers(1, &geos[g].vbo);
                 if (geos[g].vao) glDeleteVertexArrays(1, &geos[g].vao);
+                if (geos[g].tex) glDeleteTextures(1, &geos[g].tex);
             }
 
             // Restore single-attachment draw buffer + unified blend for the

@@ -1851,100 +1851,81 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 particleInstancer->getInstances(time, instances);
                 if (instances.empty()) continue;
 
-                // Build prototype meshes once per geo source (Cycles instancing = shared ccl::Mesh)
+                // Build prototype meshes once per geo source (Cycles instancing = shared ccl::Mesh).
+                // GeoExtract flattens any geo the 3D system renders (primitives, ReadGeo with
+                // its Material3D, GeoBuilder, ReadAlembicArchive); the prototype's own transform
+                // is post-multiplied into every instance.
                 ccl::Mesh* protoMeshes[4] = {nullptr, nullptr, nullptr, nullptr};
+                ccl::Transform protoTfm[4];
                 for (int g = 0; g < 4; ++g) {
-                    EffectInstancePtr geoInput = particleInstancer->getInput(g + 1);
-                    if (!geoInput) continue;
+                    protoTfm[g] = ccl::transform_identity();
+                    TriMesh pm;
+                    if (!particleInstancer->getPrototypeMesh(g, time, pm)) continue;
 
-                    std::vector<ccl::float3> verts;
-                    std::vector<int> tris;
-
-                    // Cube3D: unit cube
-                    if (dynamic_cast<Cube3D*>(geoInput.get())) {
-                        float s = 0.5f;
-                        verts = {
-                            {-s,-s,-s}, {s,-s,-s}, {s,s,-s}, {-s,s,-s},
-                            {-s,-s, s}, {s,-s, s}, {s,s, s}, {-s,s, s}
-                        };
-                        tris = {
-                            0,1,2, 0,2,3, // back
-                            4,6,5, 4,7,6, // front
-                            0,4,5, 0,5,1, // bottom
-                            2,6,7, 2,7,3, // top
-                            0,3,7, 0,7,4, // left
-                            1,5,6, 1,6,2  // right
-                        };
-                    }
-                    // Sphere3D: simple sphere
-                    else if (dynamic_cast<Sphere3D*>(geoInput.get())) {
-                        const int rings = 16, sectors = 24;
-                        float rad = 0.5f;
-                        for (int r = 0; r <= rings; ++r) {
-                            float phi = (float)M_PI * r / rings;
-                            for (int s = 0; s <= sectors; ++s) {
-                                float theta = 2.0f * (float)M_PI * s / sectors;
-                                verts.push_back(ccl::make_float3(
-                                    rad * std::sin(phi) * std::cos(theta),
-                                    rad * std::cos(phi),
-                                    rad * std::sin(phi) * std::sin(theta)));
-                            }
-                        }
-                        for (int r = 0; r < rings; ++r) {
-                            for (int s = 0; s < sectors; ++s) {
-                                int i0 = r * (sectors + 1) + s;
-                                int i1 = i0 + sectors + 1;
-                                tris.push_back(i0); tris.push_back(i1); tris.push_back(i0 + 1);
-                                tris.push_back(i0 + 1); tris.push_back(i1); tris.push_back(i1 + 1);
-                            }
-                        }
-                    }
-                    else {
-                        continue; // unsupported geo type
-                    }
-
-                    // Create the prototype mesh
                     ccl::Mesh* mesh = scene->create_node<ccl::Mesh>();
-                    mesh->reserve_mesh((int)verts.size(), (int)tris.size() / 3);
-                    for (const auto& v : verts) mesh->add_vertex(v);
-                    for (size_t t = 0; t < tris.size(); t += 3) {
-                        mesh->add_triangle(tris[t], tris[t+1], tris[t+2], 0, true);
+                    const int nv = (int)pm.numVerts();
+                    const int nt = (int)pm.numTris();
+                    mesh->reserve_mesh(nv, nt);
+                    for (int v = 0; v < nv; ++v) {
+                        mesh->add_vertex(ccl::make_float3(pm.verts[v * 3], pm.verts[v * 3 + 1], pm.verts[v * 3 + 2]));
+                    }
+                    for (int t = 0; t < nt; ++t) {
+                        mesh->add_triangle(pm.tris[t * 3], pm.tris[t * 3 + 1], pm.tris[t * 3 + 2], 0, true);
+                    }
+                    // Primitive generators supply analytic normals (flat cube faces, no pole
+                    // pinch); meshes leave Cycles to average its own.
+                    if (pm.normals.size() == (size_t)nv * 3) {
+                        ccl::Attribute* nAttr = mesh->attributes.add(ccl::ATTR_STD_VERTEX_NORMAL);
+                        ccl::float3* nDst = nAttr->data_float3();
+                        for (int v = 0; v < nv; ++v) {
+                            nDst[v] = ccl::make_float3(pm.normals[v * 3], pm.normals[v * 3 + 1], pm.normals[v * 3 + 2]);
+                        }
+                    }
+                    if (pm.hasUVs()) {
+                        ccl::Attribute* uvAttr = mesh->attributes.add(ccl::ATTR_STD_UV, ccl::ustring("UVMap"));
+                        ccl::float2* uvDst = uvAttr->data_float2();
+                        for (int c = 0; c < nt * 3; ++c) {
+                            uvDst[c] = ccl::make_float2(pm.uvs[c * 2], pm.uvs[c * 2 + 1]);
+                        }
                     }
 
-                    // Use the particle color shader (created per-instance below)
+                    // The prototype's material: its Material3D input is resolved inside
+                    // createMaterialShader (textures, displacement method, opacity...). A
+                    // downstream clay / shadow-pass override wins, as for every other object.
+                    ccl::Shader* protoShader = nullptr;
+                    if (materialOverride) {
+                        protoShader = createMaterialShader(scene, materialOverride, time);
+                    } else if (pm.material) {
+                        protoShader = createMaterialShader(scene, pm.material, time);
+                    }
+                    if (!protoShader) {
+                        protoShader = scene->create_node<ccl::Shader>();
+                        auto pg = ccl::make_unique<ccl::ShaderGraph>();
+                        ccl::PrincipledBsdfNode* bsdf = pg->create_node<ccl::PrincipledBsdfNode>();
+                        bsdf->set_base_color(ccl::make_float3(0.6f, 0.6f, 0.6f));
+                        bsdf->set_roughness(0.5f);
+                        pg->connect(bsdf->output("BSDF"), pg->output()->input("Surface"));
+                        protoShader->set_graph(std::move(pg));
+                        protoShader->tag_update(scene);
+                    }
+                    ccl::array<ccl::Node*> shaders;
+                    shaders.push_back_slow(protoShader);
+                    mesh->set_used_shaders(shaders);
+
+                    // Motion blur: Cycles allocates motion attribute space per mesh
+                    if (mbEnabled) {
+                        mesh->set_use_motion_blur(true);
+                        mesh->set_motion_steps(3);
+                    }
                     protoMeshes[g] = mesh;
+                    protoTfm[g] = natronMatrixToCyclesTransform(pm.localMatrix);
+                    fprintf(stderr, "[CyclesInstance] prototype %c '%s': %d tris, uv=%d, material=%s\n",
+                            'A' + g, pm.sourceName.c_str(), nt, (int)pm.hasUVs(), pm.material ? "node" : "default grey");
                 }
 
-                // Create a shared particle shader
-                ccl::Shader* instShader = scene->create_node<ccl::Shader>();
-                auto instGraph = ccl::make_unique<ccl::ShaderGraph>();
-                ccl::PrincipledBsdfNode* instBsdf = instGraph->create_node<ccl::PrincipledBsdfNode>();
-                instBsdf->set_base_color(ccl::make_float3(0.8f, 0.5f, 0.2f));
-                instBsdf->set_roughness(0.5f);
-                instGraph->connect(instBsdf->output("BSDF"), instGraph->output()->input("Surface"));
-                instShader->set_graph(std::move(instGraph));
-                instShader->tag_update(scene);
-
-                ccl::array<ccl::Node*> shaders;
-                shaders.push_back_slow(instShader);
-                for (int g = 0; g < 4; ++g) {
-                    if (protoMeshes[g]) protoMeshes[g]->set_used_shaders(shaders);
-                }
-
-                // Motion blur shutter timing — now hoisted outside the loop.
-                // Local aliases for readability inside this branch.
+                // Motion blur shutter timing — hoisted outside the loop.
                 const float shutterOpen  = mbShutterOpen;
                 const float shutterClose = mbShutterClose;
-
-                // Enable motion blur on all prototype meshes so Cycles allocates motion attribute space
-                if (mbEnabled) {
-                    for (int g = 0; g < 4; ++g) {
-                        if (protoMeshes[g]) {
-                            protoMeshes[g]->set_use_motion_blur(true);
-                            protoMeshes[g]->set_motion_steps(3);
-                        }
-                    }
-                }
 
                 // Create one ccl::Object per instance (shared mesh = native Cycles instancing)
                 for (const auto& inst : instances) {
@@ -1952,21 +1933,14 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     ccl::Mesh* proto = protoMeshes[inst.geoSourceIndex];
                     if (!proto) continue;
 
-                    // Helper to build a transform at a time offset (extrapolate position from velocity)
+                    // instance matrix (translate * rotate * scale, incl. normal alignment and
+                    // the per-ID random rotation / scale) x the prototype's own transform
+                    const ccl::Transform base = natronMatrixToCyclesTransform(inst.m) * protoTfm[inst.geoSourceIndex];
+
+                    // Transform at a shutter offset: extrapolate the position from the velocity
                     auto buildInstTfm = [&](float dt) -> ccl::Transform {
-                        ccl::Transform t = ccl::transform_identity();
-                        t = t * ccl::transform_translate(
-                            inst.px + inst.vx * dt,
-                            inst.py + inst.vy * dt,
-                            inst.pz + inst.vz * dt);
-                        // Extrinsic XYZ: build M = Rz * Ry * Rx (column-vector) so that
-                        // applying M to a vector rotates Rx-then-Ry-then-Rz around world
-                        // axes. Same convention as SceneGraph::buildTRS.
-                        if (inst.rz != 0) t = t * ccl::transform_rotate(inst.rz * (float)M_PI / 180.0f, ccl::make_float3(0, 0, 1));
-                        if (inst.ry != 0) t = t * ccl::transform_rotate(inst.ry * (float)M_PI / 180.0f, ccl::make_float3(0, 1, 0));
-                        if (inst.rx != 0) t = t * ccl::transform_rotate(inst.rx * (float)M_PI / 180.0f, ccl::make_float3(1, 0, 0));
-                        t = t * ccl::transform_scale(inst.sx, inst.sy, inst.sz);
-                        return t;
+                        if (dt == 0.0f) return base;
+                        return ccl::transform_translate(inst.vx * dt, inst.vy * dt, inst.vz * dt) * base;
                     };
 
                     ccl::Object* instObj = scene->create_node<ccl::Object>();
@@ -1975,7 +1949,6 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
                     if (mbEnabled) {
                         // 3 motion steps: open, center, close
-                        // (set_use_motion_blur is on the Mesh, already enabled above)
                         ccl::array<ccl::Transform> motionTfms;
                         motionTfms.resize(3);
                         motionTfms[0] = buildInstTfm(shutterOpen);
