@@ -969,54 +969,87 @@ ReadAlembicArchive::getSceneNodeAt(int idx, double time,
     outName = e.fullPath;
     outIsMesh = e.isMesh;
 
-    // Translate parentIndex from "index into entries[]" to "index into visible[]".
+    // Local matrix of ANY entry at `time` (the sample mapping works per
+    // entry) — used below for the entry itself and for folding filtered
+    // ancestors into it.
+    auto entryLocalAt = [&](int j, float out[16]) {
+        const ArchiveEntry& ej = _imp->entries[j];
+        // Identity as a safe default.
+        std::memset(out, 0, 16 * sizeof(float));
+        out[0] = out[5] = out[10] = out[15] = 1.0f;
+        if (ej.sampleMatrices.empty()) {
+            return;
+        }
+
+        // Map Natron time to sample index per the active time mode.
+        const int frameOffset = _imp->frameOffset.lock() ? _imp->frameOffset.lock()->getValue() : 0;
+        const int timeMode    = _imp->timeMode.lock()    ? _imp->timeMode.lock()->getValue()    : 0;
+        const int N = (int)ej.sampleMatrices.size();
+
+        int sampleIdx = 0;
+        if (timeMode == 1 && _imp->sourceFps > 0.0) {
+            // Time-based: locate the sample whose abcTime is closest to (Natron seconds at this time).
+            const double projectFps = getApp() ? getApp()->getProjectFrameRate() : 24.0;
+            const double abcTimeWanted = (time - 1.0 - frameOffset) / projectFps;
+            // Linear search — N is typically small (samples per archive entry).
+            double bestDelta = 1e18;
+            for (int i = 0; i < N; ++i) {
+                const double d = std::abs(ej.sampleTimes[i] - abcTimeWanted);
+                if (d < bestDelta) { bestDelta = d; sampleIdx = i; }
+            }
+        } else {
+            // Frame-by-frame: sample 0 lives at frame 1+frameOffset.
+            sampleIdx = (int)std::floor(time - 1.0 - frameOffset + 0.5);
+            if (sampleIdx < 0) sampleIdx = 0;
+            if (sampleIdx >= N) sampleIdx = N - 1;
+        }
+
+        // Convert Imath::M44d → column-major float[16].
+        // Imath stores M_col with row-major memory, where m_imath[i][j] = M_col[j][i].
+        // OpenGL column-major: out[col*4 + row] = M_col[row][col] = m_imath[col][row].
+        const Imath::M44d& m = ej.sampleMatrices[sampleIdx];
+        for (int c = 0; c < 4; ++c) {
+            for (int r = 0; r < 4; ++r) {
+                out[c * 4 + r] = (float)m[c][r];
+            }
+        }
+    };
+
+    entryLocalAt(srcIdx, outLocalMatrix);
+
+    // Translate parentIndex from "index into entries[]" to "index into
+    // visible[]". When the direct parent is filtered out (tree uncheck /
+    // excludedPaths), attach to the nearest VISIBLE ancestor and fold every
+    // filtered intermediate's local into this entry's local, so the
+    // SceneGraph chain still composes the full world — attaching to the
+    // archive root instead would drop every transform above the filtered
+    // parent and the subtree would render unassembled.
     outParentLocalIndex = -1;
-    if (e.parentIndex >= 0) {
+    int p = e.parentIndex;
+    while (p >= 0 && p < (int)_imp->entries.size()) {
+        int pv = -1;
         for (int v = 0; v < (int)_imp->visible.size(); ++v) {
-            if (_imp->visible[v] == e.parentIndex) { outParentLocalIndex = v; break; }
+            if (_imp->visible[v] == p) { pv = v; break; }
         }
-        // If parent was filtered out, this entry attaches to the archive root (-1).
-    }
-
-    // Identity as a safe default.
-    std::memset(outLocalMatrix, 0, 16 * sizeof(float));
-    outLocalMatrix[0] = outLocalMatrix[5] = outLocalMatrix[10] = outLocalMatrix[15] = 1.0f;
-
-    if (e.sampleMatrices.empty()) {
-        return true;
-    }
-
-    // Map Natron time to sample index per the active time mode.
-    const int frameOffset = _imp->frameOffset.lock() ? _imp->frameOffset.lock()->getValue() : 0;
-    const int timeMode    = _imp->timeMode.lock()    ? _imp->timeMode.lock()->getValue()    : 0;
-    const int N = (int)e.sampleMatrices.size();
-
-    int sampleIdx = 0;
-    if (timeMode == 1 && _imp->sourceFps > 0.0) {
-        // Time-based: locate the sample whose abcTime is closest to (Natron seconds at this time).
-        const double projectFps = getApp() ? getApp()->getProjectFrameRate() : 24.0;
-        const double abcTimeWanted = (time - 1.0 - frameOffset) / projectFps;
-        // Linear search — N is typically small (samples per archive entry).
-        double bestDelta = 1e18;
-        for (int i = 0; i < N; ++i) {
-            const double d = std::abs(e.sampleTimes[i] - abcTimeWanted);
-            if (d < bestDelta) { bestDelta = d; sampleIdx = i; }
+        if (pv >= 0) {
+            outParentLocalIndex = pv;
+            break;
         }
-    } else {
-        // Frame-by-frame: sample 0 lives at frame 1+frameOffset.
-        sampleIdx = (int)std::floor(time - 1.0 - frameOffset + 0.5);
-        if (sampleIdx < 0) sampleIdx = 0;
-        if (sampleIdx >= N) sampleIdx = N - 1;
-    }
-
-    // Convert Imath::M44d → column-major float[16].
-    // Imath stores M_col with row-major memory, where m_imath[i][j] = M_col[j][i].
-    // OpenGL column-major: out[col*4 + row] = M_col[row][col] = m_imath[col][row].
-    const Imath::M44d& m = e.sampleMatrices[sampleIdx];
-    for (int c = 0; c < 4; ++c) {
-        for (int r = 0; r < 4; ++r) {
-            outLocalMatrix[c * 4 + r] = (float)m[c][r];
+        float pl[16];
+        entryLocalAt(p, pl);
+        // outLocalMatrix = pl * outLocalMatrix (column-major).
+        float folded[16];
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                float sum = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    sum += pl[k * 4 + row] * outLocalMatrix[col * 4 + k];
+                }
+                folded[col * 4 + row] = sum;
+            }
         }
+        std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
+        p = _imp->entries[p].parentIndex;
     }
     return true;
 }

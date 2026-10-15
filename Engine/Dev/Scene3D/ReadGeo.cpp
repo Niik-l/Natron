@@ -419,8 +419,6 @@ ReadGeo::initializeKnobs()
     {
         KnobStringPtr infoKnob = AppManager::createKnob<KnobString>(this, tr("Info"));
         infoKnob->setName("info");
-        infoKnob->setAsMultiLine();
-        infoKnob->setAsLabel();
         infoKnob->setAnimationEnabled(false);
         infoKnob->setEvaluateOnChange(false);
         infoKnob->setIsPersistent(false);
@@ -1341,21 +1339,21 @@ ReadGeo::loadSceneGeo(const std::string& path)
     _imp->loadedObjectPath = _imp->partLabels[chosenIdx];
 
     std::ostringstream ss;
-    ss << fmtName << ": " << _imp->loadedObjectPath << "\n"
-       << "Vertices: " << (mesh ? mesh->numVertices : 0)
+    ss << fmtName << ": " << _imp->loadedObjectPath
+       << " | Vertices: " << (mesh ? mesh->numVertices : 0)
        << " | Faces: " << (mesh ? mesh->numFaces : 0)
        << " | Parts: " << _imp->meshEntries.size()
        << " | Materials: " << data.materials.size()
        << " | UVs: " << (mesh && mesh->hasUVs ? "yes" : "no");
     if (_imp->rt.hasAnimation) {
-        ss << "\nAnimated";
+        ss << " | Animated";
         if (_imp->freezeAtFrame.lock() && _imp->freezeAtFrame.lock()->getValue()) {
             ss << " (frozen at frame "
                << (_imp->freezeFrame.lock() ? _imp->freezeFrame.lock()->getValue() : 1) << ")";
         }
     }
     if (!mat) {
-        ss << "\nNo material in file";
+        ss << " | No material in file";
     }
     _imp->info.lock()->setValue(ss.str());
 

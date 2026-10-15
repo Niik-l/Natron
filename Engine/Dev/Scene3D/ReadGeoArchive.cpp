@@ -291,9 +291,12 @@ ReadGeoArchive::initializeKnobs()
     }
 
     {
+        // Compact read-only display: single-line LABEL mode renders the value
+        // as plain text in the row's label column — no field box, no reserved
+        // vertical space (multi-line mode is an expanding QTextEdit and ate
+        // the panel).
         KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Info"));
         k->setName("info");
-        k->setAsMultiLine();
         k->setAsLabel();
         k->setAnimationEnabled(false);
         k->setEvaluateOnChange(false);
@@ -531,16 +534,14 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
         _imp->visible.push_back(i);
     }
 
-    // Info string — multi-line so the label doesn't stretch the panel.
+    // Info string — compact single line (label-column display).
     std::size_t numXforms = 0, numMeshes = 0;
     for (std::size_t i = 0; i < data.nodes.size(); ++i) {
         if (data.nodes[i].isMesh) ++numMeshes; else ++numXforms;
     }
     std::ostringstream ss;
-    ss << "Total entries: " << data.nodes.size()
-       << " (nodes: " << numXforms
-       << ", meshes: " << numMeshes << ")\n"
-       << "Visible after filter: " << _imp->visible.size();
+    ss << data.nodes.size() << " entries (" << numXforms << " xform + " << numMeshes
+       << " mesh), " << _imp->visible.size() << " shown";
     if (_imp->rt.isFbx) {
         ss << " | FBX";
     }
@@ -550,13 +551,13 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
             const double fpsKnob = _imp->fps.lock() ? _imp->fps.lock()->getValue() : 0.0;
             const double fps = fpsKnob > 0.0 ? fpsKnob
                                              : (getApp() ? getApp()->getProjectFrameRate() : 24.0);
-            ss << "\nAnimated: " << dur << "s (~" << (int)(dur * fps) << " frames)";
+            ss << " | ~" << (int)(dur * fps) << "f anim";
         } else {
-            ss << "\nAnimated";
+            ss << " | anim";
         }
     }
     if (_imp->rt.bakeMeshWorld) {
-        ss << "\nBaked transforms";
+        ss << " | baked";
     }
     if (_imp->info.lock()) _imp->info.lock()->setValue(ss.str());
 
@@ -627,16 +628,38 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
         return true;
     }
 
-    // Translate parentIndex from "index into nodes[]" to "index into visible[]".
-    outParentLocalIndex = -1;
-    if (nd.parentIndex >= 0) {
-        for (int v = 0; v < (int)_imp->visible.size(); ++v) {
-            if (_imp->visible[v] == nd.parentIndex) { outParentLocalIndex = v; break; }
-        }
-        // Parent filtered out → this entry attaches to the archive root (-1).
-    }
+    const double fps = archiveFps();
+    const int frameOffset = _imp->frameOffsetKnobValue();
 
-    _imp->rt.nodeLocalAt(srcIdx, time, archiveFps(), _imp->frameOffsetKnobValue(), outLocalMatrix);
+    // The entry's own local matrix.
+    _imp->rt.nodeLocalAt(srcIdx, time, fps, frameOffset, outLocalMatrix);
+
+    // Translate parentIndex from "index into nodes[]" to "index into
+    // visible[]". When the direct parent is filtered out (tree uncheck /
+    // glob / excludedPaths), attach to the nearest VISIBLE ancestor and fold
+    // every filtered intermediate's local into this entry's local, so the
+    // SceneGraph chain composes exactly the world the runtime's
+    // worldMatrixAt computes (it always walks the full chain). Attaching to
+    // the archive root instead would drop every transform above the filtered
+    // parent — the subtree renders unassembled.
+    outParentLocalIndex = -1;
+    int p = nd.parentIndex;
+    while (p >= 0 && p < (int)_imp->rt.data.nodes.size()) {
+        int pv = -1;
+        for (int v = 0; v < (int)_imp->visible.size(); ++v) {
+            if (_imp->visible[v] == p) { pv = v; break; }
+        }
+        if (pv >= 0) {
+            outParentLocalIndex = pv;
+            break;
+        }
+        float pl[16];
+        _imp->rt.nodeLocalAt(p, time, fps, frameOffset, pl);
+        float folded[16];
+        geoArchiveMatMul(pl, outLocalMatrix, folded);
+        std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
+        p = _imp->rt.data.nodes[p].parentIndex;
+    }
     return true;
 }
 

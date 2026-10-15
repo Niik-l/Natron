@@ -1,4 +1,24 @@
 # Natron 3D System
+- **Filtered-parent fold + panel polish (2026-10-15, user feedback round)** —
+  **ReadGeo's Info knob reverted** (it had been switched to a multi-line label
+  unasked — an expanding QTextEdit that ate the File page; back to the plain
+  single-line string). **ReadGeoArchive's Info is now genuinely compact**:
+  single-line LABEL mode renders the value as plain text in the row's label
+  column — no field box, no reserved vertical space (the multi-line attempt
+  reserved a tall expanding box) — with a shortened one-line summary
+  (`72 entries (39 xform + 33 mesh), 72 shown | FBX | ~88f anim`).
+  **Chain-composition bug (both archive nodes, the likely cause of a
+  user's FBX mis-assembling unless baked):** when an entry's direct parent was
+  filtered out (tree uncheck / glob / excludedPaths), the child attached to
+  the ARCHIVE ROOT, dropping every transform above the filtered parent — the
+  subtree rendered unassembled. ReadGeoArchive and ReadAlembicArchive now
+  attach to the nearest VISIBLE ancestor and fold each filtered
+  intermediate's local into the entry's local, so the SceneGraph chain
+  composes exactly the world `worldMatrixAt` / `getEntryWorldMatrix` already
+  computed (they always walk the full chain). Bake Transforms stays default
+  OFF — with the root-normalization + fold fixes the chain path is the
+  structural default; bake remains the escape hatch until any file still
+  failing is diagnosed.
 - **FBX root normalization leak — the archive/merged hierarchy bug (2026-10-15,
   user-reported: a 72-entry FBX came in unassembled)** — ufbx applies the
   load-time normalization (target_axes rotation + target_unit_meters scale) to
