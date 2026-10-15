@@ -627,12 +627,23 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
         geoArchiveMatIdentity(outLocalMatrix);
         return true;
     }
-
     const double fps = archiveFps();
     const int frameOffset = _imp->frameOffsetKnobValue();
 
     // The entry's own local matrix.
     _imp->rt.nodeLocalAt(srcIdx, time, fps, frameOffset, outLocalMatrix);
+
+    // Root normalization: entries at the archive root carry the format-level
+    // correction (the ufbx unit/axes matrix) in their LOCAL so every chain
+    // composes it exactly once at the top — matching worldMatrixAt / the bake
+    // post-pass, which compose it at their own chain tops. Deep entries stay
+    // file-space; the (now true column-major) SceneGraph product converts
+    // their translations through the folded parent chain.
+    if (_imp->rt.data.rootMatrix.size() == 16 && nd.parentIndex == -1) {
+        float folded[16];
+        geoArchiveMatMul(_imp->rt.data.rootMatrix.data(), outLocalMatrix, folded);
+        std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
+    }
 
     // Translate parentIndex from "index into nodes[]" to "index into
     // visible[]". When the direct parent is filtered out (tree uncheck /
@@ -711,6 +722,18 @@ ReadGeoArchive::getEntryWorldMatrix(int idx, double time, float outWorld[16]) co
 
     _imp->rt.worldMatrixAt(_imp->visible[idx], time, archiveFps(),
                            _imp->frameOffsetKnobValue(), outWorld);
+    return true;
+}
+
+bool
+ReadGeoArchive::getRootMatrix(float outRoot[16]) const
+{
+    std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+    if (_imp->rt.data.rootMatrix.size() != 16) {
+        geoArchiveMatIdentity(outRoot);
+        return false;
+    }
+    std::memcpy(outRoot, _imp->rt.data.rootMatrix.data(), 16 * sizeof(float));
     return true;
 }
 

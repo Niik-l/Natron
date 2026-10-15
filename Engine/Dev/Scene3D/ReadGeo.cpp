@@ -1338,22 +1338,27 @@ ReadGeo::loadSceneGeo(const std::string& path)
     _imp->loadedFilePath = path;
     _imp->loadedObjectPath = _imp->partLabels[chosenIdx];
 
+    // Compact single line, same style as ReadGeoArchive's info.
     std::ostringstream ss;
-    ss << fmtName << ": " << _imp->loadedObjectPath
-       << " | Vertices: " << (mesh ? mesh->numVertices : 0)
-       << " | Faces: " << (mesh ? mesh->numFaces : 0)
-       << " | Parts: " << _imp->meshEntries.size()
-       << " | Materials: " << data.materials.size()
-       << " | UVs: " << (mesh && mesh->hasUVs ? "yes" : "no");
+    ss << _imp->meshEntries.size() << " parts, "
+       << (mesh ? mesh->numVertices : 0) << " verts, "
+       << (mesh ? mesh->numFaces : 0) << " faces";
+    if (_imp->rt.isFbx) {
+        ss << " | FBX";
+    } else {
+        ss << " | glTF";
+    }
+    if (mesh && mesh->hasUVs) {
+        ss << " | UVs";
+    }
     if (_imp->rt.hasAnimation) {
-        ss << " | Animated";
+        ss << " | anim";
         if (_imp->freezeAtFrame.lock() && _imp->freezeAtFrame.lock()->getValue()) {
-            ss << " (frozen at frame "
-               << (_imp->freezeFrame.lock() ? _imp->freezeFrame.lock()->getValue() : 1) << ")";
+            ss << " (frozen@" << (_imp->freezeFrame.lock() ? _imp->freezeFrame.lock()->getValue() : 1) << ")";
         }
     }
     if (!mat) {
-        ss << " | No material in file";
+        ss << " | no material";
     }
     _imp->info.lock()->setValue(ss.str());
 

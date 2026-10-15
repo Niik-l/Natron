@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "MeshData.h"
+#include "ReadGeoImport.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -90,6 +91,16 @@ public:
      *  by callers that don't go through SceneGraph (e.g. ScanlineRender).
      *  @return true on success; false if idx is out of range. */
     virtual bool getEntryWorldMatrix(int idx, double time, float outWorld[16]) const = 0;
+
+    /** @brief The archive's ROOT correction matrix (column-major float[16]) —
+     *  the file-format-level normalization every entry's chain must compose
+     *  under (e.g. the ufbx root node carrying target_axes + unit scale so
+     *  cm-authored FBX node transforms resolve to meters). Identity when the
+     *  format has none (glTF, Alembic). The provider's getEntryWorldMatrix
+     *  composes it; SceneGraph multiplies it onto the archive-root SceneNode's
+     *  local matrix so the emitted parent chain resolves in normalized space.
+     *  @return false = identity (the default). */
+    virtual bool getRootMatrix(float outRoot[16]) const { geoArchiveMatIdentity(outRoot); return false; }
 };
 
 NATRON_NAMESPACE_EXIT

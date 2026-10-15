@@ -39,6 +39,7 @@
 #include "../Particles/ParticleProvider.h"
 #include "ReadVDB.h"
 #include "MeshProvider.h"
+#include "ReadGeoImport.h"   // geoArchiveMatMul (true column-major product)
 #include "Volume3D.h"
 #include "Sphere3D.h"
 #include "Group3D.h"
@@ -61,6 +62,20 @@
 #endif
 
 NATRON_NAMESPACE_ENTER
+
+namespace {
+
+// TRUE column-major matrix product: out = a * b (out must not alias).
+// Chain composition everywhere in this file uses this; SceneGraph::multiply
+// is ImGuizmo's row-vector-convention helper (reversed product) and is kept
+// only where that order is the intended semantics.
+void
+matMulCM(const float a[16], const float b[16], float out[16])
+{
+    geoArchiveMatMul(a, b, out);
+}
+
+} // anonymous namespace
 
 SceneGraph::SceneGraph()
 {
@@ -140,6 +155,10 @@ SceneGraph::multiply(const float a[16], const float b[16], float out[16])
 {
     // Matrix multiply matching ImGuizmo::FPU_MatrixF_x_MatrixF exactly
     // out = a * b
+    // NOTE: ImGuizmo's helper is written for the ROW-vector convention — on
+    // column-major arrays it computes the REVERSED product (b * a). Kept for
+    // the archive user-transform post-multiply (whose 1:1 world-translation
+    // semantics depend on that order); chain composition uses matMulCM.
     float r[16];
     r[0]  = a[0]*b[0]  + a[1]*b[4]  + a[2]*b[8]   + a[3]*b[12];
     r[1]  = a[0]*b[1]  + a[1]*b[5]  + a[2]*b[9]   + a[3]*b[13];
@@ -425,6 +444,14 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             root.type = eSceneNodeGroup;
             root.name = nodeName;
             root.sourceNode = node;
+            // NOTE: the archive's root NORMALIZATION matrix (format-level —
+            // the ufbx unit/axes compensation on FBX files) is deliberately
+            // NOT put on this node's localMatrix: baked (world-space) mesh
+            // payloads attach here and would pick it up a second time
+            // (they're already normalized). It folds into each root-level
+            // entry's local via ArchiveProvider::getSceneNodeAt instead, and
+            // getEntryWorldMatrix / the runtime's bake post-pass compose it
+            // at their chain tops.
             // User transform on the archive root → propagates to every entry via
             // the worldMatrix chain, so it scales/moves the whole archive (the
             // T/R/S + Uniform Scale knobs on the node). Read by name so archives

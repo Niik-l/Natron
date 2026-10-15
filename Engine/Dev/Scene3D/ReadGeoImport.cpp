@@ -206,8 +206,10 @@ GeoArchiveRuntime::clearFrameCache()
 namespace {
 
 // Compose the entry's world matrix from an ALREADY-EVALUATED frame's node
-// locals (chain walk using data.nodes' parent indices) — used by the bake
-// post-pass below, which must not re-enter ensureFrameState.
+// locals (chain walk using data.nodes' parent indices), with the file's root
+// normalization composed once at the top — the same arithmetic worldMatrixAt
+// does — used by the bake post-pass below, which must not re-enter
+// ensureFrameState.
 void
 arcWorldFromLocals(const GeoArchiveResult& data,
                    const std::vector<float>& nodeLocals,
@@ -234,6 +236,11 @@ arcWorldFromLocals(const GeoArchiveResult& data,
                 r[col * 4 + row] = sum;
             }
         }
+        std::memcpy(outWorld, r, sizeof(r));
+    }
+    if (data.rootMatrix.size() == 16) {
+        float r[16];
+        geoArchiveMatMul(data.rootMatrix.data(), outWorld, r);
         std::memcpy(outWorld, r, sizeof(r));
     }
 }
@@ -273,30 +280,15 @@ GeoArchiveRuntime::ensureFrameState(double fps, int key) const
         evaluateGltfArchiveFrame(data, srcTime, *st);
     }
 
-    // Fold the file's root normalization (FBX unit/axes compensation carried
-    // by the ufbx root node — the hierarchy walk starts from the root's
-    // children, so the walked chains would otherwise miss it: a cm-authored
-    // file with x100 node scales would render x100 too large) into every
-    // root-level local. Every consumer chain — SceneGraph emission, entry
-    // world matrices, the bake post-pass below — composes from these locals.
-    if (data.rootMatrix.size() == 16 && !data.nodes.empty()) {
-        bool rootIdentity = true;
-        for (int i = 0; i < 16; ++i) {
-            if ((i % 5 == 0) ? (data.rootMatrix[i] != 1.0f)
-                             : (data.rootMatrix[i] != 0.0f)) {
-                rootIdentity = false; break;
-            }
-        }
-        if (!rootIdentity) {
-            for (std::size_t i = 0; i < data.nodes.size(); ++i) {
-                if (data.nodes[i].parentIndex == -1) {
-                    float composed[16];
-                    geoArchiveMatMul(data.rootMatrix.data(), &st->nodeLocals[i * 16], composed);
-                    std::memcpy(&st->nodeLocals[i * 16], composed, 16 * sizeof(float));
-                }
-            }
-        }
-    }
+    // NOTE: the file's root normalization (FBX unit/axes compensation) is NOT
+    // folded into the locals here — it must compose ONCE at the top of every
+    // chain, and folding it into root-level LOCALS in place would scale the
+    // file-space translations of their descendants twice (the deep locals are
+    // still in file units). The owning node exposes it through
+    // ArchiveProvider::getRootMatrix so every chain — SceneGraph emission,
+    // worldMatrixAt, the bake post-pass — composes rootMatrix * chain the
+    // same way. ensureFrameState therefore serves raw FILE-SPACE locals +
+    // payloads; the bake post-pass below is the only consumer-side fold.
 
     // Bake post-pass: when enabled, transform every mesh payload through its
     // entry's world matrix (composed from THIS frame's node locals) so the
@@ -371,7 +363,11 @@ GeoArchiveRuntime::worldMatrixAt(int nodeIdx, double time, double fps,
     if (nodeIdx < 0 || nodeIdx >= (int)data.nodes.size()) return;
 
     // Walk the parent chain from the entry to the root, then compose
-    // root -> ... -> entry (column-major).
+    // rootMatrix * (root -> ... -> entry) (column-major). The root matrix
+    // (FBX unit/axes normalization) composes once at the chain top, so the
+    // file-space translations deeper in the chain are converted at the end
+    // — the same arithmetic SceneGraph does with the root matrix on the
+    // archive-root SceneNode.
     std::vector<int> chain;
     int cur = nodeIdx;
     while (cur >= 0) {
@@ -394,6 +390,12 @@ GeoArchiveRuntime::worldMatrixAt(int nodeIdx, double time, double fps,
                 r[col * 4 + row] = sum;
             }
         }
+        std::memcpy(outWorld, r, sizeof(r));
+    }
+
+    if (data.rootMatrix.size() == 16) {
+        float r[16];
+        geoArchiveMatMul(data.rootMatrix.data(), outWorld, r);
         std::memcpy(outWorld, r, sizeof(r));
     }
 }

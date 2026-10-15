@@ -126,6 +126,7 @@ public:
     MeshDataPtr getMeshDataAt(int idx, double time = -1.0) const OVERRIDE;
     std::vector<ArchiveTreeEntry> getEntryTree() const OVERRIDE;
     bool getEntryWorldMatrix(int idx, double time, float outWorld[16]) const OVERRIDE;
+    bool getRootMatrix(float outRoot[16]) const OVERRIDE;
 
     // MaterialProvider interface — forwarded to the Material3D on input 0 when
     // connected; otherwise the first PBR material found in the file.
