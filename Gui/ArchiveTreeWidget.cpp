@@ -78,6 +78,8 @@ ArchiveTreeWidget::ArchiveTreeWidget(EffectInstance* archive, QWidget* parent)
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(2, 4, 2, 2);
     mainLayout->setSpacing(4);
+    // The tree is the widget's body — let the whole widget expand with it.
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
 
     // Toolbar: label + buttons
     QHBoxLayout* toolbar = new QHBoxLayout();
@@ -162,8 +164,16 @@ ArchiveTreeWidget::ArchiveTreeWidget(EffectInstance* archive, QWidget* parent)
         h->resizeSection(1, 70);
         h->resizeSection(2, 70);
         h->resizeSection(3, 70);
+        // The name column takes the leftover width so long paths stay readable.
+        h->setSectionResizeMode(0, QHeaderView::Stretch);
+        h->setSectionResizeMode(1, QHeaderView::Fixed);
+        h->setSectionResizeMode(2, QHeaderView::Fixed);
+        h->setSectionResizeMode(3, QHeaderView::Fixed);
     }
-    _tree->setMinimumHeight(180);
+    // Enough room to actually navigate large hierarchies (the archive
+    // contents view is the main tool on this panel — give it the space).
+    _tree->setMinimumHeight(360);
+    _tree->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     QObject::connect(_tree, &QTreeWidget::itemChanged, this, &ArchiveTreeWidget::onItemChanged);
 

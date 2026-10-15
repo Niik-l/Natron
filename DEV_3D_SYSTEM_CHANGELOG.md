@@ -1,4 +1,40 @@
 # Natron 3D System
+- **FBX root normalization leak — the archive/merged hierarchy bug (2026-10-15,
+  user-reported: a 72-entry FBX came in unassembled)** — ufbx applies the
+  load-time normalization (target_axes rotation + target_unit_meters scale) to
+  the ufbx ROOT node's transform, but both FBX walks (the archive parser and
+  the retired flat loader before it) started from the root's CHILDREN — so a
+  cm-authored file whose node scales carry the x100 cm→m compensation rendered
+  x100 too large: the camera sat inside the giant mesh and every render came
+  back near-black (the spider test asset had silently rendered empty since
+  10-14; only hash-level checks passed, never pixel content). Fix: the FBX
+  archive parser now captures the ufbx root's transform as
+  `GeoArchiveResult::rootMatrix`, and `GeoArchiveRuntime::ensureFrameState`
+  folds it into every root-level entry's evaluated local before anything
+  downstream composes (SceneGraph emission chains, entry world matrices, the
+  bake post-pass, ReadGeo's merged baking) — spider.fbx now renders the
+  assembled ~0.7 m spider identically through ReadGeo merged, ReadGeoArchive
+  chain and ReadGeoArchive baked (file-hash-equal renders). glTF is unaffected
+  (no root normalization). The per-node FBX diagnostics under
+  `NATRON_DEBUG_GEOIO` now also dump each walked node's evaluated local
+  (t + diag) and the root transform, which is what exposed this.
+- **ReadGeoArchive: Bake Transforms + panel space (2026-10-15, user request)** —
+  **Bake Transforms** (File page, default off) bakes every mesh entry's
+  evaluated world transform into its vertices; baked entries emit in world
+  space attached to the archive root (identity entry world matrices), so the
+  initial load shows the object as authored independent of the node chain.
+  Implemented as a `bakeMeshWorld` flag on the shared GeoArchiveRuntime: the
+  per-frame post-pass bakes payloads with the chain composed from the frame's
+  own node locals (identity worlds keep the input payload — no copy for
+  already-world-space skinned glTF), `getMeshDataAt` serves the baked frame
+  state for rigid meshes too when on, and the knob toggles the flag + clears
+  the frame cache (no re-parse). The archive tree widget got real room:
+  minimum height 360 (was 180), vertical expanding policy, name column
+  stretched; and the Info labels (both archive and ReadGeo) are now
+  multi-line so the one-line stats string stops stretching the panel.
+  Verified headlessly through Cycles: bake-on/off/ReadGeo-merged spider
+  renders hash-equal, baked BoxAnimated still animates (f1 != f40), the
+  full format battery renders real content for all five test assets.
 - **ArchiveTreeWidget: checkable entry tree for every archive node
   (2026-10-15)** — the ReadAlembicArchive-only settings-panel tree is
   generalized into `Gui/ArchiveTreeWidget.{h,cpp}`: it now takes any

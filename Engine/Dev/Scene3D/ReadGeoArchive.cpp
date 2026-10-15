@@ -99,6 +99,7 @@ struct ReadGeoArchivePrivate
     KnobStringWPtr objectFilter;
     KnobBoolWPtr includeMeshes;
     KnobBoolWPtr reverseNormals;
+    KnobBoolWPtr bakeTransforms;
     KnobIntWPtr frameOffset;
     KnobDoubleWPtr fps;
     KnobStringWPtr excludedPaths;
@@ -152,7 +153,12 @@ ReadGeoArchive::getPluginDescription() const
         "snap per frame). The file's first PBR material is offered through the "
         "material interface; wire a Material3D into input 0 to override it for "
         "the whole archive.\n\n"
-        "Animation knobs: Frame Offset + FPS (0 = project frame rate).\n\n"
+        "Animation knobs: Frame Offset + FPS (0 = project frame rate), and "
+        "Bake Transforms — bakes every mesh entry's evaluated world transform "
+        "into its vertices so the parts emit in world space (the assembled "
+        "look, independent of the node chain).\n\n"
+        "The settings panel shows a checkable tree of the archive's entries; "
+        "unchecked entries are excluded from the scene.\n\n"
         "Morph targets / blend shapes and per-entry material assignment from "
         "the file are not supported yet.").toStdString();
 }
@@ -229,6 +235,23 @@ ReadGeoArchive::initializeKnobs()
                              "red = facing away."));
         page->addKnob(k);
         _imp->reverseNormals = k;
+    }
+
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Bake Transforms"));
+        k->setName("bakeTransforms");
+        k->setDefaultValue(false);
+        k->setHintToolTip(tr("Bake every mesh entry's evaluated world transform into its "
+                             "vertices, so each part emits in world space attached to the "
+                             "archive root — the assembled look, independent of the node "
+                             "chain. Use this when a file's hierarchy does not compose "
+                             "correctly, or when you just want the object as authored. "
+                             "The transform/locator entries still show in the tree and "
+                             "viewport, the file's animation is baked per frame, and the "
+                             "node's own Transform page still applies on top. Rigid "
+                             "sub-frame motion blur snaps per frame while baked."));
+        page->addKnob(k);
+        _imp->bakeTransforms = k;
     }
 
     {
@@ -371,6 +394,7 @@ ReadGeoArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     KnobIPtr includeKnob = _imp->includeMeshes.lock();
     KnobIPtr excludedKnob = _imp->excludedPaths.lock();
     KnobIPtr revNormKnob = _imp->reverseNormals.lock();
+    KnobIPtr bakeKnob = _imp->bakeTransforms.lock();
 
     const bool isFileChange = (fpKnob && k == fpKnob.get());
     const bool isReload     = (reloadKnob && k == reloadKnob.get());
@@ -378,6 +402,18 @@ ReadGeoArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
                             || (includeKnob && k == includeKnob.get())
                             || (excludedKnob && k == excludedKnob.get())
                             || (revNormKnob && k == revNormKnob.get());
+
+    // Bake Transforms: flip the runtime flag and drop the cached frame
+    // evaluations (no re-parse — the baked payloads are derived from them).
+    if (bakeKnob && k == bakeKnob.get()) {
+        {
+            std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+            KnobBoolPtr bk = _imp->bakeTransforms.lock();
+            _imp->rt.bakeMeshWorld = bk ? bk->getValue() : false;
+            _imp->rt.clearFrameCache();
+        }
+        return true;
+    }
 
     if (isFileChange || isReload) {
         if (fpKnob) {
@@ -461,6 +497,8 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
         setPersistentMessage(eMessageTypeError, err);
         return;
     }
+    _imp->rt.bakeMeshWorld = _imp->bakeTransforms.lock() &&
+                             _imp->bakeTransforms.lock()->getValue();
     const GeoArchiveResult& data = _imp->rt.data;
 
     // Apply objectFilter + includeMeshes + excludedPaths (same rules as
@@ -493,7 +531,7 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
         _imp->visible.push_back(i);
     }
 
-    // Info string.
+    // Info string — multi-line so the label doesn't stretch the panel.
     std::size_t numXforms = 0, numMeshes = 0;
     for (std::size_t i = 0; i < data.nodes.size(); ++i) {
         if (data.nodes[i].isMesh) ++numMeshes; else ++numXforms;
@@ -501,21 +539,24 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
     std::ostringstream ss;
     ss << "Total entries: " << data.nodes.size()
        << " (nodes: " << numXforms
-       << ", meshes: " << numMeshes << ")"
-       << " | Visible after filter: " << _imp->visible.size();
+       << ", meshes: " << numMeshes << ")\n"
+       << "Visible after filter: " << _imp->visible.size();
+    if (_imp->rt.isFbx) {
+        ss << " | FBX";
+    }
     if (_imp->rt.hasAnimation) {
         const double dur = _imp->rt.animTimeEnd - _imp->rt.animTimeBegin;
         if (dur > 0.0) {
             const double fpsKnob = _imp->fps.lock() ? _imp->fps.lock()->getValue() : 0.0;
             const double fps = fpsKnob > 0.0 ? fpsKnob
                                              : (getApp() ? getApp()->getProjectFrameRate() : 24.0);
-            ss << " | Animated: " << dur << "s (~" << (int)(dur * fps) << " frames)";
+            ss << "\nAnimated: " << dur << "s (~" << (int)(dur * fps) << " frames)";
         } else {
-            ss << " | Animated";
+            ss << "\nAnimated";
         }
     }
-    if (_imp->rt.isFbx) {
-        ss << " | FBX";
+    if (_imp->rt.bakeMeshWorld) {
+        ss << "\nBaked transforms";
     }
     if (_imp->info.lock()) _imp->info.lock()->setValue(ss.str());
 
@@ -577,6 +618,15 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
     outName = nd.fullPath;
     outIsMesh = nd.isMesh;
 
+    // Baked mesh entries emit in world space attached to the archive root —
+    // the world transform went into the vertices (the baked payload), so the
+    // chain must not apply again.
+    if (_imp->rt.bakeMeshWorld && nd.isMesh) {
+        outParentLocalIndex = -1;
+        geoArchiveMatIdentity(outLocalMatrix);
+        return true;
+    }
+
     // Translate parentIndex from "index into nodes[]" to "index into visible[]".
     outParentLocalIndex = -1;
     if (nd.parentIndex >= 0) {
@@ -603,8 +653,9 @@ ReadGeoArchive::getMeshDataAt(int idx, double time) const
     const GeoArchiveMeshData& md = _imp->rt.data.meshes[nd.meshIndex];
     if (!md.mesh) return MeshDataPtr();
 
-    // Rigid meshes: the node's own transform animates; vertices are static.
-    if (!md.mesh || md.skinIndex < 0 || time < 0.0) {
+    // Rigid meshes: the node's own transform animates; vertices are static —
+    // except when baking, when the frame state holds the world-baked payload.
+    if (!md.mesh || (md.skinIndex < 0 && !_imp->rt.bakeMeshWorld) || time < 0.0) {
         return md.mesh;
     }
 
@@ -627,6 +678,14 @@ ReadGeoArchive::getEntryWorldMatrix(int idx, double time, float outWorld[16]) co
 {
     std::lock_guard<std::mutex> lk(_imp->archiveMutex);
     if (idx < 0 || idx >= (int)_imp->visible.size()) return false;
+
+    // Baked mesh entries are world-space payloads parented to the root —
+    // their entry world matrix is identity by construction.
+    if (_imp->rt.bakeMeshWorld && _imp->rt.data.nodes[_imp->visible[idx]].isMesh) {
+        geoArchiveMatIdentity(outWorld);
+        return true;
+    }
+
     _imp->rt.worldMatrixAt(_imp->visible[idx], time, archiveFps(),
                            _imp->frameOffsetKnobValue(), outWorld);
     return true;

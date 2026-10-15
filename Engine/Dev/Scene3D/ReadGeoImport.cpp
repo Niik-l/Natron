@@ -196,6 +196,50 @@ GeoArchiveRuntime::clear()
     }
 }
 
+void
+GeoArchiveRuntime::clearFrameCache()
+{
+    std::lock_guard<std::mutex> fl(frameMutex);
+    frameCache.clear();
+}
+
+namespace {
+
+// Compose the entry's world matrix from an ALREADY-EVALUATED frame's node
+// locals (chain walk using data.nodes' parent indices) — used by the bake
+// post-pass below, which must not re-enter ensureFrameState.
+void
+arcWorldFromLocals(const GeoArchiveResult& data,
+                   const std::vector<float>& nodeLocals,
+                   int nodeIdx, float outWorld[16])
+{
+    geoArchiveMatIdentity(outWorld);
+    if (nodeIdx < 0 || nodeIdx >= (int)data.nodes.size()) return;
+
+    std::vector<int> chain;
+    int cur = nodeIdx;
+    while (cur >= 0) {
+        chain.push_back(cur);
+        cur = (cur < (int)data.nodes.size()) ? data.nodes[cur].parentIndex : -1;
+    }
+    for (int ci = (int)chain.size() - 1; ci >= 0; --ci) {
+        const float* local = &nodeLocals[(std::size_t)chain[ci] * 16];
+        float r[16];
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                float sum = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    sum += outWorld[k * 4 + row] * local[col * 4 + k];
+                }
+                r[col * 4 + row] = sum;
+            }
+        }
+        std::memcpy(outWorld, r, sizeof(r));
+    }
+}
+
+} // anonymous namespace
+
 std::shared_ptr<const GeoArchiveFrameEval>
 GeoArchiveRuntime::ensureFrameState(double fps, int key) const
 {
@@ -227,6 +271,60 @@ GeoArchiveRuntime::ensureFrameState(double fps, int key) const
         }
     } else {
         evaluateGltfArchiveFrame(data, srcTime, *st);
+    }
+
+    // Fold the file's root normalization (FBX unit/axes compensation carried
+    // by the ufbx root node — the hierarchy walk starts from the root's
+    // children, so the walked chains would otherwise miss it: a cm-authored
+    // file with x100 node scales would render x100 too large) into every
+    // root-level local. Every consumer chain — SceneGraph emission, entry
+    // world matrices, the bake post-pass below — composes from these locals.
+    if (data.rootMatrix.size() == 16 && !data.nodes.empty()) {
+        bool rootIdentity = true;
+        for (int i = 0; i < 16; ++i) {
+            if ((i % 5 == 0) ? (data.rootMatrix[i] != 1.0f)
+                             : (data.rootMatrix[i] != 0.0f)) {
+                rootIdentity = false; break;
+            }
+        }
+        if (!rootIdentity) {
+            for (std::size_t i = 0; i < data.nodes.size(); ++i) {
+                if (data.nodes[i].parentIndex == -1) {
+                    float composed[16];
+                    geoArchiveMatMul(data.rootMatrix.data(), &st->nodeLocals[i * 16], composed);
+                    std::memcpy(&st->nodeLocals[i * 16], composed, 16 * sizeof(float));
+                }
+            }
+        }
+    }
+
+    // Bake post-pass: when enabled, transform every mesh payload through its
+    // entry's world matrix (composed from THIS frame's node locals) so the
+    // mesh data is already in world space. Identity worlds keep the input
+    // payload (skinned glTF payloads are already world-space; rigid parts at
+    // the origin don't need a copy).
+    if (bakeMeshWorld && !data.nodes.empty()) {
+        std::vector<int> meshOwner(data.meshes.size(), -1);
+        for (std::size_t i = 0; i < data.nodes.size(); ++i) {
+            const GeoArchiveNodeData& nd = data.nodes[i];
+            if (nd.isMesh && nd.meshIndex >= 0 &&
+                nd.meshIndex < (int)meshOwner.size() && meshOwner[nd.meshIndex] < 0) {
+                meshOwner[nd.meshIndex] = (int)i;
+            }
+        }
+        for (std::size_t m = 0; m < data.meshes.size(); ++m) {
+            if (!st->deformed[m] || meshOwner[m] < 0) continue;
+            float world[16];
+            arcWorldFromLocals(data, st->nodeLocals, meshOwner[m], world);
+            bool identity = true;
+            for (int i = 0; i < 16; ++i) {
+                if ((i % 5 == 0) ? (world[i] != 1.0f) : (world[i] != 0.0f)) { identity = false; break; }
+            }
+            if (identity) continue;
+            MeshDataPtr baked(new MeshData(*st->deformed[m]));
+            importBakeXform(baked->vertices, world);
+            st->deformed[m] = baked;
+        }
     }
 
     std::lock_guard<std::mutex> fl(frameMutex);

@@ -350,6 +350,17 @@ loadFbxArchiveImport(const std::string& path, void** outScene)
     for (std::size_t i = 0; i < scene->nodes.count; ++i) {
         const ufbx_node* node = scene->nodes.data[i];
         if (node->is_root) {
+            // The ufbx root node carries the load-time normalization
+            // (target_axes rotation + target_unit_meters scale, e.g. 0.01
+            // compensating cm-authored x100 node scales). The hierarchy walk
+            // starts from the root's CHILDREN, so capture the root transform
+            // here — ensureFrameState folds it into every root-level local.
+            if (result.rootMatrix.empty()) {
+                result.rootMatrix.assign(16, 0.0f);
+                ufbxMatToColMajor(
+                    ufbx_transform_to_matrix(&node->local_transform),
+                    result.rootMatrix.data());
+            }
             for (std::size_t c = 0; c < node->children.count; ++c) {
                 walk.run(node->children.data[c], -1, "");
             }
@@ -414,6 +425,26 @@ evaluateFbxArchiveFrame(void* sceneV,
     out.nodeLocals.assign(data.nodes.size() * 16, 0.0f);
     out.deformed.assign(data.meshes.size(), MeshDataPtr());
 
+    if (std::getenv("NATRON_DEBUG_GEOIO")) {
+        for (std::size_t i = 0; i < ev->nodes.count; ++i) {
+            const ufbx_node* rn = ev->nodes.data[i];
+            if (rn->is_root) {
+                std::fprintf(stderr,
+                    "[GEOIO-ARCH-FBX]   ROOT t=(%.3f,%.3f,%.3f) diag=(%.3f,%.3f,%.3f) rotation=(%.4f,%.4f,%.4f,%.4f)\n",
+                    (float)rn->local_transform.translation.x,
+                    (float)rn->local_transform.translation.y,
+                    (float)rn->local_transform.translation.z,
+                    ufbx_transform_to_matrix(&rn->local_transform).m00,
+                    ufbx_transform_to_matrix(&rn->local_transform).m11,
+                    ufbx_transform_to_matrix(&rn->local_transform).m22,
+                    (float)rn->local_transform.rotation.x,
+                    (float)rn->local_transform.rotation.y,
+                    (float)rn->local_transform.rotation.z,
+                    (float)rn->local_transform.rotation.w);
+            }
+        }
+    }
+
     struct EvalWalk {
         GeoArchiveFrameEval* out;
         const GeoArchiveResult* data;
@@ -432,6 +463,18 @@ evaluateFbxArchiveFrame(void* sceneV,
             // transform entry's matrix; mesh entries follow immediately.
             const ufbx_matrix lm = ufbx_transform_to_matrix(&node->local_transform);
             ufbxMatToColMajor(lm, &out->nodeLocals[i * 16]);
+
+            if (std::getenv("NATRON_DEBUG_GEOIO")) {
+                std::fprintf(stderr,
+                    "[GEOIO-ARCH-FBX]   node %d '%s' t=(%.3f,%.3f,%.3f) diag=(%.3f,%.3f,%.3f) rest_diag=(%.3f,%.3f,%.3f)\n",
+                    (int)i, arcUfbxToString(node->name).c_str(),
+                    (float)node->local_transform.translation.x,
+                    (float)node->local_transform.translation.y,
+                    (float)node->local_transform.translation.z,
+                    lm.m00, lm.m11, lm.m22,
+                    data->nodes[i].localMatrix[0], data->nodes[i].localMatrix[5],
+                    data->nodes[i].localMatrix[10]);
+            }
 
             // Mesh child entries for this node: emitted by the LOAD walk
             // between this node's entry and its first child's entry. Reproduce

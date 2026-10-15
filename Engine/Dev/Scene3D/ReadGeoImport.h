@@ -170,6 +170,12 @@ struct GeoArchiveResult
     std::vector<GeoArchiveMeshData> meshes;
     std::vector<GeoImportMaterial> materials;
     // Per skin: joint node indices + inverse bind matrices (16 floats each).
+    // FBX only: the ufbx root node's transform — the file's unit/axes
+    // normalization (e.g. 0.01 compensating cm-authored x100 node scales).
+    // The hierarchy walk starts from the root's children, so this matrix
+    // must be folded into every root-level local by the frame evaluation
+    // (ensureFrameState does); empty = identity (glTF, no normalization).
+    std::vector<float> rootMatrix;                // 16 floats when present
     std::vector<std::vector<int>> skinJoints;
     std::vector<std::vector<float>> skinIBMs;
     std::vector<GeoArchiveAnimData> anims;
@@ -227,6 +233,16 @@ struct GeoArchiveRuntime
     double animTimeBegin = 0.0;
     double animTimeEnd = 0.0;
 
+    // When true, every evaluated mesh payload is baked through its entry's
+    // world matrix (chain-composed from the frame's node locals) so the mesh
+    // data is already in world space; the archive node then parents mesh
+    // entries to the archive root and reports identity entry world matrices.
+    // The "escape hatch" for files whose hierarchy doesn't compose correctly,
+    // and for a guaranteed-assembled look at load. Rigid sub-frame matrix
+    // interpolation is lost for baked meshes (verts snap per frame, like the
+    // skinned payloads). Set by the node at load / knob-toggle time.
+    bool bakeMeshWorld = false;
+
     GeoArchiveRuntime();
     ~GeoArchiveRuntime();
     GeoArchiveRuntime(const GeoArchiveRuntime&) = delete;
@@ -234,6 +250,10 @@ struct GeoArchiveRuntime
 
     /** Free the ufbx scene, reset the parsed data, flags and frame cache. */
     void clear();
+
+    /** Drop the cached frame evaluations (call after changing a flag that
+     *  alters what a frame evaluates to, e.g. bakeMeshWorld). */
+    void clearFrameCache();
 
     /** Frame state for integer cache key `key` (frame 1 = key 0;
      *  srcTime = key / fps). Filled lazily on first request and kept for the
