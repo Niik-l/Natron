@@ -673,12 +673,22 @@ ReadAlembicArchive::loadAlembicFile(const std::string& path)
             }
         }
 
+        // SUBTREE semantics (matching ReadGeoArchive + the tree UI): an entry
+        // is visible only if it passes the filter AND its parent entry is
+        // visible — unchecking a transform hides its whole subtree instead of
+        // detaching the children (they used to re-attach to the archive root
+        // and lose every transform above the filtered parent). Entries are
+        // parents-before-children, so one pass suffices.
+        std::vector<char> entryVisible(_imp->entries.size(), 0);
         for (int i = 0; i < (int)_imp->entries.size(); ++i) {
             const ArchiveEntry& e = _imp->entries[i];
-            if (!includeMeshes && e.isMesh) continue;
-            if (!globMatch(pattern, e.fullPath)) continue;
-            if (excluded.count(e.fullPath)) continue;
-            _imp->visible.push_back(i);
+            bool pass = true;
+            if (!includeMeshes && e.isMesh) pass = false;
+            if (pass && !globMatch(pattern, e.fullPath)) pass = false;
+            if (pass && excluded.count(e.fullPath)) pass = false;
+            if (pass && e.parentIndex >= 0) pass = entryVisible[e.parentIndex] != 0;
+            entryVisible[i] = pass ? 1 : 0;
+            if (pass) _imp->visible.push_back(i);
         }
 
         // Build info string.

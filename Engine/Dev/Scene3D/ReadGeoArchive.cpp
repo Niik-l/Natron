@@ -505,7 +505,12 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
     const GeoArchiveResult& data = _imp->rt.data;
 
     // Apply objectFilter + includeMeshes + excludedPaths (same rules as
-    // ReadAlembicArchive).
+    // ReadAlembicArchive), with SUBTREE semantics: an entry is visible only
+    // if it passes the filter AND its parent entry is visible — unchecking a
+    // transform in the tree (or filtering it out) hides its whole subtree,
+    // instead of leaving children to detach (they used to re-attach to the
+    // archive root and render at file-unit scale — off-screen or giant).
+    // Entries are parents-before-children, so one pass suffices.
     const std::string pattern = _imp->objectFilter.lock() ? _imp->objectFilter.lock()->getValue() : std::string();
     const bool includeMeshes = _imp->includeMeshes.lock() ? _imp->includeMeshes.lock()->getValue() : true;
     const std::string excludedRaw = _imp->excludedPaths.lock() ? _imp->excludedPaths.lock()->getValue() : std::string();
@@ -526,12 +531,16 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
         }
     }
 
+    std::vector<char> entryVisible(data.nodes.size(), 0);
     for (int i = 0; i < (int)data.nodes.size(); ++i) {
         const GeoArchiveNodeData& nd = data.nodes[i];
-        if (!includeMeshes && nd.isMesh) continue;
-        if (!arcGlobMatch(pattern, nd.fullPath)) continue;
-        if (excluded.count(nd.fullPath)) continue;
-        _imp->visible.push_back(i);
+        bool pass = true;
+        if (!includeMeshes && nd.isMesh) pass = false;
+        if (pass && !arcGlobMatch(pattern, nd.fullPath)) pass = false;
+        if (pass && excluded.count(nd.fullPath)) pass = false;
+        if (pass && nd.parentIndex >= 0) pass = entryVisible[nd.parentIndex] != 0;
+        entryVisible[i] = pass ? 1 : 0;
+        if (pass) _imp->visible.push_back(i);
     }
 
     // Info string — compact single line (label-column display).
@@ -633,27 +642,24 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
     // The entry's own local matrix.
     _imp->rt.nodeLocalAt(srcIdx, time, fps, frameOffset, outLocalMatrix);
 
-    // Root normalization: entries at the archive root carry the format-level
-    // correction (the ufbx unit/axes matrix) in their LOCAL so every chain
-    // composes it exactly once at the top — matching worldMatrixAt / the bake
-    // post-pass, which compose it at their own chain tops. Deep entries stay
-    // file-space; the (now true column-major) SceneGraph product converts
-    // their translations through the folded parent chain.
-    if (_imp->rt.data.rootMatrix.size() == 16 && nd.parentIndex == -1) {
-        float folded[16];
-        geoArchiveMatMul(_imp->rt.data.rootMatrix.data(), outLocalMatrix, folded);
-        std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
-    }
-
-    // Translate parentIndex from "index into nodes[]" to "index into
-    // visible[]". When the direct parent is filtered out (tree uncheck /
-    // glob / excludedPaths), attach to the nearest VISIBLE ancestor and fold
-    // every filtered intermediate's local into this entry's local, so the
-    // SceneGraph chain composes exactly the world the runtime's
-    // worldMatrixAt computes (it always walks the full chain). Attaching to
-    // the archive root instead would drop every transform above the filtered
-    // parent — the subtree renders unassembled.
+    // Parent mapping + root normalization. The result must satisfy:
+    // SceneGraph compose (root SceneNode identity × this local) ==
+    // rootMatrix × (full parent chain × own local).
+    // - The entry's own local is file-space; a root-level entry folds the
+    //   format-level root normalization (the ufbx unit/axes matrix) into its
+    //   local so every chain composes it exactly once at the top — matching
+    //   worldMatrixAt / the bake post-pass, which compose it at their chain
+    //   tops. Deep entries stay file-space; the (true column-major)
+    //   SceneGraph product converts their translations through the folded
+    //   parent chain.
+    // - When the direct parent is filtered out (glob / excludedPaths; the
+    //   tree's subtree rule already hides such children), attach to the
+    //   nearest VISIBLE ancestor and fold every filtered intermediate's
+    //   local into this entry's local. If the walk reaches the archive root,
+    //   the root normalization composes here too (the visible ancestors'
+    //   chain no longer carries it for this entry).
     outParentLocalIndex = -1;
+    bool attachRoot = (nd.parentIndex < 0);
     int p = nd.parentIndex;
     while (p >= 0 && p < (int)_imp->rt.data.nodes.size()) {
         int pv = -1;
@@ -669,7 +675,13 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
         float folded[16];
         geoArchiveMatMul(pl, outLocalMatrix, folded);
         std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
+        attachRoot = true;
         p = _imp->rt.data.nodes[p].parentIndex;
+    }
+    if (attachRoot && _imp->rt.data.rootMatrix.size() == 16) {
+        float folded[16];
+        geoArchiveMatMul(_imp->rt.data.rootMatrix.data(), outLocalMatrix, folded);
+        std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
     }
     return true;
 }

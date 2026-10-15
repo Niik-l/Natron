@@ -417,8 +417,11 @@ ReadGeo::initializeKnobs()
     }
 
     {
+        // Same compact read-only style as ReadGeoArchive: single-line LABEL
+        // mode renders the value as plain text in the row's label column.
         KnobStringPtr infoKnob = AppManager::createKnob<KnobString>(this, tr("Info"));
         infoKnob->setName("info");
+        infoKnob->setAsLabel();
         infoKnob->setAnimationEnabled(false);
         infoKnob->setEvaluateOnChange(false);
         infoKnob->setIsPersistent(false);

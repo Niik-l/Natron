@@ -15,6 +15,7 @@
 
 #include "ArchiveTreeWidget.h"
 
+#include <functional>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -247,7 +248,15 @@ ArchiveTreeWidget::rebuildFromArchive()
     }
 
     // Build items in walk order so parents exist before children.
+    // Check-state model: each item's OWN state (in excludedPaths or not) is
+    // kept in UserRole+1; the DISPLAYED check state is the effective one —
+    // unchecked when the item itself or ANY ancestor is own-unchecked (the
+    // engine applies the same subtree rule, so the display matches the
+    // scene). writeExcludedPathsToKnob persists the MINIMAL frontier: items
+    // that are own-unchecked but have no own-unchecked ancestor — so
+    // re-checking a parent re-include its whole subtree.
     std::vector<QTreeWidgetItem*> items(entries.size(), nullptr);
+    std::vector<char> ancOwnUnchecked(entries.size(), 0);
     for (size_t i = 0; i < entries.size(); ++i) {
         const ArchiveTreeEntry& e = entries[i];
 
@@ -266,9 +275,16 @@ ArchiveTreeWidget::rebuildFromArchive()
         item->setToolTip(0, QString::fromStdString(e.fullPath));
         item->setData(0, Qt::UserRole, QString::fromStdString(e.fullPath));
 
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         const bool isExcluded = excluded.count(e.fullPath) != 0;
-        item->setCheckState(0, isExcluded ? Qt::Unchecked : Qt::Checked);
+        const bool ancUnchecked = (e.parentLocalIdx >= 0 && e.parentLocalIdx < (int)entries.size())
+                                      ? (ancOwnUnchecked[e.parentLocalIdx] != 0) : false;
+        const bool effectiveUnchecked = isExcluded || ancUnchecked;
+        ancOwnUnchecked[i] = effectiveUnchecked ? 1 : 0;
+
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(0, effectiveUnchecked ? Qt::Unchecked : Qt::Checked);
+        // Own state (what the knob carries) — the write path uses this.
+        item->setData(0, Qt::UserRole + 1, isExcluded ? 1 : 0);
 
         items[i] = item;
     }
@@ -360,7 +376,9 @@ ArchiveTreeWidget::setBranchChecked(QTreeWidgetItem* root, bool checked)
 {
     if (!root) return;
     _suppressItemChanged = true;
-    root->setCheckState(0, checked ? Qt::Checked : Qt::Unchecked);
+    // Own-state model: the branch's OWN states are set; the displayed states
+    // follow via redisplayChecks() from the caller.
+    root->setData(0, Qt::UserRole + 1, checked ? 0 : 1);
     for (int i = 0; i < root->childCount(); ++i) {
         setBranchChecked(root->child(i), checked);
     }
@@ -374,6 +392,7 @@ ArchiveTreeWidget::onCheckBranchTriggered()
     QTreeWidgetItem* sel = _tree->currentItem();
     if (!sel) return;
     setBranchChecked(sel, true);
+    redisplayChecks();
     writeExcludedPathsToKnob();
 }
 
@@ -384,15 +403,54 @@ ArchiveTreeWidget::onUncheckBranchTriggered()
     QTreeWidgetItem* sel = _tree->currentItem();
     if (!sel) return;
     setBranchChecked(sel, false);
+    redisplayChecks();
     writeExcludedPathsToKnob();
 }
 
 void
-ArchiveTreeWidget::onItemChanged(QTreeWidgetItem* /*item*/, int column)
+ArchiveTreeWidget::onItemChanged(QTreeWidgetItem* item, int column)
 {
     if (_suppressItemChanged) return;
     if (column != 0) return; // only the checkbox column matters
+    if (!item) return;
+
+    // The click expresses intent for THIS item: its own state becomes the
+    // clicked state. Checking a child under an unchecked parent propagates
+    // the check UP the ancestor chain so the click takes visible effect.
+    const bool nowChecked = (item->checkState(0) == Qt::Checked);
+    item->setData(0, Qt::UserRole + 1, nowChecked ? 0 : 1);
+    if (nowChecked) {
+        QTreeWidgetItem* p = item->parent();
+        while (p) {
+            p->setData(0, Qt::UserRole + 1, 0);
+            p = p->parent();
+        }
+    }
+    redisplayChecks();
     writeExcludedPathsToKnob();
+}
+
+// Effective check state = own-unchecked OR any ancestor own-unchecked (the
+// engine's subtree rule — the display must match the scene).
+void
+ArchiveTreeWidget::redisplayChecks()
+{
+    if (!_tree) return;
+    std::function<void(QTreeWidgetItem*, bool)> walk =
+        [&](QTreeWidgetItem* it, bool ancOwnUnchecked) {
+        if (!it) return;
+        const bool own = (it->data(0, Qt::UserRole + 1).toInt() != 0);
+        const bool effUnchecked = own || ancOwnUnchecked;
+        _suppressItemChanged = true;
+        it->setCheckState(0, effUnchecked ? Qt::Unchecked : Qt::Checked);
+        _suppressItemChanged = false;
+        for (int i = 0; i < it->childCount(); ++i) {
+            walk(it->child(i), effUnchecked);
+        }
+    };
+    for (int i = 0; i < _tree->topLevelItemCount(); ++i) {
+        walk(_tree->topLevelItem(i), false);
+    }
 }
 
 void
@@ -401,8 +459,9 @@ ArchiveTreeWidget::onCheckAllClicked()
     if (!_tree) return;
     _suppressItemChanged = true;
     QTreeWidgetItemIterator it(_tree);
-    while (*it) { (*it)->setCheckState(0, Qt::Checked); ++it; }
+    while (*it) { (*it)->setData(0, Qt::UserRole + 1, 0); ++it; }
     _suppressItemChanged = false;
+    redisplayChecks();
     writeExcludedPathsToKnob();
 }
 
@@ -412,8 +471,9 @@ ArchiveTreeWidget::onUncheckAllClicked()
     if (!_tree) return;
     _suppressItemChanged = true;
     QTreeWidgetItemIterator it(_tree);
-    while (*it) { (*it)->setCheckState(0, Qt::Unchecked); ++it; }
+    while (*it) { (*it)->setData(0, Qt::UserRole + 1, 1); ++it; }
     _suppressItemChanged = false;
+    redisplayChecks();
     writeExcludedPathsToKnob();
 }
 
@@ -422,24 +482,33 @@ ArchiveTreeWidget::writeExcludedPathsToKnob()
 {
     if (!_archive || !_tree) return;
 
-    // Collect paths of every unchecked item.
+    // Persist the MINIMAL frontier of the own-unchecked set: items that are
+    // own-unchecked but have NO own-unchecked ancestor (the engine's subtree
+    // rule already hides the descendants of an excluded ancestor, and keeping
+    // only the frontier lets re-checking a parent re-include its subtree).
     std::ostringstream ss;
     bool first = true;
-    QTreeWidgetItemIterator it(_tree);
-    while (*it) {
-        QTreeWidgetItem* item = *it;
-        if (item->checkState(0) == Qt::Unchecked) {
-            QString path = item->data(0, Qt::UserRole).toString();
+    std::function<void(QTreeWidgetItem*, bool)> walk =
+        [&](QTreeWidgetItem* it, bool ancOwnUnchecked) {
+        if (!it) return;
+        const bool own = (it->data(0, Qt::UserRole + 1).toInt() != 0);
+        const bool effUnchecked = own || ancOwnUnchecked;
+        if (own && !ancOwnUnchecked) {
+            QString path = it->data(0, Qt::UserRole).toString();
             if (!path.isEmpty()) {
                 if (!first) ss << '\n';
                 ss << path.toStdString();
                 first = false;
             }
         }
-        ++it;
+        for (int i = 0; i < it->childCount(); ++i) {
+            walk(it->child(i), effUnchecked);
+        }
+    };
+    for (int i = 0; i < _tree->topLevelItemCount(); ++i) {
+        walk(_tree->topLevelItem(i), false);
     }
-
-    KnobIPtr ep = _archive->getKnobByName("excludedPaths");
+KnobIPtr ep = _archive->getKnobByName("excludedPaths");
     KnobString* es = dynamic_cast<KnobString*>(ep.get());
     if (es) {
         // setValue -> knobChanged -> loadAlembicFile -> archiveReloaded -> refresh().
