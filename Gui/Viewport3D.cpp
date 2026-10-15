@@ -95,6 +95,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/NodeGroup.h"
 #include "Engine/Project.h"
 #include "Gui/Gui.h"
+#include "Gui/Viewport3DMeshCache.h"
 #include "Gui/GuiAppInstance.h"
 #include "Gui/NodeGui.h"
 #include "Gui/NodeGraph.h"
@@ -938,6 +939,12 @@ struct Viewport3DPrivate
     GLuint particleShaderProgram;
     bool particleShaderReady;
 
+    // GPU copies of the scene meshes + the headlight/texture shader that draws
+    // them (see Viewport3DMeshCache). Per-context resources like the above.
+    mutable Viewport3DMeshCache meshCache;
+    GLuint meshShaderProgram = 0;
+    bool meshShaderReady = false;
+
     Viewport3DPrivate()
         : camYAngle(2.7f)
         , camXAngle(0.4f)
@@ -1107,6 +1114,81 @@ Viewport3D::initializeGL()
     // context, so forget them (no delete) and let the next paint re-upload.
     purgePreviewTextures(_imp->previewGlTextures, _imp->paintSerial, -1);
     ImGui_ImplOpenGL2_CreateFontsTexture();
+
+    // The cached mesh buffers belong to the previous context too.
+    _imp->meshCache.forgetAll();
+
+    // Mesh shader: flat face normal headlight (same formula as
+    // ViewportFaceLitFactor: ambient + abs(N.L) * (1 - ambient), two-sided
+    // because reader winding is unpredictable) and optional texture modulate
+    // (u_mode bit 0 = lit, bit 1 = textured).
+    {
+        if (_imp->meshShaderProgram) {
+            glDeleteProgram(_imp->meshShaderProgram);
+            _imp->meshShaderProgram = 0;
+        }
+        _imp->meshShaderReady = false;
+        const char* vtx =
+            "#version 430 compatibility\n"
+            "varying vec2 vUV;\n"
+            "varying float vLit;\n"
+            "void main() {\n"
+            "    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+            "    vec3 n = gl_NormalMatrix * gl_Normal;\n"
+            "    float len = length(n);\n"
+            "    float nl = (len > 1e-8) ? abs(dot(n / len, vec3(0.4082482, 0.5715476, 0.7113249))) : 0.0;\n"
+            "    vLit = 0.15 + nl * 0.85;\n"
+            "    vUV = gl_MultiTexCoord0.xy;\n"
+            "}\n";
+        const char* frag =
+            "#version 430 compatibility\n"
+            "uniform sampler2D u_tex;\n"
+            "uniform int u_mode;\n"
+            "uniform float u_baseGrey;\n"
+            "varying vec2 vUV;\n"
+            "varying float vLit;\n"
+            "void main() {\n"
+            "    float f = ((u_mode & 1) != 0) ? vLit : 1.0;\n"
+            "    if ((u_mode & 2) != 0) {\n"
+            "        vec4 t = texture2D(u_tex, vUV);\n"
+            "        gl_FragColor = vec4(t.rgb * f, t.a * 0.95);\n"
+            "    } else {\n"
+            "        gl_FragColor = vec4(vec3(u_baseGrey * f), 1.0);\n"
+            "    }\n"
+            "}\n";
+        GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vs, 1, &vtx, NULL);
+        glCompileShader(vs);
+        GLint ok = 0;
+        glGetShaderiv(vs, GL_COMPILE_STATUS, &ok);
+        GLuint fs = 0;
+        if (ok) {
+            fs = glCreateShader(GL_FRAGMENT_SHADER);
+            glShaderSource(fs, 1, &frag, NULL);
+            glCompileShader(fs);
+            glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
+        }
+        if (ok) {
+            _imp->meshShaderProgram = glCreateProgram();
+            glAttachShader(_imp->meshShaderProgram, vs);
+            glAttachShader(_imp->meshShaderProgram, fs);
+            glLinkProgram(_imp->meshShaderProgram);
+            glGetProgramiv(_imp->meshShaderProgram, GL_LINK_STATUS, &ok);
+            if (!ok) {
+                glDeleteProgram(_imp->meshShaderProgram);
+                _imp->meshShaderProgram = 0;
+            }
+        }
+        if (!ok) {
+            char log[1024] = {0};
+            if (fs) glGetShaderInfoLog(fs, sizeof(log) - 1, NULL, log);
+            else    glGetShaderInfoLog(vs, sizeof(log) - 1, NULL, log);
+            std::fprintf(stderr, "[Viewport3D] mesh shader failed, meshes fall back to immediate mode: %s\n", log);
+        }
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        _imp->meshShaderReady = (_imp->meshShaderProgram != 0);
+    }
 
     // Compile particle point-sprite shader. Also a per-context GL resource, so
     // drop any program from a previous context before rebuilding.
@@ -1458,6 +1540,7 @@ Viewport3D::paintGL()
 {
     ++_imp->paintSerial;
     purgePreviewTextures(_imp->previewGlTextures, _imp->paintSerial, 600);
+    _imp->meshCache.purgeIdle(_imp->paintSerial, 600);
     // Background from Preferences > 3D Viewport, every frame (a one-off
     // glClearColor in initializeGL could not follow a preference change).
     {
@@ -3194,6 +3277,53 @@ Viewport3D::drawPointCloud() const
     glEnable(GL_DEPTH_TEST);
 }
 
+// Cached-buffer fill pass: one glDrawArrays over the corner array through the
+// mesh shader. Client arrays feed gl_Vertex / gl_Normal / gl_MultiTexCoord0.
+static void
+drawCachedMeshFill(const Viewport3DMeshCache::Entry& E, GLuint prog, bool lit, bool textured, float baseGrey)
+{
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "u_tex"), 0);
+    glUniform1i(glGetUniformLocation(prog, "u_mode"), (lit ? 1 : 0) | (textured ? 2 : 0));
+    glUniform1f(glGetUniformLocation(prog, "u_baseGrey"), baseGrey);
+    glBindBuffer(GL_ARRAY_BUFFER, E.cornerVbo);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(3, GL_FLOAT, Viewport3DMeshCache::kCornerStride, (const void*)0);
+    glEnableClientState(GL_NORMAL_ARRAY);
+    glNormalPointer(GL_BYTE, Viewport3DMeshCache::kCornerStride, (const void*)(std::ptrdiff_t)Viewport3DMeshCache::kNormalOffset);
+    if (textured) {
+        glClientActiveTexture(GL_TEXTURE0);
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        glTexCoordPointer(2, GL_FLOAT, Viewport3DMeshCache::kCornerStride, (const void*)(std::ptrdiff_t)Viewport3DMeshCache::kUVOffset);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
+    glDrawArrays(GL_TRIANGLES, 0, E.cornerCount);
+    if (textured) {
+        glDisable(GL_BLEND);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    }
+    glDisableClientState(GL_NORMAL_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glUseProgram(0);
+}
+
+// Cached-buffer wire pass: the polygon edge list as GL_LINES over the original vertices.
+static void
+drawCachedMeshWire(const Viewport3DMeshCache::Entry& E)
+{
+    if (!E.edgeEbo || E.edgeIndexCount <= 0) return;
+    glBindBuffer(GL_ARRAY_BUFFER, E.vertexVbo);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(3, GL_FLOAT, 0, (const void*)0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, E.edgeEbo);
+    glDrawElements(GL_LINES, E.edgeIndexCount, GL_UNSIGNED_INT, (const void*)0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
 void
 Viewport3D::drawMeshNode(const SceneNode& sn) const
 {
@@ -3353,6 +3483,38 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
         }
     }
     const bool meshHasTex = (texPixels != NULL);
+
+    // ----- Fast path: GPU-cached buffers -----
+    // Plain and material-textured meshes (the big scans) draw from a cached VBO
+    // with the headlight in a shader. Projection materials (UVProject / Project3D
+    // / MergeMat rewrite texture coordinates per paint) keep the immediate-mode
+    // path below for now; so does a mesh too large for the cache budget.
+    if (projLayers.empty() && projComp == 0 && _imp->meshShaderReady) {
+        const Viewport3DMeshCache::Entry* E = _imp->meshCache.acquire(mesh, _imp->paintSerial);
+        if (E) {
+            if (mode != eWireframe) {
+                if (mode == eShadedWire) {
+                    glEnable(GL_POLYGON_OFFSET_FILL);
+                    glPolygonOffset(1.0f, 1.0f);
+                }
+                const bool lit = (mode == eShaded || mode == eShadedWire);
+                const bool textured = meshHasTex && useOwnUVs && E->hasUV;
+                if (textured) {
+                    const GLint wrap = texWrapRepeat ? GL_REPEAT : GL_CLAMP_TO_EDGE;
+                    bindPreviewTextureCached(_imp->previewGlTextures, _imp->paintSerial, texPixels, texW, texH, wrap, wrap, NULL);
+                }
+                drawCachedMeshFill(*E, _imp->meshShaderProgram, lit, textured, 0.45f);
+                if (textured) glBindTexture(GL_TEXTURE_2D, 0);
+                if (mode == eShadedWire) glDisable(GL_POLYGON_OFFSET_FILL);
+            }
+            if (mode == eWireframe || mode == eShadedWire) {
+                glColor3f(0.7f, 0.7f, 0.7f);
+                glLineWidth(1.0f);
+                drawCachedMeshWire(*E);
+            }
+            return;
+        }
+    }
 
     // ----- Shaded fill (Shaded / Shaded+Wire / Flat) -----
     // Fan-triangulate the polygon-soup mesh via faceCounts. If faceCounts is

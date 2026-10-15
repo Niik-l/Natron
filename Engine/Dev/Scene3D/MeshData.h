@@ -19,6 +19,7 @@
 #include "../../../Global/Macros.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <utility>
@@ -67,13 +68,26 @@ struct MeshData
     std::size_t numVertices;
     std::size_t numFaces;
 
-    MeshData() : texCoordComponents(0), hasUVs(false), numVertices(0), numFaces(0)
+    // Change stamp for GPU-side caches (Viewport3D keeps a VBO copy of each
+    // mesh). Producers that rewrite vertices / indices IN PLACE must call
+    // bumpMeshVersion() afterwards; a freshly built MeshData needs nothing.
+    unsigned long long version;
+
+    MeshData() : texCoordComponents(0), hasUVs(false), numVertices(0), numFaces(0), version(0)
     {
         for (int i = 0; i < 16; ++i) transform[i] = (i % 5 == 0) ? 1.0f : 0.0f; // identity
     }
 };
 
 typedef std::shared_ptr<MeshData> MeshDataPtr;
+
+/** Mark an in-place edit of a mesh so GPU caches re-upload it. Process-wide
+ *  monotonic counter, so a stamp never repeats across different meshes. */
+inline void bumpMeshVersion(MeshData& m)
+{
+    static std::atomic<unsigned long long> counter(0);
+    m.version = ++counter;
+}
 
 /** Flip every face's winding order (and the parallel per-face-vertex uv /
  *  texCoord slots, which are indexed by position within faceIndices) so that
@@ -113,6 +127,7 @@ inline void reverseMeshWinding(MeshData& m)
             reverseRange(off, 3);
         }
     }
+    bumpMeshVersion(m);
 }
 
 NATRON_NAMESPACE_EXIT

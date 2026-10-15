@@ -825,6 +825,7 @@ ReadAlembicArchive::getMeshDataAt(int idx, double time) const
         const std::vector<float>& s1 = e.vertexSamples[idx1];
 
         if (!s0.empty() && s0.size() == e.meshData->vertices.size()) {
+            bumpMeshVersion(*e.meshData);   // vertices rewritten in place: GPU caches must re-upload
             if (idx0 == idx1 || alpha < 1e-9) {
                 // Exact-sample fast path (and the only correct path if the
                 // upper bracket sample size mismatches the lower).

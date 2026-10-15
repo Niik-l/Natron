@@ -1174,6 +1174,7 @@ ReadGeo::updateVerticesAtTime(MeshData* mesh, double time) const
         // verts, no flicker).
         return;
     }
+    bumpMeshVersion(*mesh);   // vertices rewritten in place below: GPU caches must re-upload
 
     if (idx0 == idx1 || alpha < 1e-9) {
         std::memcpy(mesh->vertices.data(), s0.data(), s0.size() * sizeof(float));
