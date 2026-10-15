@@ -78,6 +78,7 @@ private Q_SLOTS:
 
 private:
     void writeExcludedPathsToKnob();
+    void redisplayChecks();
     void rebuildFromArchive();
     void setBranchChecked(QTreeWidgetItem* root, bool checked);
     void applySearchFilter(const QString& text);

@@ -846,7 +846,8 @@ createEmissiveMatteShader(ccl::Scene* scene)
 static ccl::Shader*
 createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double time,
                      bool particleColorTint = false,
-                     float particleEmissionStrength = -1.0f)
+                     float particleEmissionStrength = -1.0f,
+                     const MeshData* faceColorMesh = nullptr)
 {
     // Resolve: if a Material3D is connected, use it instead of inline knobs
     MaterialProvider* mat = matProvider;
@@ -901,6 +902,26 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     // color (texture output when present, else the flat material color), and
     // drive alpha from the particle age fade — so emitter colors and
     // ParticleAttribute ramps show through the material.
+    // Per-face file colors (ReadGeo merged mode's baked part colors) use the
+    // same multiply pattern with their own attribute — placed BEFORE the
+    // particle tint block; the two never combine (different node kinds).
+    ccl::AttributeNode* faceColorAttr = nullptr;
+    if (faceColorMesh && faceColorMesh->hasVertexColors) {
+        // NOTE: not "vertex_color" — reserved std-attribute name that never
+        // matches a plain named attribute (same trap as "particle_color").
+        faceColorAttr = graph->create_node<ccl::AttributeNode>();
+        faceColorAttr->set_attribute(ccl::ustring("geo_face_color"));
+        ccl::VectorMathNode* mul = graph->create_node<ccl::VectorMathNode>();
+        mul->set_math_type(ccl::NODE_VECTOR_MATH_MULTIPLY);
+        if (baseTex) {
+            graph->connect(baseTex->output("Color"), mul->input("Vector1"));
+        } else {
+            mul->set_vector1(ccl::make_float3((float)r, (float)g, (float)b));
+        }
+        graph->connect(faceColorAttr->output("Color"), mul->input("Vector2"));
+        graph->connect(mul->output("Vector"), principled->input("Base Color"));
+    }
+
     ccl::AttributeNode* particleVcol = nullptr;
     if (particleColorTint) {
         particleVcol = graph->create_node<ccl::AttributeNode>();
@@ -2645,6 +2666,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         std::vector<int> triVerts;
         std::vector<ccl::float2> uvs; // per-vertex UVs
         std::vector<ccl::float3> normals; // per-vertex normals from a primitive's generator (empty: Cycles averages)
+        MeshDataPtr meshData; // the case branches fill this (declared here so the material/attribute code below sees it)
 
         // Render-time subdivision (the node's "Subdivision (Cycles)" group):
         // the polygons go to Cycles as subd faces and are diced against the
@@ -2728,7 +2750,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 // Prefer mesh data carried directly on the SceneNode (set by
                 // ReadGeo and ReadAlembicArchive). Fall back to the source-node
                 // dynamic_cast for older code paths that haven't been updated.
-                MeshDataPtr meshData = sn.meshData;
+                meshData = sn.meshData;
                 if (!meshData) {
                     NodePtr meshSrcNode = sn.sourceNode.lock();
                     if (!meshSrcNode) continue;
@@ -2879,7 +2901,12 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             } else if (srcNode) {
                 MaterialProvider* matProv = dynamic_cast<MaterialProvider*>(srcNode->getEffectInstance().get());
                 if (matProv) {
-                    objShader = createMaterialShader(scene, matProv, time);
+                    // Face colors baked on the merged mesh (ReadGeo multi-part
+                    // file): tint the material with them.
+                    objShader = createMaterialShader(scene, matProv, time,
+                                                     /*particleColorTint*/ false,
+                                                     /*particleEmissionStrength*/ -1.0f,
+                                                     sn.type == eSceneNodeMesh ? meshData.get() : nullptr);
                 }
             }
         }
@@ -2919,6 +2946,38 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 ccl::float3* nDst = nAttr->data_float3();
                 for (size_t v = 0; v < normals.size(); ++v) {
                     nDst[v] = normals[v];
+                }
+            }
+
+            // Per face-corner file colors (ReadGeo merged mode bakes each part's
+            // material color here): one color per TRIANGLE CORNER, parallel to
+            // the fan-triangulated corner list. Cycles interpolates the attribute
+            // across each face — constant per face since all 3 corners share it.
+            if (meshData->hasVertexColors &&
+                meshData->vertexColors.size() == meshData->faceIndices.size() * 3) {
+                // Expand face corners -> triangle corners (fan), mirroring the
+                // triangulation loop above.
+                std::vector<ccl::float3> triColors;
+                triColors.reserve(triVerts.size());
+                std::size_t idxOffset = 0;
+                for (std::size_t f = 0; f < meshData->numFaces; ++f) {
+                    const int count = meshData->faceCounts[f];
+                    const float* c = &meshData->vertexColors[idxOffset * 3];
+                    for (int t = 1; t < count - 1; ++t) {
+                        triColors.push_back(ccl::make_float3(c[0], c[1], c[2]));
+                        triColors.push_back(ccl::make_float3(c[0], c[1], c[2]));
+                        triColors.push_back(ccl::make_float3(c[0], c[1], c[2]));
+                    }
+                    idxOffset += count;
+                }
+                if (triColors.size() == (std::size_t)numTris * 3) {
+                    // NAMED color attribute so the shader's AttributeNode("geo_face_color") finds it.
+                    ccl::Attribute* colAttr = mesh->attributes.add(
+                        ccl::ustring("geo_face_color"), ccl::TypeRGBA, ccl::ATTR_ELEMENT_CORNER);
+                    ccl::float4* cDst = colAttr->data_float4();
+                    for (std::size_t c = 0; c < triColors.size(); ++c) {
+                        cDst[c] = ccl::make_float4(triColors[c].x, triColors[c].y, triColors[c].z, 1.0f);
+                    }
                 }
             }
 

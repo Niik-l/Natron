@@ -3675,10 +3675,19 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
                     const float* p2 = &mesh->vertices[v2*3];
                     float f = ViewportFaceLitFactor(p0, p1, p2, mvForLit);
                     if (hasTexPass) glColor4f(f, f, f, 0.95f);
+                    else if (mesh->hasVertexColors && (f0 * 3 + 2) < mesh->vertexColors.size()) {
+                        // Per face-corner file color (ReadGeo merged mode):
+                        // corner 0 carries the face's part color.
+                        const float* c = &mesh->vertexColors[f0 * 3];
+                        glColor3f(c[0] * f, c[1] * f, c[2] * f);
+                    }
                     else if (haveEntryColor) glColor3f(entryColor[0]*f, entryColor[1]*f, entryColor[2]*f);
                     else            glColor3f(baseGrey * f, baseGrey * f, baseGrey * f);
                 } else if (hasTexPass) {
                     glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+                } else if (mesh->hasVertexColors && (f0 * 3 + 2) < mesh->vertexColors.size()) {
+                    const float* c = &mesh->vertexColors[f0 * 3];
+                    glColor3f(c[0], c[1], c[2]);
                 } else if (haveEntryColor) {
                     glColor3f(entryColor[0], entryColor[1], entryColor[2]);
                 }

@@ -1196,10 +1196,14 @@ namespace {
 // appended vertices (identity for skinned glTF entries — their deformed
 // vertices are already in world space) and re-basing vertex indices. UVs are
 // per face-vertex, parallel to faceIndices: parts without UVs contribute
-// zero-padded slots so the interleaving stays aligned. Call
+// zero-padded slots so the interleaving stays aligned. `partColor` (when
+// non-null) is baked as per face-corner colors — a merged multi-material
+// asset keeps each part's file material color on its faces (single MeshData =
+// no per-part material slots; consumers shade the face colors). Call
 // importBuildEdgeIndices() once after all parts are appended.
 void
-appendArchiveMesh(const MeshData& src, const float world[16], MeshData* dst)
+appendArchiveMesh(const MeshData& src, const float world[16], MeshData* dst,
+                  const float partColor[3] = nullptr)
 {
     const std::size_t vertexOffset = dst->numVertices;
     const std::size_t faceIdxBegin = dst->faceIndices.size();
@@ -1226,6 +1230,16 @@ appendArchiveMesh(const MeshData& src, const float world[16], MeshData* dst)
     dst->faceCounts.insert(dst->faceCounts.end(),
                            src.faceCounts.begin(), src.faceCounts.end());
     dst->numFaces += src.faceCounts.size();
+
+    if (partColor) {
+        dst->vertexColors.resize(faceIdxBegin * 3, 0.0f);
+        for (std::size_t i = 0; i < src.faceIndices.size(); ++i) {
+            dst->vertexColors.push_back(partColor[0]);
+            dst->vertexColors.push_back(partColor[1]);
+            dst->vertexColors.push_back(partColor[2]);
+        }
+        dst->hasVertexColors = true;
+    }
 
     const bool srcUVs = src.hasUVs && src.texCoordComponents == 2;
     if (srcUVs) {
@@ -1413,7 +1427,10 @@ ReadGeo::buildSceneMesh(double time) const
 
     if (chosenIdx == 0) {
         // Merged: every mesh entry's evaluated vertices baked through its
-        // world matrix, concatenated — the whole asset as one mesh.
+        // world matrix, concatenated — the whole asset as one mesh. Each
+        // part's file material color bakes onto its face corners (the merged
+        // mesh has no per-part material slots; multi-material files keep
+        // their per-part colors as face colors).
         for (std::size_t e = 0; e < imp->meshEntries.size(); ++e) {
             const int nodeIdx = imp->meshEntries[e];
             if (nodeIdx >= (int)data.nodes.size()) continue;
@@ -1422,9 +1439,19 @@ ReadGeo::buildSceneMesh(double time) const
                 !st->deformed[nd.meshIndex]) {
                 continue;
             }
+            float partColor[3] = { -1.f, 0.f, 0.f };
+            const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
+            if (md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
+                data.materials[md.materialIndex].present) {
+                const GeoImportMaterial& m = data.materials[md.materialIndex];
+                partColor[0] = (float)m.baseColor[0];
+                partColor[1] = (float)m.baseColor[1];
+                partColor[2] = (float)m.baseColor[2];
+            }
             float world[16];
             imp->rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, world);
-            appendArchiveMesh(*st->deformed[nd.meshIndex], world, mesh.get());
+            appendArchiveMesh(*st->deformed[nd.meshIndex], world, mesh.get(),
+                              partColor[0] >= 0.f ? partColor : nullptr);
         }
     } else if (chosenIdx - 1 < (int)imp->meshEntries.size()) {
         // Single part.
@@ -1436,12 +1463,24 @@ ReadGeo::buildSceneMesh(double time) const
                 src = st->deformed[nd.meshIndex];
             }
             if (src) {
+                // Single part: bake the part's material color on its faces
+                // (the merged-style face-color consumption applies 1:1).
+                float partColor[3] = { -1.f, 0.f, 0.f };
+                const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
+                if (md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
+                    data.materials[md.materialIndex].present) {
+                    const GeoImportMaterial& m = data.materials[md.materialIndex];
+                    partColor[0] = (float)m.baseColor[0];
+                    partColor[1] = (float)m.baseColor[1];
+                    partColor[2] = (float)m.baseColor[2];
+                }
+                const float* pc = partColor[0] >= 0.f ? partColor : nullptr;
                 if (bake) {
                     // Baked: the part's evaluated world matrix goes into the
                     // vertices; MeshData::transform stays identity.
                     float world[16];
                     imp->rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, world);
-                    appendArchiveMesh(*src, world, mesh.get());
+                    appendArchiveMesh(*src, world, mesh.get(), pc);
                 } else {
                     // Non-baked: the part keeps its node-local vertices and
                     // the part's world matrix rides in MeshData::transform —
@@ -1449,7 +1488,7 @@ ReadGeo::buildSceneMesh(double time) const
                     // T/R/S composes on top in every consumer.
                     float identity[16];
                     geoArchiveMatIdentity(identity);
-                    appendArchiveMesh(*src, identity, mesh.get());
+                    appendArchiveMesh(*src, identity, mesh.get(), pc);
                     imp->rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, mesh->transform);
                 }
             }
@@ -1470,7 +1509,12 @@ ReadGeo::buildSceneMesh(double time) const
             << " verts=" << mesh->numVertices
             << " faces=" << mesh->numFaces
             << " uvslots=" << (mesh->uvs.size() / 2)
-            << " v0..v5=";
+            << " vcolors=" << (mesh->hasVertexColors ? (int)(mesh->vertexColors.size() / 3) : -1)
+            << " c0..c5=";
+        for (std::size_t i = 0; i < mesh->vertexColors.size() && i < 6; ++i) {
+            dbg << mesh->vertexColors[i] << ",";
+        }
+        dbg << " v0..v5=";
         for (std::size_t i = 0; i < mesh->vertices.size() && i < 6; ++i) {
             dbg << mesh->vertices[i] << ",";
         }

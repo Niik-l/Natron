@@ -64,6 +64,14 @@ struct MeshData
     int texCoordComponents;          // 0 / 2 / 3
     bool hasUVs;                     // true when texCoordComponents > 0
 
+    // Per face-corner color (r,g,b parallel to faceIndices) — file-authored
+    // material colors baked onto the mesh by loaders whose consumers can't
+    // address per-part materials (ReadGeo merged mode: ONE MeshData, so a
+    // multi-material file's per-part materials land as face colors). Filled
+    // only when hasVertexColors; consumers without support ignore it.
+    std::vector<float> vertexColors; // r,g,b per face-corner
+    bool hasVertexColors;
+
     float transform[16];             // 4x4 column-major transform
     std::size_t numVertices;
     std::size_t numFaces;
@@ -73,7 +81,7 @@ struct MeshData
     // bumpMeshVersion() afterwards; a freshly built MeshData needs nothing.
     unsigned long long version;
 
-    MeshData() : texCoordComponents(0), hasUVs(false), numVertices(0), numFaces(0), version(0)
+    MeshData() : texCoordComponents(0), hasUVs(false), hasVertexColors(false), numVertices(0), numFaces(0), version(0)
     {
         for (int i = 0; i < 16; ++i) transform[i] = (i % 5 == 0) ? 1.0f : 0.0f; // identity
     }
