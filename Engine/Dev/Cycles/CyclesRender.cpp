@@ -856,6 +856,10 @@ CyclesRender::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderS
 StatusEnum
 CyclesRender::render(const RenderActionArgs& args)
 {
+    // One render at a time per node instance (see _renderMutex in the header):
+    // concurrent calls queue here instead of racing the renderer lifecycle.
+    // Held for the whole body, including the cache publish.
+    std::lock_guard<std::mutex> renderLock(_renderMutex);
     assert(!args.outputPlanes.empty());
     printf("[CyclesRender] render() called with %d output planes:\n", (int)args.outputPlanes.size());
     for (const auto& pp : args.outputPlanes) {
@@ -1813,6 +1817,14 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
             setPersistentMessage(eMessageTypeError, "Set EXR output path first.");
             return true;
         }
+        // Try to hold the render mutex: reading cachedPassBuffers while a
+        // worker-thread render is replacing/clearing the map is a torn read.
+        // Never block the main thread on an in-flight render — just report.
+        std::unique_lock<std::mutex> renderLock(_renderMutex, std::try_to_lock);
+        if (!renderLock.owns_lock()) {
+            setPersistentMessage(eMessageTypeWarning, "A render is in progress; try saving again in a moment.");
+            return true;
+        }
         if (_imp->cachedPassBuffers.empty() || _imp->cachedWidth <= 0) {
             setPersistentMessage(eMessageTypeError, "No render cached. Render first, then save.");
             return true;
@@ -1830,9 +1842,16 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
 
     // --- Refresh Passes — re-publish output planes + force a re-render ---
     if (_imp->refreshPassesBtn.lock().get() == k) {
-        // Drop the internal render cache so the next render isn't served stale...
-        _imp->cachedHash = 0;
-        _imp->cachedPassBuffers.clear();
+        // Clearing the cache while a worker render is publishing into it is a
+        // race (torn map) — only clear when no render is in flight. If one is,
+        // the in-flight render will publish a fresh cache at its end anyway.
+        std::unique_lock<std::mutex> renderLock(_renderMutex, std::try_to_lock);
+        if (renderLock.owns_lock()) {
+            _imp->cachedHash = 0;
+            _imp->cachedPassBuffers.clear();
+        } else {
+            setPersistentMessage(eMessageTypeWarning, "A render is in progress; the pass cache will refresh when it finishes.");
+        }
         // ...and re-run metadata so the (possibly changed) AOV plane set is
         // re-published to downstream / the viewer without scrubbing the timeline.
         refreshMetadata_public(true);

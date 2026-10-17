@@ -138,6 +138,16 @@ private:
     mutable std::mutex _deepMutex;
     mutable DeepImagePtr _lastDeepImage;
 
+    // Guards the ENTIRE render body. Natron may drive render() concurrently
+    // (parallel frames, viewer + live preview): the body REPLACES
+    // _imp->activeRenderer and mutates cachedPassBuffers/cachedHash, so two
+    // threads interleaving there free the previous renderer's ccl::Session
+    // while the other is still inside syncSceneWithCamera building meshes on
+    // it — access violation in the ccl mesh build. That is the recurring
+    // 0xc0000005 during template loads (WER: Natron.exe+0xb3a3ca =
+    // syncSceneWithCamera, seen 2026-10-14/15/17).
+    mutable std::mutex _renderMutex;
+
     std::unique_ptr<CyclesRenderPrivate> _imp;
 };
 
