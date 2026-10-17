@@ -35,6 +35,8 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -1368,6 +1370,21 @@ ReadGeo::loadSceneGeo(const std::string& path)
     if (mesh && mesh->hasUVs) {
         ss << " | UVs";
     }
+    // Morph targets (shape keys): count targets over DISTINCT morph sets —
+    // the material pieces of one FBX node mesh share one set.
+    {
+        std::set<const GeoMorphSet*> seen;
+        std::size_t numMorphs = 0;
+        for (std::size_t i = 0; i < _imp->meshEntries.size(); ++i) {
+            const GeoArchiveMeshData& md = data.meshes[data.nodes[_imp->meshEntries[i]].meshIndex];
+            if (md.morphs && seen.insert(md.morphs.get()).second) {
+                numMorphs += md.morphs->targets.size();
+            }
+        }
+        if (numMorphs > 0) {
+            ss << " | " << numMorphs << " morphs";
+        }
+    }
     if (_imp->rt.hasAnimation) {
         ss << " | anim";
         if (_imp->freezeAtFrame.lock() && _imp->freezeAtFrame.lock()->getValue()) {
@@ -1450,8 +1467,27 @@ ReadGeo::buildSceneMesh(double time) const
             }
             float world[16];
             imp->rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, world);
+            if (std::getenv("NATRON_DEBUG_GEOIO")) {
+                std::fprintf(stderr,
+                             "[GEOIO] merged part %d node %d worldDiag=(%.4f,%.4f,%.4f) tr=(%.4f,%.4f,%.4f)\n",
+                             (int)e, nodeIdx, world[0], world[5], world[10],
+                             world[12], world[13], world[14]);
+                const MeshData& srcM = *st->deformed[nd.meshIndex];
+                if (srcM.vertices.size() >= 3) {
+                    std::fprintf(stderr,
+                                 "[GEOIO]   src v0=(%.4f,%.4f,%.4f) srcNumVerts=%d\n",
+                                 srcM.vertices[0], srcM.vertices[1],
+                                 srcM.vertices[2], (int)srcM.numVertices);
+                }
+            }
             appendArchiveMesh(*st->deformed[nd.meshIndex], world, mesh.get(),
                               partColor[0] >= 0.f ? partColor : nullptr);
+            if (std::getenv("NATRON_DEBUG_GEOIO") && mesh->vertices.size() >= 3) {
+                std::fprintf(stderr,
+                             "[GEOIO]   baked v0=(%.4f,%.4f,%.4f)\n",
+                             mesh->vertices[0], mesh->vertices[1],
+                             mesh->vertices[2]);
+            }
         }
     } else if (chosenIdx - 1 < (int)imp->meshEntries.size()) {
         // Single part.
@@ -1526,6 +1562,10 @@ ReadGeo::buildSceneMesh(double time) const
         for (std::size_t i = 0; i < mesh->faceIndices.size() && i < 6; ++i) {
             dbg << mesh->faceIndices[i] << ",";
         }
+        dbg << " tr=";
+        for (int i = 0; i < 16; ++i) {
+            dbg << mesh->transform[i] << ",";
+        }
         fprintf(stderr, "%s\n", dbg.str().c_str());
     }
 
@@ -1568,16 +1608,24 @@ MeshDataPtr
 ReadGeo::getMeshData(double time) const
 {
     // Serialise against a concurrent reload swapping/clearing _lastMeshData.
-    // NOTE: the per-time vertex/transform update below still mutates the
-    // shared mesh in place (wrong-render across concurrent consumers at
-    // different times) — that is the G1 copy-on-read fix, tracked separately.
     std::lock_guard<std::mutex> lk(_meshMutex);
 
     // Scene formats (glTF/FBX) always go through the per-frame builder, which
-    // caches its builds — frozen files evaluate at the frozen frame, animated
+    // caches its builds - frozen files evaluate at the frozen frame, animated
     // ones at the requested time.
     if (_imp && _imp->sceneLoaded) {
-        return buildSceneMesh(time);
+        MeshDataPtr built = buildSceneMesh(time);
+        if (!built) return built;
+        // G1 copy-on-read (2026-10-17): hand out an immutable snapshot instead
+        // of the cached build. Consumers (CyclesRender's worker-thread sync,
+        // the GL viewport, downstream MeshProvider readers) previously shared
+        // the cached object while a concurrent getMeshData at another time
+        // mutated it in place - heap tearing, wrong-render across concurrent
+        // consumers, and access violations deep in the readers (observed as
+        // the recurring template-load crash inside syncSceneWithCamera).
+        // Cost: one MeshData copy per call, taken under _meshMutex so the
+        // snapshot is always consistent.
+        return MeshDataPtr(new MeshData(*built));
     }
 
     // Frozen evaluation for .abc: substitute the frozen frame for the
@@ -1598,7 +1646,13 @@ ReadGeo::getMeshData(double time) const
             updateVerticesAtTime(_lastMeshData.get(), effTime);
         }
     }
-    return _lastMeshData;
+
+    // G1 copy-on-read: the same immutable-snapshot contract as the scene
+    // path above. The in-place updates stay (they own the mutation under
+    // _meshMutex); consumers receive a copy of the result, never the shared
+    // object itself.
+    if (!_lastMeshData) return _lastMeshData;
+    return MeshDataPtr(new MeshData(*_lastMeshData));
 }
 
 void
