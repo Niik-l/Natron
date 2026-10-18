@@ -92,6 +92,40 @@ importBakeXform(std::vector<float>& verts, const float m[16])
 }
 
 void
+applyGeoMorphSet(MeshData& mesh, const GeoMorphSet& morphs, const float* weights)
+{
+    if (!weights || morphs.targets.empty()) return;
+    const std::size_t numVerts = mesh.numVertices;
+    float* verts = mesh.vertices.empty() ? NULL : mesh.vertices.data();
+    if (!verts) return;
+
+    for (std::size_t t = 0; t < morphs.targets.size(); ++t) {
+        const float w = weights[t];
+        if (w == 0.0f) continue;
+        const GeoMorphTarget& tgt = morphs.targets[t];
+        if (tgt.indices.empty()) {
+            // Dense target (glTF): deltas for every vertex.
+            const std::size_t n = std::min(numVerts, tgt.deltas.size() / 3);
+            for (std::size_t v = 0; v < n; ++v) {
+                verts[v * 3]     += w * tgt.deltas[v * 3];
+                verts[v * 3 + 1] += w * tgt.deltas[v * 3 + 1];
+                verts[v * 3 + 2] += w * tgt.deltas[v * 3 + 2];
+            }
+        } else {
+            // Sparse target (FBX blend shape): parallel index/delta arrays.
+            const std::size_t n = tgt.indices.size();
+            for (std::size_t i = 0; i < n; ++i) {
+                const unsigned int vi = tgt.indices[i];
+                if ((std::size_t)vi >= numVerts) continue;
+                verts[(std::size_t)vi * 3]     += w * tgt.deltas[i * 3];
+                verts[(std::size_t)vi * 3 + 1] += w * tgt.deltas[i * 3 + 1];
+                verts[(std::size_t)vi * 3 + 2] += w * tgt.deltas[i * 3 + 2];
+            }
+        }
+    }
+}
+
+void
 importBuildEdgeIndices(MeshData* mesh)
 {
     mesh->edgeIndices.clear();
@@ -437,12 +471,14 @@ GeoArchiveRuntime::loadFile(const std::string& path, bool reverseWinding, std::s
         }
     }
 
-    // Animation detection: glTF channel bindings, skinned payloads, or an
-    // FBX file with an animation stack (FBX marks every node animated — the
-    // evaluated scene serves the whole tree; conservative and cheap).
+    // Animation detection: glTF channel bindings (TRS or morph weights),
+    // skinned payloads, or an FBX file with an animation stack (FBX marks
+    // every node animated — the evaluated scene serves the whole tree;
+    // conservative and cheap).
     bool anyAnimated = false;
     for (const GeoArchiveNodeData& nd : data.nodes) {
-        if (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) { anyAnimated = true; break; }
+        if (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0 ||
+            nd.chanWeights >= 0) { anyAnimated = true; break; }
     }
     if (!anyAnimated) {
         for (const GeoArchiveMeshData& md : data.meshes) {
@@ -455,6 +491,38 @@ GeoArchiveRuntime::loadFile(const std::string& path, bool reverseWinding, std::s
     hasAnimation = anyAnimated;
     animTimeBegin = data.animTimeBegin;
     animTimeEnd = data.animTimeEnd;
+
+    // Geometry-loader diagnostics: root normalization presence is the #1
+    // suspect for "everything renders giant/black" — dump it at load.
+    if (std::getenv("NATRON_DEBUG_GEOIO")) {
+        std::fprintf(stderr,
+                     "[GEOIO] runtime load fmt=%s nodes=%d meshes=%d anims=%d "
+                     "rootMatrix=%s\n",
+                     isFbx ? "FBX" : "glTF", (int)data.nodes.size(),
+                     (int)data.meshes.size(), (int)data.anims.size(),
+                     data.rootMatrix.size() == 16
+                         ? "present"
+                         : "ABSENT");
+        if (data.rootMatrix.size() == 16) {
+            std::fprintf(stderr,
+                         "[GEOIO]   rootMatrix diag=(%.4f,%.4f,%.4f)\n",
+                         data.rootMatrix[0], data.rootMatrix[5],
+                         data.rootMatrix[10]);
+        }
+        for (std::size_t i = 0; i < data.nodes.size(); ++i) {
+            const GeoArchiveNodeData& nd = data.nodes[i];
+            std::fprintf(stderr,
+                         "[GEOIO]   entry %d '%s' isMesh=%d parent=%d "
+                         "hasTrs=%d localDiag=(%.4f,%.4f,%.4f) "
+                         "tr=(%.3f,%.3f,%.3f) sc=(%.3f,%.3f,%.3f)\n",
+                         (int)i, nd.fullPath.c_str(), nd.isMesh ? 1 : 0,
+                         nd.parentIndex, nd.hasTrs ? 1 : 0,
+                         nd.localMatrix[0], nd.localMatrix[5],
+                         nd.localMatrix[10], nd.translation[0],
+                         nd.translation[1], nd.translation[2], nd.scale[0],
+                         nd.scale[1], nd.scale[2]);
+        }
+    }
     return true;
 }
 

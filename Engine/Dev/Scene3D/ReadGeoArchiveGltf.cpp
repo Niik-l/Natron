@@ -456,6 +456,53 @@ loadGltfArchiveImport(const std::string& path)
                         }
                     }
 
+                    // Morph targets (shape keys): per-primitive POSITION
+                    // deltas, dense (indices empty). Normals-only targets are
+                    // kept as empty placeholders so weight indexing stays
+                    // aligned. Rest weights: the node's per-instance weights
+                    // win over the mesh's defaults (glTF spec).
+                    const cgltf_mesh* cmesh = node->mesh;
+                    if (prim.targets_count > 0) {
+                        std::shared_ptr<GeoMorphSet> morphs(new GeoMorphSet());
+                        morphs->targets.resize(prim.targets_count);
+                        for (cgltf_size t = 0; t < prim.targets_count; ++t) {
+                            GeoMorphTarget& tgt = morphs->targets[t];
+                            if (cmesh->target_names && t < cmesh->target_names_count &&
+                                cmesh->target_names[t]) {
+                                tgt.name = cmesh->target_names[t];
+                            } else {
+                                tgt.name = "target " + std::to_string(t + 1);
+                            }
+                            const cgltf_accessor* mPosAcc = NULL;
+                            const cgltf_morph_target& mt = prim.targets[t];
+                            for (cgltf_size a = 0; a < mt.attributes_count; ++a) {
+                                if (!std::strcmp(mt.attributes[a].name, "POSITION") &&
+                                    mt.attributes[a].data) {
+                                    mPosAcc = mt.attributes[a].data;
+                                    break;
+                                }
+                            }
+                            if (mPosAcc && mPosAcc->count == numVerts) {
+                                tgt.deltas.resize((std::size_t)numVerts * 3);
+                                for (cgltf_size i = 0; i < numVerts; ++i) {
+                                    cgltf_accessor_read_float(mPosAcc, i, &tgt.deltas[i * 3], 3);
+                                }
+                            }
+                        }
+                        morphs->restWeights.assign(prim.targets_count, 0.0f);
+                        if (node->weights && node->weights_count == prim.targets_count) {
+                            for (cgltf_size t = 0; t < prim.targets_count; ++t) {
+                                morphs->restWeights[t] = node->weights[t];
+                            }
+                        } else if (cmesh->weights && cmesh->weights_count == prim.targets_count) {
+                            for (cgltf_size t = 0; t < prim.targets_count; ++t) {
+                                morphs->restWeights[t] = cmesh->weights[t];
+                            }
+                        }
+                        md.morphs = morphs;
+                        md.morphNodeIndex = thisIdx;
+                    }
+
                     // Mesh child entry: "name" for the first primitive,
                     // "name[2]" for subsequent ones (same material-part split
                     // shape the Alembic locator+mesh pairs use).
@@ -546,9 +593,47 @@ loadGltfArchiveImport(const std::string& path)
                 case cgltf_animation_path_type_translation: cd.path = GEO_ARCHIVE_CHAN_TRANSLATION; break;
                 case cgltf_animation_path_type_rotation: cd.path = GEO_ARCHIVE_CHAN_ROTATION; break;
                 case cgltf_animation_path_type_scale: cd.path = GEO_ARCHIVE_CHAN_SCALE; break;
-                default: cd.path = 0; break;  // weights: morph targets — deferred
+                case cgltf_animation_path_type_weights: cd.path = GEO_ARCHIVE_CHAN_WEIGHTS; break;
+                default: cd.path = 0; break;
             }
             cd.sampler = ch.sampler ? (int)(ch.sampler - anim.samplers) : -1;
+        }
+    }
+
+    // Weights samplers (morph target animation) were read with the output
+    // accessor's flat component count (SCALAR → nComp 1); the real per-key
+    // stride is the TARGET COUNT of the target node's mesh. Fix nComp so
+    // sampleAnimSampler interpolates all targets of a key together. The
+    // glTF validator (cgltf) already ties the output count to
+    // keys * targets_count; a sampler that doesn't fit stays nComp 1 and the
+    // binding below rejects it.
+    if (!result.anims.empty()) {
+        GeoArchiveAnimData& anim = result.anims.front();
+        std::vector<char> fixed(anim.samplers.size(), 0);
+        for (const GeoArchiveAnimChannelData& ch : anim.channels) {
+            if (ch.path != GEO_ARCHIVE_CHAN_WEIGHTS || ch.sampler < 0 ||
+                ch.sampler >= (int)anim.samplers.size() || ch.nodeIndex < 0 ||
+                ch.nodeIndex >= (int)result.nodes.size()) {
+                continue;
+            }
+            // Recover the target count from the owning node's mesh pieces
+            // (morphNodeIndex was stored at parse — works for skinned mesh
+            // entries too, whose parent is the archive root).
+            int numTargets = 0;
+            for (const GeoArchiveMeshData& md : result.meshes) {
+                if (md.morphs && md.morphNodeIndex == ch.nodeIndex) {
+                    numTargets = (int)md.morphs->targets.size();
+                    break;
+                }
+            }
+            if (numTargets <= 0) continue;
+            GeoArchiveAnimSamplerData& sd = anim.samplers[ch.sampler];
+            if (fixed[ch.sampler]) continue;
+            if (sd.nComp == 1 && !sd.times.empty() &&
+                sd.values.size() == sd.times.size() * (std::size_t)numTargets) {
+                sd.nComp = numTargets;
+                fixed[ch.sampler] = 1;
+            }
         }
     }
 
@@ -571,13 +656,16 @@ loadGltfArchiveImport(const std::string& path)
             if (ch.path == GEO_ARCHIVE_CHAN_TRANSLATION) nd.chanTr = ch.sampler;
             else if (ch.path == GEO_ARCHIVE_CHAN_ROTATION) nd.chanRot = ch.sampler;
             else if (ch.path == GEO_ARCHIVE_CHAN_SCALE) nd.chanSc = ch.sampler;
+            else if (ch.path == GEO_ARCHIVE_CHAN_WEIGHTS) nd.chanWeights = ch.sampler;
         }
         if (std::getenv("NATRON_DEBUG_GEOIO")) {
             for (std::size_t i = 0; i < result.nodes.size(); ++i) {
                 const GeoArchiveNodeData& nd = result.nodes[i];
-                if (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) {
-                    std::fprintf(stderr, "[GEOIO-ARCH] bind node %d '%s': tr=%d rot=%d sc=%d\n",
-                                 (int)i, nd.name.c_str(), nd.chanTr, nd.chanRot, nd.chanSc);
+                if (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0 ||
+                    nd.chanWeights >= 0) {
+                    std::fprintf(stderr, "[GEOIO-ARCH] bind node %d '%s': tr=%d rot=%d sc=%d w=%d\n",
+                                 (int)i, nd.name.c_str(), nd.chanTr, nd.chanRot, nd.chanSc,
+                                 nd.chanWeights);
                 }
             }
         }
@@ -635,8 +723,9 @@ evaluateGltfArchiveFrame(const GeoArchiveResult& data,
         }
     }
 
-    // Pass 2: per-mesh payloads — skinned entries deform against the joint
-    // world matrices; rigid entries alias the rest pose.
+    // Pass 2: per-mesh payloads — morph targets deform the rest pose first
+    // (glTF order: morph, then skin), skinned entries then deform against the
+    // joint world matrices; rigid entries alias the result.
     out.deformed.resize(data.meshes.size());
 
     // Diagnostics gate (same pattern as ReadGeo's NATRON_DEBUG_GEOIO): how
@@ -646,7 +735,8 @@ evaluateGltfArchiveFrame(const GeoArchiveResult& data,
     const bool dbgGeo = (std::getenv("NATRON_DEBUG_GEOIO") != NULL);
     int chanNodes = 0;
     for (const GeoArchiveNodeData& nd : data.nodes) {
-        if (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) ++chanNodes;
+        if (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0 ||
+            nd.chanWeights >= 0) ++chanNodes;
     }
     if (dbgGeo) {
         std::fprintf(stderr, "[GEOIO-ARCH] glTF t=%.3f chanNodes=%d skins=%d meshes=%d\n",
@@ -655,9 +745,45 @@ evaluateGltfArchiveFrame(const GeoArchiveResult& data,
 
     for (std::size_t m = 0; m < data.meshes.size(); ++m) {
         const GeoArchiveMeshData& md = data.meshes[m];
+
+        // Morph pass: build the morph-applied base (a copy when any weight is
+        // non-zero, the rest pose otherwise). Weights: the owning node's
+        // weights channel; without one, the file's rest weights.
+        MeshDataPtr base;
+        if (md.morphs && !md.morphs->targets.empty()) {
+            std::vector<float> w(md.morphs->targets.size(), 0.0f);
+            bool haveW = false;
+            if (md.morphNodeIndex >= 0 && (std::size_t)md.morphNodeIndex < nNodes &&
+                data.nodes[md.morphNodeIndex].chanWeights >= 0 && !data.anims.empty()) {
+                const GeoArchiveAnimSamplerData& smp =
+                    data.anims.front().samplers[data.nodes[md.morphNodeIndex].chanWeights];
+                if ((int)w.size() == smp.nComp) {
+                    sampleAnimSampler(smp, srcTime, w.data());
+                    haveW = true;
+                    if (dbgGeo) {
+                        std::fprintf(stderr, "[GEOIO-ARCH]   morph mesh %d t=%.3f w=[", (int)m, srcTime);
+                        for (std::size_t t = 0; t < w.size(); ++t) {
+                            std::fprintf(stderr, "%s%.4f", t ? "," : "", w[t]);
+                        }
+                        std::fprintf(stderr, "]\n");
+                    }
+                }
+            }
+            if (!haveW && md.morphs->restWeights.size() == w.size()) {
+                w = md.morphs->restWeights;
+                haveW = true;
+            }
+            bool anyW = false;
+            for (float ww : w) { if (ww != 0.0f) { anyW = true; break; } }
+            if (anyW) {
+                base.reset(new MeshData(*md.mesh));
+                applyGeoMorphSet(*base, *md.morphs, w.data());
+            }
+        }
+
         if (md.skinIndex < 0 || md.skinIndex >= (int)data.skinJoints.size() ||
             md.joints.empty()) {
-            out.deformed[m] = md.mesh;
+            out.deformed[m] = base ? base : md.mesh;
             continue;
         }
 
@@ -672,12 +798,14 @@ evaluateGltfArchiveFrame(const GeoArchiveResult& data,
             if (ji < 0 || (std::size_t)ji >= nNodes) continue;
             geoArchiveMatMul(&world[(std::size_t)ji * 16], &ibms[j * 16], &skin[j * 16]);
         }
-        MeshDataPtr def(new MeshData(*md.mesh));
+        // Deform the morph-applied base (or the rest pose) in place: each
+        // vertex is read before it is written, so an in-place copy is safe.
+        MeshDataPtr def(new MeshData(base ? *base : *md.mesh));
         const std::size_t numVerts = md.mesh->numVertices;
         const std::vector<unsigned int>& joints = md.joints;
         const std::vector<float>& weights = md.weights;
         float* dst = def->vertices.data();
-        const float* src = md.mesh->vertices.data();
+        const float* src = def->vertices.data();
 
         for (std::size_t v = 0; v < numVerts; ++v) {
             // Linear blend skinning: p' = (sum_k w_k * S[j_k]) * p.

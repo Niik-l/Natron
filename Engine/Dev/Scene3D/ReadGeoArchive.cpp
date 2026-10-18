@@ -583,6 +583,21 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
     if (_imp->rt.isFbx) {
         ss << " | FBX";
     }
+    // Morph targets (shape keys): targets over DISTINCT morph sets (the
+    // material pieces of one FBX node mesh share one set).
+    {
+        std::set<const GeoMorphSet*> seen;
+        std::size_t numMorphs = 0;
+        for (std::size_t i = 0; i < data.meshes.size(); ++i) {
+            const GeoArchiveMeshData& md = data.meshes[i];
+            if (md.morphs && seen.insert(md.morphs.get()).second) {
+                numMorphs += md.morphs->targets.size();
+            }
+        }
+        if (numMorphs > 0) {
+            ss << " | " << numMorphs << " morphs";
+        }
+    }
     if (_imp->rt.hasAnimation) {
         const double dur = _imp->rt.animTimeEnd - _imp->rt.animTimeBegin;
         if (dur > 0.0) {

@@ -79,11 +79,13 @@ struct GeoImportMaterial
 // happens at render time (evaluateXxxArchiveFrame below) so scrubbing never
 // re-parses the file.
 
-/** Animation channel target paths (bitmask for node channels). */
+/** Animation channel target paths (bitmask for node channels; WEIGHTS is a
+ *  standalone path — morph target weights — not part of the TRS bitmask). */
 enum GeoArchiveChannelPath {
     GEO_ARCHIVE_CHAN_TRANSLATION = 1,
     GEO_ARCHIVE_CHAN_ROTATION = 2,
     GEO_ARCHIVE_CHAN_SCALE = 4,
+    GEO_ARCHIVE_CHAN_WEIGHTS = 8,
 };
 
 /** Animation keyframe interpolation. */
@@ -114,8 +116,35 @@ struct GeoArchiveNodeData
     float localMatrix[16];                        // column-major rest matrix
 
     // Animation: sampler index per channel path into anims[0].samplers
-    // (translation / rotation / scale), -1 = not animated.
-    int chanTr = -1, chanRot = -1, chanSc = -1;
+    // (translation / rotation / scale / morph weights), -1 = not animated.
+    // WEIGHTS targets the node's mesh morph targets (glTF "weights" path;
+    // FBX weights are evaluated live inside ufbx instead).
+    int chanTr = -1, chanRot = -1, chanSc = -1, chanWeights = -1;
+};
+
+/** One morph target (glTF morph target / FBX blend shape) of a mesh piece:
+ *  position deltas relative to the piece's rest vertices. Storage is sparse
+ *  (parallel arrays: vertex index + xyz delta) — a glTF target's dense
+ *  accessor set is expanded to indices 0..numVerts-1 at parse. An empty
+ *  target (no position deltas, e.g. normals-only) stays in the list to keep
+ *  weight indexing aligned but applies nothing. */
+struct GeoMorphTarget
+{
+    std::string name;
+    std::vector<unsigned int> indices;   // into the piece's vertices
+    std::vector<float> deltas;           // indices.size() * 3
+};
+
+/** The morph targets of one source mesh. FBX: built once per ufbx mesh and
+ *  SHARED by its material pieces; the FBX per-frame evaluator re-derives the
+ *  per-target weights live from ufbx (same deformer/channel walk, same skip
+ *  rule as the parse — targets and weights zip by order). glTF: one set per
+ *  primitive; weights come from the owning node's chanWeights sampler or
+ *  restWeights. */
+struct GeoMorphSet
+{
+    std::vector<GeoMorphTarget> targets;
+    std::vector<float> restWeights;   // targets.size() (may be empty = all 0)
 };
 
 struct GeoArchiveMeshData
@@ -129,6 +158,14 @@ struct GeoArchiveMeshData
     // skinning is evaluated inside ufbx instead.
     std::vector<unsigned int> joints;     // numVerts * 4
     std::vector<float> weights;           // numVerts * 4
+
+    // Morph targets (shape keys) when the source mesh carries any. Shared
+    // pointer: FBX material pieces of one node mesh share one set.
+    std::shared_ptr<GeoMorphSet> morphs;
+    // glTF only: entry index of the owning transform node — morph weight
+    // animation channels bind there (a skinned mesh entry attaches to the
+    // archive root, so parentIndex can't reach the owner).
+    int morphNodeIndex = -1;
 };
 
 struct GeoArchiveAnimSamplerData
@@ -291,6 +328,13 @@ private:
 /** Transform every xyz position in `verts` in place by the column-major 4x4
  *  matrix `m` (bakes the file-authored node transform into the vertices). */
 void importBakeXform(std::vector<float>& verts, const float m[16]);
+
+/** Add morph target deltas to `mesh`'s vertices in place:
+ *  v += weights[t] * delta_t(v) for every target. Vertex indices past
+ *  mesh->numVertices (trimmed FBX pieces) are skipped. Both sparse and dense
+ *  (indices empty) targets are handled. */
+void applyGeoMorphSet(MeshData& mesh, const GeoMorphSet& morphs,
+                      const float* weights);
 
 /** Rebuild mesh->edgeIndices from faceIndices/faceCounts (wireframe). */
 void importBuildEdgeIndices(MeshData* mesh);

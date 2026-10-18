@@ -288,6 +288,54 @@ loadFbxArchiveImport(const std::string& path, void** outScene)
 
             if (node->mesh) {
                 const ufbx_mesh* mesh = node->mesh;
+
+                // Blend shapes (morph targets): one shared set for all
+                // material pieces of this node mesh. Targets are the blend
+                // deformer channels in order; the per-frame evaluator walks
+                // the SAME lists with the SAME skip rule (channels without a
+                // usable target shape are skipped on both sides), so target
+                // index k and evaluated weight k stay aligned. Offsets are
+                // sparse (the file lists only moved vertices) and relative to
+                // the mesh's vertex pool — the pieces keep pool indexing.
+                std::shared_ptr<GeoMorphSet> morphSet;
+                if (mesh->blend_deformers.count > 0) {
+                    morphSet.reset(new GeoMorphSet());
+                    for (std::size_t d = 0; d < mesh->blend_deformers.count; ++d) {
+                        const ufbx_blend_deformer* def = mesh->blend_deformers.data[d];
+                        if (!def) continue;
+                        for (std::size_t c = 0; c < def->channels.count; ++c) {
+                            const ufbx_blend_channel* chan = def->channels.data[c];
+                            if (!chan) continue;
+                            const ufbx_blend_shape* shape = chan->target_shape;
+                            if (!shape || shape->num_offsets == 0) continue;
+
+                            GeoMorphTarget tgt;
+                            tgt.name = arcUfbxToString(chan->name);
+                            if (tgt.name.empty()) tgt.name = arcUfbxToString(shape->name);
+                            if (tgt.name.empty()) {
+                                tgt.name = "shape " + std::to_string(morphSet->targets.size() + 1);
+                            }
+                            tgt.indices.reserve(shape->num_offsets);
+                            tgt.deltas.reserve(shape->num_offsets * 3);
+                            for (std::size_t o = 0; o < shape->num_offsets; ++o) {
+                                const uint32_t vi = shape->offset_vertices.data[o];
+                                ufbx_vec3 off = shape->position_offsets.data[o];
+                                if (o < shape->offset_weights.count) {
+                                    const ufbx_real ow = shape->offset_weights.data[o];
+                                    off.x *= ow; off.y *= ow; off.z *= ow;
+                                }
+                                tgt.indices.push_back(vi);
+                                tgt.deltas.push_back((float)off.x);
+                                tgt.deltas.push_back((float)off.y);
+                                tgt.deltas.push_back((float)off.z);
+                            }
+                            morphSet->targets.push_back(std::move(tgt));
+                            morphSet->restWeights.push_back((float)chan->weight);
+                        }
+                    }
+                    if (morphSet->targets.empty()) morphSet.reset();
+                }
+
                 // Group faces by material (same split the flat loader uses).
                 std::map<uint32_t, std::vector<uint32_t>> facesByMat;
                 const bool hasPerFaceMats = mesh->face_material.count == mesh->faces.count;
@@ -316,6 +364,7 @@ loadFbxArchiveImport(const std::string& path, void** outScene)
                         // evaluator gets skinned positions straight from
                         // ufbx_evaluate_scene(evaluate_skinning=true).
                         md.skinIndex = mesh->skin_deformers.count > 0 ? 0 : -1;
+                        md.morphs = morphSet;
 
                         GeoArchiveNodeData me;
                         me.fullPath = singleMat
@@ -448,14 +497,24 @@ evaluateFbxArchiveFrame(void* sceneV,
     struct EvalWalk {
         GeoArchiveFrameEval* out;
         const GeoArchiveResult* data;
+        const ufbx_scene* origScene;   // original scene: blend channels + anim
+        double srcTime;
         std::size_t entryIdx;   // next expected node index (entry counter)
         bool orderBroken;
 
-        void run(const ufbx_node* node)
+        void run(const ufbx_node* node, const ufbx_node* origNode)
         {
             if (orderBroken) return;
             const std::size_t i = entryIdx++;
             if (i >= data->nodes.size()) { orderBroken = true; return; }
+            if (!origNode || origNode->is_root ||
+                (origNode->mesh ? 1 : 0) != (node->mesh ? 1 : 0) ||
+                origNode->children.count != node->children.count) {
+                // The evaluated tree must mirror the original 1:1 (it does by
+                // construction; this guard keeps a mismatch from silently
+                // zipping the wrong nodes).
+                orderBroken = true; return;
+            }
 
             // NOTE: the load walk emits the node entry AND THEN its mesh
             // child entries before recursing into children — replicate that
@@ -504,7 +563,9 @@ evaluateFbxArchiveFrame(void* sceneV,
 
                     // Evaluated geometry: skinned positions when the mesh has
                     // a skin deformer, raw positions otherwise — both in the
-                    // geometry space; move into the node-local frame.
+                    // geometry space. Blend shape deltas (below) and the
+                    // geometry->node bake both live in that space too, so the
+                    // order is: copy raw → add morph offsets → bake.
                     const ufbx_vertex_vec3* srcPos =
                         (mesh->skinned_position.exists ? &mesh->skinned_position
                                                        : &mesh->vertex_position);
@@ -521,10 +582,58 @@ evaluateFbxArchiveFrame(void* sceneV,
                     for (std::size_t v = 0; v < nv; ++v) {
                         if (v >= srcCount) break;
                         ufbx_vec3 p = srcPos->values.data[v];
-                        if (bake) p = ufbx_transform_position(&node->geometry_to_node, p);
                         def->vertices[v * 3] = (float)p.x;
                         def->vertices[v * 3 + 1] = (float)p.y;
                         def->vertices[v * 3 + 2] = (float)p.z;
+                    }
+
+                    // Blend shapes: per-channel weights evaluated from the
+                    // file's animation (the DeformPercent property; 1.0 =
+                    // full weight, unanimated channels fall back to their
+                    // load-time weight). Offsets are relative to the rest
+                    // pool — applied in geometry space, before the bake. On a
+                    // SKINNED mesh the offsets land on the skinned positions
+                    // (exact for the common skeleton-free shape-key rig; the
+                    // pre-skin deformer order would need a re-skin here).
+                    const GeoArchiveMeshData& md = data->meshes[meshIdx];
+                    if (md.morphs && !md.morphs->targets.empty() && origNode->mesh) {
+                        const ufbx_mesh* origMesh = origNode->mesh;
+                        std::vector<float> w(md.morphs->targets.size(), 0.0f);
+                        std::size_t k = 0;
+                        for (std::size_t d = 0;
+                             d < origMesh->blend_deformers.count && k < w.size(); ++d) {
+                            const ufbx_blend_deformer* defo = origMesh->blend_deformers.data[d];
+                            if (!defo) continue;
+                            for (std::size_t c = 0;
+                                 c < defo->channels.count && k < w.size(); ++c) {
+                                const ufbx_blend_channel* chan = defo->channels.data[c];
+                                if (!chan) continue;
+                                const ufbx_blend_shape* shape = chan->target_shape;
+                                if (!shape || shape->num_offsets == 0) continue;
+                                w[k++] = (float)ufbx_evaluate_blend_weight(
+                                    origScene->anim, chan, srcTime);
+                            }
+                        }
+                        applyGeoMorphSet(*def, *md.morphs, w.data());
+                        if (std::getenv("NATRON_DEBUG_GEOIO") && k > 0) {
+                            std::fprintf(stderr,
+                                         "[GEOIO-ARCH-FBX]   morph mesh %d t=%.3f w0=%.4f targets=%d\n",
+                                         (int)meshIdx, srcTime, w[0], (int)w.size());
+                        }
+                    }
+
+                    if (bake) {
+                        for (std::size_t v = 0; v < nv; ++v) {
+                            ufbx_vec3 p;
+                            p.x = def->vertices[v * 3];
+                            p.y = def->vertices[v * 3 + 1];
+                            p.z = def->vertices[v * 3 + 2];
+                            const ufbx_vec3 bp =
+                                ufbx_transform_position(&node->geometry_to_node, p);
+                            def->vertices[v * 3] = (float)bp.x;
+                            def->vertices[v * 3 + 1] = (float)bp.y;
+                            def->vertices[v * 3 + 2] = (float)bp.z;
+                        }
                     }
                     geoArchiveMatIdentity(def->transform);
                     out->deformed[meshIdx] = def;
@@ -532,20 +641,27 @@ evaluateFbxArchiveFrame(void* sceneV,
             }
 
             for (std::size_t c = 0; c < node->children.count; ++c) {
-                run(node->children.data[c]);
+                run(node->children.data[c], origNode->children.data[c]);
             }
         }
     } evw;
     evw.out = &out;
     evw.data = &data;
+    evw.origScene = scene;
+    evw.srcTime = srcTime;
     evw.entryIdx = 0;
     evw.orderBroken = false;
 
     for (std::size_t i = 0; i < ev->nodes.count; ++i) {
         const ufbx_node* node = ev->nodes.data[i];
         if (node->is_root) {
+            const ufbx_node* origRoot = scene->nodes.data[i];
+            if (!origRoot->is_root || origRoot->children.count != node->children.count) {
+                err = "FBX structure changed between parse and evaluation";
+                return false;
+            }
             for (std::size_t c = 0; c < node->children.count; ++c) {
-                evw.run(node->children.data[c]);
+                evw.run(node->children.data[c], origRoot->children.data[c]);
             }
         }
     }
