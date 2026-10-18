@@ -151,12 +151,30 @@ private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
+    // Project load: recreate the morph-weight knobs from the saved target
+    // list BEFORE loadKnobs runs, so the saved values + keyframes restore by
+    // knob name (dynamic knobs are absent from the holder during loadKnobs
+    // otherwise).
+    virtual void onKnobsAboutToBeLoaded(const NodeSerializationPtr& serialization) OVERRIDE FINAL;
     // Auto-load on project restore (the file knob is restored but knobChanged
     // does not fire for it).
     virtual void onKnobsLoaded() OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
+
+    // --- Morph Weights (glTF shape keys / FBX blend shapes) ---
+    // Enumerate the file's distinct morph sets into an ordered target list
+    // (caller holds archiveMutex; reads rt.data).
+    void collectMorphTargets(std::vector<GeoMorphTargetRef>* out) const;
+    // Sync the per-target weight knobs to `targets`; returns true when the
+    // knob structure changed (the caller then calls recreateKnobs(true) —
+    // loadArchiveFile does that AFTER releasing archiveMutex). Caller holds
+    // archiveMutex; GUI-thread only.
+    bool syncMorphWeightKnobs(const std::vector<GeoMorphTargetRef>& targets);
+    // Fill the runtime's override store from the weight knobs at `time`
+    // (caller holds archiveMutex). No-op when Use File Morph Weights is on.
+    void applyMorphOverrideAt(double time) const;
 
     void loadArchiveFile(const std::string& path);
 

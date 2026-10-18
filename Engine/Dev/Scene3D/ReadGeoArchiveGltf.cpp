@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -318,6 +319,7 @@ loadGltfArchiveImport(const std::string& path)
         std::vector<GeoArchiveNodeData>* nodes;
         std::vector<GeoArchiveMeshData>* meshes;
         std::vector<int>* flatToEntry;
+        int* numMorphSets;   // GeoArchiveResult::numMorphSets (distinct-set ids)
 
         void run(const cgltf_node* node, int parentEntryIdx, const std::string& parentPath,
                  cgltf_data* data)
@@ -499,6 +501,7 @@ loadGltfArchiveImport(const std::string& path)
                                 morphs->restWeights[t] = cmesh->weights[t];
                             }
                         }
+                        morphs->id = (*numMorphSets)++;
                         md.morphs = morphs;
                         md.morphNodeIndex = thisIdx;
                     }
@@ -532,6 +535,7 @@ loadGltfArchiveImport(const std::string& path)
     walk.nodes = &result.nodes;
     walk.meshes = &result.meshes;
     walk.flatToEntry = &flatToEntry;
+    walk.numMorphSets = &result.numMorphSets;
     for (cgltf_size i = 0; i < scene->nodes_count; ++i) {
         walk.run(scene->nodes[i], -1, "", data);
     }
@@ -680,7 +684,8 @@ loadGltfArchiveImport(const std::string& path)
 void
 evaluateGltfArchiveFrame(const GeoArchiveResult& data,
                          double srcTime,
-                         GeoArchiveFrameEval& out)
+                         GeoArchiveFrameEval& out,
+                         const GeoArchiveMorphOverride* morphOverride)
 {
     const std::size_t nNodes = data.nodes.size();
 
@@ -760,18 +765,31 @@ evaluateGltfArchiveFrame(const GeoArchiveResult& data,
                 if ((int)w.size() == smp.nComp) {
                     sampleAnimSampler(smp, srcTime, w.data());
                     haveW = true;
-                    if (dbgGeo) {
-                        std::fprintf(stderr, "[GEOIO-ARCH]   morph mesh %d t=%.3f w=[", (int)m, srcTime);
-                        for (std::size_t t = 0; t < w.size(); ++t) {
-                            std::fprintf(stderr, "%s%.4f", t ? "," : "", w[t]);
-                        }
-                        std::fprintf(stderr, "]\n");
-                    }
                 }
             }
             if (!haveW && md.morphs->restWeights.size() == w.size()) {
                 w = md.morphs->restWeights;
                 haveW = true;
+            }
+            // User override (ReadGeo/ReadGeoArchive Morph Weights knobs): when
+            // enabled and this set has an entry, its per-target weights replace
+            // whatever the file provided. Size must match the target count.
+            if (morphOverride && morphOverride->enabled && morphOverride->weights &&
+                md.morphs->id >= 0) {
+                std::map<int, std::vector<float>>::const_iterator oit =
+                    morphOverride->weights->find(md.morphs->id);
+                if (oit != morphOverride->weights->end() && oit->second.size() == w.size()) {
+                    w = oit->second;
+                    haveW = true;
+                }
+            }
+            if (dbgGeo) {
+                std::fprintf(stderr, "[GEOIO-ARCH]   morph mesh %d t=%.3f (consumed) w=[", (int)m, srcTime);
+                for (std::size_t t = 0; t < w.size(); ++t) {
+                    std::fprintf(stderr, "%s%.4f", t ? "," : "", w[t]);
+                }
+                std::fprintf(stderr, "] ovr=%d\n",
+                             (morphOverride && morphOverride->enabled) ? 1 : 0);
             }
             bool anyW = false;
             for (float ww : w) { if (ww != 0.0f) { anyW = true; break; } }

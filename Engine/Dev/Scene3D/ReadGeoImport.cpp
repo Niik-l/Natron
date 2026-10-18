@@ -125,6 +125,58 @@ applyGeoMorphSet(MeshData& mesh, const GeoMorphSet& morphs, const float* weights
     }
 }
 
+std::string
+geoArchiveEncodeMorphList(const std::vector<GeoMorphTargetRef>& targets)
+{
+    std::string out;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        const GeoMorphTargetRef& t = targets[i];
+        std::string label = t.label;
+        for (std::size_t c = 0; c < label.size(); ++c) {
+            const char ch = label[c];
+            if (ch == '|' || ch == '\n' || ch == '\r' || ch == '\t') label[c] = ' ';
+        }
+        if (!out.empty()) out += '\n';
+        out += std::to_string(t.setId);
+        out += '|';
+        out += std::to_string(t.targetIdx);
+        out += '|';
+        out += label;
+    }
+    return out;
+}
+
+bool
+geoArchiveDecodeMorphList(const std::string& s, std::vector<GeoMorphTargetRef>* out)
+{
+    if (!out) return false;
+    out->clear();
+    std::size_t pos = 0;
+    while (pos <= s.size()) {
+        std::size_t nl = s.find('\n', pos);
+        if (nl == std::string::npos) nl = s.size();
+        std::string line = s.substr(pos, nl - pos);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (!line.empty()) {
+            const std::size_t p1 = line.find('|');
+            const std::size_t p2 = (p1 == std::string::npos) ? std::string::npos
+                                                             : line.find('|', p1 + 1);
+            if (p1 == std::string::npos || p2 == std::string::npos) {
+                out->clear();
+                return false;
+            }
+            GeoMorphTargetRef t;
+            t.setId = std::atoi(line.substr(0, p1).c_str());
+            t.targetIdx = std::atoi(line.substr(p1 + 1, p2 - p1 - 1).c_str());
+            t.label = line.substr(p2 + 1);
+            out->push_back(t);
+        }
+        if (nl == s.size()) break;
+        pos = nl + 1;
+    }
+    return true;
+}
+
 void
 importBuildEdgeIndices(MeshData* mesh)
 {
@@ -224,6 +276,10 @@ GeoArchiveRuntime::clear()
     animTimeBegin = 0.0;
     animTimeEnd = 0.0;
     data = GeoArchiveResult();
+    // A cleared runtime has no morph sets — stale override entries must not
+    // leak into the next parse (set ids restart at 0).
+    morphOverrideEnabled = false;
+    morphOverrideWeights.clear();
     {
         std::lock_guard<std::mutex> fl(frameMutex);
         frameCache.clear();
@@ -296,9 +352,15 @@ GeoArchiveRuntime::ensureFrameState(double fps, int key) const
 
     const double srcTime = (double)key / (fps > 0.0 ? fps : 24.0);
 
+    // User morph-weight override snapshot (caller holds the data guard, so
+    // reading the flags/map here is race-free).
+    GeoArchiveMorphOverride ovr;
+    ovr.enabled = morphOverrideEnabled;
+    ovr.weights = &morphOverrideWeights;
+
     if (isFbx) {
         std::string err;
-        if (!evaluateFbxArchiveFrame(fbxScene, data, srcTime, *st, err)) {
+        if (!evaluateFbxArchiveFrame(fbxScene, data, srcTime, *st, err, &ovr)) {
             // Evaluation failure: identity locals + rest meshes — never a
             // half-evaluated scene.
             st->nodeLocals.assign(data.nodes.size() * 16, 0.0f);
@@ -311,7 +373,7 @@ GeoArchiveRuntime::ensureFrameState(double fps, int key) const
             }
         }
     } else {
-        evaluateGltfArchiveFrame(data, srcTime, *st);
+        evaluateGltfArchiveFrame(data, srcTime, *st, &ovr);
     }
 
     // NOTE: the file's root normalization (FBX unit/axes compensation) is NOT

@@ -10,10 +10,26 @@
   `getMeshData` immutable-snapshot change (G1 copy-on-read, `2cd63abc8`) that in-place morph
   application motivated. Verified in the 3D viewport and via ScanlineRender (AnimatedMorphCube.glb
   renders and animates correctly). **KNOWN PROBLEM, deferred to the Cycles backlog by user
-  decision:** the same file renders blank through CyclesRender — fault isolated to
-  `CyclesRenderer::syncSceneWithCamera`'s mesh path (viewport + ScanlineRender share the same
-  morph-applied MeshData and are fine). Full evidence + diagnostic instructions live as the
-  known-issue entry in TODO.md's Cycles Renderer section.
+  decision:** the same file renders blank through CyclesRender — DISTANCE-DEPENDENT (renders
+  at <=1.5 m camera, zero pixels at 6 m) with the ccl object verified sane after sync; the
+  poison is inside Cycles' geometry/BVH/device path. Full evidence + diagnostic instructions
+  live as the known-issue entry in TODO.md's Cycles Renderer section.
+
+- **User morph-weight knobs + rigid-morph routing fix (2026-10-18)** — ReadGeo and
+  ReadGeoArchive gained a per-target **Morph Weight** knob set (dynamic `morphW<i>` knobs,
+  created at load, labels from the file; keyframable), a `Use File Morph Weights` toggle
+  (default on = file animation/rest weights), and a hidden `morphNames` serialization knob
+  that lets `onKnobsAboutToBeLoaded` recreate the knobs BEFORE loadKnobs so saved values +
+  keyframes restore by name. Override plumbing: `GeoMorphSet::id` (parse-assigned stable set
+  ids) + `GeoArchiveRuntime::morphOverrideWeights`, consumed by both evaluators (dump shows
+  the consumed weights under NATRON_DEBUG_GEOIO). Also fixed a pre-existing gap:
+  `ReadGeoArchive::getMeshDataAt` early-returned the rest mesh for RIGID morph-carrying
+  entries (the common no-skeleton rig) — morph-carrying rigid meshes now route through the
+  frame cache like skinned ones (likely also fixes the standing "weights-only animation
+  renders nothing in archive chain mode" bug, GUI verification pending). Verified headlessly:
+  override (1,0)/(0,1) vs file weights change the consumed `w=[...]` and the merged bbox
+  (z-max 0.56 file / -0.89 / +1.0) on AnimatedMorphCube.glb through BOTH nodes
+  (`readgeo_morphknobs_test.py`).
 - **Per-entry file materials (2026-10-15, user report: the roundtrip rotcube
   imported from Blender showed one flat color, not the six randomized side
   colors)** — the roundtrip test (Blender 5.2 → FBX → Natron, scripts in

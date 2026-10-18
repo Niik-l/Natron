@@ -140,11 +140,14 @@ struct GeoMorphTarget
  *  per-target weights live from ufbx (same deformer/channel walk, same skip
  *  rule as the parse — targets and weights zip by order). glTF: one set per
  *  primitive; weights come from the owning node's chanWeights sampler or
- *  restWeights. */
+ *  restWeights. `id` is assigned by the parser (one id per distinct set,
+ *  shared pieces included) — the stable key user weight overrides map on
+ *  (GeoMorphSet pointers dangle across rt.clear(), ids don't). */
 struct GeoMorphSet
 {
     std::vector<GeoMorphTarget> targets;
     std::vector<float> restWeights;   // targets.size() (may be empty = all 0)
+    int id = -1;                      // parse-assigned distinct-set id
 };
 
 struct GeoArchiveMeshData
@@ -206,6 +209,9 @@ struct GeoArchiveResult
     std::vector<GeoArchiveNodeData> nodes;
     std::vector<GeoArchiveMeshData> meshes;
     std::vector<GeoImportMaterial> materials;
+    // Distinct morph-set counter: parsers assign GeoMorphSet::id from it
+    // (0, 1, 2, ... one id per distinct set; shared FBX sets keep one id).
+    int numMorphSets = 0;
     // Per skin: joint node indices + inverse bind matrices (16 floats each).
     // FBX only: the ufbx root node's transform — the file's unit/axes
     // normalization (e.g. 0.01 compensating cm-authored x100 node scales).
@@ -223,12 +229,27 @@ struct GeoArchiveResult
 /** glTF 2.0 archive import via cgltf. Implemented in ReadGeoArchiveGltf.cpp. */
 GeoArchiveResult loadGltfArchiveImport(const std::string& path);
 
+/** User morph-weight override handed to the frame evaluators: when enabled,
+ *  the per-target weights of every morph set present in the map replace the
+ *  file's animated/rest weights for that set. Keyed by GeoMorphSet::id;
+ *  sets without an entry keep their file-driven weights. The map is owned by
+ *  GeoArchiveRuntime (guarded by the owning node's data mutex); the
+ *  evaluators only read it. */
+struct GeoArchiveMorphOverride
+{
+    bool enabled = false;
+    const std::map<int, std::vector<float>>* weights = NULL;
+};
+
 /** Evaluate one frame of the glTF archive: per-node local matrices from the
  *  animation channels (linear/step/cubic-spline) + skinned vertex positions.
- *  Thread-safe (reads only the const parse result). Same file. */
+ *  Thread-safe (reads only the const parse result). Same file. When
+ *  morphOverride is non-NULL and enabled, its weights replace the file's
+ *  morph weights per set. */
 void evaluateGltfArchiveFrame(const GeoArchiveResult& data,
                               double srcTime,
-                              GeoArchiveFrameEval& out);
+                              GeoArchiveFrameEval& out,
+                              const GeoArchiveMorphOverride* morphOverride = NULL);
 
 /** FBX archive import via ufbx. Implemented in ReadGeoArchiveFbx.cpp.
  *  On success *outScene receives the live ufbx_scene — the archive node owns
@@ -237,12 +258,15 @@ void evaluateGltfArchiveFrame(const GeoArchiveResult& data,
 GeoArchiveResult loadFbxArchiveImport(const std::string& path, void** outScene);
 
 /** Evaluate one frame of the FBX archive via ufbx_evaluate_scene (with CPU
- *  skinning). Returns false on evaluation failure (err filled). */
+ *  skinning). Returns false on evaluation failure (err filled). When
+ *  morphOverride is non-NULL and enabled, its weights replace the file's
+ *  blend-shape weights per set. */
 bool evaluateFbxArchiveFrame(void* scene,
                              const GeoArchiveResult& data,
                              double srcTime,
                              GeoArchiveFrameEval& out,
-                             std::string& err);
+                             std::string& err,
+                             const GeoArchiveMorphOverride* morphOverride = NULL);
 
 /** Free a scene handed out by loadFbxArchiveImport. Implemented in
  *  ReadGeoArchiveFbx.cpp (keeps ufbx.h out of this header). */
@@ -279,6 +303,16 @@ struct GeoArchiveRuntime
     // interpolation is lost for baked meshes (verts snap per frame, like the
     // skinned payloads). Set by the node at load / knob-toggle time.
     bool bakeMeshWorld = false;
+
+    // User morph-weight override (ReadGeo / ReadGeoArchive "Morph Weights"
+    // knobs). When enabled, the evaluators take each set's per-target weights
+    // from this map (keyed by GeoMorphSet::id) instead of the file's
+    // animated/rest weights; sets without an entry keep file weights.
+    // Guarded by the owning node's data mutex like the members above; the
+    // node fills it under that lock right before ensureFrameState, and
+    // clearFrameCache() must follow every edit.
+    bool morphOverrideEnabled = false;
+    std::map<int, std::vector<float>> morphOverrideWeights;
 
     GeoArchiveRuntime();
     ~GeoArchiveRuntime();
@@ -324,6 +358,27 @@ private:
 };
 
 // --- helpers shared by the importers (ReadGeoImport.cpp) -------------------
+
+/** One user-addressable morph target: the parse-side identity (set id +
+ *  target index within the set's target order) plus the display label and
+ *  rest weight. The node façades enumerate these at load for the per-target
+ *  weight knobs; the serialized knob list carries them so
+ *  onKnobsAboutToBeLoaded can recreate the knobs before loadKnobs (saved
+ *  values + keyframes then restore by knob name). */
+struct GeoMorphTargetRef
+{
+    int setId = -1;
+    int targetIdx = -1;
+    std::string label;
+    float restWeight = 0.0f;
+};
+
+/** Encode/decode the ordered morph-target list for the `morphNames` string
+ *  knob: one line per target, "<setId>|<targetIdx>|<label>". Labels are
+ *  sanitized ('|' -> '/', newlines/tabs -> space). Decode returns false on a
+ *  malformed line (the list is then treated as empty). */
+std::string geoArchiveEncodeMorphList(const std::vector<GeoMorphTargetRef>& targets);
+bool geoArchiveDecodeMorphList(const std::string& s, std::vector<GeoMorphTargetRef>* out);
 
 /** Transform every xyz position in `verts` in place by the column-major 4x4
  *  matrix `m` (bakes the file-authored node transform into the vertices). */

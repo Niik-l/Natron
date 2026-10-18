@@ -334,6 +334,7 @@ loadFbxArchiveImport(const std::string& path, void** outScene)
                         }
                     }
                     if (morphSet->targets.empty()) morphSet.reset();
+                    else morphSet->id = result->numMorphSets++;
                 }
 
                 // Group faces by material (same split the flat loader uses).
@@ -440,7 +441,8 @@ evaluateFbxArchiveFrame(void* sceneV,
                         const GeoArchiveResult& data,
                         double srcTime,
                         GeoArchiveFrameEval& out,
-                        std::string& err)
+                        std::string& err,
+                        const GeoArchiveMorphOverride* morphOverride)
 {
     ufbx_scene* scene = (ufbx_scene*)sceneV;
     if (!scene) {
@@ -499,6 +501,7 @@ evaluateFbxArchiveFrame(void* sceneV,
         const GeoArchiveResult* data;
         const ufbx_scene* origScene;   // original scene: blend channels + anim
         double srcTime;
+        const GeoArchiveMorphOverride* morphOverride;  // user weight override
         std::size_t entryIdx;   // next expected node index (entry counter)
         bool orderBroken;
 
@@ -614,6 +617,19 @@ evaluateFbxArchiveFrame(void* sceneV,
                                     origScene->anim, chan, srcTime);
                             }
                         }
+                        // User override (ReadGeo/ReadGeoArchive Morph Weights
+                        // knobs): when enabled and this set has an entry, its
+                        // per-target weights replace the file's evaluated blend
+                        // weights (same target order as the walk above).
+                        if (morphOverride && morphOverride->enabled &&
+                            morphOverride->weights && md.morphs->id >= 0) {
+                            std::map<int, std::vector<float>>::const_iterator oit =
+                                morphOverride->weights->find(md.morphs->id);
+                            if (oit != morphOverride->weights->end() &&
+                                oit->second.size() == w.size()) {
+                                std::copy(oit->second.begin(), oit->second.end(), w.begin());
+                            }
+                        }
                         applyGeoMorphSet(*def, *md.morphs, w.data());
                         if (std::getenv("NATRON_DEBUG_GEOIO") && k > 0) {
                             std::fprintf(stderr,
@@ -649,6 +665,7 @@ evaluateFbxArchiveFrame(void* sceneV,
     evw.data = &data;
     evw.origScene = scene;
     evw.srcTime = srcTime;
+    evw.morphOverride = morphOverride;
     evw.entryIdx = 0;
     evw.orderBroken = false;
 

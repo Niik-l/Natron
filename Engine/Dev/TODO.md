@@ -736,25 +736,33 @@ CyclesRender node with path tracing, PBR materials, lights, animation. Optional 
 
 ### Known Issues
 
-- **Morph-target (shape-key / blend-shape) assets render blank in Cycles** — isolated
-  2026-10-17; deferred by user decision (do NOT patch Cycles for now — documented here as the
-  handoff note for whoever picks the Cycles side up). Evidence: AnimatedMorphCube.glb through
-  ReadGeo / ReadGeoArchive renders and animates correctly in the 3D viewport AND via
-  ScanlineRender — both consume the same `GeoArchiveRuntime` morph-applied MeshData Cycles does —
-  so import, weights-sampler fix-up and per-frame `applyGeoMorphSet` are all validated. The
-  identical rig through CyclesRender outputs an empty/black frame: the same-process A/B probe
-  (`tools/geoio-tests/readgeo_ab_probe.py`, AnimatedMorphCube.glb vs BoxAnimated.glb) produced a
-  19 110-byte EXR for the morph cube — the known-empty signature (byte-size-equal to the
-  far-camera probes that render nothing) — while the non-morph box rendered real content (52 KB).
-  Conclusion: the fault is in `CyclesRenderer::syncSceneWithCamera`'s mesh path — bad/NaN vertices
-  rejecting the geometry, or the mesh read before/without the morph application — NOT the
-  shader/material chain (`NATRON_GEOIO_NO_VCOL=1` shader A/B rendered the same). Diagnostic
-  tooling is already in `CyclesRenderer.cpp`, all gated behind `NATRON_DEBUG_SC=1`: per-object
-  `[Cycles GEO]` dump (bbox + `badVerts` NaN/huge-vertex scan), `[Cycles VCOL]` staged prints,
-  `[Cycles OBJ]` per-object line, and the scene-walk truth dump at the end of sync. Next
-  diagnostic step: run `readgeo_ab_probe.py` with `NATRON_DEBUG_SC=1` and compare the
-  `[Cycles GEO]` / `[Cycles OBJ]` traces of the two files (expect `badVerts=1`, zero tris, or the
-  object missing from the walk).
+- **Morph-target (shape-key / blend-shape) assets render blank in Cycles — DISTANCE-DEPENDENT** —
+  isolated 2026-10-17, deferred by user decision (do NOT patch Cycles for now — this is the
+  handoff note for whoever picks the Cycles side up). Known state after the 10-17 bisect
+  (GLB surgery via `make_glb_variants*.py`, probes `readgeo_glbvar*_probe.py`,
+  `readgeo_ab_probe.py`, `readgeo_dist_probe.py`, `readgeo_caminside_probe.py`):
+  - AnimatedMorphCube.glb ("k") renders and animates correctly in the 3D viewport (GL) AND via
+    ScanlineRender — the ReadGeo mesh data is correct end-to-end. Cycles is the only consumer
+    that loses it.
+  - **Distance-dependent**: k renders with the camera at <=1.5 m (inside / near-wall views
+    confirmed by pixels), ZERO pixels at 6 m — on independent fresh rigs. Non-morph cubes at
+    the same distance render fine.
+  - The ccl scene holds the k object with sane bytes after sync (NATRON_DEBUG_SC scene walk:
+    24 verts +-1, no NaN, bbox sane, 12 triangles in-range, identity tfm, vis=0xFFFFFFFF, pass
+    executes, CPU device): the triangles never intersect rays from any angle while sitting in
+    the scene graph. The poison is inside Cycles' geometry/BVH/device processing — not visible
+    from Natron's sync walk.
+  - Ruled out one-by-one (variant still black unless noted): TANGENT attr, morph targets +
+    weights animation themselves, material, POSITION accessor min/max, Reverse Normals,
+    winding + the w=0 rotation quat (proper rotation), small-verts x big-scale numerics,
+    the face-color shader chain (`NATRON_GEOIO_NO_VCOL=1` still black), and session/init races
+    (same-process A/B with BoxAnimated: box renders, k does not).
+  - Next steps for the Cycles side: (a) instrument Cycles' geometry/BVH path — dump
+    Mesh::triangles post-update, or compare a working mesh attribute-by-attribute at the ccl
+    level; (b) test another Khronos morph sample, or a hand-rebuilt cube with k's exact values
+    but morphcube's arrangement; (c) the close-camera repro (<=1.5 m) is a useful knob.
+  - Note for rig authors: `readgeo_dist_probe.py` also showed that camera knob changes AFTER a
+    render don't re-sync in CyclesRender — create cameras at their final position.
 
 ---
 
