@@ -2824,16 +2824,29 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     }
                 }
                 if (scDebugEnabled()) {
+                    ccl::float3 bmn = verts[0], bmx = verts[0];
+                    bool bad = false;
+                    for (size_t vi = 0; vi < verts.size(); ++vi) {
+                        const ccl::float3& p = verts[vi];
+                        if (!(p.x == p.x) || !(p.y == p.y) || !(p.z == p.z) ||
+                            fabsf(p.x) > 1e9f || fabsf(p.y) > 1e9f || fabsf(p.z) > 1e9f) {
+                            bad = true;
+                        }
+                        bmn = ccl::make_float3(std::min(bmn.x, p.x), std::min(bmn.y, p.y), std::min(bmn.z, p.z));
+                        bmx = ccl::make_float3(std::max(bmx.x, p.x), std::max(bmx.y, p.y), std::max(bmx.z, p.z));
+                    }
                     fprintf(stderr, "[Cycles GEO] '%s' verts=%zu faces=%d tri=%zu "
                             "v0=(%.4f,%.4f,%.4f) uv=%zu faceIdx0=%d "
-                            "worldtr=(%.3f,%.3f,%.3f) wdiag=(%.4f,%.4f,%.4f)\n",
+                            "worldtr=(%.3f,%.3f,%.3f) wdiag=(%.4f,%.4f,%.4f) "
+                            "bbox=(%.4f..%.4f, %.4f..%.4f, %.4f..%.4f) badVerts=%d\n",
                             sn.name.c_str(), verts.size(),
                             (int)meshData->numFaces, triVerts.size() / 3,
                             verts[0].x, verts[0].y, verts[0].z,
                             uvs.size(),
                             meshData->faceIndices.empty() ? -1 : meshData->faceIndices[0],
                             sn.worldMatrix[12], sn.worldMatrix[13], sn.worldMatrix[14],
-                            sn.worldMatrix[0], sn.worldMatrix[5], sn.worldMatrix[10]);
+                            sn.worldMatrix[0], sn.worldMatrix[5], sn.worldMatrix[10],
+                            bmn.x, bmx.x, bmn.y, bmx.y, bmn.z, bmx.z, bad ? 1 : 0);
                 }
                 break;
             }
@@ -2902,11 +2915,14 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 MaterialProvider* matProv = dynamic_cast<MaterialProvider*>(srcNode->getEffectInstance().get());
                 if (matProv) {
                     // Face colors baked on the merged mesh (ReadGeo multi-part
-                    // file): tint the material with them.
+                    // file): tint the material with them. NATRON_GEOIO_NO_VCOL=1
+                    // kills the face-color chain (plain Principled) — shader-A/B
+                    // switch for invisible-object debugging.
+                    const bool vcolOn = (std::getenv("NATRON_GEOIO_NO_VCOL") == NULL);
                     objShader = createMaterialShader(scene, matProv, time,
                                                      /*particleColorTint*/ false,
                                                      /*particleEmissionStrength*/ -1.0f,
-                                                     sn.type == eSceneNodeMesh ? meshData.get() : nullptr);
+                                                     (vcolOn && sn.type == eSceneNodeMesh) ? meshData.get() : nullptr);
                 }
             }
         }
@@ -2953,7 +2969,20 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             // material color here): one color per TRIANGLE CORNER, parallel to
             // the fan-triangulated corner list. Cycles interpolates the attribute
             // across each face — constant per face since all 3 corners share it.
-            if (meshData->hasVertexColors &&
+            if (scDebugEnabled()) {
+                // Stage 1: the raw pointer only - safe even if meshData is garbage.
+                fprintf(stderr, "[Cycles VCOL] '%s' md=%p\n",
+                        sn.name.c_str(), (void*)meshData.get());
+                if (meshData) {
+                    // Stage 2: fields (only when the pointer passed a null check).
+                    fprintf(stderr,
+                            "[Cycles VCOL]   hasV=%d nVerts=%d vc=%zu fi=%zu tris=%zu\n",
+                            (int)meshData->hasVertexColors, (int)meshData->numVertices,
+                            meshData->vertexColors.size(),
+                            meshData->faceIndices.size(), triVerts.size() / 3);
+                }
+            }
+            if (meshData && meshData->hasVertexColors &&
                 meshData->vertexColors.size() == meshData->faceIndices.size() * 3) {
                 // Expand face corners -> triangle corners (fan), mirroring the
                 // triangulation loop above.
@@ -3172,7 +3201,71 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             obj->set_use_holdout(true);
         }
 
+        if (scDebugEnabled()) {
+            fprintf(stderr,
+                    "[Cycles OBJ] '%s' meshVerts=%zu meshTris=%zu shader=%s "
+                    "vis=0x%X vcols=%d uvs=%zu\n",
+                    sn.name.c_str(), verts.size(), (size_t)numTris,
+                    objShader ? "yes" : "NULL", obj->get_visibility(),
+                    meshData && meshData->hasVertexColors ? 1 : 0,
+                    uvs.size());
+        }
+
         obj->tag_update(scene);
+    }
+
+    // Scene-walk truth: what Cycles ACTUALLY holds after the sync (objects
+    // can differ from what the loop believed it created).
+    if (scDebugEnabled()) {
+        int nObj = 0;
+        for (ccl::Object* o : scene->objects) {
+            if (!o) continue;
+            ccl::Geometry* g = o->get_geometry();
+            const bool isMesh = g && g->geometry_type == ccl::Geometry::Type::MESH;
+            const size_t ntri =
+                isMesh ? static_cast<ccl::Mesh *>(g)->num_triangles() : 0;
+            const size_t nverts =
+                isMesh ? static_cast<ccl::Mesh *>(g)->get_verts().size() : 0;
+            if (isMesh) {
+                ccl::array<ccl::float3>& cv =
+                    static_cast<ccl::Mesh *>(g)->get_verts();
+                ccl::array<int>& ct = static_cast<ccl::Mesh *>(g)->get_triangles();
+                ccl::float3 bmn = cv[0], bmx = cv[0];
+                bool bad = false;
+                int badTri = 0;
+                for (size_t vi = 0; vi < cv.size(); ++vi) {
+                    const ccl::float3& p = cv[vi];
+                    if (!(p.x == p.x) || !(p.y == p.y) || !(p.z == p.z)) bad = true;
+                    bmn = ccl::make_float3(std::min(bmn.x, p.x), std::min(bmn.y, p.y), std::min(bmn.z, p.z));
+                    bmx = ccl::make_float3(std::max(bmx.x, p.x), std::max(bmx.y, p.y), std::max(bmx.z, p.z));
+                }
+                for (size_t ti = 0; ti + 2 < ct.size(); ti += 3) {
+                    if (ct[ti] < 0 || (size_t)ct[ti] >= cv.size() ||
+                        ct[ti+1] < 0 || (size_t)ct[ti+1] >= cv.size() ||
+                        ct[ti+2] < 0 || (size_t)ct[ti+2] >= cv.size()) ++badTri;
+                }
+                fprintf(stderr,
+                        "[Cycles SCENE]   v0=(%.4f,%.4f,%.4f) bbox=(%.4f..%.4f, %.4f..%.4f, %.4f..%.4f) bad=%d tfm=(%.3f,%.3f,%.3f | %.3f,%.3f,%.3f)\n",
+                        cv[0].x, cv[0].y, cv[0].z,
+                        bmn.x, bmx.x, bmn.y, bmx.y, bmn.z, bmx.z, bad ? 1 : 0,
+                        o->get_tfm().x.w, o->get_tfm().y.w, o->get_tfm().z.w,
+                        o->get_tfm().x.x, o->get_tfm().y.y, o->get_tfm().z.z);
+                fprintf(stderr,
+                        "[Cycles SCENE]   tris n=%zu first=[%d,%d,%d][%d,%d,%d] maxIdx=%d outOfRange=%d\n",
+                        ct.size() / 3,
+                        ct.size() > 2 ? ct[0] : -1, ct.size() > 2 ? ct[1] : -1, ct.size() > 2 ? ct[2] : -1,
+                        ct.size() > 5 ? ct[3] : -1, ct.size() > 5 ? ct[4] : -1, ct.size() > 5 ? ct[5] : -1,
+                        ct.size() ? *std::max_element(ct.begin(), ct.end()) : -1,
+                        badTri);
+            }
+            fprintf(stderr,
+                    "[Cycles SCENE] obj='%s' geo=%s tris=%zu verts=%zu vis=0x%X\n",
+                    o->name.c_str(),
+                    g ? (isMesh ? "mesh" : "other") : "NULL",
+                    ntri, nverts, o->get_visibility());
+            ++nObj;
+        }
+        fprintf(stderr, "[Cycles SCENE] total objects=%d\n", nObj);
     }
 }
 
