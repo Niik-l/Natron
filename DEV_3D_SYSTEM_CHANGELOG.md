@@ -29,7 +29,11 @@
   renders nothing in archive chain mode" bug, GUI verification pending). Verified headlessly:
   override (1,0)/(0,1) vs file weights change the consumed `w=[...]` and the merged bbox
   (z-max 0.56 file / -0.89 / +1.0) on AnimatedMorphCube.glb through BOTH nodes
-  (`readgeo_morphknobs_test.py`).
+  (`readgeo_morphknobs_test.py`). User GUI pass 2026-10-18 (rebuilt exe): morph cube renders
+  in 3D viewport, ScanlineRender AND CyclesRender; morph-weight knobs usable. The earlier
+  "Cycles always blank" observation was confounded by a stale staged exe — see the updated
+  known-issue entry in TODO.md. Morph-weight-knob GUI pass (override toggle + animated
+  weights) still pending.
 - **Per-entry file materials (2026-10-15, user report: the roundtrip rotcube
   imported from Blender showed one flat color, not the six randomized side
   colors)** — the roundtrip test (Blender 5.2 → FBX → Natron, scripts in
