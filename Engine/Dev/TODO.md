@@ -734,6 +734,28 @@ CyclesRender node with path tracing, PBR materials, lights, animation. Optional 
 - Viewport rendered mode (live progressive) — future phase
 - Volume shader workflow WIP — absorption/scatter/blackbody/remap exposure needs iteration
 
+### Known Issues
+
+- **Morph-target (shape-key / blend-shape) assets render blank in Cycles** — isolated
+  2026-10-17; deferred by user decision (do NOT patch Cycles for now — documented here as the
+  handoff note for whoever picks the Cycles side up). Evidence: AnimatedMorphCube.glb through
+  ReadGeo / ReadGeoArchive renders and animates correctly in the 3D viewport AND via
+  ScanlineRender — both consume the same `GeoArchiveRuntime` morph-applied MeshData Cycles does —
+  so import, weights-sampler fix-up and per-frame `applyGeoMorphSet` are all validated. The
+  identical rig through CyclesRender outputs an empty/black frame: the same-process A/B probe
+  (`tools/geoio-tests/readgeo_ab_probe.py`, AnimatedMorphCube.glb vs BoxAnimated.glb) produced a
+  19 110-byte EXR for the morph cube — the known-empty signature (byte-size-equal to the
+  far-camera probes that render nothing) — while the non-morph box rendered real content (52 KB).
+  Conclusion: the fault is in `CyclesRenderer::syncSceneWithCamera`'s mesh path — bad/NaN vertices
+  rejecting the geometry, or the mesh read before/without the morph application — NOT the
+  shader/material chain (`NATRON_GEOIO_NO_VCOL=1` shader A/B rendered the same). Diagnostic
+  tooling is already in `CyclesRenderer.cpp`, all gated behind `NATRON_DEBUG_SC=1`: per-object
+  `[Cycles GEO]` dump (bbox + `badVerts` NaN/huge-vertex scan), `[Cycles VCOL]` staged prints,
+  `[Cycles OBJ]` per-object line, and the scene-walk truth dump at the end of sync. Next
+  diagnostic step: run `readgeo_ab_probe.py` with `NATRON_DEBUG_SC=1` and compare the
+  `[Cycles GEO]` / `[Cycles OBJ]` traces of the two files (expect `badVerts=1`, zero tris, or the
+  object missing from the walk).
+
 ---
 
 ## LensFlare3D

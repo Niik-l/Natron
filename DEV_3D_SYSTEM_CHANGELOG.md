@@ -1,4 +1,19 @@
 # Natron 3D System
+- **Morph targets / blend shapes on the shared archive engine (2026-10-17)** —
+  glTF per-primitive POSITION-delta targets plus `weights` animation channels (the flat SCALAR
+  output accessor is re-strided by target count at parse so all targets of a key interpolate
+  together), FBX blend shapes evaluated live inside ufbx per frame, and `applyGeoMorphSet`
+  applied at both base and per-frame def evaluation. Sparse storage: a dense glTF target accessor
+  is expanded to index/delta arrays; normals-only (empty) targets stay in the list to keep weight
+  indexing aligned; names come from cgltf `target_names` ("target N" fallback); rest weights
+  follow the glTF spec (node weights win over mesh defaults). This rides with the
+  `getMeshData` immutable-snapshot change (G1 copy-on-read, `2cd63abc8`) that in-place morph
+  application motivated. Verified in the 3D viewport and via ScanlineRender (AnimatedMorphCube.glb
+  renders and animates correctly). **KNOWN PROBLEM, deferred to the Cycles backlog by user
+  decision:** the same file renders blank through CyclesRender — fault isolated to
+  `CyclesRenderer::syncSceneWithCamera`'s mesh path (viewport + ScanlineRender share the same
+  morph-applied MeshData and are fine). Full evidence + diagnostic instructions live as the
+  known-issue entry in TODO.md's Cycles Renderer section.
 - **Per-entry file materials (2026-10-15, user report: the roundtrip rotcube
   imported from Blender showed one flat color, not the six randomized side
   colors)** — the roundtrip test (Blender 5.2 → FBX → Natron, scripts in
