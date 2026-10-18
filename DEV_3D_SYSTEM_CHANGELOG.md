@@ -30,10 +30,11 @@
   override (1,0)/(0,1) vs file weights change the consumed `w=[...]` and the merged bbox
   (z-max 0.56 file / -0.89 / +1.0) on AnimatedMorphCube.glb through BOTH nodes
   (`readgeo_morphknobs_test.py`). User GUI pass 2026-10-18 (rebuilt exe): morph cube renders
-  in 3D viewport, ScanlineRender AND CyclesRender; morph-weight knobs usable. The earlier
+  in 3D viewport, ScanlineRender AND CyclesRender; morph-weight knobs usable, and the
+  override path user-verified the same pass (toggle off + drag weights, both nodes, all three
+  render paths). The earlier
   "Cycles always blank" observation was confounded by a stale staged exe — see the updated
-  known-issue entry in TODO.md. Morph-weight-knob GUI pass (override toggle + animated
-  weights) still pending.
+  known-issue entry in TODO.md.
 - **Per-entry file materials (2026-10-15, user report: the roundtrip rotcube
   imported from Blender showed one flat color, not the six randomized side
   colors)** — the roundtrip test (Blender 5.2 → FBX → Natron, scripts in

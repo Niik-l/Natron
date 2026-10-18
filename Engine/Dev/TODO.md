@@ -764,11 +764,13 @@ CyclesRender node with path tracing, PBR materials, lights, animation. Optional 
   - Note for rig authors: `readgeo_dist_probe.py` also showed that camera knob changes AFTER a
     render don't re-sync in CyclesRender — create cameras at their final position.
   - UPDATE 2026-10-18: user GUI pass with the rebuilt exe — AnimatedMorphCube.glb now renders
-    in 3D viewport, ScanlineRender AND CyclesRender. The earlier "always blank" observation was
-    confounded by a stale staged exe (the session's recurring 06-install gotcha); the
-    distance-dependence reported on 10-17 may still be real but is unconfirmed against the
-    current build. If a blank Cycles render of a morph asset reappears, re-check camera
-    distance + exe freshness first, then this entry applies as written.
+    in 3D viewport, ScanlineRender AND CyclesRender; the morph-weight override path is ALSO
+    user-verified (Use File Morph Weights off + dragging the weight knobs, both nodes, all
+    three render paths). The earlier "always blank" observation was confounded by a stale
+    staged exe (the session's recurring 06-install gotcha); the distance-dependence reported
+    on 10-17 may still be real but is unconfirmed against the current build. If a blank Cycles
+    render of a morph asset reappears, re-check camera distance + exe freshness first, then
+    this entry applies as written.
 
 ---
 
