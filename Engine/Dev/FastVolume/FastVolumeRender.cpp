@@ -606,8 +606,9 @@ FastVolumeRender::render(const RenderActionArgs& args)
         for (const Node* un : upstream) {
             EffectInstancePtr ue = const_cast<Node*>(un)->getEffectInstance();
             if (!ue) continue;
-            if (!dynamic_cast<Scene3D*>(ue.get()) && !dynamic_cast<Group3D*>(ue.get())) continue;
-            const int ni = ue->getNInputs();
+            Group3D* g3 = dynamic_cast<Group3D*>(ue.get());
+            if (!dynamic_cast<Scene3D*>(ue.get()) && !g3) continue;
+            const int ni = g3 ? g3->getNumChildInputs() : ue->getNInputs(); // a group's axis input is not a member
             for (int i = 0; i < ni; ++i) {
                 EffectInstancePtr inp = skipDots(ue->getInput(i));
                 if (!inp || inp->getNode()->isNodeDisabled()) continue;

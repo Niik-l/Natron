@@ -22,9 +22,11 @@
 // ***** END PYTHON BLOCK *****
 
 #include "Group3D.h"
+#include "SceneGraph.h" // buildTRSPivot / multiply
 #include "../DotUtils.h"
 
 #include <cassert>
+#include <cstring>
 #include <sstream>
 
 #include "../../AppInstance.h"
@@ -43,6 +45,8 @@ struct Group3DPrivate
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
     KnobDoubleWPtr scaleX, scaleY, scaleZ;
+    KnobDoubleWPtr uniformScale;
+    KnobDoubleWPtr pivotX, pivotY, pivotZ;
     KnobBoolWPtr enableTransform;
     KnobStringWPtr info;
 };
@@ -63,20 +67,48 @@ std::string
 Group3D::getPluginDescription() const
 {
     return tr("Group multiple 3D objects together.\n\n"
-              "Connect ReadGeo, ReadAlembicCamera, Card3DRender, DeepToPoints, "
-              "or other 3D nodes to the inputs to organize them into a group.\n\n"
-              "The optional Group Transform applies an offset to all connected objects "
-              "when displayed in the 3D viewport.\n\n"
-              "Use this to organize complex 3D scenes — similar to Nuke's Scene node "
-              "but focused on grouping and organization.").toStdString();
+              "Connect ReadGeo, Card3D, lights, other groups or any 3D node to the "
+              "numbered inputs to organize them into a group.\n\n"
+              "The optional Transform (Translate / Rotate / Scale / Uniform Scale, turning "
+              "around Pivot) moves every connected object together in the 3D viewport, "
+              "ScanlineRender and Cycles.\n\n"
+              "The axis input is an optional parent transform (Nuke TransformGeo-style): "
+              "wire any 3D node there and its Translate / Rotate / Scale become the parent "
+              "of this group — a ReadAlembicTransform, a Camera3D's keyed position, or another "
+              "Group3D / TransformGeo for hierarchies.\n\n"
+              "Similar to Nuke's Scene node but focused on grouping and organization; "
+              "TransformGeo is the one-object form.").toStdString();
 }
 
 std::string
 Group3D::getInputLabel(int inputNb) const
 {
+    if (inputNb == getAxisInputIndex()) {
+        return "axis";
+    }
     std::ostringstream ss;
     ss << "Input " << (inputNb + 1);
     return ss.str();
+}
+
+std::string
+TransformGeo::getPluginDescription() const
+{
+    return tr("Transform a 3D object (Nuke TransformGeo).\n\n"
+              "geo: the object to move — a ReadGeo, Card3D, light, or a whole Group3D / "
+              "Scene3D branch.\n"
+              "axis: optional parent transform. Any 3D node wired here contributes its "
+              "Translate / Rotate / Scale (ReadAlembicTransform, a Camera3D's keyed position, "
+              "a Sphere3D...); another TransformGeo or Group3D contributes its full matrix, so "
+              "TransformGeo → TransformGeo chains build hierarchies.\n\n"
+              "Rotate and Scale turn around Pivot X/Y/Z; the viewport gizmo handle sits on the "
+              "pivot. Uniform Scale multiplies all three scale axes.").toStdString();
+}
+
+std::string
+TransformGeo::getInputLabel(int inputNb) const
+{
+    return inputNb == 0 ? "geo" : "axis";
 }
 
 void
@@ -100,11 +132,12 @@ Group3D::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
 void
 Group3D::initializeKnobs()
 {
-    KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Group Transform"));
+    KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Transform"));
 
-    KnobBoolPtr en = AppManager::createKnob<KnobBool>(this, tr("Enable Group Transform"));
-    en->setName("enableTransform"); en->setDefaultValue(false);
-    en->setHintToolTip(tr("Apply the group transform to all connected objects in the 3D viewport."));
+    KnobBoolPtr en = AppManager::createKnob<KnobBool>(this, tr("Enable Transform"));
+    en->setName("enableTransform"); en->setDefaultValue(transformEnabledByDefault());
+    en->setHintToolTip(tr("Apply this node's Translate / Rotate / Scale to every connected object "
+                          "(3D viewport, ScanlineRender, Cycles). The axis input applies regardless."));
     page->addKnob(en); _imp->enableTransform = en;
 
     KnobDoublePtr tx = AppManager::createKnob<KnobDouble>(this, tr("Translate X"));
@@ -152,13 +185,37 @@ Group3D::initializeKnobs()
     sz->setMinimum(0.01); sz->setDisplayMinimum(0.1); sz->setDisplayMaximum(10);
     page->addKnob(sz); _imp->scaleZ = sz;
 
+    KnobDoublePtr us = AppManager::createKnob<KnobDouble>(this, tr("Uniform Scale"));
+    us->setName("uniformScale"); us->setDefaultValue(1); us->setAnimationEnabled(true);
+    us->setMinimum(0.01); us->setDisplayMinimum(0.1); us->setDisplayMaximum(10);
+    us->setHintToolTip(tr("Multiplies Scale X / Y / Z together."));
+    page->addKnob(us); _imp->uniformScale = us;
+
+    KnobDoublePtr px = AppManager::createKnob<KnobDouble>(this, tr("Pivot X"));
+    px->setName("pivotX"); px->setDefaultValue(0); px->setAnimationEnabled(true);
+    px->setDisplayMinimum(-100); px->setDisplayMaximum(100);
+    px->setHintToolTip(tr("Point, in this node's space, that Rotate and Scale turn around. "
+                          "The viewport gizmo handle sits on it."));
+    page->addKnob(px); _imp->pivotX = px;
+
+    KnobDoublePtr py = AppManager::createKnob<KnobDouble>(this, tr("Pivot Y"));
+    py->setName("pivotY"); py->setDefaultValue(0); py->setAnimationEnabled(true);
+    py->setDisplayMinimum(-100); py->setDisplayMaximum(100);
+    page->addKnob(py); _imp->pivotY = py;
+
+    KnobDoublePtr pz = AppManager::createKnob<KnobDouble>(this, tr("Pivot Z"));
+    pz->setName("pivotZ"); pz->setDefaultValue(0); pz->setAnimationEnabled(true);
+    pz->setDisplayMinimum(-100); pz->setDisplayMaximum(100);
+    page->addKnob(pz); _imp->pivotZ = pz;
+
     // Info
     KnobPagePtr infoPage = AppManager::createKnob<KnobPage>(this, tr("Info"));
 
     KnobStringPtr info = AppManager::createKnob<KnobString>(this, tr("Info"));
     info->setName("info"); info->setAnimationEnabled(false);
     info->setEvaluateOnChange(false); info->setIsPersistent(false);
-    info->setDefaultValue("Connect 3D nodes to group them together.");
+    info->setDefaultValue(getNumChildInputs() == 1 ? "Connect a 3D node to the geo input."
+                                                   : "Connect 3D nodes to group them together.");
     infoPage->addKnob(info); _imp->info = info;
 }
 
@@ -180,15 +237,76 @@ Group3D::getGroupTransform(double time, float& tx, float& ty, float& tz,
     rx = (float)_imp->rotateX.lock()->getValueAtTime(time);
     ry = (float)_imp->rotateY.lock()->getValueAtTime(time);
     rz = (float)_imp->rotateZ.lock()->getValueAtTime(time);
-    sx = (float)_imp->scaleX.lock()->getValueAtTime(time);
-    sy = (float)_imp->scaleY.lock()->getValueAtTime(time);
-    sz = (float)_imp->scaleZ.lock()->getValueAtTime(time);
+    const float us = (float)_imp->uniformScale.lock()->getValueAtTime(time);
+    sx = (float)_imp->scaleX.lock()->getValueAtTime(time) * us;
+    sy = (float)_imp->scaleY.lock()->getValueAtTime(time) * us;
+    sz = (float)_imp->scaleZ.lock()->getValueAtTime(time) * us;
+}
+
+void
+Group3D::getLocalMatrix(double time, float out[16], float pivotOut[3]) const
+{
+    float tx, ty, tz, rx, ry, rz, sx, sy, sz;
+    getGroupTransform(time, tx, ty, tz, rx, ry, rz, sx, sy, sz);
+
+    float px = 0.f, py = 0.f, pz = 0.f;
+    if ( _imp->enableTransform.lock()->getValueAtTime(time) ) {
+        px = (float)_imp->pivotX.lock()->getValueAtTime(time);
+        py = (float)_imp->pivotY.lock()->getValueAtTime(time);
+        pz = (float)_imp->pivotZ.lock()->getValueAtTime(time);
+    }
+
+    float trs[16];
+    SceneGraph::buildTRSPivot(tx, ty, tz, rx, ry, rz, sx, sy, sz, px, py, pz, trs);
+
+    // Parent (axis) first, then this node's own transform — the same
+    // parent × local order SceneGraph uses for the world matrix.
+    float axis[16];
+    if ( getAxisMatrix(time, axis) ) {
+        SceneGraph::multiply(axis, trs, out);
+    } else {
+        std::memcpy(out, trs, sizeof(trs));
+    }
+
+    if (pivotOut) {
+        pivotOut[0] = px; pivotOut[1] = py; pivotOut[2] = pz;
+    }
+}
+
+bool
+Group3D::getAxisMatrix(double time, float out[16]) const
+{
+    EffectInstancePtr axis = skipDots( getInput( getAxisInputIndex() ) );
+    if (!axis) {
+        return false;
+    }
+
+    // Another group / TransformGeo: take its whole matrix so chains nest.
+    if ( const Group3D* g = dynamic_cast<const Group3D*>( axis.get() ) ) {
+        g->getLocalMatrix(time, out, NULL);
+        return true;
+    }
+
+    // Any other 3D node: its transform knobs by name (the convention every
+    // mesh / light / camera node in the 3D system follows).
+    auto knob = [&](const char* name, double def) -> float {
+        KnobIPtr k = axis->getKnobByName(name);
+        KnobDouble* kd = k ? dynamic_cast<KnobDouble*>( k.get() ) : NULL;
+        return kd ? (float)kd->getValueAtTime(time) : (float)def;
+    };
+    const float us = knob("uniformScale", 1.0);
+    SceneGraph::buildTRS(knob("translateX", 0.0), knob("translateY", 0.0), knob("translateZ", 0.0),
+                         knob("rotateX", 0.0),    knob("rotateY", 0.0),    knob("rotateZ", 0.0),
+                         knob("scaleX", 1.0) * us, knob("scaleY", 1.0) * us, knob("scaleZ", 1.0) * us,
+                         out);
+    return true;
 }
 
 bool
 Group3D::isNodeInGroup(const std::string& nodeName) const
 {
-    for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
+    const int nChildren = getNumChildInputs();
+    for (int i = 0; i < nChildren; ++i) {
         EffectInstancePtr input = getInput(i);
         if (input && input->getNode()->getScriptName() == nodeName) {
             return true;
@@ -200,8 +318,10 @@ Group3D::isNodeInGroup(const std::string& nodeName) const
 StatusEnum
 Group3D::getPreferredMetadata(NodeMetadata& metadata)
 {
-    // If any connected input has animated knobs, this group is frame-varying.
-    for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
+    // If any connected input (children or the axis) has animated knobs, this
+    // group is frame-varying.
+    const int nInputs = getNInputs();
+    for (int i = 0; i < nInputs; ++i) {
         EffectInstancePtr inp = skipDots(getInput(i));
         if (inp && inp->getHasAnimation()) {
             metadata.setIsFrameVarying(true);
@@ -230,7 +350,8 @@ Group3D::render(const RenderActionArgs& args)
     int connectedCount = 0;
     std::ostringstream ss;
     ss << "Connected: ";
-    for (int i = 0; i < GROUP3D_MAX_INPUTS; ++i) {
+    const int nChildren = getNumChildInputs();
+    for (int i = 0; i < nChildren; ++i) {
         EffectInstancePtr input = getInput(i);
         if (input) {
             if (connectedCount > 0) ss << ", ";
@@ -242,6 +363,9 @@ Group3D::render(const RenderActionArgs& args)
         ss.str("No 3D nodes connected.");
     } else {
         ss << " (" << connectedCount << " objects)";
+    }
+    if ( EffectInstancePtr axis = skipDots( getInput( getAxisInputIndex() ) ) ) {
+        ss << "  axis: " << axis->getNode()->getScriptName();
     }
     _imp->info.lock()->setValue(ss.str());
 

@@ -275,9 +275,8 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             sn.name = nodeName;
             sn.sourceNode = node;
 
-            float gtx, gty, gtz, grx, gry, grz, gsx, gsy, gsz;
-            group->getGroupTransform(time, gtx, gty, gtz, grx, gry, grz, gsx, gsy, gsz);
-            buildTRS(gtx, gty, gtz, grx, gry, grz, gsx, gsy, gsz, sn.localMatrix);
+            // axis input × T·T(P)·R·S·T(−P); sn.pivot seeds the gizmo on the pivot.
+            group->getLocalMatrix(time, sn.localMatrix, sn.pivot);
 
             nameToIndex[nodeName] = (int)_nodes.size();
             _nodes.push_back(sn);
@@ -872,7 +871,9 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         Group3D* group = dynamic_cast<Group3D*>(node->getEffectInstance().get());
         if (!group) continue;
 
-        for (int inp = 0; inp < GROUP3D_MAX_INPUTS; ++inp) {
+        // Children only: the axis input is this group's parent, not a member.
+        const int nChildren = group->getNumChildInputs();
+        for (int inp = 0; inp < nChildren; ++inp) {
             // skipDots: Group3D → Dot → child must parent the CHILD, not try to
             // match the Dot's script name (which matches no SceneNode — the
             // child silently never parented and the group transform was lost).

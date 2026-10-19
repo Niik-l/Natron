@@ -78,7 +78,7 @@ collectSceneNodes(EffectInstance* eff, NodesList& out, std::set<EffectInstance*>
 
     Scene3D* s = dynamic_cast<Scene3D*>(eff);
     Group3D* g = dynamic_cast<Group3D*>(eff);
-    const int maxIn = s ? SCENE3D_MAX_INPUTS : (g ? GROUP3D_MAX_INPUTS : 0);
+    const int maxIn = s ? SCENE3D_MAX_INPUTS : (g ? g->getNumChildInputs() : 0); // not the axis input
     for (int i = 0; i < maxIn; ++i) {
         EffectInstancePtr inp = eff->getInput(i);
         if (inp) collectSceneNodes(inp.get(), out, seen);

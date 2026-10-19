@@ -1499,7 +1499,7 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
         bool found = false;
         Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
         Group3D* group3d = dynamic_cast<Group3D*>(geoEffect.get());
-        int numInputs = scene3d ? scene3d->getNInputs() : (group3d ? group3d->getNInputs() : 0);
+        int numInputs = scene3d ? scene3d->getNInputs() : (group3d ? group3d->getNumChildInputs() : 0);
         EffectInstance* sceneNode = scene3d ? (EffectInstance*)scene3d : (EffectInstance*)group3d;
 
         for (int i = 0; i < numInputs && !found; ++i) {
@@ -1559,7 +1559,7 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
         if (geoEffect) {
             Scene3D* scene3d = dynamic_cast<Scene3D*>(geoEffect.get());
             Group3D* group3d = dynamic_cast<Group3D*>(geoEffect.get());
-            int numInputs = scene3d ? scene3d->getNInputs() : (group3d ? group3d->getNInputs() : 0);
+            int numInputs = scene3d ? scene3d->getNInputs() : (group3d ? group3d->getNumChildInputs() : 0);
             EffectInstance* scn = scene3d ? (EffectInstance*)scene3d : (EffectInstance*)group3d;
             for (int i = 0; i < numInputs; ++i) {
                 EffectInstancePtr inp = scn ? scn->getInput(i) : EffectInstancePtr();

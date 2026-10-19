@@ -952,7 +952,7 @@ CyclesRenderPass::discoverSceneObjects(std::vector<std::string>& outGeo,
             if (inp) sceneInputs.push_back(inp);
         }
     } else if (group3d) {
-        for (int i = 0; i < group3d->getNInputs(); ++i) {
+        for (int i = 0; i < group3d->getNumChildInputs(); ++i) {
             EffectInstancePtr inp = group3d->getInput(i);
             if (inp) sceneInputs.push_back(inp);
         }

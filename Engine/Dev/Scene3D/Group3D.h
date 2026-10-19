@@ -40,14 +40,22 @@ struct Group3DPrivate;
  * @brief Groups multiple 3D objects (cameras, geo, cards, point clouds)
  * into an organizational unit.
  *
- * Accepts up to 8 inputs from any 3D node type (ReadGeo, ReadAlembicCamera,
- * Card3DRender, DeepToPoints).
+ * Inputs [0, getNumChildInputs()) are the grouped objects (any 3D node type:
+ * ReadGeo, Card3D, Light3D, another Group3D...). The input after them is an
+ * optional **axis**: a parent transform, Nuke TransformGeo-style. Any 3D node
+ * works there — its translate / rotate / scale (+ uniformScale) knobs are read
+ * by name (ReadAlembicTransform, a Camera3D's keyed position, a Sphere3D...),
+ * and another Group3D / TransformGeo contributes its full matrix, so chains
+ * build hierarchies.
  *
- * Provides an optional unified transform that applies to all children.
+ * The node's own Translate / Rotate / Scale (+ Uniform Scale) rotate and scale
+ * around Pivot X/Y/Z. Local matrix = axis × T(t)·T(P)·R·S·T(−P); see
+ * getLocalMatrix(). SceneGraph parents every child under that matrix, so the
+ * 3D viewport, ScanlineRender and Cycles all agree.
+ *
  * The 3D viewport can filter display to show only objects in a specific Group3D.
  *
- * This is Natron's simplified equivalent of Nuke's Scene node — focused on
- * grouping and organization rather than full scene graph management.
+ * TransformGeo (below) is the one-object form of the same node.
  */
 class Group3D
     : public EffectInstance
@@ -65,21 +73,28 @@ public:
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return GROUP3D_MAX_INPUTS; }
+    // Children first, then the axis input.
+    virtual int getNInputs() const OVERRIDE WARN_UNUSED_RETURN { return getNumChildInputs() + 1; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
-    virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
+    /// Inputs [0, getNumChildInputs()) are the grouped objects. Everything that
+    /// enumerates a group's children must use this, not getNInputs(), so the
+    /// axis node is never mistaken for a grouped object.
+    virtual int getNumChildInputs() const WARN_UNUSED_RETURN { return GROUP3D_MAX_INPUTS; }
+    int getAxisInputIndex() const WARN_UNUSED_RETURN { return getNumChildInputs(); }
+
+    virtual std::string getPluginID() const OVERRIDE WARN_UNUSED_RETURN
     { return PLUGINID_NATRON_GROUP3D; }
 
-    virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
+    virtual std::string getPluginLabel() const OVERRIDE WARN_UNUSED_RETURN
     { return "Group3D"; }
 
-    virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual std::string getPluginDescription() const OVERRIDE WARN_UNUSED_RETURN;
 
     virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
     { grouping->push_back("3D"); }
 
-    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual std::string getInputLabel(int inputNb) const OVERRIDE WARN_UNUSED_RETURN;
 
     virtual bool isInputOptional(int /*inputNb*/) const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return true; }
@@ -95,13 +110,30 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
-    // Group transform for the viewport
+    // Knob T/R/S only (Uniform Scale folded into the scale; identity while
+    // Enable Transform is off). No pivot, no axis — see getLocalMatrix().
     void getGroupTransform(double time, float& tx, float& ty, float& tz,
                            float& rx, float& ry, float& rz,
                            float& sx, float& sy, float& sz) const;
 
-    // Check if a node is connected to this group
+    // The group's full local matrix (column-major, GL-ready, SceneGraph
+    // convention): axis-input matrix × T(t)·T(P)·R·S·T(−P). The knob part is
+    // the identity while Enable Transform is off; the axis input applies
+    // regardless. pivotOut (may be NULL) receives the Pivot knobs so the
+    // viewport gizmo can seed its handle on the pivot.
+    void getLocalMatrix(double time, float out[16], float pivotOut[3]) const;
+
+    // Matrix of whatever is wired into the axis input; false when nothing is.
+    bool getAxisMatrix(double time, float out[16]) const;
+
+    // Check if a node is connected to this group (children only)
     bool isNodeInGroup(const std::string& nodeName) const;
+
+protected:
+
+    // TransformGeo turns the knob transform on by default; a Group3D is an
+    // organiser first, so it keeps the upstream default (off).
+    virtual bool transformEnabledByDefault() const { return false; }
 
 private:
 
@@ -111,6 +143,46 @@ private:
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
 
     std::unique_ptr<Group3DPrivate> _imp;
+};
+
+/**
+ * @brief Nuke-style TransformGeo: the one-object form of Group3D.
+ *
+ * Inputs: geo (the object, or a whole Group3D / Scene3D branch) and axis (an
+ * optional parent transform, see Group3D). Same knobs, same matrix, same
+ * consumers — only the input count, the labels and the Enable default differ.
+ */
+class TransformGeo
+    : public Group3D
+{
+public:
+
+    static EffectInstance* BuildEffect(NodePtr n) { return new TransformGeo(n); }
+
+    TransformGeo(NodePtr node)
+        : Group3D(node)
+    {
+    }
+
+    virtual ~TransformGeo()
+    {
+    }
+
+    virtual int getNumChildInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
+
+    virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
+    { return PLUGINID_NATRON_TRANSFORMGEO; }
+
+    virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
+    { return "TransformGeo"; }
+
+    virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+
+    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
+
+protected:
+
+    virtual bool transformEnabledByDefault() const OVERRIDE FINAL { return true; }
 };
 
 NATRON_NAMESPACE_EXIT

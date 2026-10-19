@@ -17,6 +17,21 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **TransformGeo node + Group3D axis input / Pivot / Uniform Scale (2026-10-19)** — the user asked
+  for Nuke's TransformGeo. Group3D already applied one T/R/S to its children, so it grew the missing
+  pieces instead of a new code path: an **axis** input (index `getNumChildInputs()`, after the
+  children) whose node becomes the parent transform — any 3D node's translate/rotate/scale(+uniform)
+  knobs read by name, or another Group3D / TransformGeo's full matrix so chains nest — plus
+  **Pivot X/Y/Z** (via the existing `SceneGraph::buildTRSPivot`, `SceneNode::pivot` seeds the gizmo
+  on it) and **Uniform Scale**. `Group3D::getLocalMatrix()` = axis × T·T(P)·R·S·T(−P) and SceneGraph
+  pass 1 takes that matrix directly. **TransformGeo** is a subclass in Group3D.h: one `geo` child
+  input + `axis`, Enable Transform on by default, own plugin ID / menu entry under 3D. Every place
+  that walked a group's inputs with `getNInputs()` / `GROUP3D_MAX_INPUTS` (SceneGraph pass 2,
+  CyclesPassRender::collectSceneNodes, CyclesRender object lookup + focus list, CyclesRenderPass
+  non-Cycles walk, FastVolumeRender particle lights) now uses `getNumChildInputs()` so the axis node
+  is never treated as a grouped object. Old projects: new knobs default to the identity; the
+  Group3D page is now titled "Transform" (knob names unchanged). Not done: look-at input; the
+  gizmo still ignores a parent (axis or group) transform, as it always did for grouped children.
 - **Linux: no more startup abort on Wayland sessions (2026-10-19)** — GitHub issue #5: on Ubuntu
   26.04 / GNOME Wayland the AppImage died with "Error while creating OpenGL context: EGL: Wayland
   contexts are not supported and need to be enabled at build time". The AppImage is built without
