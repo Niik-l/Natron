@@ -572,6 +572,31 @@ evaluateFbxArchiveFrame(void* sceneV,
                     const ufbx_vertex_vec3* srcPos =
                         (mesh->skinned_position.exists ? &mesh->skinned_position
                                                        : &mesh->vertex_position);
+
+                    // ufbx CPU skinning evaluates in WORLD space
+                    // (ufbx_get_skin_vertex_matrix composes bone to_world ×
+                    // inv_bind; ufbx sets skinned_is_local = false for those).
+                    // This evaluator's contract is GEOMETRY-space payloads —
+                    // the node chain (root normalization folded at the top)
+                    // must compose exactly once downstream — so map the
+                    // skinned positions back through inv(geometry_to_world).
+                    // Without this the chain applies a SECOND time and skinned
+                    // meshes land at the wrong scale/position (the Mixamo
+                    // skeleton/mesh 100x mismatch: bones at meters, mesh at
+                    // centimeters — or the reverse).
+                    const bool skinnedWorld =
+                        mesh->skinned_position.exists && !mesh->skinned_is_local;
+                    ufbx_matrix worldToGeometry;
+                    if (skinnedWorld) {
+                        const ufbx_matrix geometryToWorld = node->geometry_to_world;
+                        worldToGeometry = ufbx_matrix_invert(&geometryToWorld);
+                        if (std::getenv("NATRON_DEBUG_GEOIO")) {
+                            std::fprintf(stderr,
+                                "[GEOIO-ARCH-FBX]   skin world->geometry remap g2wDiag=(%.4f,%.4f,%.4f)\n",
+                                geometryToWorld.m00, geometryToWorld.m11,
+                                geometryToWorld.m22);
+                        }
+                    }
                     const bool bake = (node->geometry_to_node.m00 != 1.0f ||
                                        node->geometry_to_node.m11 != 1.0f ||
                                        node->geometry_to_node.m22 != 1.0f ||
@@ -585,6 +610,9 @@ evaluateFbxArchiveFrame(void* sceneV,
                     for (std::size_t v = 0; v < nv; ++v) {
                         if (v >= srcCount) break;
                         ufbx_vec3 p = srcPos->values.data[v];
+                        if (skinnedWorld) {
+                            p = ufbx_transform_position(&worldToGeometry, p);
+                        }
                         def->vertices[v * 3] = (float)p.x;
                         def->vertices[v * 3 + 1] = (float)p.y;
                         def->vertices[v * 3 + 2] = (float)p.z;
