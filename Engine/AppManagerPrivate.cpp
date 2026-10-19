@@ -206,6 +206,40 @@ oom:
 } // char2wchar
 
 NATRON_NAMESPACE_ENTER
+#if defined(__NATRON_LINUX__)
+// Should the OpenGL contexts be native Wayland (EGL) or X11 (GLX)?
+// This is decided before the QApplication exists (the GL data is initialised
+// first, see AppManager::loadInternal), so it has to come from the environment.
+//  - A build without Wayland support (no __NATRON_WAYLAND__: the Linux AppImage)
+//    always uses GLX. Qt then runs through XWayland on a Wayland desktop, where
+//    WAYLAND_DISPLAY is still set, so testing that variable alone made every
+//    Wayland session abort at startup with "Wayland contexts are not supported"
+//    (GitHub issue #5).
+//  - NATRON_DISABLE_WAYLAND forces GLX.
+//  - QT_QPA_PLATFORM, when set, names the plugin Qt will load (a ;-separated
+//    list is tried in order): Wayland only if the first entry is a wayland one;
+//    "xcb" means XWayland, so GLX.
+//  - Otherwise WAYLAND_DISPLAY means Qt picks its wayland plugin.
+static bool
+useWaylandGLContext()
+{
+#ifndef __NATRON_WAYLAND__
+    return false;
+#else
+    if ( qEnvironmentVariableIsSet("NATRON_DISABLE_WAYLAND") ) {
+        return false;
+    }
+    const QByteArray platform = qgetenv("QT_QPA_PLATFORM");
+    if ( !platform.isEmpty() ) {
+        const int semi = platform.indexOf(';');
+        const QByteArray first = (semi >= 0 ? platform.left(semi) : platform).trimmed();
+        return first.startsWith("wayland");
+    }
+    return qEnvironmentVariableIsSet("WAYLAND_DISPLAY");
+#endif
+}
+#endif // __NATRON_LINUX__
+
 AppManagerPrivate::AppManagerPrivate()
     : globalTLS()
     , _appType(AppManager::eAppTypeBackground)
@@ -262,6 +296,7 @@ AppManagerPrivate::AppManagerPrivate()
     , glHasTextureFloat(false)
     , hasInitializedOpenGLFunctions(false)
     , openGLFunctionsMutex()
+    , onWayland(false)
     , renderingContextPool()
     , openGLRenderers()
 {
@@ -270,7 +305,7 @@ AppManagerPrivate::AppManagerPrivate()
     runningThreadsCount = 0;
 
 #if defined(__NATRON_LINUX__)
-    onWayland = qEnvironmentVariableIsSet("WAYLAND_DISPLAY") && !qEnvironmentVariableIsSet("NATRON_DISABLE_WAYLAND");
+    onWayland = useWaylandGLContext();
 #endif
 }
 

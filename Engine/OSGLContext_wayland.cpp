@@ -667,7 +667,8 @@ struct OSGLContext_egl_dataPrivate
 
 OSGLContext_egl_data::OSGLContext_egl_data()
 {
-    throw std::runtime_error("EGL: Wayland contexts are not supported and need to be enabled at build time");
+    throw std::runtime_error("EGL: this build has no native Wayland OpenGL support. "
+                             "Run it through XWayland (QT_QPA_PLATFORM=xcb) or set NATRON_DISABLE_WAYLAND=1.");
 }
 
 OSGLContext_egl_data::~OSGLContext_egl_data()

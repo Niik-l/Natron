@@ -448,7 +448,9 @@ jobs:
             # No native Wayland GL context: Rocky 8s EGL headers predate the
             # PFNEGL*PROC typedefs OSGLContext_wayland.cpp uses. Nothing is lost:
             # the AppImage ships only Qts X11 (xcb) plugin, so Wayland desktops
-            # run it through XWayland anyway. The Fedora build keeps Wayland.
+            # run it through XWayland anyway (AppManagerPrivate::useWaylandGLContext
+            # keeps a build without __NATRON_WAYLAND__ on GLX; issue #5). The
+            # Fedora build keeps Wayland.
             # The images Qt and HarfBuzz need FreeType 2.13 (in /usr/local);
             # Rocky 8s FreeType 2.9 in /usr/lib64 lacks FT_Get_Paint & co.
             # Cairo (Rocky only) pulls freetype2 in by full path via pkg-config,

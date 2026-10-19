@@ -979,7 +979,8 @@ the job frees runner disk space and runs the image as a long-lived container (`d
 per step) instead of via `container:`.
 
 Differences from the Windows build: no native Wayland GL context (Qt's xcb plugin is what the
-AppImage ships, so Wayland desktops run it through XWayland); SeExpr omitted.
+AppImage ships, so Wayland desktops run it through XWayland; `useWaylandGLContext()` in
+`AppManagerPrivate.cpp` keeps such a build on GLX even though `WAYLAND_DISPLAY` is set); SeExpr omitted.
 
 ### Linux Build (Fedora)
 

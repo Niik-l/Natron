@@ -17,6 +17,16 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Linux: no more startup abort on Wayland sessions (2026-10-19)** — GitHub issue #5: on Ubuntu
+  26.04 / GNOME Wayland the AppImage died with "Error while creating OpenGL context: EGL: Wayland
+  contexts are not supported and need to be enabled at build time". The AppImage is built without
+  native Wayland GL on purpose (Rocky 8 EGL headers, xcb-only Qt, runs through XWayland), but the
+  upstream switch in `AppManagerPrivate` picked the EGL path from `WAYLAND_DISPLAY` alone, which
+  every Wayland desktop sets, and hit the compiled-out stub. New `useWaylandGLContext()`: a build
+  without `__NATRON_WAYLAND__` always uses GLX; otherwise `NATRON_DISABLE_WAYLAND` forces GLX,
+  `QT_QPA_PLATFORM` decides when set (first entry `wayland*` → EGL, `xcb` → GLX), and only then
+  `WAYLAND_DISPLAY` counts. Workaround on older AppImages: `NATRON_DISABLE_WAYLAND=1`. README /
+  BUILDING updated.
 - **3D viewport: GPU-cached meshes (2026-10-15)** - orbiting a 1.5M+ triangle scan was sluggish
   because `Viewport3D::drawMeshNode` re-sent every triangle in immediate mode on every paint (CPU
   headlight per face + ~10 GL calls per triangle, then the edge list again for the wire pass).
