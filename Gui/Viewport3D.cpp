@@ -74,6 +74,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/UVProject.h"
 #include "Engine/Dev/DotUtils.h"
 #include "Engine/Dev/Scene3D/Group3D.h"
+#include "Engine/Dev/Scene3D/GeoExtract.h"
 #include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
 #include "Engine/Dev/Scene3D/Material3D.h"
@@ -943,6 +944,11 @@ struct Viewport3DPrivate
     // GPU copies of the scene meshes + the headlight/texture shader that draws
     // them (see Viewport3DMeshCache). Per-context resources like the above.
     mutable Viewport3DMeshCache meshCache;
+
+    // Local-space bounds per MeshData::version, for the Group3D bounding box.
+    // A 1.5M-vertex scan is scanned once per upload, not once per paint.
+    struct LocalBox { float mn[3], mx[3]; };
+    mutable std::map<unsigned long long, LocalBox> meshBoundsCache;
     GLuint meshShaderProgram = 0;
     bool meshShaderReady = false;
 
@@ -1853,6 +1859,9 @@ Viewport3D::paintGL()
             // node's world matrix is pushed, or they land offset by the node's
             // translate (= the selected endpoint) and float away from the bolt.
             drawZapEndpoints(sn);
+        }
+        if (sn.type == eSceneNodeGroup) {
+            drawGroupBounds(sn, sceneNodes);   // world space: before the push
         }
         glPushMatrix();
         glMultMatrixf(sn.worldMatrix);
@@ -3113,9 +3122,14 @@ Viewport3D::selectObjectAtPosition(int screenX, int screenY)
         EffectInstancePtr effect = node->getEffectInstance();
         if (!effect) continue;
 
-        // Get node position from knobs (consistent with RecomposeMatrixFromComponents)
-        float translation[3], rotation[3], scale[3];
-        readTRSFromNode(effect, translation, rotation, scale);
+        // Pick on the node's drawn position: worldMatrix x pivot, which is where
+        // the gizmo handle sits (= parent x (translate + pivot)). The old knob
+        // read ignored Group3D / axis parents, so a parented child could only be
+        // clicked at its un-parented spot.
+        const float* M = sn.worldMatrix; const float* p = sn.pivot;
+        const float translation[3] = { M[0]*p[0] + M[4]*p[1] + M[8]*p[2]  + M[12],
+                                       M[1]*p[0] + M[5]*p[1] + M[9]*p[2]  + M[13],
+                                       M[2]*p[0] + M[6]*p[1] + M[10]*p[2] + M[14] };
 
         float projX, projY;
         if (!worldToScreenDev(_imp->cameraView, _imp->cameraProjection,
@@ -5852,29 +5866,141 @@ Viewport3D::drawPointCloudNode(const SceneNode& sn) const
 void
 Viewport3D::drawGroupNode(const SceneNode& sn) const
 {
-    Q_UNUSED(sn);
-
+    // Small origin tripod so the group can be found and clicked even when its
+    // children sit far away (selection picks on the node origin). The box
+    // around the children is drawn in world space by drawGroupBounds(). This
+    // replaces the old fixed 4-unit dashed cube, which read as a bounding box
+    // but never followed the children.
+    const bool selected = (sn.name == _imp->selectedNodeName);
+    const float s = 0.35f;
+    glLineWidth(selected ? 2.0f : 1.5f);
+    glBegin(GL_LINES);
+    glColor3f(0.9f, 0.25f, 0.2f); glVertex3f(0, 0, 0); glVertex3f(s, 0, 0);
+    glColor3f(0.3f, 0.85f, 0.3f); glVertex3f(0, 0, 0); glVertex3f(0, s, 0);
+    glColor3f(0.3f, 0.5f, 1.0f);  glVertex3f(0, 0, 0); glVertex3f(0, 0, s);
+    glEnd();
+    // a dashed orange diamond at the origin ties the tripod to the dashed box
     glColor3f(0.9f, 0.5f, 0.1f);
-    glLineWidth(1.5f);
     glEnable(GL_LINE_STIPPLE);
     glLineStipple(2, 0xAAAA);
-
-    float s = 2.0f;
+    const float d = 0.12f;
     glBegin(GL_LINE_LOOP);
-    glVertex3f(-s, -s, -s); glVertex3f(s, -s, -s);
-    glVertex3f(s, s, -s); glVertex3f(-s, s, -s);
+    glVertex3f(-d, 0, 0); glVertex3f(0, d, 0); glVertex3f(d, 0, 0); glVertex3f(0, -d, 0);
     glEnd();
     glBegin(GL_LINE_LOOP);
-    glVertex3f(-s, -s, s); glVertex3f(s, -s, s);
-    glVertex3f(s, s, s); glVertex3f(-s, s, s);
+    glVertex3f(0, 0, -d); glVertex3f(0, d, 0); glVertex3f(0, 0, d); glVertex3f(0, -d, 0);
     glEnd();
-    glBegin(GL_LINES);
-    glVertex3f(-s, -s, -s); glVertex3f(-s, -s, s);
-    glVertex3f(s, -s, -s); glVertex3f(s, -s, s);
-    glVertex3f(s, s, -s); glVertex3f(s, s, s);
-    glVertex3f(-s, s, -s); glVertex3f(-s, s, s);
-    glEnd();
+    glDisable(GL_LINE_STIPPLE);
+    glLineWidth(1.0f);
+}
 
+bool
+Viewport3D::sceneNodeLocalBounds(const SceneNode& sn, float bmin[3], float bmax[3]) const
+{
+    // Meshes (ReadGeo, GeoBuilder, archive entries, Zap3D...): scan the
+    // vertices once per MeshData version.
+    if (sn.meshData && sn.meshData->numVertices > 0) {
+        const unsigned long long ver = sn.meshData->version;
+        std::map<unsigned long long, Viewport3DPrivate::LocalBox>::const_iterator it = _imp->meshBoundsCache.find(ver);
+        if (it == _imp->meshBoundsCache.end()) {
+            Viewport3DPrivate::LocalBox box;
+            const std::vector<float>& v = sn.meshData->vertices;
+            box.mn[0] = box.mx[0] = v[0]; box.mn[1] = box.mx[1] = v[1]; box.mn[2] = box.mx[2] = v[2];
+            for (size_t i = 3; i + 2 < v.size(); i += 3) {
+                for (int k = 0; k < 3; ++k) {
+                    box.mn[k] = std::min(box.mn[k], v[i + k]);
+                    box.mx[k] = std::max(box.mx[k], v[i + k]);
+                }
+            }
+            if (_imp->meshBoundsCache.size() > 4096) _imp->meshBoundsCache.clear();
+            it = _imp->meshBoundsCache.insert(std::make_pair(ver, box)).first;
+        }
+        std::memcpy(bmin, it->second.mn, sizeof(float) * 3);
+        std::memcpy(bmax, it->second.mx, sizeof(float) * 3);
+        return true;
+    }
+    // Primitives (sphere / cube / cylinder / card): cheap to flatten; the
+    // TriMesh bbox is in mesh space, before the node's own transform.
+    if (sn.type == eSceneNodeSphere || sn.type == eSceneNodeCube ||
+        sn.type == eSceneNodeCylinder || sn.type == eSceneNodeCard) {
+        NodePtr node = sn.sourceNode.lock();
+        EffectInstancePtr effect = node ? node->getEffectInstance() : EffectInstancePtr();
+        if (!effect) return false;
+        TriMesh tm;
+        if (!extractTriangleMesh(effect, effect->getCurrentTime(), tm)) return false;
+        std::memcpy(bmin, tm.bboxMin, sizeof(float) * 3);
+        std::memcpy(bmax, tm.bboxMax, sizeof(float) * 3);
+        return true;
+    }
+    return false;
+}
+
+void
+Viewport3D::drawGroupBounds(const SceneNode& sn, const std::vector<SceneNode>& sceneNodes) const
+{
+    // Union of every descendant's bounds in world space (each node's local box
+    // corners through its world matrix, nested groups by recursion through
+    // childIndices). Lights / cameras / point clouds add nothing.
+    float wmin[3] = { 0, 0, 0 }, wmax[3] = { 0, 0, 0 };
+    bool any = false;
+    std::vector<int> stack(sn.childIndices.begin(), sn.childIndices.end());
+    while (!stack.empty()) {
+        const int idx = stack.back(); stack.pop_back();
+        if (idx < 0 || idx >= (int)sceneNodes.size()) continue;
+        const SceneNode& c = sceneNodes[idx];
+        if (!c.visible) continue;
+        stack.insert(stack.end(), c.childIndices.begin(), c.childIndices.end());
+        float lmin[3], lmax[3];
+        if (!sceneNodeLocalBounds(c, lmin, lmax)) continue;
+        const float* M = c.worldMatrix;
+        for (int k = 0; k < 8; ++k) {
+            const float p[3] = { (k & 1) ? lmax[0] : lmin[0], (k & 2) ? lmax[1] : lmin[1], (k & 4) ? lmax[2] : lmin[2] };
+            const float w[3] = { M[0]*p[0] + M[4]*p[1] + M[8]*p[2]  + M[12],
+                                 M[1]*p[0] + M[5]*p[1] + M[9]*p[2]  + M[13],
+                                 M[2]*p[0] + M[6]*p[1] + M[10]*p[2] + M[14] };
+            if (!any) {
+                std::memcpy(wmin, w, sizeof(w)); std::memcpy(wmax, w, sizeof(w)); any = true;
+            } else {
+                for (int i = 0; i < 3; ++i) { wmin[i] = std::min(wmin[i], w[i]); wmax[i] = std::max(wmax[i], w[i]); }
+            }
+        }
+    }
+
+    const bool selected = (sn.name == _imp->selectedNodeName);
+    glColor3f(0.9f, 0.5f, 0.1f);
+    glLineWidth(selected ? 2.0f : 1.0f);
+    glEnable(GL_LINE_STIPPLE);
+    glLineStipple(2, 0xAAAA);
+    if (any) {
+        const float* a = wmin; const float* b = wmax;
+        glBegin(GL_LINE_LOOP);
+        glVertex3f(a[0], a[1], a[2]); glVertex3f(b[0], a[1], a[2]); glVertex3f(b[0], b[1], a[2]); glVertex3f(a[0], b[1], a[2]);
+        glEnd();
+        glBegin(GL_LINE_LOOP);
+        glVertex3f(a[0], a[1], b[2]); glVertex3f(b[0], a[1], b[2]); glVertex3f(b[0], b[1], b[2]); glVertex3f(a[0], b[1], b[2]);
+        glEnd();
+        glBegin(GL_LINES);
+        glVertex3f(a[0], a[1], a[2]); glVertex3f(a[0], a[1], b[2]);
+        glVertex3f(b[0], a[1], a[2]); glVertex3f(b[0], a[1], b[2]);
+        glVertex3f(b[0], b[1], a[2]); glVertex3f(b[0], b[1], b[2]);
+        glVertex3f(a[0], b[1], a[2]); glVertex3f(a[0], b[1], b[2]);
+        glEnd();
+    }
+    // Pivot cross: the pivot is a point of the node's own space, so its world
+    // position is worldMatrix x pivot (= parent x (translate + pivot)), which
+    // is also where the gizmo handle sits.
+    if (sn.pivot[0] != 0.f || sn.pivot[1] != 0.f || sn.pivot[2] != 0.f) {
+        const float* M = sn.worldMatrix; const float* p = sn.pivot;
+        const float w[3] = { M[0]*p[0] + M[4]*p[1] + M[8]*p[2]  + M[12],
+                             M[1]*p[0] + M[5]*p[1] + M[9]*p[2]  + M[13],
+                             M[2]*p[0] + M[6]*p[1] + M[10]*p[2] + M[14] };
+        const float r = 0.2f;
+        glBegin(GL_LINES);
+        glVertex3f(w[0] - r, w[1], w[2]); glVertex3f(w[0] + r, w[1], w[2]);
+        glVertex3f(w[0], w[1] - r, w[2]); glVertex3f(w[0], w[1] + r, w[2]);
+        glVertex3f(w[0], w[1], w[2] - r); glVertex3f(w[0], w[1], w[2] + r);
+        glEnd();
+    }
     glDisable(GL_LINE_STIPPLE);
     glLineWidth(1.0f);
 }

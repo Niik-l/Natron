@@ -17,6 +17,16 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **3D viewport: Group3D / TransformGeo draw their real bounds (2026-10-19)** — the group marker
+  was a fixed 4-unit dashed cube at the node origin that read as a bounding box but never followed
+  the children (the user noticed it after Move Pivot to Centroid). Now `drawGroupBounds()` draws,
+  in world space before the matrix push, the union of every descendant's bounds (mesh vertices
+  scanned once per `MeshData::version` into `meshBoundsCache`; primitives through GeoExtract; nested
+  groups by `childIndices` recursion; lights / cameras / point clouds add nothing) as the dashed
+  orange box, plus a cross at the pivot (`worldMatrix × pivot`, where the gizmo sits). The node
+  origin keeps a small RGB tripod with a dashed diamond so a far-away group can still be found and
+  clicked. Picking (`selectObjectAtPosition`) now tests `worldMatrix × pivot` instead of the node's
+  own translate knobs, so parented children and pivoted nodes are clicked where they are drawn.
 - **TransformGeo / Group3D: Move Pivot to Centroid + Move Centroid to Origin (2026-10-19)** — the
   user asked for Houdini's Pre-Transform buttons. `Group3D::getChildrenBounds()` walks the children
   (nested groups under their own `getLocalMatrix`, everything else through `extractTriangleMesh`,
