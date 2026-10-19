@@ -17,6 +17,33 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **3D hierarchy composed in the wrong order — fixed (2026-10-19)** — found while making the
+  gizmo parent-aware for TransformGeo. `SceneGraph::multiply(a, b)` applies `a` first, then `b`
+  (on GL-layout arrays it is B × A), but pass 3 called `multiply(parent.world, local)` and the
+  Alembic entry chain `multiply(parentW, lm)`: children of a rotated / scaled parent were moved by
+  the parent first and then by their own offset, so a child at x=2 under a parent rotated 90°
+  stayed at x=2 and turned in place instead of swinging to z=−2. Proven with a Blender-exported
+  2-level Alembic (Root rotZ 90 › Child cube at local (2,0,0), Blender world (0,2,0) → Y-up
+  (0,0,−2)): the old build rendered it at x=+2, pixel-identical to the reversed candidate.
+  ReadAlembicArchive's own `getEntryWorldMatrix` (ScanlineRender + motion blur) always composed
+  Parent × Local correctly, so Cycles / the 3D viewport disagreed with ScanlineRender on any
+  archive with a non-trivial parent. Fixed in pass 3, the entry chain, and Group3D's axis
+  composition (`multiply(trs, axis)`); `multiply` is now documented in SceneGraph.h. Behaviour
+  change for existing projects only where a Group3D transform or an archive parent carried
+  rotation / non-uniform scale (translation-only parents commute). Pass 4 (archive user transform
+  applied outermost in world space) is unchanged and still correct.
+- **ScanlineRender renders Group3D / TransformGeo children (2026-10-19)** — `extractGeometries`
+  never recursed into a group: geometry under a Group3D / TransformGeo wired into ScanlineRender's
+  scene simply vanished. It now extracts every child input and parents each GeoData under
+  `Group3D::getLocalMatrix()` (axis × T·R·S around the pivot), so SLR matches the viewport and
+  Cycles. Lights / volumes / particle systems are still only picked up at the Scene3D level.
+- **3D viewport gizmo is parent-aware (2026-10-19)** — the handle used to be drawn from the
+  node's own knobs alone, so a child of a Group3D (transform on) or a TransformGeo with an axis
+  input showed its gizmo at the un-parented position. The gizmo now seeds with Parent × Local
+  (group chain world matrix, plus the node's own axis matrix for a Group3D / TransformGeo) and
+  on drag converts back with Parent⁻¹ (new `invertMatrix4`) before writing the knobs. Archives
+  are exempt (their user transform is world-space by design). Caveat: a non-uniformly scaled
+  parent makes the decomposed child rotation approximate (ImGuizmo's polar-free decompose).
 - **TransformGeo node + Group3D axis input / Pivot / Uniform Scale (2026-10-19)** — the user asked
   for Nuke's TransformGeo. Group3D already applied one T/R/S to its children, so it grew the missing
   pieces instead of a new code path: an **axis** input (index `getNumChildInputs()`, after the

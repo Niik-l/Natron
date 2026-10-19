@@ -259,11 +259,13 @@ Group3D::getLocalMatrix(double time, float out[16], float pivotOut[3]) const
     float trs[16];
     SceneGraph::buildTRSPivot(tx, ty, tz, rx, ry, rz, sx, sy, sz, px, py, pz, trs);
 
-    // Parent (axis) first, then this node's own transform — the same
-    // parent × local order SceneGraph uses for the world matrix.
+    // out = Axis × TRS (column-major): the node's own transform acts on the
+    // vertices first, then the axis parent — the same Parent × Local order
+    // SceneGraph uses for the world matrix. SceneGraph::multiply() applies its
+    // FIRST argument first, hence trs before axis.
     float axis[16];
     if ( getAxisMatrix(time, axis) ) {
-        SceneGraph::multiply(axis, trs, out);
+        SceneGraph::multiply(trs, axis, out);
     } else {
         std::memcpy(out, trs, sizeof(trs));
     }

@@ -474,7 +474,9 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
                             continue;
                         }
                         if (pli >= 0 && pli < i) {
-                            multiply(&entryW[(size_t)pli * 16], lm, &entryW[(size_t)i * 16]);
+                            // world = Parent × Local: local first, then the parent chain
+                            // (multiply() applies its first argument first).
+                            multiply(lm, &entryW[(size_t)pli * 16], &entryW[(size_t)i * 16]);
                         } else {
                             std::memcpy(&entryW[(size_t)i * 16], lm, sizeof(float) * 16);
                             if (!gotAuth) { auth[0] = lm[12]; auth[1] = lm[13]; auth[2] = lm[14]; gotAuth = true; }
@@ -945,8 +947,16 @@ SceneGraph::computeWorldRecursive(int nodeIdx)
     SceneNode& node = _nodes[nodeIdx];
 
     if (node.parentIndex >= 0) {
-        // world = parent.world * local
-        multiply(_nodes[node.parentIndex].worldMatrix, node.localMatrix, node.worldMatrix);
+        // world = Parent × Local (column-major): the node's own transform is
+        // applied to its vertices first, then the parent's. multiply() applies
+        // its FIRST argument first, so the local matrix goes first. It used to
+        // be the other way round, which moved children by the parent first and
+        // then by their own offset — a child at x=2 under a parent rotated 90°
+        // stayed at x=2 instead of swinging to z=-2 (verified against a
+        // Blender-exported Alembic hierarchy, 2026-10-19). ReadAlembicArchive's
+        // own getEntryWorldMatrix (ScanlineRender, motion blur) always composed
+        // in the correct order, so the renderers disagreed.
+        multiply(node.localMatrix, _nodes[node.parentIndex].worldMatrix, node.worldMatrix);
         // Propagate disabled state from ancestor: a disabled Group3D / Scene3D
         // hides every node downstream of it.
         if (!_nodes[node.parentIndex].visible) {

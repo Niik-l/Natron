@@ -66,6 +66,7 @@
 #include "ReadGeo.h"
 #include "../../CameraTrackerNode.h"
 #include "SceneGraph.h"
+#include "Group3D.h"
 #include "GeoExtract.h"
 #include "Material3D.h"
 #include "Sphere3D.h"
@@ -2127,6 +2128,30 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
     {
         NodePtr n = effect->getNode();
         if (n && n->isNodeDisabled()) return;
+    }
+
+    // Group3D / TransformGeo: extract every child, then parent each result
+    // under the group's matrix (axis × T·R·S around the pivot) — world =
+    // Group × Local, matching SceneGraph (viewport, Cycles). Only mesh
+    // geometry is carried through a group here; lights, volumes and particle
+    // systems are still picked up at the Scene3D level only.
+    if (Group3D* group = dynamic_cast<Group3D*>(effect.get())) {
+        float groupM[16];
+        group->getLocalMatrix(time, groupM, NULL);
+        const int nChildren = group->getNumChildInputs();
+        for (int c = 0; c < nChildren; ++c) {
+            EffectInstancePtr child = skipDots(group->getInput(c));
+            if (!child) continue;
+            const size_t prevCount = out.size();
+            extractGeometries(child, time, view, out);
+            for (size_t i = prevCount; i < out.size(); ++i) {
+                float w[16];
+                // multiply() applies its first argument first: local, then the group.
+                SceneGraph::multiply(out[i].localMatrix, groupM, w);
+                std::memcpy(out[i].localMatrix, w, sizeof(w));
+            }
+        }
+        return;
     }
 
     // UVProject: transparent UV-rewriting wrapper. Walk through to the upstream

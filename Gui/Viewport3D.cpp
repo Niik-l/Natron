@@ -74,6 +74,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Scene3D/UVProject.h"
 #include "Engine/Dev/DotUtils.h"
 #include "Engine/Dev/Scene3D/Group3D.h"
+#include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
 #include "Engine/Dev/Scene3D/ReadGeo.h"
 #include "Engine/Dev/Scene3D/Material3D.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
@@ -1275,6 +1276,39 @@ Viewport3D::resizeGL(int w, int h)
 // ============================================================================
 
 // Helper: read T/R/S from a node's knobs
+
+// General 4x4 inverse (layout-agnostic: the inverse of the transposed matrix
+// is the transposed inverse). Used to take the gizmo's world matrix back into
+// a parented node's own space. Returns false for a singular matrix.
+static bool
+invertMatrix4(const float m[16], float out[16])
+{
+    float inv[16];
+    inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8]  =  m[4]*m[9]*m[15]  - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14]  + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9]  = -m[0]*m[9]*m[15]  + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] =  m[0]*m[9]*m[14]  - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2]  =  m[1]*m[6]*m[15]  - m[1]*m[7]*m[14]  - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7]  - m[13]*m[3]*m[6];
+    inv[6]  = -m[0]*m[6]*m[15]  + m[0]*m[7]*m[14]  + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7]  + m[12]*m[3]*m[6];
+    inv[10] =  m[0]*m[5]*m[15]  - m[0]*m[7]*m[13]  - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7]  - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14]  + m[0]*m[6]*m[13]  + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6]  + m[12]*m[2]*m[5];
+    inv[3]  = -m[1]*m[6]*m[11]  + m[1]*m[7]*m[10]  + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7]   + m[9]*m[3]*m[6];
+    inv[7]  =  m[0]*m[6]*m[11]  - m[0]*m[7]*m[10]  - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7]   - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11]  + m[0]*m[7]*m[9]   + m[4]*m[1]*m[11] - m[4]*m[3]*m[9]  - m[8]*m[1]*m[7]   + m[8]*m[3]*m[5];
+    inv[15] =  m[0]*m[5]*m[10]  - m[0]*m[6]*m[9]   - m[4]*m[1]*m[10] + m[4]*m[2]*m[9]  + m[8]*m[1]*m[6]   - m[8]*m[2]*m[5];
+    const float det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    if (std::fabs(det) < 1e-12f) {
+        return false;
+    }
+    const float invDet = 1.0f / det;
+    for (int i = 0; i < 16; ++i) out[i] = inv[i] * invDet;
+    return true;
+}
+
 static void readTRSFromNode(NATRON_NAMESPACE::EffectInstancePtr effect,
                             float translation[3], float rotation[3], float scale[3])
 {
@@ -2032,6 +2066,39 @@ Viewport3D::paintGL()
                 float objMat[16];
                 ImGuizmo::RecomposeMatrixFromComponents(gizT, rotation, scale, objMat);
 
+                // Parent space the knobs live in: the Group3D chain above this node
+                // plus, for a Group3D / TransformGeo, its own axis input. The gizmo
+                // works in world space, so seed it with Parent × Local and strip the
+                // parent again before the knobs are written back; without this the
+                // handle sat at the un-parented position (a child offset by a group
+                // or an axis drew its gizmo somewhere else). An archive's user
+                // transform is applied in world space (SceneGraph pass 4), so it
+                // takes no parent compensation.
+                float parentM[16];
+                SceneNode::setIdentity(parentM);
+                bool hasParent = false;
+                if ( !dynamic_cast<ReadAlembicArchive*>( effect.get() ) ) {
+                    if (sn.parentIndex >= 0 && sn.parentIndex < (int)sns.size()) {
+                        std::memcpy(parentM, sns[sn.parentIndex].worldMatrix, sizeof(parentM));
+                        hasParent = true;
+                    }
+                    if ( Group3D* grp = dynamic_cast<Group3D*>( effect.get() ) ) {
+                        float axisM[16];
+                        if ( grp->getAxisMatrix(effect->getCurrentTime(), axisM) ) {
+                            float w[16];
+                            // axis first, then the chain above it (multiply applies its first arg first)
+                            SceneGraph::multiply(axisM, parentM, w);
+                            std::memcpy(parentM, w, sizeof(parentM));
+                            hasParent = true;
+                        }
+                    }
+                }
+                if (hasParent) {
+                    float w[16];
+                    SceneGraph::multiply(objMat, parentM, w); // world = Parent × Local
+                    std::memcpy(objMat, w, sizeof(w));
+                }
+
                 // Capture drag start values when ImGuizmo begins using
                 if (ImGuizmo::IsUsing() && !_imp->gizmoDragging) {
                     _imp->gizmoDragging = true;
@@ -2069,10 +2136,19 @@ Viewport3D::paintGL()
                                           _imp->imguizmoOp, _imp->imguizmoMode,
                                           objMat, NULL, NULL))
                 {
-                    // Decompose modified matrix back to T/R/S, then back out the
-                    // pivot offset so the plain translate knobs are stored.
+                    // Back to the node's own space (Local = Parent⁻¹ × World), then
+                    // decompose to T/R/S and back out the pivot offset so the plain
+                    // translate knobs are stored.
+                    float localMat[16];
+                    std::memcpy(localMat, objMat, sizeof(localMat));
+                    if (hasParent) {
+                        float parentInv[16];
+                        if ( invertMatrix4(parentM, parentInv) ) {
+                            SceneGraph::multiply(objMat, parentInv, localMat); // world first, then Parent⁻¹
+                        }
+                    }
                     float newT[3], newR[3], newS[3];
-                    ImGuizmo::DecomposeMatrixToComponents(objMat, newT, newR, newS);
+                    ImGuizmo::DecomposeMatrixToComponents(localMat, newT, newR, newS);
                     newT[0] -= piv[0]; newT[1] -= piv[1]; newT[2] -= piv[2];
 
                     KnobIPtr kTX = effect->getKnobByName("translateX");

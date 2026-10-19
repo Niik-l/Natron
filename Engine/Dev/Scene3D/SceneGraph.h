@@ -175,6 +175,13 @@ public:
                               float px, float py, float pz,
                               float out[16]);
 
+    // out = the transform that applies `a` FIRST and then `b`. On these
+    // column-major (GL-layout) arrays that is the product B × A, i.e. the
+    // opposite of what the argument order suggests: to parent `local` under
+    // `parent` (world = Parent × Local) call multiply(local, parent, world).
+    // The scene graph composed its hierarchy the other way round until
+    // 2026-10-19 (children of a rotated / scaled parent stayed put and turned
+    // in place; Blender-exported Alembic hierarchies landed in the wrong spot).
     static void multiply(const float a[16], const float b[16], float out[16]);
 
 private:
