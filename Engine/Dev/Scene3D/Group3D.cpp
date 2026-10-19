@@ -371,7 +371,20 @@ Group3D::render(const RenderActionArgs& args)
     }
     _imp->info.lock()->setValue(ss.str());
 
-    Q_UNUSED(args);
+    // A group produces no image. Write a black placeholder: an untouched
+    // output buffer is uninitialised memory and the viewer flags it as NaN
+    // ("rendered rectangle (0,0)-(1,1) contains NaN values").
+    if (args.outputPlanes.empty()) return eStatusOK;
+    ImagePtr outImg = args.outputPlanes.front().second;
+    if (!outImg) return eStatusOK;
+    const RectI bounds = outImg->getBounds();
+    Image::WriteAccess wa(outImg.get());
+    for (int y = bounds.y1; y < bounds.y2; ++y) {
+        for (int x = bounds.x1; x < bounds.x2; ++x) {
+            float* pix = (float*)wa.pixelAt(x, y);
+            if (pix) { pix[0] = pix[1] = pix[2] = pix[3] = 0.0f; }
+        }
+    }
     return eStatusOK;
 }
 
