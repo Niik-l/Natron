@@ -356,7 +356,8 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         Camera3DNode* cam3d = dynamic_cast<Camera3DNode*>(effect.get());
         if (cam3d) {
             double ctx, cty, ctz, crx, cry, crz;
-            cam3d->getCameraPosition(time, ctx, cty, ctz, crx, cry, crz);
+            // Local pose (keys + motion layers, no group): pass 3 parents it.
+            cam3d->getLocalCameraPosition(time, ctx, cty, ctz, crx, cry, crz);
 
             SceneNode sn;
             sn.type = eSceneNodeCamera;

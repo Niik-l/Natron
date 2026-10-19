@@ -98,6 +98,13 @@ public:
                         double& r, double& g, double& b,
                         double& intensity, double& exposure) const;
 
+    // getLightParams gives the light's OWN (local) position. This is the
+    // world position: the same under any Group3D / TransformGeo the light is
+    // wired into (Group3D::getParentWorldMatrix). The SceneGraph parents
+    // lights itself (Cycles / FastVolumeRender / the viewport read its world
+    // matrix); ScanlineRender takes the Light3D pointer and uses this.
+    void getWorldPosition(double time, double& x, double& y, double& z) const;
+
     LightType getLightType() const;
     std::string getEnvironmentMap() const;
     double getSpotAngle(double time) const;

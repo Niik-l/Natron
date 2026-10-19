@@ -126,6 +126,16 @@ public:
     // Matrix of whatever is wired into the axis input; false when nothing is.
     bool getAxisMatrix(double time, float out[16]) const;
 
+    // Parent transform of `child` as the scene graph would compute it: the
+    // first Group3D / TransformGeo downstream of `child` (through Dots) that
+    // has it on a CHILD input (not the axis), composed with that group's own
+    // parents. Lets a node's own getters (a Camera3D's position, a Light3D's
+    // position) report where the group put it, so consumers that take the
+    // node pointer rather than a SceneNode — Project3D, ScanlineRender's
+    // camera and light, Cycles' camera — follow the group too. False when the
+    // node is not under a group (out = identity).
+    static bool getParentWorldMatrix(const EffectInstance* child, double time, float out[16]);
+
     // Bounding box of everything connected below this node, in the node's own
     // pre-transform space (children placed by their own transforms, nested
     // groups by theirs; this node's T/R/S and axis NOT applied). Lights and

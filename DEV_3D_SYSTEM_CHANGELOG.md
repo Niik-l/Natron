@@ -17,6 +17,24 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Cameras and lights follow Group3D / TransformGeo everywhere (2026-10-19)** — the user asked
+  for lights and for a grouped projector camera. Audit: Cycles and FastVolumeRender already placed
+  lights from the SceneGraph world matrix (so grouped lights worked there), but ScanlineRender took
+  the light's own knobs and never looked inside a group for a light, Cycles' dome rotation read the
+  knobs, and every camera consumer (ScanlineRender, Cycles, Project3D, UVProject, GeoBuilder, the
+  viewport look-through) went through `CameraProvider::getCameraPosition`, which was the knobs +
+  Motion layers only. New `Group3D::getParentWorldMatrix(child)` finds the group a node is wired
+  into by walking its OUTPUTS (through Dots; the axis input does not count) and composes that
+  group's `getLocalMatrix` with its own parents. `Camera3DNode::getCameraPosition` now returns the
+  WORLD pose (local × parent, Euler via `RotationConventions::decompose`); the SceneGraph builds the
+  camera's local matrix from the new `getLocalCameraPosition` and parents it itself, so nothing is
+  applied twice. `Light3D::getWorldPosition` does the same for lights; ScanlineRender uses it and
+  finds lights nested in groups (`findLightInGroup`); the Cycles dome mapping takes its rotation
+  from the SceneGraph world matrix. Net: a Camera3D under a TransformGeo renders, projects
+  (Project3D) and look-throughs from the grouped position; a Light3D under one lights from it in
+  all three renderers. Not covered: ReadAlembicCamera / CameraTracker cameras under a group (their
+  providers do not consult the parent), and look-through orbit/pan of a grouped camera writes the
+  knobs as if ungrouped. A node wired into two groups takes the first one found.
 - **3D viewport: Group3D / TransformGeo draw their real bounds (2026-10-19)** — the group marker
   was a fixed 4-unit dashed cube at the node origin that read as a bounding box but never followed
   the children (the user noticed it after Move Pivot to Centroid). Now `drawGroupBounds()` draws,

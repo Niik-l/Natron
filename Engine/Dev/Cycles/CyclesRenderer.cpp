@@ -74,6 +74,7 @@
 #include "Engine/Dev/Scene3D/SceneGraph.h"
 #include "Engine/Dev/Scene3D/Zap3D.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
+#include "Engine/Dev/Scene3D/RotationConventions.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/Card3D.h"
 #include "Engine/Dev/Scene3D/Sphere3D.h"
@@ -1351,16 +1352,22 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 envTex->set_filename(ccl::ustring(envMap));
                 envTex->set_colorspace(ccl::ustring("__builtin_raw")); // HDRIs are linear
 
-                // Rotation via Mapping node (read light's rotateX/Y/Z)
+                // Rotation via Mapping node, from the dome's SceneGraph world
+                // matrix (its own rotateX/Y/Z plus any Group3D / TransformGeo
+                // above it), columns normalised so a scaled group does not skew
+                // the Euler extraction. Ungrouped: identical to the knob values.
                 float lrx = 0, lry = 0, lrz = 0;
                 {
-                    EffectInstancePtr eff = node->getEffectInstance();
-                    if (eff) {
-                        KnobIPtr k;
-                        k = eff->getKnobByName("rotateX"); if (k) lrx = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-                        k = eff->getKnobByName("rotateY"); if (k) lry = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
-                        k = eff->getKnobByName("rotateZ"); if (k) lrz = (float)dynamic_cast<KnobDouble*>(k.get())->getValueAtTime(time);
+                    double m[3][3];
+                    for (int c = 0; c < 3; ++c) {
+                        const float* col = &sn.worldMatrix[c * 4];
+                        const double len = std::sqrt((double)col[0]*col[0] + (double)col[1]*col[1] + (double)col[2]*col[2]);
+                        const double inv = len > 1e-12 ? 1.0 / len : 1.0;
+                        for (int r = 0; r < 3; ++r) m[r][c] = col[r] * inv;
                     }
+                    double drx = 0, dry = 0, drz = 0;
+                    RotationConventions::decompose(m, drx, dry, drz);
+                    lrx = (float)drx; lry = (float)dry; lrz = (float)drz;
                 }
                 // Cycles env texture uses Z-up, our scene is Y-up.
                 // Swap Y↔Z via SeparateXYZ/CombineXYZ so rotations work in Y-up space.

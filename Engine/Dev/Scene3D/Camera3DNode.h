@@ -95,10 +95,19 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
-    // CameraProvider interface
+    // CameraProvider interface. getCameraPosition is the camera's WORLD pose:
+    // keyframes + Motion-page layers + any Group3D / TransformGeo the camera
+    // is wired into (Group3D::getParentWorldMatrix), so ScanlineRender, Cycles,
+    // Project3D and the viewport look-through all see the grouped camera.
     virtual void getCameraPosition(double time,
                                    double& tx, double& ty, double& tz,
                                    double& rx, double& ry, double& rz) const OVERRIDE;
+    // The same without the group parent: what the SceneGraph uses as the
+    // node's LOCAL matrix (it parents the camera itself), and what the viewport
+    // look-through editing writes back into the knobs.
+    void getLocalCameraPosition(double time,
+                                double& tx, double& ty, double& tz,
+                                double& rx, double& ry, double& rz) const;
     virtual double getCameraFocalLength(double time) const OVERRIDE;
     virtual double getCameraHAperture(double time) const OVERRIDE;
     virtual double getCameraVAperture(double time) const OVERRIDE;

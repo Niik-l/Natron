@@ -371,6 +371,58 @@ accumulateChildBounds(const EffectInstancePtr& eff, const float parentM[16], dou
     unionTransformedBox(m, tm.bboxMin, tm.bboxMax, bmin, bmax, any);
 }
 
+// Does `group` have `child` wired (through Dots) into one of its child inputs?
+static bool
+groupHasChild(const Group3D* group, const EffectInstance* child)
+{
+    const int n = group->getNumChildInputs();
+    for (int i = 0; i < n; ++i) {
+        EffectInstancePtr in = skipDots( const_cast<Group3D*>(group)->getInput(i) );
+        if (in && in.get() == child) return true;
+    }
+    return false;
+}
+
+// First Group3D downstream of `node` (following Dots) that has `child` on a
+// child input. `depth` guards against pathological graphs.
+static const Group3D*
+findParentGroup(const NodePtr& node, const EffectInstance* child, int depth)
+{
+    if (!node || depth > 32) return NULL;
+    const NodesWList& outs = node->getOutputs();
+    for (NodesWList::const_iterator it = outs.begin(); it != outs.end(); ++it) {
+        NodePtr out = it->lock();
+        if (!out) continue;
+        EffectInstancePtr eff = out->getEffectInstance();
+        if (!eff) continue;
+        if ( isGraphPassthrough( eff->getPluginID() ) ) {
+            if ( const Group3D* g = findParentGroup(out, child, depth + 1) ) return g;
+            continue;
+        }
+        const Group3D* g = dynamic_cast<const Group3D*>( eff.get() );
+        if ( g && groupHasChild(g, child) ) return g;
+    }
+    return NULL;
+}
+
+bool
+Group3D::getParentWorldMatrix(const EffectInstance* child, double time, float out[16])
+{
+    geoMat4Identity(out);
+    if (!child) return false;
+    const Group3D* g = findParentGroup(child->getNode(), child, 0);
+    if (!g) return false;
+    float local[16];
+    g->getLocalMatrix(time, local, NULL);
+    float above[16];
+    if ( getParentWorldMatrix(g, time, above) ) {
+        geoMat4Mul(out, above, local); // above * local: local applied first
+    } else {
+        std::memcpy(out, local, sizeof(local));
+    }
+    return true;
+}
+
 bool
 Group3D::getChildrenBounds(double time, float bmin[3], float bmax[3]) const
 {

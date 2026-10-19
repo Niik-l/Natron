@@ -36,6 +36,8 @@
 #include "../../Project.h"
 #include "../../ViewIdx.h"
 #include "RotationConventions.h"
+#include "Group3D.h"   // getParentWorldMatrix
+#include "SceneGraph.h" // buildTRS / multiply
 #include "../DotUtils.h"
 #include "PathProvider.h"
 
@@ -640,9 +642,9 @@ Camera3DNode::refreshAspectInfo()
 // ==================== CameraProvider interface ====================
 
 void
-Camera3DNode::getCameraPosition(double time,
-                                double& tx, double& ty, double& tz,
-                                double& rx, double& ry, double& rz) const
+Camera3DNode::getLocalCameraPosition(double time,
+                                     double& tx, double& ty, double& tz,
+                                     double& rx, double& ry, double& rz) const
 {
     tx = _imp->translateX.lock()->getValueAtTime(time);
     ty = _imp->translateY.lock()->getValueAtTime(time);
@@ -652,6 +654,33 @@ Camera3DNode::getCameraPosition(double time,
     rz = _imp->rotateZ.lock()->getValueAtTime(time);
     double focal = 0.0;   // unused here; the focal getter applies its own layer
     applyMotionLayers(time, tx, ty, tz, rx, ry, rz, focal);
+}
+
+void
+Camera3DNode::getCameraPosition(double time,
+                                double& tx, double& ty, double& tz,
+                                double& rx, double& ry, double& rz) const
+{
+    getLocalCameraPosition(time, tx, ty, tz, rx, ry, rz);
+
+    float parent[16];
+    if ( !Group3D::getParentWorldMatrix(this, time, parent) ) {
+        return;
+    }
+    // world = Parent x Local (multiply applies its first argument first).
+    float local[16], world[16];
+    SceneGraph::buildTRS((float)tx, (float)ty, (float)tz, (float)rx, (float)ry, (float)rz, 1.f, 1.f, 1.f, local);
+    SceneGraph::multiply(local, parent, world);
+    tx = world[12]; ty = world[13]; tz = world[14];
+    // Rotation block, column-major -> m[r][c], columns normalised so a scaled
+    // group does not skew the Euler extraction (a camera has no scale).
+    double m[3][3];
+    for (int c = 0; c < 3; ++c) {
+        const double len = std::sqrt((double)world[c*4+0]*world[c*4+0] + (double)world[c*4+1]*world[c*4+1] + (double)world[c*4+2]*world[c*4+2]);
+        const double inv = len > 1e-12 ? 1.0 / len : 1.0;
+        for (int r = 0; r < 3; ++r) m[r][c] = world[c*4 + r] * inv;
+    }
+    RotationConventions::decompose(m, rx, ry, rz);
 }
 
 double

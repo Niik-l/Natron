@@ -22,6 +22,9 @@
 
 #include "Light3D.h"
 
+#include "Group3D.h"    // getParentWorldMatrix
+#include "GeoExtract.h" // geoMat4MulPoint
+
 #include "../../AppManager.h"
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
@@ -270,6 +273,21 @@ Light3D::getLightParams(double time,
     intensity = _imp->intensity.lock()->getValueAtTime(time);
     KnobDoublePtr expKnob = _imp->exposure.lock();
     exposure = expKnob ? expKnob->getValueAtTime(time) : 0.0;
+}
+
+void
+Light3D::getWorldPosition(double time, double& x, double& y, double& z) const
+{
+    x = _imp->translateX.lock()->getValueAtTime(time);
+    y = _imp->translateY.lock()->getValueAtTime(time);
+    z = _imp->translateZ.lock()->getValueAtTime(time);
+    float parent[16];
+    if ( Group3D::getParentWorldMatrix(this, time, parent) ) {
+        const float p[3] = { (float)x, (float)y, (float)z };
+        float w[3];
+        geoMat4MulPoint(parent, p, w);
+        x = w[0]; y = w[1]; z = w[2];
+    }
 }
 
 std::string
