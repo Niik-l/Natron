@@ -23,8 +23,10 @@
 
 #include "Group3D.h"
 #include "SceneGraph.h" // buildTRSPivot / multiply
+#include "GeoExtract.h" // children bounds for the centroid buttons
 #include "../DotUtils.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <sstream>
@@ -47,6 +49,7 @@ struct Group3DPrivate
     KnobDoubleWPtr scaleX, scaleY, scaleZ;
     KnobDoubleWPtr uniformScale;
     KnobDoubleWPtr pivotX, pivotY, pivotZ;
+    KnobButtonWPtr movePivotToCentroid, moveCentroidToOrigin;
     KnobBoolWPtr enableTransform;
     KnobStringWPtr info;
 };
@@ -208,6 +211,24 @@ Group3D::initializeKnobs()
     pz->setDisplayMinimum(-100); pz->setDisplayMaximum(100);
     page->addKnob(pz); _imp->pivotZ = pz;
 
+    // Houdini-style helpers. "Centroid" = bounding-box centre of everything
+    // connected below, measured at the current frame in this node's own
+    // pre-transform space.
+    KnobButtonPtr mp = AppManager::createKnob<KnobButton>(this, tr("Move Pivot to Centroid"));
+    mp->setName("movePivotToCentroid");
+    mp->setHintToolTip(tr("Set Pivot X/Y/Z to the bounding-box centre of the connected geometry "
+                          "(at the current frame), so Rotate and Scale turn around the object and "
+                          "the gizmo handle sits on it."));
+    mp->setAddNewLine(false);
+    page->addKnob(mp); _imp->movePivotToCentroid = mp;
+
+    KnobButtonPtr mc = AppManager::createKnob<KnobButton>(this, tr("Move Centroid to Origin"));
+    mc->setName("moveCentroidToOrigin");
+    mc->setHintToolTip(tr("Set Translate to minus the connected geometry's bounding-box centre and "
+                          "the Pivot to that centre, so the geometry's centre lands on the origin "
+                          "and later Rotate / Scale turn around it there (current frame)."));
+    page->addKnob(mc); _imp->moveCentroidToOrigin = mc;
+
     // Info
     KnobPagePtr infoPage = AppManager::createKnob<KnobPage>(this, tr("Info"));
 
@@ -301,6 +322,100 @@ Group3D::getAxisMatrix(double time, float out[16]) const
                          knob("rotateX", 0.0),    knob("rotateY", 0.0),    knob("rotateZ", 0.0),
                          knob("scaleX", 1.0) * us, knob("scaleY", 1.0) * us, knob("scaleZ", 1.0) * us,
                          out);
+    return true;
+}
+
+// Union the 8 corners of a local-space box, mapped through `m`, into bmin/bmax.
+static void
+unionTransformedBox(const float m[16], const float lo[3], const float hi[3],
+                    float bmin[3], float bmax[3], bool& any)
+{
+    for (int c = 0; c < 8; ++c) {
+        const float p[3] = { (c & 1) ? hi[0] : lo[0], (c & 2) ? hi[1] : lo[1], (c & 4) ? hi[2] : lo[2] };
+        float w[3];
+        geoMat4MulPoint(m, p, w);
+        if (!any) {
+            bmin[0] = bmax[0] = w[0]; bmin[1] = bmax[1] = w[1]; bmin[2] = bmax[2] = w[2];
+            any = true;
+        } else {
+            for (int i = 0; i < 3; ++i) {
+                bmin[i] = std::min(bmin[i], w[i]);
+                bmax[i] = std::max(bmax[i], w[i]);
+            }
+        }
+    }
+}
+
+// Walk a child: a nested group contributes its children under its own matrix,
+// anything else goes through GeoExtract (its localMatrix = the node's own
+// T/R/S x embedded transform; bbox in that node's mesh space).
+static void
+accumulateChildBounds(const EffectInstancePtr& eff, const float parentM[16], double time,
+                      float bmin[3], float bmax[3], bool& any)
+{
+    if (!eff) return;
+    if ( const Group3D* g = dynamic_cast<const Group3D*>( eff.get() ) ) {
+        float local[16], m[16];
+        g->getLocalMatrix(time, local, NULL);
+        geoMat4Mul(m, parentM, local); // parent * local: local applied first
+        const int n = g->getNumChildInputs();
+        for (int i = 0; i < n; ++i) {
+            accumulateChildBounds(skipDots( g->getInput(i) ), m, time, bmin, bmax, any);
+        }
+        return;
+    }
+    TriMesh tm;
+    if ( !extractTriangleMesh(eff, time, tm) ) return;
+    float m[16];
+    geoMat4Mul(m, parentM, tm.localMatrix);
+    unionTransformedBox(m, tm.bboxMin, tm.bboxMax, bmin, bmax, any);
+}
+
+bool
+Group3D::getChildrenBounds(double time, float bmin[3], float bmax[3]) const
+{
+    float ident[16];
+    geoMat4Identity(ident);
+    bool any = false;
+    const int n = getNumChildInputs();
+    for (int i = 0; i < n; ++i) {
+        accumulateChildBounds(skipDots( getInput(i) ), ident, time, bmin, bmax, any);
+    }
+    return any;
+}
+
+bool
+Group3D::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /*view*/,
+                     double time, bool /*originatedFromMainThread*/)
+{
+    if (!k) return false;
+    const bool toCentroid = (k == _imp->movePivotToCentroid.lock().get());
+    const bool toOrigin   = (k == _imp->moveCentroidToOrigin.lock().get());
+    if (!toCentroid && !toOrigin) return false;
+
+    float bmin[3], bmax[3];
+    if ( !getChildrenBounds(time, bmin, bmax) ) {
+        setPersistentMessage(eMessageTypeWarning,
+                             tr("No geometry connected below this node — nothing to measure.").toStdString());
+        return true;
+    }
+    clearPersistentMessage(false);
+    const double c[3] = { 0.5 * (bmin[0] + bmax[0]), 0.5 * (bmin[1] + bmax[1]), 0.5 * (bmin[2] + bmax[2]) };
+
+    beginChanges();
+    _imp->pivotX.lock()->setValue(c[0]);
+    _imp->pivotY.lock()->setValue(c[1]);
+    _imp->pivotZ.lock()->setValue(c[2]);
+    if (toOrigin) {
+        // Centre to the origin: with pivot = c, a point c maps to c + t, so t = -c.
+        _imp->translateX.lock()->setValue(-c[0]);
+        _imp->translateY.lock()->setValue(-c[1]);
+        _imp->translateZ.lock()->setValue(-c[2]);
+        if ( !_imp->enableTransform.lock()->getValue() ) {
+            _imp->enableTransform.lock()->setValue(true);
+        }
+    }
+    endChanges();
     return true;
 }
 

@@ -17,6 +17,16 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **TransformGeo / Group3D: Move Pivot to Centroid + Move Centroid to Origin (2026-10-19)** — the
+  user asked for Houdini's Pre-Transform buttons. `Group3D::getChildrenBounds()` walks the children
+  (nested groups under their own `getLocalMatrix`, everything else through `extractTriangleMesh`,
+  so ReadGeo / primitives / GeoBuilder / Alembic archives all count; lights and cameras add nothing)
+  and unions each child's transformed bbox corners in the node's pre-transform space at the
+  current frame. The buttons (one row, Transform page) set Pivot X/Y/Z to the box centre, or
+  Pivot + Translate = −centre (Enable Transform switched on) so the geometry's centre lands on the
+  origin and later Rotate / Scale turn around it there. Folded into the main knobs rather than a
+  separate pre-transform block so the gizmo and the panel stay in agreement. No geometry below →
+  a persistent warning, knobs untouched.
 - **3D hierarchy composed in the wrong order — fixed (2026-10-19)** — found while making the
   gizmo parent-aware for TransformGeo. `SceneGraph::multiply(a, b)` applies `a` first, then `b`
   (on GL-layout arrays it is B × A), but pass 3 called `multiply(parent.world, local)` and the

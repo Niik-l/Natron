@@ -126,6 +126,12 @@ public:
     // Matrix of whatever is wired into the axis input; false when nothing is.
     bool getAxisMatrix(double time, float out[16]) const;
 
+    // Bounding box of everything connected below this node, in the node's own
+    // pre-transform space (children placed by their own transforms, nested
+    // groups by theirs; this node's T/R/S and axis NOT applied). Lights and
+    // cameras contribute nothing. False when no child has geometry.
+    bool getChildrenBounds(double time, float bmin[3], float bmax[3]) const;
+
     // Check if a node is connected to this group (children only)
     bool isNodeInGroup(const std::string& nodeName) const;
 
@@ -138,6 +144,7 @@ protected:
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
+    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual StatusEnum getPreferredMetadata(NodeMetadata& metadata) OVERRIDE FINAL;
     virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
