@@ -245,7 +245,8 @@ Recent milestones:
 - **Node graph: many-input nodes readable (2026-10-13)** — Material3D's seven input arrows fanned
   out of a 100 px box with their labels piled on top of each other. `NodeGui::getManyInputsScale()`
   (+25% per non-mask input beyond four, capped at 1.75; inspectors excluded) now widens the node box
-  and, doubled, lengthens its disconnected arrows. On such nodes each arrow starts from its own
+  and lengthens its disconnected arrows (2026-10-20: 1.5x at the cap, down from 2.5x — the taller
+  comb was distracting on Group3D / Material3D). On such nodes each arrow starts from its own
   slot along the top edge (`Edge::setFanSlot`, index 0 rightmost) with an 18-degree lean per step
   instead of all radiating from the centre, labels are centred on their arrow and alternate between
   45% and 90% along it, so the seven read as a two-row comb. New hover aid: moving over one input arrow (or its label) fades the

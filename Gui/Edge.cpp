@@ -613,10 +613,11 @@ Edge::initLine()
         if (foundIntersection) {
             double distToCenter = std::sqrt( ( intersection.x() - dst.x() ) * ( intersection.x() - dst.x() ) +
                                              ( intersection.y() - dst.y() ) * ( intersection.y() - dst.y() ) );
-            // Many-input nodes get proportionally longer arrows, so the fan of
-            // labels above them spreads out instead of overlapping.
+            // Many-input nodes get somewhat longer arrows, so the fan of labels
+            // above them spreads out instead of overlapping: 1.5x at the 1.75
+            // width cap (was 2.5x; the user found the tall comb distracting).
             const double manyInputsScale = dest ? dest->getManyInputsScale() : 1.;
-            const double arrowScale = 1. + (manyInputsScale - 1.) * 2.;
+            const double arrowScale = 1. + (manyInputsScale - 1.) * (2. / 3.);
             distToCenter += TO_DPIY( appPTR->getCurrentSettings()->getDisconnectedArrowLength() ) * arrowScale;
 
             srcpt = QPointF( dst.x() + (std::cos(fanAngle) * distToCenter * sc),
