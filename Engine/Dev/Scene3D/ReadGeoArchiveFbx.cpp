@@ -417,9 +417,50 @@ loadFbxArchiveImport(const std::string& path, void** outScene)
         }
     }
 
-    // Animation range from the default animation (anims stay empty — FBX
-    // channels are evaluated live inside ufbx at frame-evaluation time).
-    if (scene->anim) {
+    // Animation range from the animation stack with actual channel content.
+    // ufbx's scene->anim is the DEFAULT stack ("Take 001"), which Mixamo
+    // exports ship EMPTY — the real clip lives in a second stack named
+    // "mixamo.com". Evaluating the empty default yields the rest pose at
+    // every time (the static T-pose bug), so pick the stack carrying the
+    // most anim_values; fall back to the default when none has content.
+    // The chosen stack index rides out through GeoArchiveResult::fbxAnimStack
+    // and the frame evaluator drives THAT stack.
+    if (scene->anim_stacks.count > 0) {
+        std::size_t bestStack = scene->anim_stacks.count;
+        std::size_t bestValues = 0;
+        for (std::size_t s = 0; s < scene->anim_stacks.count; ++s) {
+            const ufbx_anim_stack* st = scene->anim_stacks.data[s];
+            if (!st || !st->anim) continue;
+            std::size_t values = 0;
+            for (std::size_t l = 0; l < st->anim->layers.count; ++l) {
+                const ufbx_anim_layer* layer = st->anim->layers.data[l];
+                if (layer) values += (std::size_t)layer->anim_values.count;
+            }
+            if (values > bestValues) {
+                bestValues = values;
+                bestStack = s;
+            }
+        }
+        const ufbx_anim* rangeAnim = scene->anim;
+        if (bestStack < scene->anim_stacks.count) {
+            result.fbxAnimStack = (int)bestStack;
+            rangeAnim = scene->anim_stacks.data[bestStack]->anim;
+        }
+        if (rangeAnim) {
+            result.animTimeBegin = rangeAnim->time_begin;
+            result.animTimeEnd = rangeAnim->time_end;
+        }
+        if (std::getenv("NATRON_DEBUG_GEOIO")) {
+            std::fprintf(stderr,
+                "[GEOIO-ARCH-FBX] anim stacks=%d chosen=%d values=%d time=%.3f..%.3f (default '%s')\n",
+                (int)scene->anim_stacks.count, result.fbxAnimStack,
+                (int)bestValues, result.animTimeBegin, result.animTimeEnd,
+                scene->anim && scene->anim->layers.count > 0 &&
+                    scene->anim->layers.data[0]
+                    ? (scene->anim->layers.data[0]->name.data ? scene->anim->layers.data[0]->name.data : "?")
+                    : "?");
+        }
+    } else if (scene->anim) {
         result.animTimeBegin = scene->anim->time_begin;
         result.animTimeEnd = scene->anim->time_end;
     }
@@ -458,9 +499,20 @@ evaluateFbxArchiveFrame(void* sceneV,
     std::memset(&eopts, 0, sizeof(eopts));
     eopts.evaluate_skinning = true;   // CPU skinning for skinned meshes
 
+    // Drive the loader-chosen animation stack (GeoArchiveResult::fbxAnimStack
+    // — the non-empty one; ufbx's default scene->anim is EMPTY in Mixamo
+    // files). Falls back to the default when the index is out of range or
+    // the file had no non-empty stack.
+    ufbx_anim* evalAnim = scene->anim;
+    if (data.fbxAnimStack >= 0 &&
+        (std::size_t)data.fbxAnimStack < scene->anim_stacks.count) {
+        const ufbx_anim_stack* chosen = scene->anim_stacks.data[data.fbxAnimStack];
+        if (chosen && chosen->anim) evalAnim = chosen->anim;
+    }
+
     ufbx_error e;
     std::memset(&e, 0, sizeof(e));
-    ufbx_scene* ev = ufbx_evaluate_scene(scene, scene->anim, srcTime, &eopts, &e);
+    ufbx_scene* ev = ufbx_evaluate_scene(scene, evalAnim, srcTime, &eopts, &e);
     if (!ev) {
         err = "ufbx_evaluate_scene failed: " + arcUfbxToString(e.description);
         return false;

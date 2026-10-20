@@ -219,6 +219,12 @@ struct GeoArchiveResult
     // must be folded into every root-level local by the frame evaluation
     // (ensureFrameState does); empty = identity (glTF, no normalization).
     std::vector<float> rootMatrix;                // 16 floats when present
+    // FBX only: index into ufbx_scene::anim_stacks of the animation stack the
+    // frame evaluator drives — ufbx's scene->anim is the DEFAULT stack, which
+    // Mixamo files ship EMPTY (the real clip lives in a second "mixamo.com"
+    // stack), so the loader picks the stack with actual channel content.
+    // -1 = evaluate the default scene->anim (no non-empty stack found).
+    int fbxAnimStack = -1;
     std::vector<std::vector<int>> skinJoints;
     std::vector<std::vector<float>> skinIBMs;
     std::vector<GeoArchiveAnimData> anims;
