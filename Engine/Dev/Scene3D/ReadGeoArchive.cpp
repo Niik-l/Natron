@@ -1142,15 +1142,26 @@ MaterialProvider*
 ReadGeoArchive::getEntryMaterialProvider(int idx) const
 {
     std::lock_guard<std::mutex> lk(_imp->archiveMutex);
-    if (idx < 0 || idx >= (int)_imp->rt.data.nodes.size()) return nullptr;
-    const GeoArchiveNodeData& nd = _imp->rt.data.nodes[idx];
+    // idx is the VISIBLE entry index — the same space as getSceneNodeAt /
+    // getMeshDataAt / getEntryWorldMatrix (and the one SceneGraph stores in
+    // SceneNode::archiveEntryIdx). Remap to the full-archive node index
+    // before touching rt.data; resolving the visible index directly shaded
+    // entries with whatever material sat at that position in the FULL list,
+    // so hiding the rig subtree (skeleton transforms drop out of `visible`)
+    // silently re-shuffled every mesh onto the wrong / node-level material.
+    if (idx < 0 || idx >= (int)_imp->visible.size()) return nullptr;
+    const int srcIdx = _imp->visible[idx];
+    if (srcIdx < 0 || srcIdx >= (int)_imp->rt.data.nodes.size()) return nullptr;
+    const GeoArchiveNodeData& nd = _imp->rt.data.nodes[srcIdx];
     if (!nd.isMesh || nd.meshIndex < 0 || nd.meshIndex >= (int)_imp->rt.data.meshes.size()) {
         return nullptr;
     }
 
-    // Cached adapter?
+    // Cached adapter? Keyed by the FULL node index so the cache survives
+    // visibility changes (the same material must resolve whichever subtree
+    // the user ticks in the archive tree).
     std::map<int, std::shared_ptr<EntryMaterialProvider>>::const_iterator it =
-        _imp->entryMaterials.find(idx);
+        _imp->entryMaterials.find(srcIdx);
     if (it != _imp->entryMaterials.end()) return it->second.get();
 
     const GeoArchiveMeshData& md = _imp->rt.data.meshes[nd.meshIndex];
@@ -1161,7 +1172,7 @@ ReadGeoArchive::getEntryMaterialProvider(int idx) const
 
     std::shared_ptr<EntryMaterialProvider> adapter =
         std::make_shared<EntryMaterialProvider>(_imp->rt.data.materials[md.materialIndex]);
-    _imp->entryMaterials[idx] = adapter;
+    _imp->entryMaterials[srcIdx] = adapter;
     return adapter.get();
 }
 
