@@ -125,6 +125,7 @@ struct ReadGeoArchivePrivate
     KnobBoolWPtr includeMeshes;
     KnobBoolWPtr reverseNormals;
     KnobBoolWPtr bakeTransforms;
+KnobBoolWPtr showBBox;
     KnobIntWPtr frameOffset;
     KnobDoubleWPtr fps;
     KnobStringWPtr excludedPaths;
@@ -302,6 +303,17 @@ ReadGeoArchive::initializeKnobs()
                              "sub-frame motion blur snaps per frame while baked."));
         page->addKnob(k);
         _imp->bakeTransforms = k;
+    }
+
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Show Bounding Box"));
+        k->setName("showBBox");
+        k->setDefaultValue(true);
+        k->setHintToolTip(tr("Draw a dashed box in the 3D viewport enclosing all "
+                             "mesh entries of the archive (their union at the "
+                             "current frame). Uncheck to hide it."));
+        page->addKnob(k);
+        _imp->showBBox = k;
     }
 
     {
