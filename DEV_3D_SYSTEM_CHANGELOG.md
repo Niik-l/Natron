@@ -1,4 +1,20 @@
 # Natron 3D System
+- **ReadGeoArchive: rig-toggle shading fix (2026-10-20, headless-verified)** —
+  unticking the rig subtree in the archive tree re-shaded every mesh entry (much brighter in
+  the 3D viewport; in Cycles textures toggled on/off). Cause: `getEntryMaterialProvider` used
+  the incoming VISIBLE entry index directly into the full node list — once `/mixamorig:Hips`
+  (74 skeleton transforms in the sample) dropped out of `visible`, mesh visible-indices shifted
+  and entries shaded with whatever material sat at that full-list position, falling through to
+  the node-level material (ReadGeoArchive's documented first-PBR fallback). Fix: remap the
+  visible index to the stable FULL node index before the lookup and key the per-entry adapter
+  cache `entryMaterials` by the full index — hiding entries can never change shading, whichever
+  subtree is ticked. All other visible/full consumers were already consistent (`getSceneNodeAt`,
+  `getMeshDataAt`, `getEntryWorldMatrix` map internally; Viewport3D + CyclesRenderer pass
+  `SceneNode::archiveEntryIdx` in visible space). Headless verify
+  (`tools/geoio-tests/readgeo_rigshade_verify.py`, byte-exact): deterministic base render x2,
+  rig-visible vs rig-excluded Cycles renders identical after the EXR `capDate` timestamp is
+  zeroed (the one differing byte between otherwise-identical files); mesh count intact under
+  the filter, silhouette unchanged. Regressions inherit the 10-20 morning pass — same binary.
 - **Mixamo FBX round: skinning scale + dead animation + archive bounding box (2026-10-19, user-verified)** —
   three fixes from one user report on a Mixamo-exported animated FBX (`tools/geoio-tests/assets/mixamo.fbx`).
   (1) **Skeleton/mesh scale mismatch (~10×/100×)** — ufbx produces skinned vertices in WORLD space
