@@ -78,9 +78,9 @@ Group3D::getPluginDescription() const
               "The axis input is an optional parent transform (Nuke TransformGeo-style): "
               "wire any 3D node there and its Translate / Rotate / Scale become the parent "
               "of this group — a ReadAlembicTransform, a Camera3D's keyed position, or another "
-              "Group3D / TransformGeo for hierarchies.\n\n"
+              "Group3D / Transform3D for hierarchies.\n\n"
               "Similar to Nuke's Scene node but focused on grouping and organization; "
-              "TransformGeo is the one-object form.").toStdString();
+              "Transform3D is the one-object form.").toStdString();
 }
 
 std::string
@@ -95,21 +95,21 @@ Group3D::getInputLabel(int inputNb) const
 }
 
 std::string
-TransformGeo::getPluginDescription() const
+Transform3D::getPluginDescription() const
 {
     return tr("Transform a 3D object (Nuke TransformGeo).\n\n"
               "geo: the object to move — a ReadGeo, Card3D, light, or a whole Group3D / "
               "Scene3D branch.\n"
               "axis: optional parent transform. Any 3D node wired here contributes its "
               "Translate / Rotate / Scale (ReadAlembicTransform, a Camera3D's keyed position, "
-              "a Sphere3D...); another TransformGeo or Group3D contributes its full matrix, so "
-              "TransformGeo → TransformGeo chains build hierarchies.\n\n"
+              "a Sphere3D...); another Transform3D or Group3D contributes its full matrix, so "
+              "Transform3D → Transform3D chains build hierarchies.\n\n"
               "Rotate and Scale turn around Pivot X/Y/Z; the viewport gizmo handle sits on the "
               "pivot. Uniform Scale multiplies all three scale axes.").toStdString();
 }
 
 std::string
-TransformGeo::getInputLabel(int inputNb) const
+Transform3D::getInputLabel(int inputNb) const
 {
     return inputNb == 0 ? "geo" : "axis";
 }
@@ -304,7 +304,7 @@ Group3D::getAxisMatrix(double time, float out[16]) const
         return false;
     }
 
-    // Another group / TransformGeo: take its whole matrix so chains nest.
+    // Another group / Transform3D: take its whole matrix so chains nest.
     if ( const Group3D* g = dynamic_cast<const Group3D*>( axis.get() ) ) {
         g->getLocalMatrix(time, out, NULL);
         return true;

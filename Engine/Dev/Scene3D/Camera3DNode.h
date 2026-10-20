@@ -96,7 +96,7 @@ public:
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
     // CameraProvider interface. getCameraPosition is the camera's WORLD pose:
-    // keyframes + Motion-page layers + any Group3D / TransformGeo the camera
+    // keyframes + Motion-page layers + any Group3D / Transform3D the camera
     // is wired into (Group3D::getParentWorldMatrix), so ScanlineRender, Cycles,
     // Project3D and the viewport look-through all see the grouped camera.
     virtual void getCameraPosition(double time,

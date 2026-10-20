@@ -1353,7 +1353,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 envTex->set_colorspace(ccl::ustring("__builtin_raw")); // HDRIs are linear
 
                 // Rotation via Mapping node, from the dome's SceneGraph world
-                // matrix (its own rotateX/Y/Z plus any Group3D / TransformGeo
+                // matrix (its own rotateX/Y/Z plus any Group3D / Transform3D
                 // above it), columns normalised so a scaled group does not skew
                 // the Euler extraction. Ungrouped: identical to the knob values.
                 float lrx = 0, lry = 0, lrz = 0;

@@ -45,7 +45,7 @@ struct Group3DPrivate;
  * optional **axis**: a parent transform, Nuke TransformGeo-style. Any 3D node
  * works there — its translate / rotate / scale (+ uniformScale) knobs are read
  * by name (ReadAlembicTransform, a Camera3D's keyed position, a Sphere3D...),
- * and another Group3D / TransformGeo contributes its full matrix, so chains
+ * and another Group3D / Transform3D contributes its full matrix, so chains
  * build hierarchies.
  *
  * The node's own Translate / Rotate / Scale (+ Uniform Scale) rotate and scale
@@ -55,7 +55,7 @@ struct Group3DPrivate;
  *
  * The 3D viewport can filter display to show only objects in a specific Group3D.
  *
- * TransformGeo (below) is the one-object form of the same node.
+ * Transform3D (below) is the one-object form of the same node.
  */
 class Group3D
     : public EffectInstance
@@ -127,7 +127,7 @@ public:
     bool getAxisMatrix(double time, float out[16]) const;
 
     // Parent transform of `child` as the scene graph would compute it: the
-    // first Group3D / TransformGeo downstream of `child` (through Dots) that
+    // first Group3D / Transform3D downstream of `child` (through Dots) that
     // has it on a CHILD input (not the axis), composed with that group's own
     // parents. Lets a node's own getters (a Camera3D's position, a Light3D's
     // position) report where the group put it, so consumers that take the
@@ -147,7 +147,7 @@ public:
 
 protected:
 
-    // TransformGeo turns the knob transform on by default; a Group3D is an
+    // Transform3D turns the knob transform on by default; a Group3D is an
     // organiser first, so it keeps the upstream default (off).
     virtual bool transformEnabledByDefault() const { return false; }
 
@@ -163,35 +163,35 @@ private:
 };
 
 /**
- * @brief Nuke-style TransformGeo: the one-object form of Group3D.
+ * @brief Nuke-style Transform3D: the one-object form of Group3D.
  *
  * Inputs: geo (the object, or a whole Group3D / Scene3D branch) and axis (an
  * optional parent transform, see Group3D). Same knobs, same matrix, same
  * consumers — only the input count, the labels and the Enable default differ.
  */
-class TransformGeo
+class Transform3D
     : public Group3D
 {
 public:
 
-    static EffectInstance* BuildEffect(NodePtr n) { return new TransformGeo(n); }
+    static EffectInstance* BuildEffect(NodePtr n) { return new Transform3D(n); }
 
-    TransformGeo(NodePtr node)
+    Transform3D(NodePtr node)
         : Group3D(node)
     {
     }
 
-    virtual ~TransformGeo()
+    virtual ~Transform3D()
     {
     }
 
     virtual int getNumChildInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return PLUGINID_NATRON_TRANSFORMGEO; }
+    { return PLUGINID_NATRON_TRANSFORM3D; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "TransformGeo"; }
+    { return "Transform3D"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 

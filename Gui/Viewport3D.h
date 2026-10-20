@@ -201,7 +201,7 @@ private:
     void drawZapEndpoints(const SceneNode& sn) const;
     void drawPointCloudNode(const SceneNode& sn) const;
     void drawGroupNode(const SceneNode& sn) const;
-    // World-space dashed box around everything under a Group3D / TransformGeo
+    // World-space dashed box around everything under a Group3D / Transform3D
     // plus a cross on its pivot. Drawn BEFORE the node's matrix push.
     void drawGroupBounds(const SceneNode& sn, const std::vector<SceneNode>& sceneNodes) const;
     // Local-space bounds of one scene node's geometry (mesh space, i.e. before

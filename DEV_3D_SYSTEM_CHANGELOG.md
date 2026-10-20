@@ -17,7 +17,12 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
-- **Cameras and lights follow Group3D / TransformGeo everywhere (2026-10-19)** — the user asked
+- **TransformGeo renamed Transform3D (2026-10-20)** — plugin id `fr.inria.built-in.Transform3D`,
+  class `Transform3D` (still a `Group3D` subclass in Group3D.h), label Transform3D; the Nuke node it
+  mirrors is still called TransformGeo in the descriptions. The node never shipped in a release, so
+  no alias for the old id: a dev-build project saved with a TransformGeo node needs that node
+  re-created.
+- **Cameras and lights follow Group3D / Transform3D everywhere (2026-10-19)** — the user asked
   for lights and for a grouped projector camera. Audit: Cycles and FastVolumeRender already placed
   lights from the SceneGraph world matrix (so grouped lights worked there), but ScanlineRender took
   the light's own knobs and never looked inside a group for a light, Cycles' dome rotation read the
@@ -30,12 +35,12 @@ Recent milestones:
   camera's local matrix from the new `getLocalCameraPosition` and parents it itself, so nothing is
   applied twice. `Light3D::getWorldPosition` does the same for lights; ScanlineRender uses it and
   finds lights nested in groups (`findLightInGroup`); the Cycles dome mapping takes its rotation
-  from the SceneGraph world matrix. Net: a Camera3D under a TransformGeo renders, projects
+  from the SceneGraph world matrix. Net: a Camera3D under a Transform3D renders, projects
   (Project3D) and look-throughs from the grouped position; a Light3D under one lights from it in
   all three renderers. Not covered: ReadAlembicCamera / CameraTracker cameras under a group (their
   providers do not consult the parent), and look-through orbit/pan of a grouped camera writes the
   knobs as if ungrouped. A node wired into two groups takes the first one found.
-- **3D viewport: Group3D / TransformGeo draw their real bounds (2026-10-19)** — the group marker
+- **3D viewport: Group3D / Transform3D draw their real bounds (2026-10-19)** — the group marker
   was a fixed 4-unit dashed cube at the node origin that read as a bounding box but never followed
   the children (the user noticed it after Move Pivot to Centroid). Now `drawGroupBounds()` draws,
   in world space before the matrix push, the union of every descendant's bounds (mesh vertices
@@ -45,7 +50,7 @@ Recent milestones:
   origin keeps a small RGB tripod with a dashed diamond so a far-away group can still be found and
   clicked. Picking (`selectObjectAtPosition`) now tests `worldMatrix × pivot` instead of the node's
   own translate knobs, so parented children and pivoted nodes are clicked where they are drawn.
-- **TransformGeo / Group3D: Move Pivot to Centroid + Move Centroid to Origin (2026-10-19)** — the
+- **Transform3D / Group3D: Move Pivot to Centroid + Move Centroid to Origin (2026-10-19)** — the
   user asked for Houdini's Pre-Transform buttons. `Group3D::getChildrenBounds()` walks the children
   (nested groups under their own `getLocalMatrix`, everything else through `extractTriangleMesh`,
   so ReadGeo / primitives / GeoBuilder / Alembic archives all count; lights and cameras add nothing)
@@ -56,7 +61,7 @@ Recent milestones:
   separate pre-transform block so the gizmo and the panel stay in agreement. No geometry below →
   a persistent warning, knobs untouched.
 - **3D hierarchy composed in the wrong order — fixed (2026-10-19)** — found while making the
-  gizmo parent-aware for TransformGeo. `SceneGraph::multiply(a, b)` applies `a` first, then `b`
+  gizmo parent-aware for Transform3D. `SceneGraph::multiply(a, b)` applies `a` first, then `b`
   (on GL-layout arrays it is B × A), but pass 3 called `multiply(parent.world, local)` and the
   Alembic entry chain `multiply(parentW, lm)`: children of a rotated / scaled parent were moved by
   the parent first and then by their own offset, so a child at x=2 under a parent rotated 90°
@@ -70,26 +75,26 @@ Recent milestones:
   change for existing projects only where a Group3D transform or an archive parent carried
   rotation / non-uniform scale (translation-only parents commute). Pass 4 (archive user transform
   applied outermost in world space) is unchanged and still correct.
-- **ScanlineRender renders Group3D / TransformGeo children (2026-10-19)** — `extractGeometries`
-  never recursed into a group: geometry under a Group3D / TransformGeo wired into ScanlineRender's
+- **ScanlineRender renders Group3D / Transform3D children (2026-10-19)** — `extractGeometries`
+  never recursed into a group: geometry under a Group3D / Transform3D wired into ScanlineRender's
   scene simply vanished. It now extracts every child input and parents each GeoData under
   `Group3D::getLocalMatrix()` (axis × T·R·S around the pivot), so SLR matches the viewport and
   Cycles. Lights / volumes / particle systems are still only picked up at the Scene3D level.
 - **3D viewport gizmo is parent-aware (2026-10-19)** — the handle used to be drawn from the
-  node's own knobs alone, so a child of a Group3D (transform on) or a TransformGeo with an axis
+  node's own knobs alone, so a child of a Group3D (transform on) or a Transform3D with an axis
   input showed its gizmo at the un-parented position. The gizmo now seeds with Parent × Local
-  (group chain world matrix, plus the node's own axis matrix for a Group3D / TransformGeo) and
+  (group chain world matrix, plus the node's own axis matrix for a Group3D / Transform3D) and
   on drag converts back with Parent⁻¹ (new `invertMatrix4`) before writing the knobs. Archives
   are exempt (their user transform is world-space by design). Caveat: a non-uniformly scaled
   parent makes the decomposed child rotation approximate (ImGuizmo's polar-free decompose).
-- **TransformGeo node + Group3D axis input / Pivot / Uniform Scale (2026-10-19)** — the user asked
+- **Transform3D node + Group3D axis input / Pivot / Uniform Scale (2026-10-19)** — the user asked
   for Nuke's TransformGeo. Group3D already applied one T/R/S to its children, so it grew the missing
   pieces instead of a new code path: an **axis** input (index `getNumChildInputs()`, after the
   children) whose node becomes the parent transform — any 3D node's translate/rotate/scale(+uniform)
-  knobs read by name, or another Group3D / TransformGeo's full matrix so chains nest — plus
+  knobs read by name, or another Group3D / Transform3D's full matrix so chains nest — plus
   **Pivot X/Y/Z** (via the existing `SceneGraph::buildTRSPivot`, `SceneNode::pivot` seeds the gizmo
   on it) and **Uniform Scale**. `Group3D::getLocalMatrix()` = axis × T·T(P)·R·S·T(−P) and SceneGraph
-  pass 1 takes that matrix directly. **TransformGeo** is a subclass in Group3D.h: one `geo` child
+  pass 1 takes that matrix directly. **Transform3D** is a subclass in Group3D.h: one `geo` child
   input + `axis`, Enable Transform on by default, own plugin ID / menu entry under 3D. Every place
   that walked a group's inputs with `getNInputs()` / `GROUP3D_MAX_INPUTS` (SceneGraph pass 2,
   CyclesPassRender::collectSceneNodes, CyclesRender object lookup + focus list, CyclesRenderPass

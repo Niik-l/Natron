@@ -2120,7 +2120,7 @@ applyProjectorMaterial(const EffectInstancePtr& geoEffect, double time, ViewIdx 
     else g.occMode = 0;
 }
 
-// First Light3D wired (through Dots) under a Group3D / TransformGeo, nested
+// First Light3D wired (through Dots) under a Group3D / Transform3D, nested
 // groups included. ScanlineRender lights with one light, so the first wins.
 static Light3D*
 findLightInGroup(Group3D* group, int depth = 0)
@@ -2148,7 +2148,7 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
         if (n && n->isNodeDisabled()) return;
     }
 
-    // Group3D / TransformGeo: extract every child, then parent each result
+    // Group3D / Transform3D: extract every child, then parent each result
     // under the group's matrix (axis × T·R·S around the pivot) — world =
     // Group × Local, matching SceneGraph (viewport, Cycles). Only mesh
     // geometry is carried through a group here; lights, volumes and particle
@@ -2746,7 +2746,7 @@ ScanlineRender::render(const RenderActionArgs& args)
                 // Check for lights in scene (already handled above, but also here)
                 Light3D* sLight = dynamic_cast<Light3D*>(sceneInput.get());
                 if (sLight) { if (!light3d) light3d = sLight; continue; }
-                // A light inside a Group3D / TransformGeo: pick it up (its world
+                // A light inside a Group3D / Transform3D: pick it up (its world
                 // position comes from Light3D::getWorldPosition), but do NOT
                 // skip the group — its geometry still goes through extractGeometries.
                 if (Group3D* sGroup = dynamic_cast<Group3D*>(sceneInput.get())) {
@@ -3038,7 +3038,7 @@ ScanlineRender::render(const RenderActionArgs& args)
     if (light3d) {
         double ltx, lty, ltz, lr, lg, lb, lint, lexp_unused;
         light3d->getLightParams(args.time, ltx, lty, ltz, lr, lg, lb, lint, lexp_unused);
-        light3d->getWorldPosition(args.time, ltx, lty, ltz); // follows a Group3D / TransformGeo
+        light3d->getWorldPosition(args.time, ltx, lty, ltz); // follows a Group3D / Transform3D
         lightPos[0] = (float)ltx; lightPos[1] = (float)lty; lightPos[2] = (float)ltz;
         lightColor[0] = (float)lr; lightColor[1] = (float)lg; lightColor[2] = (float)lb;
         lightIntensity = (float)lint;

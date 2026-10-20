@@ -2076,7 +2076,7 @@ Viewport3D::paintGL()
                 ImGuizmo::RecomposeMatrixFromComponents(gizT, rotation, scale, objMat);
 
                 // Parent space the knobs live in: the Group3D chain above this node
-                // plus, for a Group3D / TransformGeo, its own axis input. The gizmo
+                // plus, for a Group3D / Transform3D, its own axis input. The gizmo
                 // works in world space, so seed it with Parent × Local and strip the
                 // parent again before the knobs are written back; without this the
                 // handle sat at the un-parented position (a child offset by a group
