@@ -13,3 +13,57 @@ index bbf98e52..8455cdff 100644
          set(OFX_ARCH "Win64")
      endif()
  # Visual Studio    
+diff --git a/Crop/Crop.cpp b/Crop/Crop.cpp
+index 7e9f1177..a436646a 100644
+--- a/Crop/Crop.cpp
++++ b/Crop/Crop.cpp
+@@ -56,7 +56,7 @@ OFXS_NAMESPACE_ANONYMOUS_ENTER
+ #define kParamReformat "reformat"
+ #define kParamReformatLabel "Reformat"
+ #define kParamReformatHint "Translates the bottom left corner of the crop rectangle to be in (0,0)."
+-#define kParamReformatHintExtraNatron " This sets the output format only if 'Format' or 'Project' is selected as the output Extend. In order to actually change the format of this image stream for other Extent choices, feed the output of this node to a either a NoOp node which sets the proper format, or a Reformat node with the same extent and with 'Resize Type' set to None and 'Center' unchecked. The reason is that the Crop size may be animated, but the output format can not be animated."
++#define kParamReformatHintExtraNatron " The output format becomes the crop rectangle: the chosen Format or the Project format for those Extents, otherwise the Size rectangle (or the input region for Extent Default) measured at the current frame, since a format can not be animated."
+ #define kParamReformatDefault false
+ 
+ #define kParamIntersect "intersect"
+@@ -730,6 +730,40 @@ CropPlugin::getClipPreferences(ClipPreferencesSetter &clipPreferences)
+             const OfxPointD rsOne = {1., 1.};
+             Coords::toPixelNearest(rod, rsOne, par, &pixelFormat);
+         }
++        if ( (extent == eGeneratorExtentSize) || (extent == eGeneratorExtentDefault) ) {
++            // Natron fork: Nuke-style reformat for the other extents too. A
++            // format cannot be animated, so the crop rectangle is measured at
++            // the current frame and moved to the origin.
++            const double time = timeLineGetTime();
++            OfxRectD rod;
++            if (extent == eGeneratorExtentSize) {
++                par = _srcClip ? _srcClip->getPixelAspectRatio() : getProjectPixelAspectRatio();
++                _size->getValueAtTime(time, rod.x2, rod.y2);
++                _btmLeft->getValueAtTime(time, rod.x1, rod.y1);
++                rod.x2 += rod.x1;
++                rod.y2 += rod.y1;
++            } else if ( _srcClip && _srcClip->isConnected() ) {
++                rod = _srcClip->getRegionOfDefinition(time);
++                par = _srcClip->getPixelAspectRatio();
++            } else {
++                OfxPointD siz = getProjectSize();
++                OfxPointD off = getProjectOffset();
++                par = getProjectPixelAspectRatio();
++                rod.x1 = off.x;
++                rod.x2 = off.x + siz.x;
++                rod.y1 = off.y;
++                rod.y2 = off.y + siz.y;
++            }
++            if (par <= 0.) {
++                par = 1.;
++            }
++            rod.x2 -= rod.x1;
++            rod.y2 -= rod.y1;
++            rod.x1 = 0.;
++            rod.y1 = 0.;
++            const OfxPointD rsOne = {1., 1.};
++            Coords::toPixelNearest(rod, rsOne, par, &pixelFormat);
++        }
+         if (par != 0.) {
+             clipPreferences.setPixelAspectRatio(*_dstClip, par);
+         }

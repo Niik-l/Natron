@@ -26,6 +26,14 @@ Recent milestones:
   opened. The ceiling is gone on those four; H, S, A stay 0..1, the sliders clamp their own
   position and every QColor the widget builds (triangle, hex, slider tints) clamps first since
   QColor rejects components outside 0..1.
+- **Crop "Reformat" sets the output format for every Extent (2026-10-20)** — user report: ticking
+  Reformat on a Crop only moved the crop to (0,0) without changing the stream's format. Upstream
+  openfx-misc only sets the format for the Format / Project extents (its hint even says to add a
+  Reformat node). Patched in `tools/win-build/patches/openfx-misc.patch` (shared by the Linux
+  build): `CropPlugin::getClipPreferences` now also handles Size (the crop rectangle at the
+  timeline's current frame, since a format can't be animated) and Default (the input region).
+  Headless-verified: format follows the rectangle and its edits, RoD lands at the origin. Needs
+  a rebuilt Misc.ofx; the dev install got one, releases pick it up from the patch.
 - **TransformGeo renamed Transform3D (2026-10-20)** — plugin id `fr.inria.built-in.Transform3D`,
   class `Transform3D` (still a `Group3D` subclass in Group3D.h), label Transform3D; the Nuke node it
   mirrors is still called TransformGeo in the descriptions. The node never shipped in a release, so
