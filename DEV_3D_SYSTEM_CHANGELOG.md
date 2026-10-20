@@ -1,4 +1,25 @@
 # Natron 3D System
+- **Mixamo FBX round: skinning scale + dead animation + archive bounding box (2026-10-19, user-verified)** —
+  three fixes from one user report on a Mixamo-exported animated FBX (`tools/geoio-tests/assets/mixamo.fbx`).
+  (1) **Skeleton/mesh scale mismatch (~10×/100×)** — ufbx produces skinned vertices in WORLD space
+  (unit/axes normalization baked in) while the entry geometry and every downstream transform
+  (node chain, Uniform Scale, SceneGraph) compose in GEOMETRY space, so the ×100 cm normalization
+  leaked into the skin path only. Fix `c3d7b47d7`: the FBX entry builder remaps ufbx world-space
+  skinned vertices to geometry space, so skin output composes through the same chain as the rest
+  pose. User-verified: scale matches.
+  (2) **Animation not playing (static T-pose on scrub)** — ufbx's `scene->anim` is the DEFAULT
+  stack ("Take 001"), and Mixamo exports ship it EMPTY (zero channels); the real clip lives in a
+  second `mixamo.com` stack (0–19.17 s ≈ 460 frames @ 24 fps). Every evaluation returned the rest
+  pose. Fix `0eda3123b`: the loader picks the stack carrying actual channel content
+  (content-based, no name special-casing) and the evaluator drives it; the Info string reports the
+  real frame count. User-verified: scrubbing poses the figure (the sample clip is subtle-motion —
+  world sway ~0.1 m, don't expect large movement).
+  (3) **Archive bounding box** — the fixed ±2 marker cube was `drawGroupNode`'s box on the archive
+  root and intersected the figure. Fix `f12dadbb8`: ReadGeoArchive gains a **Show Bounding Box**
+  knob (default ON) drawing a dashed box around the real union of all mesh entries at the current
+  frame (tracks the posed figure); disabled → hidden. Group3D keeps its legacy marker box.
+  Regressions clean (glTF controls, morph cube, f_arch, spider); fresh exe staged in
+  `Natron-install` for the user GUI pass.
 - **Morph targets / blend shapes on the shared archive engine (2026-10-17)** —
   glTF per-primitive POSITION-delta targets plus `weights` animation channels (the flat SCALAR
   output accessor is re-strided by target count at parse so all targets of a key interpolate
