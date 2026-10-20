@@ -39,6 +39,11 @@ CLANG_DIAG_ON(uninitialized)
 #define COLOR_SELECTOR_BUTTON_RGB 0
 #define COLOR_SELECTOR_BUTTON_HSV 1
 
+namespace {
+// QColor only accepts components in [0, 1]; the spinboxes may hold more.
+inline float clamp01(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
+}
+
 NATRON_NAMESPACE_ENTER
 
 ColorSelectorPaletteButton::ColorSelectorPaletteButton(QWidget *parent)
@@ -326,17 +331,17 @@ ColorSelectorWidget::ColorSelectorWidget(bool withAlpha, QWidget *parent)
         _spinA->setIncrement(0.01);
     }
 
-    _spinR->setMaximum(1.);
+    // R/G/B and V have no ceiling: values above 1 are normal in a comp (the
+    // old picker clamped them to 1, which also clamped the knob when the
+    // dialog opened on an HDR colour). The sliders still span 0..1 and the
+    // triangle / hex show the clamped colour. H, S and A stay in [0, 1].
     _spinR->setMinimum(0.);
-    _spinG->setMaximum(1.);
     _spinG->setMinimum(0.);
-    _spinB->setMaximum(1.);
     _spinB->setMinimum(0.);
     _spinH->setMaximum(1.);
     _spinH->setMinimum(0.);
     _spinS->setMaximum(1.);
     _spinS->setMinimum(0.);
-    _spinV->setMaximum(1.);
     _spinV->setMinimum(0.);
     if (_slideA) {
         _spinA->setMaximum(1.);
@@ -646,8 +651,11 @@ ColorSelectorWidget::ColorSelectorWidget(bool withAlpha, QWidget *parent)
                          this, SLOT( handleSliderAMoved(double) ) );
     }
 
-    QObject::connect( _buttonColorGroup, SIGNAL( buttonClicked(int) ),
-                      this, SLOT( handleButtonColorClicked(int) ) );
+    // buttonClicked(QAbstractButton*) exists in both Qt5 and Qt6; the (int)
+    // overload was removed in Qt6 (renamed idClicked), which left the RGB/HSV
+    // switch dead on the Qt6 build.
+    QObject::connect( _buttonColorGroup, SIGNAL( buttonClicked(QAbstractButton*) ),
+                      this, SLOT( handleButtonColorClicked(QAbstractButton*) ) );
 
     QObject::connect( paletteAddColorButton, SIGNAL( clicked(bool) ),
                       this, SLOT( setPaletteButtonColor(bool) ) );
@@ -813,10 +821,10 @@ ColorSelectorWidget::setTriangle(float r,
                                  float a)
 {
     QColor color = _triangle->color();
-    color.setRgbF( Color::to_func_srgb(r),
-                   Color::to_func_srgb(g),
-                   Color::to_func_srgb(b) );
-    color.setAlphaF(_slideA ? a : 1.);
+    color.setRgbF( Color::to_func_srgb( clamp01(r) ),
+                   Color::to_func_srgb( clamp01(g) ),
+                   Color::to_func_srgb( clamp01(b) ) );
+    color.setAlphaF(_slideA ? clamp01(a) : 1.);
 
     _triangle->blockSignals(true);
     _triangle->setColor(color);
@@ -1003,8 +1011,8 @@ ColorSelectorWidget::manageColorHSVChanged(bool announce)
     setBlueChannel(b);
 
     QColor color = _triangle->color();
-    color.setHsvF(h, s, v);
-    color.setAlphaF(a);
+    color.setHsvF( clamp01(h), clamp01(s), clamp01(v) );
+    color.setAlphaF( clamp01(a) );
 
     _triangle->blockSignals(true);
     _triangle->setColor(color);
@@ -1190,7 +1198,7 @@ void
 ColorSelectorWidget::setSliderHColor()
 {
     QColor color;
-    color.setHsvF( _spinH->value(),
+    color.setHsvF( clamp01( _spinH->value() ),
                    1.0,
                    1.0,
                    1.0);
@@ -1202,8 +1210,8 @@ void
 ColorSelectorWidget::setSliderSColor()
 {
     QColor color;
-    color.setHsvF( _spinH->value(),
-                   _spinS->value(),
+    color.setHsvF( clamp01( _spinH->value() ),
+                   clamp01( _spinS->value() ),
                    1.0,
                    1.0);
     _spinS->setUseLineColor(true, color);
@@ -1214,18 +1222,24 @@ void
 ColorSelectorWidget::setSliderVColor()
 {
     QColor color;
-    color.setHsvF( _spinH->value(),
-                   _spinS->value(),
-                   _spinV->value(),
+    color.setHsvF( clamp01( _spinH->value() ),
+                   clamp01( _spinS->value() ),
+                   clamp01( _spinV->value() ),
                    1.0);
     _spinV->setUseLineColor(true, color);
     _slideV->setUseLineColor(true, color);
 }
 
 void
-ColorSelectorWidget::handleButtonColorClicked(int /*id*/)
+ColorSelectorWidget::handleButtonColorClicked(QAbstractButton* button)
 {
-    QVariant var = _buttonColorGroup->checkedButton()->property(COLOR_SELECTOR_BUTTON_PROPERTY);
+    if (!button) {
+        button = _buttonColorGroup->checkedButton();
+    }
+    if (!button) {
+        return;
+    }
+    QVariant var = button->property(COLOR_SELECTOR_BUTTON_PROPERTY);
     if ( var.isValid() ) {
         _stack->setCurrentIndex( var.toInt() );
     }

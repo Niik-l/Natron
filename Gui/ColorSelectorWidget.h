@@ -31,6 +31,7 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QEvent>
 #include <QStackedWidget>
 #include <QButtonGroup>
+#include <QAbstractButton>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 
@@ -192,7 +193,7 @@ private Q_SLOTS:
     void setSliderSColor();
     void setSliderVColor();
 
-    void handleButtonColorClicked(int id);
+    void handleButtonColorClicked(QAbstractButton* button);
 
     void setPaletteButtonColor(bool clicked = true);
     void clearPaletteButtons(bool clicked = true);

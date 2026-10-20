@@ -17,6 +17,15 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **Colour picker: HSV page dead on Qt6 + 0..1 ceiling (2026-10-20)** — user report: the
+  RGB / HSV switch in the colour selector did nothing. `QButtonGroup::buttonClicked(int)` was
+  removed in Qt6 (renamed `idClicked`), so the string-based connect in ColorSelectorWidget failed
+  at runtime and the page stack never switched; now connected through `buttonClicked(QAbstractButton*)`,
+  which exists in both Qt versions. Same widget: R/G/B and V spinboxes capped at 1.0 (a Natron 2.5
+  limitation the report also raised), which also clamped an HDR knob value the moment the dialog
+  opened. The ceiling is gone on those four; H, S, A stay 0..1, the sliders clamp their own
+  position and every QColor the widget builds (triangle, hex, slider tints) clamps first since
+  QColor rejects components outside 0..1.
 - **TransformGeo renamed Transform3D (2026-10-20)** — plugin id `fr.inria.built-in.Transform3D`,
   class `Transform3D` (still a `Group3D` subclass in Group3D.h), label Transform3D; the Nuke node it
   mirrors is still called TransformGeo in the descriptions. The node never shipped in a release, so
