@@ -48,7 +48,8 @@ std::string
 GeoMaterialOverride::getPluginDescription() const
 {
     return tr("Assigns a different material to specific sub-objects of an upstream "
-              "geometry source (e.g. individual meshes inside a ReadAlembicArchive), "
+              "geometry source (e.g. individual meshes inside ReadAlembicArchive or "
+              "ReadGeoArchive), "
               "without creating new geometry.\n\n"
               "Connect the geo (the archive) to input 0 and a Material3D to the Mat "
               "input, then list the full archive paths to override in the Surfaces "
@@ -94,9 +95,10 @@ GeoMaterialOverride::initializeKnobs()
     surfaces->setAnimationEnabled(false);
     surfaces->setEvaluateOnChange(true);
     surfaces->setHintToolTip(tr("Full archive paths of the sub-objects to override, "
-                                "one per line (e.g. industrial_wall_lamp/polySurface2/"
+                                "one per line (e.g. /lamp/polySurface2/"
                                 "polySurfaceShape2). Matches the entry's full path as "
-                                "shown in the Alembic archive's tree. The connected Mat "
+                                "shown in the archive node's tree (Alembic or "
+                                "ReadGeoArchive). The connected Mat "
                                 "is applied to exactly these surfaces."));
     page->addKnob(surfaces);
     _surfacesKnob = surfaces;

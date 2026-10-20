@@ -37,9 +37,10 @@ NATRON_NAMESPACE_ENTER
 
 /**
  * @brief Assigns a different material to specific sub-objects of an upstream geo
- * source (currently ReadAlembicArchive) without creating new geometry.
+ * archive (any ArchiveProvider: ReadAlembicArchive, ReadGeoArchive, future
+ * formats) without creating new geometry.
  *
- * Sits in the geo chain: ReadAlembicArchive -> GeoMaterialOverride -> Scene ->
+ * Sits in the geo chain: Archive -> GeoMaterialOverride -> Scene ->
  * CyclesRender. Input 0 is the geo (passed through), input 1 is the Material3D.
  * The `surfaces` knob lists the full archive paths to override (one per line).
  *

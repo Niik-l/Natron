@@ -36,8 +36,8 @@ CLANG_DIAG_ON(uninitialized)
 
 #include "Engine/EffectInstance.h"
 #include "Engine/KnobTypes.h"
+#include "Engine/Dev/Scene3D/ArchiveProvider.h"
 #include "Engine/Dev/Scene3D/GeoMaterialOverride.h"
-#include "Engine/Dev/Scene3D/ReadAlembicArchive.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -63,8 +63,9 @@ makeTypeIcon(bool isMesh)
 }
 
 // Walk the override's Geo input (input 0) through Dots and chained overrides to
-// the upstream ReadAlembicArchive. Null if none is connected.
-static ReadAlembicArchive*
+// the upstream geo archive — any ArchiveProvider (ReadAlembicArchive .abc,
+// ReadGeoArchive .glb/.gltf/.fbx, future formats). Null if none is connected.
+static ArchiveProvider*
 resolveArchive(GeoMaterialOverride* ov)
 {
     if (!ov) return NULL;
@@ -74,7 +75,7 @@ resolveArchive(GeoMaterialOverride* ov)
         if (dynamic_cast<GeoMaterialOverride*>(geo.get())) { geo = geo->getInput(0); continue; }
         break;
     }
-    return dynamic_cast<ReadAlembicArchive*>(geo.get());
+    return dynamic_cast<ArchiveProvider*>(geo.get());
 }
 
 // Parse the node's `surfaces` knob into a set of tokens (one per non-blank line).
@@ -158,10 +159,10 @@ MaterialOverridePickerWidget::rebuildFromGeo()
     _suppressItemChanged = true;
     _tree->clear();
 
-    ReadAlembicArchive* archive = resolveArchive(_ov);
+    ArchiveProvider* archive = resolveArchive(_ov);
     if (!archive) {
         QTreeWidgetItem* item = new QTreeWidgetItem(_tree);
-        item->setText(0, tr("(connect an Alembic archive to the Geo input)"));
+        item->setText(0, tr("(connect a geo archive to the Geo input)"));
         item->setFlags(item->flags() & ~Qt::ItemIsUserCheckable);
         _suppressItemChanged = false;
         return;
