@@ -62,6 +62,7 @@
 #include "../../KnobFile.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
+#include "../../Project.h"
 #include "../../ViewIdx.h"
 #include "../../CreateNodeArgs.h"
 
@@ -785,20 +786,37 @@ ReadGeoArchive::rebuildMaterialsSet()
     } busyReset(&_imp->rebuildBusy);
 
     // Root group: assembles the per-part pairs (8 inputs each — more parts
-    // nest additional Group3Ds at the root's spare slots).
+    // nest additional Group3Ds at the root's spare slots). Assign a friendly,
+    // self-explanatory name: Group3d_RebuiltMaterials_NN — NN counts previous
+    // rebuilds in the project (scan existing nodes for the highest suffix).
+    std::string rootName = "Group3d_RebuiltMaterials_1";
+    {
+        static const std::string prefix = "Group3d_RebuiltMaterials";
+        int maxN = 0;
+        NodesList nodes = app->getProject()->getNodes();
+        for (const NodePtr& n : nodes) {
+            const std::string lbl = n->getLabel();
+            if (lbl.compare(0, prefix.size(), prefix) != 0) continue;
+            const std::string rem = lbl.substr(prefix.size());
+            if (!rem.empty() && rem[0] == '_') {
+                const int v = std::atoi(rem.c_str() + 1);
+                if (v > maxN && v < 100000) maxN = v;
+            }
+        }
+        rootName = prefix + "_" + std::to_string(maxN + 1);
+    }
     CreateNodeArgs gArgs(PLUGINID_NATRON_GROUP3D, grp);
     gArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
     gArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
     gArgs.setProperty<bool>(kCreateNodeArgsPropSettingsOpened, false);
+    gArgs.setProperty<std::string>(kCreateNodeArgsPropNodeInitialName, rootName);
     NodePtr rootGroup = app->createNode(gArgs);
     if (!rootGroup) {
         setPersistentMessage(eMessageTypeError,
             "Re-build Materials: failed to create the Group3D node.");
         return;
     }
-    rootGroup->setLabel(thisNode->getLabel().empty()
-                            ? std::string("Materials")
-                            : thisNode->getLabel() + "_materials");
+    rootGroup->setLabel(rootName);
 
     // Mirror the archive's user TRS onto the group (Uniform Scale folds into
     // the per-axis scales; Group3D has no uniform-scale knob). Enabling the
@@ -849,9 +867,9 @@ ReadGeoArchive::rebuildMaterialsSet()
         }
     }
 
-    // Layout anchor: the archive's own position. Parts run down in rows
-    // (+y = down, same convention CyclesRenderPass uses), each pair side by
-    // side, root group at the archive's right.
+    // Layout anchor: the archive's own position. Data reads left to right —
+    // Material3D -> part ReadGeo -> sub Group3D -> root Group3D — each part
+    // runs down in rows (+y = down, the CyclesRenderPass convention).
     double px = 0, py = 0;
     thisNode->getPosition(&px, &py);
     const double rowHeight = 150.0;
@@ -874,11 +892,9 @@ ReadGeoArchive::rebuildMaterialsSet()
                     "Re-build Materials: failed to create a sub-Group3D.");
                 return;
             }
-            sub->setLabel(thisNode->getLabel().empty()
-                              ? std::string("Materials")
-                              : thisNode->getLabel() + "_materials");
+            sub->setLabel(rootName);
             rootGroup->connectInput(sub, rootSlot++);
-            sub->setPosition(px + 460, py + rowHeight * (double)(i + 1));
+            sub->setPosition(px + 780, py + rowHeight * (double)(i + 1));
             curGroup = sub;
             curSlot = 0;
         }
@@ -955,11 +971,15 @@ ReadGeoArchive::rebuildMaterialsSet()
         }
         curGroup->connectInput(geo, curSlot++);
 
-        geo->setPosition(px + 780, py + rowHeight * (double)(i + 1));
+        geo->setPosition(px + 620, py + rowHeight * (double)(i + 1));
         if (mat) {
-            mat->setPosition(px + 620, py + rowHeight * (double)(i + 1));
+            mat->setPosition(px + 460, py + rowHeight * (double)(i + 1));
         }
     }
+
+    // The root group sits right of the whole rebuilt chain: the set reads
+    // Material3D -> ReadGeo -> Group3D, data flowing left to right.
+    rootGroup->setPosition(px + 940, py);
 
     setPersistentMessage(eMessageTypeInfo,
         std::string("Re-build Materials: built ") + std::to_string(parts.size()) +

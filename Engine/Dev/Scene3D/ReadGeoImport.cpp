@@ -27,6 +27,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <vector>
 
 NATRON_NAMESPACE_ENTER
@@ -37,6 +40,31 @@ void
 geoArchiveMatIdentity(float m[16])
 {
     for (int i = 0; i < 16; ++i) m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+}
+
+// Sanitize a file name into a safe path prefix (runs of alphanumerics, dash,
+// dot, underscore; everything else becomes '_') so a source file's texture
+// label can stage into its side folder.
+std::string
+importSanitizeFilePrefix(const std::string& name)
+{
+    std::string out;
+    out.reserve(name.size());
+    for (std::size_t i = 0; i < name.size() && out.size() < 64; ++i) {
+        const unsigned char ch = (unsigned char)name[i];
+        if (std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.') {
+            out.push_back((char)ch);
+        } else {
+            out.push_back('_');
+        }
+    }
+    while (!out.empty() && out.back() == '.') {
+        out.pop_back();
+    }
+    if (out.empty()) {
+        out = "texture";
+    }
+    return out;
 }
 
 // out = a * b (column-major; out must not alias a or b)
@@ -203,7 +231,8 @@ importBuildEdgeIndices(MeshData* mesh)
 }
 
 std::string
-importWriteEmbeddedTexture(const void* bytes, std::size_t size, const char* tag)
+importWriteEmbeddedTexture(const void* bytes, std::size_t size, const char* tag,
+                           const std::string& outDir, const std::string& outName)
 {
     if (!bytes || size < 8) return std::string();
 
@@ -227,27 +256,52 @@ importWriteEmbeddedTexture(const void* bytes, std::size_t size, const char* tag)
         h *= 1099511628211ULL;
     }
 
-    const char* tmpDir = std::getenv("TEMP") ? std::getenv("TEMP") : "/tmp";
-    char tmpPath[512];
-    std::snprintf(tmpPath, sizeof(tmpPath), "%s/natron_%s_%016llx.%s",
-                  tmpDir, tag, (unsigned long long)h, ext);
-
-    // Reuse an existing file with the same content hash (no rewrite).
-    FILE* probe = fopen(tmpPath, "rb");
-    if (probe) {
-        fclose(probe);
-        return std::string(tmpPath);
+    // Side folder staging (DCC-style "<file>.FBM" next to the source):
+    // <outDir>/<sanitized outName>_<fnv1a-hash>.<ext>. The folder is created
+    // on demand; any failure (read-only location, invalid path...) or an
+    // empty outDir falls back to the TEMP path below.
+    std::string   outPath;
+    const char*   tmpDir = std::getenv("TEMP") ? std::getenv("TEMP") : "/tmp";
+    if (!outDir.empty()) {
+        std::string dir = outDir;
+        while (!dir.empty() && (dir.back() == '/' || dir.back() == '\\')) {
+            dir.pop_back();
+        }
+        if (!dir.empty()) {
+            std::error_code   ec;
+            std::filesystem::create_directories(dir, ec);
+            if (!ec && std::filesystem::is_directory(dir, ec)) {
+                std::string base = importSanitizeFilePrefix(outName.empty() ? tag : outName);
+                std::ostringstream os;
+                os << dir << '/' << base << '_' << std::hex << std::setw(16)
+                   << std::setfill('0') << h << '.' << ext;
+                outPath = os.str();
+            }
+        }
+    }
+    if (outPath.empty()) {
+        std::ostringstream os;
+        os << tmpDir << "/natron_" << tag << '_' << std::hex << std::setw(16)
+           << std::setfill('0') << h << '.' << ext;
+        outPath = os.str();
     }
 
-    FILE* f = fopen(tmpPath, "wb");
+    // Reuse an existing file with the same content hash (no rewrite).
+    FILE* probe = fopen(outPath.c_str(), "rb");
+    if (probe) {
+        fclose(probe);
+        return outPath;
+    }
+
+    FILE* f = fopen(outPath.c_str(), "wb");
     if (!f) return std::string();
     const std::size_t written = fwrite(bytes, 1, size, f);
     fclose(f);
     if (written != size) {
-        remove(tmpPath);
+        remove(outPath.c_str());
         return std::string();
     }
-    return std::string(tmpPath);
+    return outPath;
 }
 
 // --- GeoArchiveRuntime ------------------------------------------------------

@@ -74,12 +74,17 @@ ufbxMatToColMajor(const ufbx_matrix& m, float out[16])
 }
 
 // Resolve a texture to a usable file path (mirrors the flat loader's logic).
+// Embedded content is staged next to the source FBX in its same-named ".FBM"
+// side folder (DCC convention) when fbmDir is non-empty, else to TEMP.
 std::string
-resolveUfbxTextureArc(const ufbx_texture* tex, const std::string& dir)
+resolveUfbxTextureArc(const ufbx_texture* tex, const std::string& dir,
+                      const std::string& fbmDir)
 {
     if (!tex) return std::string();
     if (tex->content.data && tex->content.size > 0) {
-        std::string embedded = importWriteEmbeddedTexture(tex->content.data, tex->content.size, "fbx_tex");
+        std::string embedded =
+            importWriteEmbeddedTexture(tex->content.data, tex->content.size, "fbx_tex",
+                                       fbmDir, arcUfbxToString(tex->name));
         if (!embedded.empty()) return embedded;
     }
     std::string rel = arcUfbxToString(tex->relative_filename);
@@ -97,7 +102,8 @@ resolveUfbxTextureArc(const ufbx_texture* tex, const std::string& dir)
 }
 
 GeoImportMaterial
-mapUfbxMaterialArc(const ufbx_material* m, const std::string& dir)
+mapUfbxMaterialArc(const ufbx_material* m, const std::string& dir,
+                   const std::string& fbmDir)
 {
     GeoImportMaterial out;
     if (!m) return out;
@@ -128,7 +134,7 @@ mapUfbxMaterialArc(const ufbx_material* m, const std::string& dir)
                                    ? m->pbr.emission_factor.value_real : 1.0;
     }
     if (baseColor.texture) {
-        out.diffuseMapPath = resolveUfbxTextureArc(baseColor.texture, dir);
+        out.diffuseMapPath = resolveUfbxTextureArc(baseColor.texture, dir, fbmDir);
     }
     return out;
 }
@@ -217,6 +223,22 @@ loadFbxArchiveImport(const std::string& path, void** outScene)
         if (slash != std::string::npos) dir = path.substr(0, slash);
     }
 
+    // FBM side folder for embedded textures: chair.fbx -> chair.FBM next to
+    // the source file (DCC convention). Empty when the file has no directory.
+    std::string fbmDir;
+    {
+        const std::size_t slash = path.find_last_of("/\\");
+        if (slash != std::string::npos) {
+            const std::size_t dot = path.find_last_of('.');
+            if (dot != std::string::npos && dot > slash + 1) fbmDir = path.substr(slash + 1, dot - slash - 1);
+            else fbmDir = path.substr(slash + 1);
+        } else {
+            const std::size_t dot = path.find_last_of('.');
+            fbmDir = dot != std::string::npos ? path.substr(0, dot) : path;
+        }
+        fbmDir = dir + "/" + fbmDir + ".FBM";
+    }
+
     ufbx_load_opts opts;
     std::memset(&opts, 0, sizeof(opts));
     opts.target_axes.right = UFBX_COORDINATE_AXIS_POSITIVE_X;
@@ -242,7 +264,7 @@ loadFbxArchiveImport(const std::string& path, void** outScene)
     // Materials (all of them; mesh entries reference by index).
     result.materials.resize(scene->materials.count);
     for (std::size_t m = 0; m < scene->materials.count; ++m) {
-        result.materials[m] = mapUfbxMaterialArc(scene->materials.data[m], dir);
+        result.materials[m] = mapUfbxMaterialArc(scene->materials.data[m], dir, fbmDir);
     }
 
     // Hierarchy walk (pre-order). ufbx_node* -> entry index for skin bindings.

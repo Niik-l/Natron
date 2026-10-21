@@ -403,8 +403,16 @@ void importBuildEdgeIndices(MeshData* mesh);
 /** Write an embedded texture blob (raw PNG/JPEG bytes) to
  *  <TEMP>/natron_<tag>_<fnv1a-hash>.<ext>, sniffing the type from the magic
  *  bytes. Returns the path, or empty on failure. Reuses an existing file for
- *  identical content so repeated loads don't rewrite the temp file. */
-std::string importWriteEmbeddedTexture(const void* bytes, std::size_t size, const char* tag);
+ *  identical content so repeated loads don't rewrite the temp file.
+ *  When outDir is non-empty, the blob is staged there as
+ *  <outDir>/<outName>_<fnv1a-hash>.<ext> instead (same-named side folder next
+ *  to the source file, like DCCs' auto-extract folders, e.g. mything.FBM) —
+ *  created on demand; on any failure the TEMP path above is used as before.
+ *  outName is sanitized to a safe file prefix and deduped by the content hash
+ *  so two source files with the same embedded texture share one staged file. */
+std::string importWriteEmbeddedTexture(const void* bytes, std::size_t size, const char* tag,
+                                       const std::string& outDir = std::string(),
+                                       const std::string& outName = std::string());
 
 // --- small math helpers shared by the archive parsers/evaluators -----------
 
