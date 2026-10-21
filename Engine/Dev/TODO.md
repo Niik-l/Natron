@@ -780,6 +780,24 @@ CyclesRender node with path tracing, PBR materials, lights, animation. Optional 
     render of a morph asset reappears, re-check camera distance + exe freshness first, then
     this entry applies as written.
 
+- **Two Cycles render-path defects (GUI sessions, isolated 2026-10-21 while verifying the
+  glTF ORM/normal material wiring on the cobra asset)** — probes in
+  `tools/geoio-tests/mcmp_cycles_*.py`:
+  - **Writer/`renderBlocking` path renders pure black** with a correctly connected scene
+    (Scene3D → CyclesRender → Writer; scene, light, camera verified by the viewer path
+    rendering the same graph). PNG comes out 0.00 mean luma, no stderr errors. This is the
+    long-standing "zero-sample flood" — reproduce headless with `NatronRenderer` too.
+    The interactive **viewer** path renders the same graph fine, so the defect is in the
+    offline render/batch path (CyclesPassRender / multipass tile handling), not in scene sync
+    or materials. Trail: `CyclesRenderer.cpp` multipass ~3088, driver tiles ~140-190,
+    `CyclesPassRender.cpp` ~247.
+  - **Viewer Cycles engine goes stale after its first render** — subsequent scene/knob changes
+    (tree swaps, light changes, material edits) and even Viewer input disconnect/reconnect do
+    not restart the render; the pane keeps showing the first completed frame. Creating a NEW
+    Viewer node connected to the CyclesRender node renders fresh (the workaround used for the
+    material A/B/C verification). Likely a missing invalidation/re-render trigger from graph
+    changes into the viewer-side Cycles session.
+
 ---
 
 ## LensFlare3D
