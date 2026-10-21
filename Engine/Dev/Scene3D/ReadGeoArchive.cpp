@@ -892,6 +892,13 @@ ReadGeoArchive::rebuildMaterialsSet()
                 return;
             }
             sub->setLabel(rootName);
+            // Only the root group draws the bounding box (parity with the
+            // archive's single box); nested sub-groups stay unboxed.
+            if (KnobIPtr sbk = sub->getKnobByName("showBBox")) {
+                if (KnobBoolPtr sb = std::dynamic_pointer_cast<KnobBool>(sbk)) {
+                    sb->setValue(false);
+                }
+            }
             rootGroup->connectInput(sub, rootSlot++);
             sub->setPosition(px + 780, py + rowHeight * (double)(i + 1));
             curGroup = sub;

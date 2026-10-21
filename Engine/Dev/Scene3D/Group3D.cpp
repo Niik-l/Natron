@@ -51,6 +51,8 @@ struct Group3DPrivate
     KnobDoubleWPtr pivotX, pivotY, pivotZ;
     KnobButtonWPtr movePivotToCentroid, moveCentroidToOrigin;
     KnobBoolWPtr enableTransform;
+    // Viewport bounding-box display (read by Viewport3D::drawGroupNode)
+    KnobBoolWPtr showBBox;
     KnobStringWPtr info;
 };
 
@@ -142,6 +144,16 @@ Group3D::initializeKnobs()
     en->setHintToolTip(tr("Apply this node's Translate / Rotate / Scale to every connected object "
                           "(3D viewport, ScanlineRender, Cycles). The axis input applies regardless."));
     page->addKnob(en); _imp->enableTransform = en;
+
+    // Bounding-box display toggle for the 3D viewport (read by
+    // Viewport3D::drawGroupBounds). Off hides the dashed box; on (default)
+    // draws the union of the group's mesh children in world space.
+    KnobBoolPtr showBox = AppManager::createKnob<KnobBool>(this, tr("Show Bounding Box"));
+    showBox->setName("showBBox"); showBox->setDefaultValue(true);
+    showBox->setHintToolTip(tr("Draw a dashed bounding box around the group's contents "
+                               "in the 3D viewport. The box encloses the actual geometry "
+                               "of every mesh connected to the group."));
+    page->addKnob(showBox); _imp->showBBox = showBox;
 
     KnobDoublePtr tx = AppManager::createKnob<KnobDouble>(this, tr("Translate X"));
     tx->setName("translateX"); tx->setDefaultValue(0); tx->setAnimationEnabled(true);
