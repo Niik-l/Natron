@@ -1822,6 +1822,38 @@ Viewport3D::paintGL()
                                  _imp->paintSerial, time, dbgNodes.size(),
                                  gotMesh ? "yes" : "no",
                                  vmn[0], vmx[0], vmn[1], vmx[1], vmn[2], vmx[2]);
+                    // Per-mesh dump: when two providers render differently the
+                    // counts above are not enough — this shows exactly what
+                    // each mesh scene node holds (indices/UV/vcolor state and
+                    // whether the verts are the raw file frame or baked).
+                    for (size_t di = 0; di < dbgNodes.size(); ++di) {
+                        if (dbgNodes[di].type != eSceneNodeMesh || !dbgNodes[di].meshData) continue;
+                        const MeshData& dm = *dbgNodes[di].meshData;
+                        float dmn[3] = { 1e30f, 1e30f, 1e30f };
+                        float dmx[3] = { -1e30f, -1e30f, -1e30f };
+                        for (size_t k = 0; k + 2 < dm.vertices.size(); k += 3) {
+                            for (int c = 0; c < 3; ++c) {
+                                dmn[c] = std::min(dmn[c], dm.vertices[k + c]);
+                                dmx[c] = std::max(dmx[c], dm.vertices[k + c]);
+                            }
+                        }
+                        std::fprintf(stderr,
+                                     "[VP3D-MESH] serial=%d name=%s vis=%d verts=%zu faces=%zu fidx=%zu "
+                                     "vcol=%d uvs=%zu tr=[%g,%g,%g,%g;%g,%g,%g,%g;%g,%g,%g,%g;%g,%g,%g,%g] "
+                                     "v0=(%g,%g,%g) bbox=[%g,%g,%g..%g,%g,%g]\n",
+                                     _imp->paintSerial, dbgNodes[di].name.c_str(),
+                                     dbgNodes[di].visible ? 1 : 0,
+                                     dm.vertices.size() / 3, dm.faceCounts.size(), dm.faceIndices.size(),
+                                     dm.hasVertexColors ? 1 : 0, dm.uvs.size() / 2,
+                                     dm.transform[0], dm.transform[1], dm.transform[2], dm.transform[3],
+                                     dm.transform[4], dm.transform[5], dm.transform[6], dm.transform[7],
+                                     dm.transform[8], dm.transform[9], dm.transform[10], dm.transform[11],
+                                     dm.transform[12], dm.transform[13], dm.transform[14], dm.transform[15],
+                                     dm.vertices.size() >= 3 ? dm.vertices[0] : 0.f,
+                                     dm.vertices.size() >= 3 ? dm.vertices[1] : 0.f,
+                                     dm.vertices.size() >= 3 ? dm.vertices[2] : 0.f,
+                                     dmn[0], dmn[1], dmn[2], dmx[0], dmx[1], dmx[2]);
+                    }
                 }
             }
         }
@@ -3775,7 +3807,11 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
     }
 
     // ----- Wireframe (Wireframe / Shaded+Wire) -----
-    if ((mode == eWireframe || mode == eShadedWire) && !mesh->edgeIndices.empty()) {
+    // Density cap: beyond ~1M lines the wires stop conveying shape and render
+    // as a solid grey mass over the fill (and cost megabytes of immediate-mode
+    // submissions per paint). Dense meshes read better shaded-only; their edge
+    // arrays are also skipped at import (ReadGeo's build gate).
+    if ((mode == eWireframe || mode == eShadedWire) && mesh->edgeIndices.size() <= 2000000) {
         glColor3f(0.7f, 0.7f, 0.7f);
         glLineWidth(1.0f);
         glBegin(GL_LINES);

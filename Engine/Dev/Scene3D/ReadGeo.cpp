@@ -1643,7 +1643,15 @@ ReadGeo::buildSceneMesh(double time) const
             }
         }
     }
-    importBuildEdgeIndices(mesh.get());
+    // Edge indices for the viewport wireframe. Skipped for very dense meshes:
+    // the array alone is ~2x the corner count (8.9M ints for a 1.5M-triangle
+    // scan) and the viewport wire pass would push millions of immediate-mode
+    // lines every paint, drowning the shaded fill in a uniform grey — the
+    // archive path never builds edges, so big assets shaded clean there while
+    // a rebuilt ReadGeo of the same file turned into a grey blob.
+    if (mesh->faceIndices.size() <= 4000000) {
+        importBuildEdgeIndices(mesh.get());
+    }
 
     // Geometry-loader diagnostics gate (same pattern as NATRON_DEBUG_SC):
     // set env NATRON_DEBUG_GEOIO=1 to dump the raw built geometry (vertex
