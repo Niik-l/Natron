@@ -406,7 +406,7 @@ void importBuildEdgeIndices(MeshData* mesh);
  *  identical content so repeated loads don't rewrite the temp file.
  *  When outDir is non-empty, the blob is staged there as
  *  <outDir>/<outName>_<fnv1a-hash>.<ext> instead (same-named side folder next
- *  to the source file, like DCCs' auto-extract folders, e.g. mything.FBM) —
+ *  to the source file, like DCCs' auto-extract folders, e.g. mything.fbm) —
  *  created on demand; on any failure the TEMP path above is used as before.
  *  outName is sanitized to a safe file prefix and deduped by the content hash
  *  so two source files with the same embedded texture share one staged file. */

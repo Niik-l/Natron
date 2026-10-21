@@ -74,7 +74,7 @@ ufbxMatToColMajor(const ufbx_matrix& m, float out[16])
 }
 
 // Resolve a texture to a usable file path (mirrors the flat loader's logic).
-// Embedded content is staged next to the source FBX in its same-named ".FBM"
+// Embedded content is staged next to the source FBX in its same-named ".fbm"
 // side folder (DCC convention) when fbmDir is non-empty, else to TEMP.
 std::string
 resolveUfbxTextureArc(const ufbx_texture* tex, const std::string& dir,
@@ -223,7 +223,7 @@ loadFbxArchiveImport(const std::string& path, void** outScene)
         if (slash != std::string::npos) dir = path.substr(0, slash);
     }
 
-    // FBM side folder for embedded textures: chair.fbx -> chair.FBM next to
+    // FBM side folder for embedded textures: chair.fbx -> chair.fbm next to
     // the source file (DCC convention). Empty when the file has no directory.
     std::string fbmDir;
     {
@@ -236,7 +236,7 @@ loadFbxArchiveImport(const std::string& path, void** outScene)
             const std::size_t dot = path.find_last_of('.');
             fbmDir = dot != std::string::npos ? path.substr(0, dot) : path;
         }
-        fbmDir = dir + "/" + fbmDir + ".FBM";
+        fbmDir = dir + "/" + fbmDir + ".fbm";
     }
 
     ufbx_load_opts opts;

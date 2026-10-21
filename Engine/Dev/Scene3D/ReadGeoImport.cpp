@@ -256,7 +256,7 @@ importWriteEmbeddedTexture(const void* bytes, std::size_t size, const char* tag,
         h *= 1099511628211ULL;
     }
 
-    // Side folder staging (DCC-style "<file>.FBM" next to the source):
+    // Side folder staging (DCC-style "<file>.fbm" next to the source):
     // <outDir>/<sanitized outName>_<fnv1a-hash>.<ext>. The folder is created
     // on demand; any failure (read-only location, invalid path...) or an
     // empty outDir falls back to the TEMP path below.
