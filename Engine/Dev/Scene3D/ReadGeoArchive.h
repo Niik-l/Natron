@@ -178,6 +178,15 @@ private:
 
     void loadArchiveFile(const std::string& path);
 
+    // Re-build Materials button: analyze the visible entries and build a
+    // standalone node set beside this archive that replicates the archive's
+    // output — per material-bearing part a ReadGeo scoped to that part via
+    // its Object dropdown + a Material3D wired into the ReadGeo's Material
+    // input, all assembled hierarchically under Group3D. Nothing connects
+    // back; the archive becomes redundant after the rebuild. GUI-thread only
+    // (fires from the knobChanged button branch).
+    void rebuildMaterialsSet();
+
     std::unique_ptr<ReadGeoArchivePrivate> _imp;
 };
 

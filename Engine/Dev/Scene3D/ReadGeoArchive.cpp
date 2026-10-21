@@ -63,6 +63,7 @@
 #include "../../KnobTypes.h"
 #include "../../Node.h"
 #include "../../ViewIdx.h"
+#include "../../CreateNodeArgs.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -121,6 +122,7 @@ struct ReadGeoArchivePrivate
 {
     KnobFileWPtr filePath;
     KnobButtonWPtr reloadBtn;
+    KnobButtonWPtr rebuildMaterialsBtn;
     KnobStringWPtr objectFilter;
     KnobBoolWPtr includeMeshes;
     KnobBoolWPtr reverseNormals;
@@ -162,6 +164,10 @@ KnobBoolWPtr showBBox;
     {
         return frameOffset.lock() ? frameOffset.lock()->getValue() : 0;
     }
+
+    // Re-entrancy guard for the Re-build Materials button (a second trigger
+    // while the batch is on the stack must not double-build).
+    bool rebuildBusy;
 };
 
 // --- construction / description ---------------------------------------------
@@ -179,6 +185,7 @@ ReadGeoArchive::ReadGeoArchive(NodePtr node)
     , _imp(new ReadGeoArchivePrivate())
 {
     setSupportsRenderScaleMaybe(eSupportsNo);
+    _imp->rebuildBusy = false;
 }
 
 ReadGeoArchive::~ReadGeoArchive()
@@ -254,6 +261,25 @@ ReadGeoArchive::initializeKnobs()
         k->setHintToolTip(tr("Re-read the file and refresh the hierarchy."));
         page->addKnob(k);
         _imp->reloadBtn = k;
+    }
+
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Re-build Materials"));
+        k->setName("rebuildMaterials");
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Analyze the imported object's structure and build a standalone "
+                             "material composition in the node editor beside this archive: "
+                             "per material-bearing part, one ReadGeo scoped to that part via "
+                             "its Object dropdown and a Material3D wired into the ReadGeo's "
+                             "Material input (diffuse map / PBR values carried over from the "
+                             "file), all assembled under a Group3D. The rebuilt set "
+                             "replicates this archive's output 100% — the original "
+                             "ReadGeoArchive becomes redundant and nothing connects back to "
+                             "it. Archive-wide knobs are mirrored: Bake Transforms, Reverse "
+                             "Normals, Use File Morph Weights and the Transform page "
+                             "(Uniform Scale folds into the group's per-axis scales)."));
+        page->addKnob(k);
+        _imp->rebuildMaterialsBtn = k;
     }
 
     {
@@ -483,6 +509,7 @@ ReadGeoArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     if (!k) return false;
     KnobIPtr fpKnob = _imp->filePath.lock();
     KnobIPtr reloadKnob = _imp->reloadBtn.lock();
+    KnobIPtr rebuildKnob = _imp->rebuildMaterialsBtn.lock();
     KnobIPtr filterKnob = _imp->objectFilter.lock();
     KnobIPtr includeKnob = _imp->includeMeshes.lock();
     KnobIPtr excludedKnob = _imp->excludedPaths.lock();
@@ -491,6 +518,7 @@ ReadGeoArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
 
     const bool isFileChange = (fpKnob && k == fpKnob.get());
     const bool isReload     = (reloadKnob && k == reloadKnob.get());
+    const bool isRebuild    = (rebuildKnob && k == rebuildKnob.get());
     const bool isFilter     = (filterKnob && k == filterKnob.get())
                             || (includeKnob && k == includeKnob.get())
                             || (excludedKnob && k == excludedKnob.get())
@@ -553,6 +581,14 @@ ReadGeoArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         refreshMetadata_public(true);
         return true;
     }
+
+    // Re-build Materials: standalone ReadGeo + Material3D node set under
+    // Group3D. Runs after the load branches so a button hit while the file
+    // knob is empty/wrong still reports sensibly.
+    if (isRebuild) {
+        rebuildMaterialsSet();
+        return true;
+    }
     return false;
 }
 
@@ -567,6 +603,368 @@ ReadGeoArchive::onKnobsLoaded()
             refreshMetadata_public(true);
         }
     }
+}
+
+// --- Re-build Materials --------------------------------------------------------
+
+namespace {
+
+// Copy a file material's EntryMaterialProvider-visible fields onto a fresh
+// Material3D's knobs (mirror of ReadGeo::applyImportedMaterialKnobs — the
+// script names are identical on both nodes). Fields the archive path does
+// not carry (normal/roughness/... maps, colorspace choice) stay at their
+// defaults, matching the defaults the EntryMaterialProvider falls back to.
+void
+setRebuildMaterialKnobs(NodePtr matNode, const GeoImportMaterial& m)
+{
+    if (KnobIPtr k = matNode->getKnobByName("baseColor")) {
+        if (KnobColorPtr c = std::dynamic_pointer_cast<KnobColor>(k)) {
+            c->setValue(m.baseColor[0], ViewSpec::all(), 0);
+            c->setValue(m.baseColor[1], ViewSpec::all(), 1);
+            c->setValue(m.baseColor[2], ViewSpec::all(), 2);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("roughness")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.roughness);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("metallic")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.metallic);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("specular")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.specular);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("emissionColor")) {
+        if (KnobColorPtr c = std::dynamic_pointer_cast<KnobColor>(k)) {
+            c->setValue(m.emission[0], ViewSpec::all(), 0);
+            c->setValue(m.emission[1], ViewSpec::all(), 1);
+            c->setValue(m.emission[2], ViewSpec::all(), 2);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("emissionStrength")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.emissionStrength);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("transmission")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.transmission);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("ior")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.ior);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("textureFile")) {
+        if (KnobFilePtr f = std::dynamic_pointer_cast<KnobFile>(k)) {
+            f->setValue(m.diffuseMapPath);
+        }
+    }
+    // Texture colorspaces: EntryMaterialProvider hardcodes "sRGB" for both
+    // (getMaterialDiffuseColorspace / getMaterialEmissionColorspace), while a
+    // fresh Material3D's defaults are the first sRGB-ish entry of the OCIO
+    // config (e.g. "rrt_srgb"), which Cycles decodes differently — the rebuilt
+    // set's shading visibly diverges from the archive's at grazing angles.
+    // Select the exact "sRGB" entry when it exists.
+    auto setSpace = [](const KnobIPtr& k) -> bool {
+        KnobChoicePtr c = std::dynamic_pointer_cast<KnobChoice>(k);
+        if (!c) {
+            return false;
+        }
+        const std::vector<ChoiceOption> entries = c->getEntries_mt_safe();
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].id == "sRGB") {
+                c->setValue((int)i);
+                return true;
+            }
+        }
+        return false;
+    };
+    if (KnobIPtr k = matNode->getKnobByName("diffuseColorspace")) {
+        setSpace(k);
+    }
+    if (KnobIPtr k = matNode->getKnobByName("emissionColorspace")) {
+        setSpace(k);
+    }
+}
+
+} // anonymous namespace
+
+void
+ReadGeoArchive::rebuildMaterialsSet()
+{
+    AppInstancePtr app = getApp();
+    NodePtr thisNode = getNode();
+    if (!app || !thisNode) {
+        return;
+    }
+    if (_imp->rebuildBusy) {
+        return;
+    }
+
+    KnobFilePtr fp = _imp->filePath.lock();
+    const std::string filePath = fp ? fp->getValue() : std::string();
+
+    // Snapshot the visible mesh entries + their file materials under the
+    // lock. Material-bearing parts get a ReadGeo + Material3D pair; mesh
+    // parts without a material still get a plain ReadGeo so no visible
+    // geometry is dropped. objectPathIdx = the part's 1-based rank among ALL
+    // mesh entries of the file (ReadGeo's Object dropdown counts the
+    // unfiltered file, so filtered entries still map mid-list).
+    struct RebuildPart
+    {
+        std::string path;
+        int objectPathIdx;
+        bool hasMaterial;
+        GeoImportMaterial material; // read only when hasMaterial
+    };
+    std::vector<RebuildPart> parts;
+    {
+        std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+        if (_imp->loadedFilePath.empty() || filePath.empty() || _imp->rt.data.nodes.empty()) {
+            setPersistentMessage(eMessageTypeError,
+                "Re-build Materials: no file loaded on the archive.");
+            return;
+        }
+        std::vector<char> visFlag(_imp->rt.data.nodes.size(), 0);
+        for (std::size_t v = 0; v < _imp->visible.size(); ++v) {
+            if (_imp->visible[v] >= 0 && _imp->visible[v] < (int)visFlag.size()) {
+                visFlag[_imp->visible[v]] = 1;
+            }
+        }
+        int meshRank = 0;
+        for (std::size_t i = 0; i < _imp->rt.data.nodes.size(); ++i) {
+            const GeoArchiveNodeData& nd = _imp->rt.data.nodes[i];
+            if (!nd.isMesh) continue;
+            ++meshRank;
+            if (!visFlag[i]) continue;
+            RebuildPart p;
+            p.path = nd.fullPath;
+            p.objectPathIdx = meshRank;
+            p.hasMaterial = false;
+            if (nd.meshIndex >= 0 && nd.meshIndex < (int)_imp->rt.data.meshes.size()) {
+                const GeoArchiveMeshData& md = _imp->rt.data.meshes[nd.meshIndex];
+                if (md.materialIndex >= 0 &&
+                    md.materialIndex < (int)_imp->rt.data.materials.size() &&
+                    _imp->rt.data.materials[md.materialIndex].present) {
+                    p.hasMaterial = true;
+                    p.material = _imp->rt.data.materials[md.materialIndex];
+                }
+            }
+            parts.push_back(p);
+        }
+    }
+    if (parts.empty()) {
+        setPersistentMessage(eMessageTypeError,
+            "Re-build Materials: no mesh entries are currently visible "
+            "(check the hierarchy tree / Object Filter).");
+        return;
+    }
+
+    // Mirror the archive-wide knobs onto the copies.
+    const bool archiveBake = _imp->bakeTransforms.lock() &&
+                             _imp->bakeTransforms.lock()->getValue();
+    const bool archiveReverse = _imp->reverseNormals.lock() &&
+                                _imp->reverseNormals.lock()->getValue();
+    const bool archiveUseFileMorphs = _imp->useFileMorphWeights.lock() &&
+                                      _imp->useFileMorphWeights.lock()->getValue();
+
+    NodeCollectionPtr grp = thisNode->getGroup();
+    _imp->rebuildBusy = true;
+    struct BusyReset
+    {
+        bool* flag;
+        explicit BusyReset(bool* f) : flag(f) {}
+        ~BusyReset() { *flag = false; }
+    } busyReset(&_imp->rebuildBusy);
+
+    // Root group: assembles the per-part pairs (8 inputs each — more parts
+    // nest additional Group3Ds at the root's spare slots).
+    CreateNodeArgs gArgs(PLUGINID_NATRON_GROUP3D, grp);
+    gArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+    gArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+    gArgs.setProperty<bool>(kCreateNodeArgsPropSettingsOpened, false);
+    NodePtr rootGroup = app->createNode(gArgs);
+    if (!rootGroup) {
+        setPersistentMessage(eMessageTypeError,
+            "Re-build Materials: failed to create the Group3D node.");
+        return;
+    }
+    rootGroup->setLabel(thisNode->getLabel().empty()
+                            ? std::string("Materials")
+                            : thisNode->getLabel() + "_materials");
+
+    // Mirror the archive's user TRS onto the group (Uniform Scale folds into
+    // the per-axis scales; Group3D has no uniform-scale knob). Enabling the
+    // group transform only when the archive carries a non-identity TRS.
+    {
+        KnobBoolPtr enable = std::dynamic_pointer_cast<KnobBool>(
+            rootGroup->getKnobByName("enableTransform"));
+        static const char* trsNames[9] = { "translateX", "translateY", "translateZ",
+                                           "rotateX", "rotateY", "rotateZ",
+                                           "scaleX", "scaleY", "scaleZ" };
+        double trsVals[9] = { 0, 0, 0, 0, 0, 0, 1, 1, 1 };
+        double uniformScale = 1.0;
+        bool anyNonDefault = false;
+        for (int i = 0; i < 9; ++i) {
+            KnobIPtr k = thisNode->getKnobByName(trsNames[i]);
+            KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k);
+            if (d) {
+                trsVals[i] = d->getValue();
+                if (i < 6 && trsVals[i] != 0.0) anyNonDefault = true;
+            }
+        }
+        {
+            KnobIPtr k = thisNode->getKnobByName("uniformScale");
+            KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k);
+            if (d) {
+                uniformScale = d->getValue();
+                if (uniformScale != 1.0) anyNonDefault = true;
+            }
+        }
+        if (enable) {
+            enable->setValue(anyNonDefault);
+        }
+        if (anyNonDefault) {
+            for (int i = 0; i < 9; ++i) {
+                KnobIPtr k = rootGroup->getKnobByName(trsNames[i]);
+                KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k);
+                if (d) {
+                    d->setValue(trsVals[i]);
+                }
+            }
+            for (int i = 6; i < 9; ++i) {
+                KnobIPtr k = rootGroup->getKnobByName(trsNames[i]);
+                KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k);
+                if (d) {
+                    d->setValue(trsVals[i] * uniformScale);
+                }
+            }
+        }
+    }
+
+    // Layout anchor: the archive's own position. Parts run down in rows
+    // (+y = down, same convention CyclesRenderPass uses), each pair side by
+    // side, root group at the archive's right.
+    double px = 0, py = 0;
+    thisNode->getPosition(&px, &py);
+    const double rowHeight = 150.0;
+
+    const int kGroupInputs = 8;
+    NodePtr curGroup = rootGroup;
+    int curSlot = 0;
+    int rootSlot = 0;
+
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        const RebuildPart& part = parts[i];
+        if (curSlot >= kGroupInputs) {
+            CreateNodeArgs sArgs(PLUGINID_NATRON_GROUP3D, grp);
+            sArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+            sArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+            sArgs.setProperty<bool>(kCreateNodeArgsPropSettingsOpened, false);
+            NodePtr sub = app->createNode(sArgs);
+            if (!sub) {
+                setPersistentMessage(eMessageTypeError,
+                    "Re-build Materials: failed to create a sub-Group3D.");
+                return;
+            }
+            sub->setLabel(thisNode->getLabel().empty()
+                              ? std::string("Materials")
+                              : thisNode->getLabel() + "_materials");
+            rootGroup->connectInput(sub, rootSlot++);
+            sub->setPosition(px + 460, py + rowHeight * (double)(i + 1));
+            curGroup = sub;
+            curSlot = 0;
+        }
+
+        // Per-part ReadGeo: file set first (setting the file knob fires the
+        // synchronous parse + dropdown build), then the Object dropdown
+        // scopes it to the part — the part's evaluated world matrix rides
+        // MeshData::transform (same mechanics the archive uses), so the
+        // consumers compose the identical geometry.
+        CreateNodeArgs rArgs(PLUGINID_NATRON_READGEO, grp);
+        rArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+        rArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+        rArgs.setProperty<bool>(kCreateNodeArgsPropSettingsOpened, false);
+        NodePtr geo = app->createNode(rArgs);
+        if (!geo) {
+            setPersistentMessage(eMessageTypeError,
+                "Re-build Materials: failed to create the ReadGeo node for '" + part.path + "'.");
+            return;
+        }
+        geo->setLabel(part.path.empty()
+                          ? ("part_" + std::to_string(i + 1))
+                          : part.path);
+        if (KnobIPtr fk = geo->getKnobByName("filename")) {
+            if (KnobFilePtr ff = std::dynamic_pointer_cast<KnobFile>(fk)) {
+                ff->setValue(filePath);
+            }
+        }
+        if (KnobIPtr ok = geo->getKnobByName("objectPath")) {
+            if (KnobChoicePtr oc = std::dynamic_pointer_cast<KnobChoice>(ok)) {
+                oc->setValue(part.objectPathIdx);
+            }
+        }
+        // Mirror the archive-wide knobs (state copies; changing the copy later
+        // is free — they are independent nodes).
+        if (KnobIPtr bk = geo->getKnobByName("bakeTransforms")) {
+            if (KnobBoolPtr bb = std::dynamic_pointer_cast<KnobBool>(bk)) {
+                bb->setValue(archiveBake);
+            }
+        }
+        if (KnobIPtr rk = geo->getKnobByName("reverseNormals")) {
+            if (KnobBoolPtr rb = std::dynamic_pointer_cast<KnobBool>(rk)) {
+                rb->setValue(archiveReverse);
+            }
+        }
+        if (KnobIPtr mk = geo->getKnobByName("useFileMorphWeights")) {
+            if (KnobBoolPtr mb = std::dynamic_pointer_cast<KnobBool>(mk)) {
+                mb->setValue(archiveUseFileMorphs);
+            }
+        }
+
+        // Material3D carrying the part's file material.
+        NodePtr mat;
+        if (part.hasMaterial) {
+            CreateNodeArgs mArgs(PLUGINID_NATRON_MATERIAL3D, grp);
+            mArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+            mArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+            mArgs.setProperty<bool>(kCreateNodeArgsPropSettingsOpened, false);
+            mat = app->createNode(mArgs);
+            if (!mat) {
+                setPersistentMessage(eMessageTypeError,
+                    "Re-build Materials: failed to create the Material3D node for '" + part.path + "'.");
+                return;
+            }
+            mat->setLabel(part.path.empty()
+                              ? ("part_" + std::to_string(i + 1) + "_mat")
+                              : (part.path + "_mat"));
+            setRebuildMaterialKnobs(mat, part.material);
+        }
+
+        // Wire: the material feeds the part's Material input; the part feeds
+        // the group. (The Material3D emits no SceneNode of its own.)
+        if (mat) {
+            geo->connectInput(mat, 0);
+        }
+        curGroup->connectInput(geo, curSlot++);
+
+        geo->setPosition(px + 780, py + rowHeight * (double)(i + 1));
+        if (mat) {
+            mat->setPosition(px + 620, py + rowHeight * (double)(i + 1));
+        }
+    }
+
+    setPersistentMessage(eMessageTypeInfo,
+        std::string("Re-build Materials: built ") + std::to_string(parts.size()) +
+        " part node(s) under a Group3D. The archive is unchanged; the rebuilt "
+        "set reproduces its output.");
 }
 
 // --- Morph Weights (glTF shape keys / FBX blend shapes) -----------------------
