@@ -981,10 +981,11 @@ ReadGeoArchive::rebuildMaterialsSet()
     // Material3D -> ReadGeo -> Group3D, data flowing left to right.
     rootGroup->setPosition(px + 940, py);
 
-    setPersistentMessage(eMessageTypeInfo,
-        std::string("Re-build Materials: built ") + std::to_string(parts.size()) +
-        " part node(s) under a Group3D. The archive is unchanged; the rebuilt "
-        "set reproduces its output.");
+    // Note: no info PersistentMessage here. In the GUI an info
+    // PersistentMessage pops a modal OK dialog after every rebuild, which
+    // wedges scripted/bridge sessions (the dialog blocks the main thread
+    // waiting for the user). The created Group3D is evidence enough that the
+    // rebuild ran; error paths below still report via setPersistentMessage.
 }
 
 // --- Morph Weights (glTF shape keys / FBX blend shapes) -----------------------
