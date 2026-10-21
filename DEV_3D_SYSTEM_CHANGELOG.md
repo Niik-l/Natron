@@ -17,6 +17,18 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **ScanlineRender: ParticleInstance inside a Scene3D rendered nothing (2026-10-21)** — user
+  report (Scatter3D → ParticleInstance → Scene3D → ScanlineRender black, Cycles fine). The
+  Scene3D loop adopted the instancer but never fetched its particle data, and since the
+  thread-safety pass (b8658d4c0) the draw pass builds instances from that private snapshot
+  (`getInstancesFromData(motionBlurPData)`) instead of pulling the provider itself, so the
+  list came back empty; the direct ParticleInstance → ScanlineRender wiring set it and worked.
+  Now the scene path fetches the data when it adopts the instancer, and a directly wired
+  instancer is no longer also handed to `extractGeometries`. GUI-script probe: the Scene3D
+  path now covers the same pixels as the Cycles render of the same scene (alpha mean 0.1186
+  vs 0.1189). Noted while probing, NOT fixed: three ScanlineRender writes rendering at the
+  same time made one of them fail at the multisample FBO allocation (`glCheckFramebufferStatus`
+  incomplete); sequential renders are fine.
 - **Colour picker: HSV page dead on Qt6 + 0..1 ceiling (2026-10-20)** — user report: the
   RGB / HSV switch in the colour selector did nothing. `QButtonGroup::buttonClicked(int)` was
   removed in Qt6 (renamed `idClicked`), so the string-based connect in ColorSelectorWidget failed

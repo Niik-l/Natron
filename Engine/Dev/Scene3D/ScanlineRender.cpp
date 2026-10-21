@@ -2756,7 +2756,15 @@ ScanlineRender::render(const RenderActionArgs& args)
                 // Check for particle instancer in scene
                 ParticleInstance* sInstancer = dynamic_cast<ParticleInstance*>(sceneInput.get());
                 if (sInstancer) {
-                    if (!particleInstancer) particleInstancer = sInstancer;
+                    // Adopt the first instancer AND its particle data: the draw
+                    // pass builds instances from motionBlurPData (private
+                    // sub-frame copy), so without this an instancer reached
+                    // through a Scene3D rendered nothing while the direct
+                    // connection and Cycles worked.
+                    if (!particleInstancer) {
+                        particleInstancer = sInstancer;
+                        motionBlurPData = sInstancer->getParticleData(args.time);
+                    }
                     continue;
                 }
 
@@ -2770,7 +2778,8 @@ ScanlineRender::render(const RenderActionArgs& args)
                     extractGeometries(sceneInput, args.time, args.view, geoObjects);
                 }
             }
-        } else {
+        } else if (!particleInstancer) {
+            // An instancer is drawn from its instance list, not as geometry.
             extractGeometries(geoEffect, args.time, args.view, geoObjects);
         }
     }
