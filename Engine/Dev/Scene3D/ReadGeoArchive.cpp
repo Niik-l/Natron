@@ -116,6 +116,11 @@ struct EntryMaterialProvider : public MaterialProvider
     double getMaterialTransmission(double) const OVERRIDE { return mat->transmission; }
     double getMaterialIOR(double) const OVERRIDE { return mat->ior; }
     std::string getMaterialTextureFile() const OVERRIDE { return mat->diffuseMapPath; }
+    // glTF ORM: one file, roughness in G / metallic in B (CyclesRenderer splits
+    // the channels); normal is the tangent-space map.
+    std::string getMaterialRoughnessMapFile() const OVERRIDE { return mat->metallicRoughnessMapPath; }
+    std::string getMaterialMetallicMapFile() const OVERRIDE { return mat->metallicRoughnessMapPath; }
+    std::string getMaterialNormalMapFile() const OVERRIDE { return mat->normalMapPath; }
     std::string getMaterialDiffuseColorspace() const OVERRIDE { return "sRGB"; }
 };
 
@@ -612,9 +617,10 @@ namespace {
 
 // Copy a file material's EntryMaterialProvider-visible fields onto a fresh
 // Material3D's knobs (mirror of ReadGeo::applyImportedMaterialKnobs — the
-// script names are identical on both nodes). Fields the archive path does
-// not carry (normal/roughness/... maps, colorspace choice) stay at their
-// defaults, matching the defaults the EntryMaterialProvider falls back to.
+// script names are identical on both nodes). Includes the glTF PBR maps the
+// file carries (metallicRoughness → roughness+metallic, normal); fields the
+// archive path does not carry (colorspace choice beyond the sRGB pin) stay at
+// their defaults.
 void
 setRebuildMaterialKnobs(NodePtr matNode, const GeoImportMaterial& m)
 {
@@ -667,6 +673,23 @@ setRebuildMaterialKnobs(NodePtr matNode, const GeoImportMaterial& m)
             f->setValue(m.diffuseMapPath);
         }
     }
+    // PBR maps the file carries: the glTF metallicRoughness texture drives
+    // both sliders (roughness = G, metallic = B — CyclesRenderer splits the
+    // channels) and the normal map plugs into Normal (Non-Color handled by
+    // the Cycles node). Empty paths leave the knobs at their defaults.
+    auto setFileKnob = [&matNode](const char* name, const std::string& path) {
+        if (path.empty() || !matNode) {
+            return;
+        }
+        if (KnobIPtr k = matNode->getKnobByName(name)) {
+            if (KnobFilePtr f = std::dynamic_pointer_cast<KnobFile>(k)) {
+                f->setValue(path);
+            }
+        }
+    };
+    setFileKnob("roughnessMapFile", m.metallicRoughnessMapPath);
+    setFileKnob("metallicMapFile", m.metallicRoughnessMapPath);
+    setFileKnob("normalMapFile", m.normalMapPath);
     // Texture colorspaces: EntryMaterialProvider hardcodes "sRGB" for both
     // (getMaterialDiffuseColorspace / getMaterialEmissionColorspace), while a
     // fresh Material3D's defaults are the first sRGB-ish entry of the OCIO

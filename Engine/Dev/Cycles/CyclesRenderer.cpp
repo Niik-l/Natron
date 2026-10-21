@@ -975,14 +975,18 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         graph->connect(normalMap->output("Normal"), principled->input("Normal"));
     }
 
-    // Roughness map
+    // Roughness map — sampled through Separate Color GREEN: glTF packs
+    // roughness there in its metallicRoughness texture (grayscale maps carry
+    // the same value in every channel, so they are unaffected).
     std::string roughFile = resolveTextureFrame(mat->getMaterialRoughnessMapFile(), frame);
     if (!roughFile.empty()) {
         ccl::ImageTextureNode* roughTex = graph->create_node<ccl::ImageTextureNode>();
         roughTex->set_filename(ccl::ustring(roughFile));
         roughTex->set_colorspace(ccl::ustring("__builtin_raw"));
         graph->connect(texCoord->output("UV"), roughTex->input("Vector"));
-        graph->connect(roughTex->output("Color"), principled->input("Roughness"));
+        ccl::SeparateColorNode* roughSep = graph->create_node<ccl::SeparateColorNode>();
+        graph->connect(roughTex->output("Color"), roughSep->input("Color"));
+        graph->connect(roughSep->output("Green"), principled->input("Roughness"));
     }
 
     // Specular map — drives Principled's "Specular IOR Level" per-pixel (0.5 is
@@ -1026,14 +1030,17 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         shader->set_displacement_method(method);
     }
 
-    // Metallic map
+    // Metallic map — Separate Color BLUE: glTF's metallicRoughness texture
+    // carries metallic there (grayscale maps are channel-equal, unaffected).
     std::string metalFile = resolveTextureFrame(mat->getMaterialMetallicMapFile(), frame);
     if (!metalFile.empty()) {
         ccl::ImageTextureNode* metalTex = graph->create_node<ccl::ImageTextureNode>();
         metalTex->set_filename(ccl::ustring(metalFile));
         metalTex->set_colorspace(ccl::ustring("__builtin_raw"));
         graph->connect(texCoord->output("UV"), metalTex->input("Vector"));
-        graph->connect(metalTex->output("Color"), principled->input("Metallic"));
+        ccl::SeparateColorNode* metalSep = graph->create_node<ccl::SeparateColorNode>();
+        graph->connect(metalTex->output("Color"), metalSep->input("Color"));
+        graph->connect(metalSep->output("Blue"), principled->input("Metallic"));
     }
 
     // Emission map

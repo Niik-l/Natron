@@ -67,6 +67,11 @@ struct GeoImportMaterial
     double transmission = 0.0;
     double ior = 1.45;
     std::string diffuseMapPath;   // resolved texture file path (empty = none)
+    // glTF metallicRoughness texture (R=AO unused, G=roughness, B=metallic) and
+    // normal texture, staged into the .glm side folder like the diffuse map.
+    // Empty = the file carries none (FBX imports leave these unset).
+    std::string metallicRoughnessMapPath;
+    std::string normalMapPath;
 };
 
 // --- Archive import (hierarchy-preserving) ----------------------------------

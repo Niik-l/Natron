@@ -317,6 +317,20 @@ loadGltfArchiveImport(const std::string& path)
             mat.diffuseMapPath = resolveCgltfImage(img, dir, glmDir,
                                                    img->name ? img->name : "gltf_tex");
         }
+        // glTF packs roughness in the MR texture's GREEN channel and metallic
+        // in BLUE; consumers that read a single channel must split it (see
+        // CyclesRenderer's SeparateColor wiring). Same staging as diffuse.
+        if (pbr.metallic_roughness_texture.texture &&
+            pbr.metallic_roughness_texture.texture->image) {
+            const cgltf_image* img = pbr.metallic_roughness_texture.texture->image;
+            mat.metallicRoughnessMapPath = resolveCgltfImage(img, dir, glmDir,
+                                                             img->name ? img->name : "gltf_mr");
+        }
+        if (cm->normal_texture.texture && cm->normal_texture.texture->image) {
+            const cgltf_image* img = cm->normal_texture.texture->image;
+            mat.normalMapPath = resolveCgltfImage(img, dir, glmDir,
+                                                  img->name ? img->name : "gltf_n");
+        }
     }
 
     // Skins — flat joint node indices (remapped to entry indices after the
