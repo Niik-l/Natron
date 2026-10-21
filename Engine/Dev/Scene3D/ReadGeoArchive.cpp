@@ -768,11 +768,10 @@ ReadGeoArchive::rebuildMaterialsSet()
         return;
     }
 
-    // Mirror the archive-wide knobs onto the copies.
-    const bool archiveBake = _imp->bakeTransforms.lock() &&
-                             _imp->bakeTransforms.lock()->getValue();
+    // Mirror selected archive-wide knobs onto the copies (bake is forced
+    // instead — see the ReadGeo creation below).
     const bool archiveReverse = _imp->reverseNormals.lock() &&
-                                _imp->reverseNormals.lock()->getValue();
+                             _imp->reverseNormals.lock()->getValue();
     const bool archiveUseFileMorphs = _imp->useFileMorphWeights.lock() &&
                                       _imp->useFileMorphWeights.lock()->getValue();
 
@@ -928,12 +927,8 @@ ReadGeoArchive::rebuildMaterialsSet()
             }
         }
         // Mirror the archive-wide knobs (state copies; changing the copy later
-        // is free — they are independent nodes).
-        if (KnobIPtr bk = geo->getKnobByName("bakeTransforms")) {
-            if (KnobBoolPtr bb = std::dynamic_pointer_cast<KnobBool>(bk)) {
-                bb->setValue(archiveBake);
-            }
-        }
+        // is free — they are independent nodes). Bake Transforms is forced
+        // instead — see the re-assertion at the end of this loop iteration.
         if (KnobIPtr rk = geo->getKnobByName("reverseNormals")) {
             if (KnobBoolPtr rb = std::dynamic_pointer_cast<KnobBool>(rk)) {
                 rb->setValue(archiveReverse);
@@ -971,6 +966,20 @@ ReadGeoArchive::rebuildMaterialsSet()
         }
         curGroup->connectInput(geo, curSlot++);
 
+        // Bake Transforms is forced ON: the baked path (world transform into
+        // vertices, identity MeshData::transform) is the consumer-verified
+        // one — probe-verified pixel-identical to the archive output. The
+        // ride path (transform carried on MeshData::transform) flips the
+        // model in the 3D viewport and renders empty in Cycles when this
+        // ReadGeo stands alone with the file's parent transform selected.
+        // Re-asserted after wiring: the file parse triggered by the filename
+        // knob above completes asynchronously and re-applies knob defaults,
+        // which would otherwise revert an earlier assignment.
+        if (KnobIPtr bk = geo->getKnobByName("bakeTransforms")) {
+            if (KnobBoolPtr bb = std::dynamic_pointer_cast<KnobBool>(bk)) {
+                bb->setValue(true);
+            }
+        }
         geo->setPosition(px + 620, py + rowHeight * (double)(i + 1));
         if (mat) {
             mat->setPosition(px + 460, py + rowHeight * (double)(i + 1));

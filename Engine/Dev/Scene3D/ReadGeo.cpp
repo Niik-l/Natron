@@ -423,14 +423,18 @@ ReadGeo::initializeKnobs()
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Bake Transforms"));
         k->setName("bakeTransforms");
-        k->setDefaultValue(false);
+        k->setDefaultValue(true);
         k->setAnimationEnabled(false);
         k->setHintToolTip(tr("Bake the part's file-authored transform into the vertices at "
                              "the evaluated frame. Only applies when a single part is picked "
                              "in the Object dropdown â€” merged mode always bakes. When off, "
                              "the part keeps its node-local vertices and the file's transform "
                              "animates through the node's transform slot (the user "
-                             "Translate/Rotate/Scale composes on top of it)."));
+                             "Translate/Rotate/Scale composes on top of it). Default is on: "
+                             "the ride path with a file's parent transform renders "
+                             "misoriented in the viewport and empty in Cycles for the "
+                             "standalone-part case the Re-build Materials set produces; "
+                             "the baked path reproduces the archive look exactly."));
         page->addKnob(k);
         _imp->bakeTransforms = k;
     }
