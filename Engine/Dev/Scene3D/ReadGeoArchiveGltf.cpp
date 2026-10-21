@@ -102,18 +102,22 @@ decodeBase64(const std::string& in, std::vector<unsigned char>& out)
 
 // Resolve a cgltf image (file URI, data URI, or buffer view) to a usable
 // texture file path. External URIs resolve relative to the .gltf directory;
-// embedded content is written to a content-hashed temp file. Ported from the
-// retired flat loader (ReadGeoGltf.cpp) so embedded GLB textures reach both
-// node façades.
+// embedded content (buffer view / data URI) is staged into a same-named
+// ".glm" side folder next to the source file when sideDir is non-empty (DCC
+// convention), else to a content-hashed temp file. Ported from the retired
+// flat loader (ReadGeoGltf.cpp) so embedded GLB textures reach both node
+// façades.
 std::string
-resolveCgltfImage(const cgltf_image* image, const std::string& dir)
+resolveCgltfImage(const cgltf_image* image, const std::string& dir,
+                  const std::string& sideDir, const std::string& sideName)
 {
     if (!image) return std::string();
 
     if (image->buffer_view) {
         const unsigned char* bytes = cgltf_buffer_view_data(image->buffer_view);
         if (bytes && image->buffer_view->size > 0) {
-            return importWriteEmbeddedTexture(bytes, image->buffer_view->size, "gltf_tex");
+            return importWriteEmbeddedTexture(bytes, image->buffer_view->size, "gltf_tex",
+                                              sideDir, sideName);
         }
         return std::string();
     }
@@ -127,7 +131,8 @@ resolveCgltfImage(const cgltf_image* image, const std::string& dir)
         if (b64 != std::string::npos) {
             std::vector<unsigned char> decoded;
             if (decodeBase64(uri.substr(b64 + 7), decoded)) {
-                return importWriteEmbeddedTexture(decoded.data(), decoded.size(), "gltf_tex");
+                return importWriteEmbeddedTexture(decoded.data(), decoded.size(), "gltf_tex",
+                                                  sideDir, sideName);
             }
         }
         return std::string();
@@ -229,6 +234,22 @@ loadGltfArchiveImport(const std::string& path)
         if (slash != std::string::npos) dir = path.substr(0, slash);
     }
 
+    // Same-named ".glm" side folder for embedded textures: model.glb ->
+    // model.glm next to the source file (DCC convention). Empty when the
+    // file has no directory — embedded payloads fall back to TEMP. External
+    // file URIs (.gltf referencing loose textures on disk) resolve in place.
+    std::string glmDir;
+    {
+        const std::size_t slash = path.find_last_of("/\\");
+        if (slash != std::string::npos) {
+            const std::size_t dot = path.find_last_of('.');
+            const std::string stem = (dot != std::string::npos && dot > slash + 1)
+                                         ? path.substr(slash + 1, dot - slash - 1)
+                                         : path.substr(slash + 1);
+            glmDir = dir + "/" + stem + ".glm";
+        }
+    }
+
     cgltf_options options;
     std::memset(&options, 0, sizeof(options));
     cgltf_data* data = NULL;
@@ -255,6 +276,16 @@ loadGltfArchiveImport(const std::string& path)
         return result;
     }
 
+    // Unpack EVERY embedded image (GLB buffer views, data URIs) into the
+    // .glm side folder up front — including textures no material references.
+    // The diffuse mapping below reuses the same content-hashed files through
+    // importWriteEmbeddedTexture's dedup. External file URIs come back
+    // unchanged (they already live on disk).
+    for (cgltf_size i = 0; i < data->images_count; ++i) {
+        const cgltf_image* img = &data->images[i];
+        resolveCgltfImage(img, dir, glmDir, img->name ? img->name : "gltf_tex");
+    }
+
     // Materials.
     result.materials.resize(data->materials_count);
     for (cgltf_size m = 0; m < data->materials_count; ++m) {
@@ -279,10 +310,12 @@ loadGltfArchiveImport(const std::string& path)
         if (cm->has_ior) mat.ior = cm->ior.ior;
         if (cm->has_specular) mat.specular = cm->specular.specular_factor;
         // Diffuse texture: external file URI relative to the .gltf directory,
-        // or embedded content (data URI / buffer view) extracted to a
-        // content-hashed temp file.
+        // or embedded content (data URI / buffer view) staged into the .glm
+        // side folder.
         if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
-            mat.diffuseMapPath = resolveCgltfImage(pbr.base_color_texture.texture->image, dir);
+            const cgltf_image* img = pbr.base_color_texture.texture->image;
+            mat.diffuseMapPath = resolveCgltfImage(img, dir, glmDir,
+                                                   img->name ? img->name : "gltf_tex");
         }
     }
 
