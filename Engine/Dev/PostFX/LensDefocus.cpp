@@ -26,6 +26,7 @@
 #include <cctype>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <vector>
 
@@ -231,12 +232,15 @@ struct LensDefocusPrivate
     defocus::CameraModel pickCamera;            // at pickScale
     double pickPivotX = 0., pickPivotY = 0.;    // canonical coordinates of the last focus pivot
 
-    // EXR header camera cache: file -> matrices (empty = none).
+    // EXR header cameras by file (valid = false: no file, or no camera in it).
+    struct HeaderCamera
+    {
+        bool valid = false;
+        double w2c[16], w2ndc[16];
+        double width = 0., height = 0.;
+    };
     QMutex headerMutex;
-    std::string headerFile;
-    bool headerValid = false;
-    double headerW2C[16], headerW2NDC[16];
-    double headerWidth = 0., headerHeight = 0.;
+    std::map<std::string, HeaderCamera> headerCache;
 
     // Depth
     KnobChoiceWPtr depthSource, depthChannel, depthConvention, sceneUnits;
@@ -449,7 +453,7 @@ LensDefocus::onInputChanged(int inputNo)
     }
     if (inputNo == eInputSource) {
         QMutexLocker l(&_imp->headerMutex);
-        _imp->headerFile.clear();   // re-read the camera from the (new) upstream file
+        _imp->headerCache.clear();   // re-read the camera from the (new) upstream file
     }
 }
 
@@ -1343,24 +1347,40 @@ cameraFromProvider(const CameraProvider* cam, double time, const RectI& format, 
     return true;
 }
 
-// The file the nearest upstream Read (any node with a "filename" knob, through Source's first
-// inputs) reads at this time; empty if none.
-std::string
-upstreamFile(EffectInstance* self, double time)
+// The nearest upstream Read: any node with a "filename" knob, through Source's first inputs.
+NodePtr
+upstreamRead(EffectInstance* self)
 {
     NodePtr n = self->getNode() ? self->getNode()->getInput(eInputSource) : NodePtr();
     for (int hop = 0; n && hop < 32; ++hop) {
-        KnobFilePtr fk = std::dynamic_pointer_cast<KnobFile>(n->getKnobByName("filename"));
-        if (fk) {
-            std::string f = fk->getFileName((int)std::floor(time + 0.5), ViewIdx(0));
-            if (!f.empty() && self->getApp() && self->getApp()->getProject()) {
-                self->getApp()->getProject()->canonicalizePath(f);
-            }
-            return f;
+        if (std::dynamic_pointer_cast<KnobFile>(n->getKnobByName("filename"))) {
+            return n;
         }
         n = n->getInput(0);
     }
-    return std::string();
+    return NodePtr();
+}
+
+// The file that Read reads at `frame`, with the frame held inside its frame range (outside it a
+// Read holds its first / last frame: a single-frame render read through a #### pattern has no
+// file for the other frames).
+std::string
+readFileAt(EffectInstance* self, const NodePtr& rd, int frame)
+{
+    KnobFilePtr fk = std::dynamic_pointer_cast<KnobFile>(rd->getKnobByName("filename"));
+    if (!fk) {
+        return std::string();
+    }
+    KnobIntPtr first = std::dynamic_pointer_cast<KnobInt>(rd->getKnobByName("firstFrame"));
+    KnobIntPtr last = std::dynamic_pointer_cast<KnobInt>(rd->getKnobByName("lastFrame"));
+    if (first && last && first->getValue() <= last->getValue()) {
+        frame = std::max(first->getValue(), std::min(last->getValue(), frame));
+    }
+    std::string f = fk->getFileName(frame, ViewIdx(0));
+    if (!f.empty() && self->getApp() && self->getApp()->getProject()) {
+        self->getApp()->getProject()->canonicalizePath(f);
+    }
+    return f;
 }
 
 } // anonymous namespace
@@ -1373,9 +1393,9 @@ exrHeaderCamera(LensDefocusPrivate& imp, const std::string& file, double pxScale
         return false;
     }
     QMutexLocker l(&imp.headerMutex);
-    if (file != imp.headerFile) {
-        imp.headerFile = file;
-        imp.headerValid = false;
+    std::map<std::string, LensDefocusPrivate::HeaderCamera>::iterator it = imp.headerCache.find(file);
+    if (it == imp.headerCache.end()) {
+        LensDefocusPrivate::HeaderCamera h;
 #ifdef NATRON_HAVE_OPENIMAGEIO
         std::unique_ptr<OIIO::ImageInput> in = OIIO::ImageInput::open(file);
         if (in) {
@@ -1384,21 +1404,46 @@ exrHeaderCamera(LensDefocusPrivate& imp, const std::string& file, double pxScale
             if (sp.getattribute("worldToCamera", OIIO::TypeMatrix44, a) &&
                 sp.getattribute("worldToNDC", OIIO::TypeMatrix44, b)) {
                 for (int k = 0; k < 16; ++k) {
-                    imp.headerW2C[k] = a[k];
-                    imp.headerW2NDC[k] = b[k];
+                    h.w2c[k] = a[k];
+                    h.w2ndc[k] = b[k];
                 }
-                imp.headerWidth = sp.full_width;
-                imp.headerHeight = sp.full_height;
-                imp.headerValid = true;
+                h.width = sp.full_width;
+                h.height = sp.full_height;
+                h.valid = true;
             }
             in->close();
+        } else {
+            (void)OIIO::geterror();   // missing frame: no camera from it
         }
 #endif
+        if (imp.headerCache.size() > 512) {
+            imp.headerCache.clear();
+        }
+        it = imp.headerCache.insert(std::make_pair(file, h)).first;
     }
-    if (!imp.headerValid) {
+    const LensDefocusPrivate::HeaderCamera& h = it->second;
+    return h.valid && defocus::cameraFromExrMatrices(h.w2c, h.w2ndc, h.width, h.height, pxScale, out);
+}
+
+bool
+LensDefocus::fileCamera(double time, double pxScale, defocus::CameraModel* out)
+{
+    NodePtr rd = upstreamRead(this);
+    if (!rd) {
         return false;
     }
-    return defocus::cameraFromExrMatrices(imp.headerW2C, imp.headerW2NDC, imp.headerWidth, imp.headerHeight, pxScale, out);
+    const int frame = (int)std::floor(time + 0.5);
+    if (exrHeaderCamera(*_imp, readFileAt(this, rd, frame), pxScale, out)) {
+        return true;
+    }
+    // Missing frames in the middle of a sequence: the nearest frame that has one.
+    for (int d = 1; d <= 50; ++d) {
+        if (exrHeaderCamera(*_imp, readFileAt(this, rd, frame - d), pxScale, out) ||
+            exrHeaderCamera(*_imp, readFileAt(this, rd, frame + d), pxScale, out)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 StatusEnum
@@ -1482,8 +1527,7 @@ LensDefocus::render(const RenderActionArgs& args)
     std::string cameraSource;
     if (cam && _imp->useCamera.lock()->getValue() && cameraFromProvider(cam, time, format, pxScale, &s.camera)) {
         cameraSource = "Camera input";
-    } else if (_imp->cameraFromFile.lock()->getValue() &&
-               exrHeaderCamera(*_imp, upstreamFile(this, time), pxScale, &s.camera)) {
+    } else if (_imp->cameraFromFile.lock()->getValue() && fileCamera(time, pxScale, &s.camera)) {
         s.camera.centreX += format.x1 * pxScale;
         s.camera.centreY += format.y1 * pxScale;
         cameraSource = "file";

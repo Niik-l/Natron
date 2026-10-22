@@ -22,8 +22,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <thread>
 
 // DEFOCUS_TRACE (testbed builds only): DEFOCUS_TRACE_X / DEFOCUS_TRACE_Y env vars name one pixel
@@ -62,6 +64,111 @@ int threadCount(int requested)
     return h ? (int)h : 4;
 }
 
+// Workers kept alive for one render() call. The fill runs several parallel loops per depth slice,
+// and with hundreds of slices starting threads for each loop costs more than the work.
+class WorkerPool
+{
+public:
+    explicit WorkerPool(int threads)
+    {
+        for (int i = 0; i < threads - 1; ++i) {
+            _threads.emplace_back([this]() { workerLoop(); });
+        }
+    }
+
+    ~WorkerPool()
+    {
+        {
+            std::lock_guard<std::mutex> l(_m);
+            _quit = true;
+        }
+        _wake.notify_all();
+        for (size_t i = 0; i < _threads.size(); ++i) {
+            _threads[i].join();
+        }
+    }
+
+    int size() const { return (int)_threads.size() + 1; }
+
+    // Runs fn(chunk) for every chunk on the workers and the calling thread. Returns false if
+    // aborted() (called on the calling thread only) stopped it.
+    bool run(int chunks, const std::function<void(int)>& fn, const std::function<bool()>& aborted)
+    {
+        {
+            std::lock_guard<std::mutex> l(_m);
+            _job = &fn;
+            _chunks = chunks;
+            _next = 0;
+            _stop = false;
+            _busy = (int)_threads.size();
+            ++_generation;
+        }
+        _wake.notify_all();
+        for (;;) {
+            if (aborted && aborted()) {
+                _stop = true;
+                break;
+            }
+            const int c = _next.fetch_add(1);
+            if (c >= chunks) {
+                break;
+            }
+            fn(c);
+        }
+        std::unique_lock<std::mutex> l(_m);
+        _idle.wait(l, [this]() { return _busy == 0; });
+        _job = nullptr;
+        return !_stop.load();
+    }
+
+private:
+    void workerLoop()
+    {
+        unsigned seen = 0;
+        for (;;) {
+            const std::function<void(int)>* job;
+            int chunks;
+            {
+                std::unique_lock<std::mutex> l(_m);
+                _wake.wait(l, [&]() { return _quit || _generation != seen; });
+                if (_quit) {
+                    return;
+                }
+                seen = _generation;
+                job = _job;
+                chunks = _chunks;
+            }
+            while (!_stop.load(std::memory_order_relaxed)) {
+                const int c = _next.fetch_add(1);
+                if (c >= chunks) {
+                    break;
+                }
+                (*job)(c);
+            }
+            {
+                std::lock_guard<std::mutex> l(_m);
+                --_busy;
+            }
+            _idle.notify_all();
+        }
+    }
+
+    std::vector<std::thread> _threads;
+    std::mutex _m;
+    std::condition_variable _wake, _idle;
+    const std::function<void(int)>* _job = nullptr;
+    int _chunks = 0;
+    int _busy = 0;
+    unsigned _generation = 0;
+    bool _quit = false;
+    std::atomic<int> _next{0};
+    std::atomic<bool> _stop{false};
+};
+
+// The pool of the render() running on this thread, if any (Natron renders frames concurrently:
+// each render() call has its own).
+thread_local WorkerPool* tlsPool = nullptr;
+
 bool parallelFor(int n, int grain, int threads,
                  const std::function<bool()>& aborted,
                  const std::function<void(int, int)>& fn)
@@ -71,6 +178,12 @@ bool parallelFor(int n, int grain, int threads,
     }
     grain = std::max(1, grain);
     const int chunks = (n + grain - 1) / grain;
+    if (tlsPool && tlsPool->size() > 1 && chunks > 1) {
+        return tlsPool->run(chunks, [&](int c) {
+            const int b = c * grain;
+            fn(b, std::min(n, b + grain));
+        }, aborted);
+    }
     threads = std::max(1, std::min(threads, chunks));
     std::atomic<int> next(0);
     std::atomic<bool> stop(false);
@@ -666,6 +779,90 @@ inline int sliceIndexOf(double r, double step)
     return r < 0. ? -i : i;
 }
 
+// Exact Euclidean distance transform of a w x h grid (Felzenszwalb & Huttenlocher), with the index
+// of the nearest seed cell; columns, then rows, each in parallel. dist = +inf and nearest = -1
+// where there is no seed at all.
+void distanceTransform(int w, int h, const std::vector<unsigned char>& seed, std::vector<float>& dist,
+                       std::vector<int>& nearest, std::vector<int>& g, std::vector<int>& gRow,
+                       int nThreads, const std::function<bool()>& aborted)
+{
+    const size_t n = (size_t)w * h;
+    const int kNone = std::numeric_limits<int>::max() / 4;
+    dist.assign(n, std::numeric_limits<float>::infinity());
+    nearest.assign(n, -1);
+    // 1. Per column: distance (in rows) to the nearest seed in that column, and its row.
+    g.assign(n, kNone);
+    gRow.assign(n, -1);
+    parallelFor(w, 16, nThreads, aborted, [&](int b, int e) {
+        for (int x = b; x < e; ++x) {
+            int last = -1;
+            for (int y = 0; y < h; ++y) {
+                const size_t c = (size_t)y * w + x;
+                if (seed[c]) {
+                    last = y;
+                }
+                if (last >= 0) {
+                    g[c] = y - last;
+                    gRow[c] = last;
+                }
+            }
+            last = -1;
+            for (int y = h - 1; y >= 0; --y) {
+                const size_t c = (size_t)y * w + x;
+                if (seed[c]) {
+                    last = y;
+                }
+                if (last >= 0 && last - y < g[c]) {
+                    g[c] = last - y;
+                    gRow[c] = last;
+                }
+            }
+        }
+    });
+    // 2. Per row: lower envelope of the parabolas (x - q)^2 + g(q)^2.
+    parallelFor(h, 8, nThreads, aborted, [&](int b, int e) {
+        std::vector<int> v(w);
+        std::vector<double> z(w + 1);
+        for (int y = b; y < e; ++y) {
+            const size_t row = (size_t)y * w;
+            auto f = [&](int q) { const double gq = g[row + q]; return gq * gq; };
+            int k = -1;
+            for (int q = 0; q < w; ++q) {
+                if (g[row + q] >= kNone) {
+                    continue;
+                }
+                const double fq = f(q);
+                double s = 0.;
+                while (k >= 0) {
+                    s = ((fq + (double)q * q) - (f(v[k]) + (double)v[k] * v[k])) / (2. * (q - v[k]));
+                    if (s <= z[k]) {
+                        --k;
+                    } else {
+                        break;
+                    }
+                }
+                ++k;
+                v[k] = q;
+                z[k] = k == 0 ? -std::numeric_limits<double>::infinity() : s;
+                z[k + 1] = std::numeric_limits<double>::infinity();
+            }
+            if (k < 0) {
+                continue;   // no seed reaches this row
+            }
+            int j = 0;
+            for (int x = 0; x < w; ++x) {
+                while (z[j + 1] < x) {
+                    ++j;
+                }
+                const int q = v[j];
+                const double d2 = (double)(x - q) * (x - q) + f(q);
+                dist[row + x] = (float)std::sqrt(d2);
+                nearest[row + x] = gRow[row + q] * w + q;
+            }
+        }
+    });
+}
+
 inline float luminance(const float* c)
 {
     return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
@@ -871,6 +1068,14 @@ render(const Inputs& in,
 {
     Stats stats;
     const int nThreads = threadCount(s.threads);
+    // One pool for every parallel loop of this call (see WorkerPool).
+    WorkerPool pool(nThreads);
+    struct PoolScope
+    {
+        WorkerPool* prev;
+        explicit PoolScope(WorkerPool* p) : prev(tlsPool) { tlsPool = p; }
+        ~PoolScope() { tlsPool = prev; }
+    } poolScope(&pool);
     const Clock::time_point tDecode = Clock::now();
 
     const CocModel coc(s);
@@ -980,6 +1185,7 @@ render(const Inputs& in,
     const Rect& SB = src.bounds;
     const int Sw = SB.width(), Sh = SB.height();
     std::vector<float> rSrc((size_t)Sw * Sh, 0.f);
+    std::vector<float> invSrc((size_t)Sw * Sh, 0.f);   // 1 / planar depth, 0 = infinity or unknown
     std::vector<unsigned char> clampedSrc((size_t)Sw * Sh, 0);
     // Position/Normal can disagree with the depth pass: volumes and transparent objects (Karma
     // writes the surface behind a VDB into P and N, but the volume into depth). Such pixels don't
@@ -1014,6 +1220,7 @@ render(const Inputs& in,
                     if (geomCamera && geomPos(dx, dy, c) && -c[2] > 0.) {
                         inv = 1. / -c[2];
                     }
+                    invSrc[(size_t)j * Sw + i] = (float)inv;
                     r = focusField.tilted ? coc.radiusAt(inv, focusField.at(x, y)) : coc.radius(inv);
                 } else {
                     double inv = 0.;    // 1/depth, 0 = infinity
@@ -1045,6 +1252,7 @@ render(const Inputs& in,
                         }
                         }
                     }
+                    invSrc[(size_t)j * Sw + i] = (float)inv;
                     r = focusField.tilted ? coc.radiusAt(inv, focusField.at(x, y)) : coc.radius(inv);
                     if (useGeom && geomCamera) {
                         double c[3];
@@ -1177,6 +1385,51 @@ render(const Inputs& in,
         return -1;
     };
 
+    // The occlusion-edge question from depth alone (no Position/Normal needed): an outline is a
+    // depth step much larger than a pixel's width at that distance that doesn't continue the
+    // surface's own depth gradient (a floor at a grazing angle steps by as much on either side).
+    // Unlike a threshold on the blur difference this doesn't depend on focus, so an outline gets the
+    // same treatment on every frame of a focus pull; with a tilted focus plane the blur difference
+    // across an outline hovers around any threshold, the decision flips from pixel to pixel along
+    // it, and the flips crawl as focus moves (beaded, wavy outlines).
+    // Returns 1 for an occlusion edge, else -1 (let the other tests decide).
+    auto depthRelation = [&](int i, int j, int ii, int jj) -> int {
+        if (s.depthConvention == eDepthDirectCoC) {
+            return -1;
+        }
+        auto zAt = [&](int a, int b) -> double {   // planar depth of a domain pixel; 0 = none / infinity
+            if (a < 0 || b < 0 || a >= Dw || b >= Dh) {
+                return 0.;
+            }
+            const int x = std::max(SB.x1, std::min(SB.x2 - 1, D.x1 + a));
+            const int y = std::max(SB.y1, std::min(SB.y2 - 1, D.y1 + b));
+            const float iv = invSrc[(size_t)(y - SB.y1) * Sw + (x - SB.x1)];
+            return iv > 0.f ? 1. / iv : 0.;
+        };
+        const double za = zAt(i, j), zb = zAt(ii, jj);
+        if (!(za > 0.) || !(zb > 0.)) {
+            return -1;   // against infinity (sky): the radius test sees the jump
+        }
+        const double lateral = std::max(za, zb) / proj.fpx;   // scene units across one pixel
+        const double dz = zb - za;
+        if (std::fabs(dz) <= 4. * lateral) {
+            return -1;
+        }
+        // Surface gradient measured 2-3 pixels out on each side, past any anti-aliased blend
+        // pixels at the outline (those make an edge look like a short ramp to its neighbours).
+        // Done on 1/depth, which is exactly linear across the image on any plane (depth itself
+        // curves, a lot at grazing angles).
+        const int di = ii - i, dj = jj - j;
+        const double a1 = zAt(i - 2 * di, j - 2 * dj), a0 = zAt(i - 3 * di, j - 3 * dj);
+        const double b1 = zAt(ii + 2 * di, jj + 2 * dj), b0 = zAt(ii + 3 * di, jj + 3 * dj);
+        if (a1 > 0. && a0 > 0. && b1 > 0. && b0 > 0.) {
+            const double gap = 1. / b1 - 1. / a1;   // over 5 pixel steps
+            const double err = std::min(std::fabs(gap - 5. * (1. / a1 - 1. / a0)), std::fabs(gap - 5. * (1. / b0 - 1. / b1)));
+            return err > 4. * lateral / (za * zb) ? 1 : -1;   // the depth tolerance, in 1/depth
+        }
+        return 1;
+    };
+
     // Whether two neighbouring (occupied) domain pixels must go into different slices:
     //  0 = no; 1 = yes, an occlusion edge (Position/Normal); 2 = yes, by the blur-radius test;
     //  3 = no, because Position/Normal say one surface where the radius test would split (only
@@ -1187,7 +1440,12 @@ render(const Inputs& in,
         // With Position/Normal the geometry decides: one surface never splits, and a real
         // occlusion edge splits even when the radii differ by little (those leave the faint seams
         // the radius test lets through).
-        int rel = geomRelation(i, j, ii, jj);
+        // A clear depth step is an outline whatever P/N say (filtered P/N blur contacts and
+        // outlines into "one surface"); otherwise P/N may still find one surface or an outline.
+        int rel = depthRelation(i, j, ii, jj);
+        if (rel == -1) {
+            rel = geomRelation(i, j, ii, jj);
+        }
         if (rel == 1 && !s.splitOcclusionEdges) {
             rel = -1;   // Fast: occlusion edges go by the radius test
         }
@@ -1799,6 +2057,10 @@ render(const Inputs& in,
     // ---- 5. per slice (nearest first): level choice, background fill, aggregation
     const Clock::time_point tFill = Clock::now();
     std::vector<Slice> slices;
+    // Per-slice scratch, reused across slices.
+    std::vector<float> W, P, Rs, Hc, RoccC, RfrontC, cleanC, dist, distP;
+    std::vector<unsigned char> cleanOk, seedMask, covered;
+    std::vector<int> srcIdx, srcP, edtG, edtRow;
     slices.reserve(nSlices);
     std::vector<float> H(N, 0.f), Rocc(N, 0.f), Rfront(N, std::numeric_limits<float>::quiet_NaN());
     float maxRocc = 0.f;
@@ -1842,7 +2104,9 @@ render(const Inputs& in,
         const size_t RN = (size_t)rw * rh;
 
         // Aggregate this slice's samples into region cells (all levels: L0 cells are pixels).
-        std::vector<float> W(RN, 0.f), P(RN * 4, 0.f), Rs(RN, 0.f);
+        W.assign(RN, 0.f);
+        P.assign(RN * 4, 0.f);
+        Rs.assign(RN, 0.f);
         const double inv = 1. / ((double)sc * sc);
         for (int q = b; q < e; ++q) {
             PixSample ps;
@@ -1877,10 +2141,13 @@ render(const Inputs& in,
                                   holeBox.y2 / sc + 1 < region.y1 || holeBox.y1 / sc > region.y2);
         if (s.fillBehind && regionHits) {
             // Occluders and clean plate per cell.
-            std::vector<float> Hc(RN, 0.f), RoccC(RN, 0.f), RfrontC(RN, std::numeric_limits<float>::quiet_NaN());
-            std::vector<float> cleanC(clean.valid() ? RN * 4 : 0, 0.f);
-            std::vector<unsigned char> cleanOk(clean.valid() ? RN : 0, 0);
-            for (int j = 0; j < rh; ++j) {
+            Hc.assign(RN, 0.f);
+            RoccC.assign(RN, 0.f);
+            RfrontC.assign(RN, std::numeric_limits<float>::quiet_NaN());
+            cleanC.assign(clean.valid() ? RN * 4 : 0, 0.f);
+            cleanOk.assign(clean.valid() ? RN : 0, 0);
+            parallelFor(rh, 8, nThreads, aborted, [&](int jb, int je) {
+            for (int j = jb; j < je; ++j) {
                 for (int i = 0; i < rw; ++i) {
                     const size_t c = (size_t)j * rw + i;
                     const int gi = region.x1 + i, gj = region.y1 + j;
@@ -1921,12 +2188,12 @@ render(const Inputs& in,
                     }
                 }
             }
+            });
 
-            // Chamfer distance + nearest seed cell. Seeds are cells of this slice at least one cell
-            // away from any nearer content: with an aliased depth pass the pixels right at the edge
-            // carry the foreground's anti-aliased colour, and extending them streaks it inwards.
-            std::vector<float> dist(RN, std::numeric_limits<float>::infinity());
-            std::vector<int> srcIdx(RN, -1);
+            // Distance + nearest seed cell. Seeds are cells of this slice at least one cell away
+            // from any nearer content: with an aliased depth pass the pixels right at the edge carry
+            // the foreground's anti-aliased colour, and extending them streaks it inwards.
+            seedMask.assign(RN, 0);
             int nSeeds = 0;
             for (int pass = 0; pass < 2 && nSeeds == 0; ++pass) {
                 for (int j = 0; j < rh; ++j) {
@@ -1948,75 +2215,28 @@ render(const Inputs& in,
                             }
                         }
                         if (seed) {
-                            dist[c] = 0.f;
-                            srcIdx[c] = (int)c;
+                            seedMask[c] = 1;
                             ++nSeeds;
                         }
                     }
                 }
             }
-            const float d1 = 1.f, d2 = 1.41421356f;
-            auto relax = [&](size_t c, int ni, int nj, float d) {
-                if (ni < 0 || nj < 0 || ni >= rw || nj >= rh) {
-                    return;
-                }
-                const size_t n = (size_t)nj * rw + ni;
-                if (dist[n] + d < dist[c]) {
-                    dist[c] = dist[n] + d;
-                    srcIdx[c] = srcIdx[n];
-                }
-            };
-            for (int j = 0; j < rh; ++j) {
-                for (int i = 0; i < rw; ++i) {
-                    const size_t c = (size_t)j * rw + i;
-                    relax(c, i - 1, j, d1); relax(c, i, j - 1, d1);
-                    relax(c, i - 1, j - 1, d2); relax(c, i + 1, j - 1, d2);
-                }
-            }
-            for (int j = rh - 1; j >= 0; --j) {
-                for (int i = rw - 1; i >= 0; --i) {
-                    const size_t c = (size_t)j * rw + i;
-                    relax(c, i + 1, j, d1); relax(c, i, j + 1, d1);
-                    relax(c, i + 1, j + 1, d2); relax(c, i - 1, j + 1, d2);
-                }
-            }
+            distanceTransform(rw, rh, seedMask, dist, srcIdx, edtG, edtRow, nThreads, aborted);
             // Distance to the nearest cell this slice actually covers decides how far the fill must
             // reach; the seeds above sit back from the edge and would cut the fill short.
             // The nearest covered cell also gives the fill its blur radius: on a depth ramp that is
             // the adjacent pixel, so the radius stays continuous; behind an object it is the
             // background's own radius (not the object's), so their junction doesn't leave a seam.
-            std::vector<float> distP(RN, std::numeric_limits<float>::infinity());
-            std::vector<int> srcP(RN, -1);
+            covered.assign(RN, 0);
             for (size_t c = 0; c < RN; ++c) {
-                if (W[c] > 0.f) {
-                    distP[c] = 0.f;
-                    srcP[c] = (int)c;
-                }
+                covered[c] = W[c] > 0.f ? 1 : 0;
             }
-            auto relaxP = [&](size_t c, int ni, int nj, float d) {
-                if (ni >= 0 && nj >= 0 && ni < rw && nj < rh) {
-                    const size_t n = (size_t)nj * rw + ni;
-                    if (distP[n] + d < distP[c]) {
-                        distP[c] = distP[n] + d;
-                        srcP[c] = srcP[n];
-                    }
-                }
-            };
-            for (int j = 0; j < rh; ++j) {
-                for (int i = 0; i < rw; ++i) {
-                    const size_t c = (size_t)j * rw + i;
-                    relaxP(c, i - 1, j, d1); relaxP(c, i, j - 1, d1);
-                    relaxP(c, i - 1, j - 1, d2); relaxP(c, i + 1, j - 1, d2);
-                }
-            }
-            for (int j = rh - 1; j >= 0; --j) {
-                for (int i = rw - 1; i >= 0; --i) {
-                    const size_t c = (size_t)j * rw + i;
-                    relaxP(c, i + 1, j, d1); relaxP(c, i, j + 1, d1);
-                    relaxP(c, i + 1, j + 1, d2); relaxP(c, i - 1, j + 1, d2);
-                }
-            }
-            for (int j = 0; j < rh; ++j) {
+            distanceTransform(rw, rh, covered, distP, srcP, edtG, edtRow, nThreads, aborted);
+            const int fillGrain = 8;
+            std::vector<std::vector<Sample> > fillChunks((rh + fillGrain - 1) / fillGrain);
+            parallelFor(rh, fillGrain, nThreads, aborted, [&](int jb, int je) {
+            std::vector<Sample>& chunk = fillChunks[jb / fillGrain];
+            for (int j = jb; j < je; ++j) {
                 for (int i = 0; i < rw; ++i) {
                     const size_t c = (size_t)j * rw + i;
                     if (srcIdx[c] < 0) {
@@ -2083,8 +2303,12 @@ render(const Inputs& in,
                         const bool disc = gap > std::max(1.5 * rs, 0.2 * std::max(std::fabs(rF), std::fabs(rSrc)));
                         f.c[4] = disc ? (float)h : 0.f;
                     }
-                    fills.push_back(f);
+                    chunk.push_back(f);
                 }
+            }
+            });
+            for (size_t k = 0; k < fillChunks.size(); ++k) {
+                fills.insert(fills.end(), fillChunks[k].begin(), fillChunks[k].end());
             }
         }
         stats.filled += (std::int64_t)fills.size();

@@ -29,6 +29,10 @@
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 
+namespace defocus {
+struct CameraModel;
+}
+
 NATRON_NAMESPACE_ENTER
 
 struct LensDefocusPrivate;
@@ -139,6 +143,8 @@ private:
     void alignFocusPlane();
     // Sets focus from the cached depth at canonical position pos (per Focus mode).
     void pickFocusAt(double time, const QPointF& pos);
+    // Camera from the upstream Read's EXR header at this time (held / nearest frame if missing).
+    bool fileCamera(double time, double pxScale, defocus::CameraModel* out);
 
     std::unique_ptr<LensDefocusPrivate> _imp;
 };
