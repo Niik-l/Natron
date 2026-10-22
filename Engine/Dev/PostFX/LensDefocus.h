@@ -128,6 +128,8 @@ private:
 
     void refreshLayerChoices();
     void refreshKnobVisibility();
+    // Align Focus Plane to Surface: tilt/swing from the normal under the last focus pivot.
+    void alignFocusPlane();
 
     std::unique_ptr<LensDefocusPrivate> _imp;
 };
