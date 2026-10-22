@@ -113,6 +113,13 @@ public:
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time,
                              bool originatedFromMainThread) OVERRIDE FINAL;
 
+    // Viewer: Ctrl+Alt+click (or Ctrl+middle-click) picks focus at the cursor from the last rendered
+    // depth. Plain clicks go on to the Focus Point handle and the viewer (colour pick, pan).
+    virtual bool hasOverlay() const OVERRIDE FINAL { return true; }
+    virtual bool onOverlayPenDown(double time, const RenderScale& renderScale, ViewIdx view,
+                                  const QPointF& viewportPos, const QPointF& pos, double pressure,
+                                  double timestamp, PenType pen) OVERRIDE FINAL WARN_UNUSED_RETURN;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;

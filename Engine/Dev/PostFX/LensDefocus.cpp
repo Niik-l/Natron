@@ -155,6 +155,14 @@ struct LensDefocusPrivate
     std::vector<DepthOption> depthOptions;
     int autoIndex = -1;
 
+    // Depth channel of the last render, for picking focus in the viewer (render thread writes,
+    // main thread reads).
+    QMutex pickMutex;
+    std::vector<float> pickDepth;
+    RectI pickBounds;           // pixel coordinates at pickScale
+    double pickScale = 1.;
+    bool pickValid = false;
+
     // Depth
     KnobChoiceWPtr depthSource, depthChannel, depthConvention, sceneUnits;
     KnobDoubleWPtr unitScale, farThreshold, normalizedNear, normalizedFar;
@@ -492,14 +500,16 @@ LensDefocus::initializeKnobs()
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Focus"));
         k->setName("focusMode");
         std::vector<ChoiceOption> o;
-        o.push_back(ChoiceOption("distance", "Distance", "Focus at Focus Distance."));
+        o.push_back(ChoiceOption("distance", "Distance", "Focus at Focus Distance. Ctrl+Alt+click in the viewer sets it from the depth under the cursor."));
         o.push_back(ChoiceOption("point", "Point (autofocus)", "Focus on whatever is under Focus Point, every frame. Link the point to a tracker for a follow-focus."));
         k->populateChoices(o);
         k->setDefaultValue(eFocusDistance);
         lens->addKnob(k); _imp->focusMode = k;
     }
     _imp->focusDistance = dbl(lens, "Focus Distance", "focusDistance", 5., 0.1, 100.,
-                              tr("Distance to the focus plane, in scene units (see Depth > Scene Units)."));
+                              tr("Distance to the focus plane, in scene units (see Depth > Scene Units). Ctrl+Alt+click "
+                                 "(or Ctrl+middle-click) in the viewer picks it from the depth under the cursor; keyframed "
+                                 "if the knob is animated."));
     _imp->focusDistance.lock()->setMinimum(1e-4);
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Focus Point"), 2);
@@ -512,8 +522,9 @@ LensDefocus::initializeKnobs()
         k->setDisplayMinimum(0., 1); k->setDisplayMaximum(4096., 1);
         k->setAnimationEnabled(true);
         k->setHasHostOverlayHandle(true);
-        k->setHintToolTip(tr("Autofocus point in pixels. The nearest depth in a small window around it is used, "
-                             "so it doesn't land on an anti-aliased edge."));
+        k->setHintToolTip(tr("Autofocus point in pixels: drag the crosshair, or Ctrl+Alt+click (Ctrl+middle-click) "
+                             "anywhere in the viewer. The nearest depth in a small window around it is used, so it "
+                             "doesn't land on an anti-aliased edge."));
         lens->addKnob(k); _imp->focusPoint = k;
     }
     _imp->nearGain = dbl(lens, "Near Gain", "nearGain", 1., 0., 2.,
@@ -740,6 +751,65 @@ LensDefocus::initializeKnobs()
     refreshKnobVisibility();
 }
 
+bool
+LensDefocus::onOverlayPenDown(double time, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+                              const QPointF& /*viewportPos*/, const QPointF& pos, double /*pressure*/,
+                              double /*timestamp*/, PenType pen)
+{
+    // Ctrl+Alt+left and Ctrl+middle both reach plugin overlays as the middle pen (the viewer keeps
+    // plain Alt+drag and middle-drag for panning, and Ctrl+left for colour picking).
+    if (pen != ePenTypeMMB) {
+        return false;
+    }
+    KnobDoublePtr fp = _imp->focusPoint.lock();
+    if (fp) {
+        fp->setValue(pos.x(), ViewSpec::all(), 0);
+        fp->setValue(pos.y(), ViewSpec::all(), 1);
+    }
+    if (_imp->focusMode.lock()->getValue() == eFocusPoint) {
+        return true;    // autofocus follows the point from the next render
+    }
+
+    // Distance mode: nearest depth in a 5x5 window around the click, from the last render.
+    double best = std::numeric_limits<double>::infinity();
+    {
+        QMutexLocker l(&_imp->pickMutex);
+        if (_imp->pickValid) {
+            defocus::Settings s;
+            s.depthConvention = (defocus::DepthConventionEnum)_imp->depthConvention.lock()->getValue();
+            s.zeroIsInfinity = _imp->zeroIsInfinity.lock()->getValue();
+            s.farThreshold = _imp->farThreshold.lock()->getValue();
+            s.normalizedNear = _imp->normalizedNear.lock()->getValueAtTime(time);
+            s.normalizedFar = _imp->normalizedFar.lock()->getValueAtTime(time);
+            s.normalizedInvert = _imp->normalizedInvert.lock()->getValue();
+            const RectI& b = _imp->pickBounds;
+            const int px = (int)std::floor(pos.x() * _imp->pickScale);
+            const int py = (int)std::floor(pos.y() * _imp->pickScale);
+            for (int y = py - 2; y <= py + 2; ++y) {
+                for (int x = px - 2; x <= px + 2; ++x) {
+                    if (x >= b.x1 && x < b.x2 && y >= b.y1 && y < b.y2) {
+                        const double d = defocus::decodeDepthUnits(s, _imp->pickDepth[(size_t)(y - b.y1) * b.width() + (x - b.x1)]);
+                        if (d > 0. && d < best) {
+                            best = d;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (!std::isfinite(best)) {
+        setPersistentMessage(eMessageTypeWarning, "Pick focus: no depth under the cursor (background, or nothing rendered yet).");
+        return true;
+    }
+    KnobDoublePtr fd = _imp->focusDistance.lock();
+    if (fd->isAnimated(0)) {
+        fd->setValueAtTime(time, best, ViewSpec::all(), 0);   // keep focus pulls keyframed
+    } else {
+        fd->setValue(best, ViewSpec::all(), 0);
+    }
+    return true;
+}
+
 StatusEnum
 LensDefocus::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale& scale, ViewIdx view, RectD* rod)
 {
@@ -892,6 +962,18 @@ LensDefocus::render(const RenderActionArgs& args)
         depthRa.reset(new Image::ReadAccess(depthImg.get()));
         in.depth = viewOf(depthImg, *depthRa);
         in.depthChannel = std::max(0, std::min(in.depth.channels - 1, dChannel));
+        // Keep a copy for picking focus in the viewer.
+        QMutexLocker l(&_imp->pickMutex);
+        const defocus::Rect& b = in.depth.bounds;
+        _imp->pickDepth.resize((size_t)b.width() * b.height());
+        for (int y = b.y1; y < b.y2; ++y) {
+            for (int x = b.x1; x < b.x2; ++x) {
+                _imp->pickDepth[(size_t)(y - b.y1) * b.width() + (x - b.x1)] = in.depth.pixel(x, y)[in.depthChannel];
+            }
+        }
+        _imp->pickBounds = RectI(b.x1, b.y1, b.x2, b.y2);
+        _imp->pickScale = pxScale;
+        _imp->pickValid = true;
     }
     if (cleanImg) {
         cleanRa.reset(new Image::ReadAccess(cleanImg.get()));
