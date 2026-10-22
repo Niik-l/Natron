@@ -179,7 +179,7 @@
 #include "Dev/PostFX/VectorBlur.h"
 #include "Dev/PostFX/PatchFill.h"
 #include "Dev/PostFX/ContentFill.h"
-#include "Dev/PostFX/ZDefocus.h"
+#include "Dev/PostFX/LensDefocus.h"
 #include "Dev/PostFX/PMask.h"
 
 // Dev nodes — Particles
@@ -1804,11 +1804,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<VectorBlur>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
     registerBuiltInPlugin<PatchFill>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
     registerBuiltInPlugin<ContentFill>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
-    // ZDefocus disabled 2026-05-24: the community zDefocus PyPlug from natron-plugins
-    // covers this use-case better (front/back asymmetry, layer-stack algorithm for
-    // larger blurs). Our C++ ZDefocus's niche was bokeh-shape control (bladed iris),
-    // but that's not in active use. Code kept intact; re-enable by uncommenting.
-    //registerBuiltInPlugin<ZDefocus>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
+    registerBuiltInPlugin<LensDefocus>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
     registerBuiltInPlugin<PMask>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/keyer_grouping_2.png"), false, false);
 }
 

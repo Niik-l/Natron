@@ -49,7 +49,7 @@ struct VectorBlurPrivate;
  *                     is reserved/zero in our convention). If input 1 is not
  *                     wired the node passes Source through unchanged. Same
  *                     "data via a shuffled secondary input" pattern as PMask
- *                     (Position pass) and ZDefocus (depth pass).
+ *                     (Position pass) and LensDefocus (depth pass).
  */
 class VectorBlur
     : public EffectInstance
