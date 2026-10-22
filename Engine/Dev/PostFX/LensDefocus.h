@@ -113,12 +113,19 @@ public:
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time,
                              bool originatedFromMainThread) OVERRIDE FINAL;
 
-    // Viewer: Ctrl+Alt+click (or Ctrl+middle-click) picks focus at the cursor from the last rendered
-    // depth. Plain clicks go on to the Focus Point handle and the viewer (colour pick, pan).
+    // Viewer: with Pick Focus on, a click (or drag) picks focus at the cursor from the last rendered
+    // depth; Ctrl+middle-click does it any time. Other clicks go on to the Focus Point handle and
+    // the viewer (colour pick, pan).
     virtual bool hasOverlay() const OVERRIDE FINAL { return true; }
     virtual bool onOverlayPenDown(double time, const RenderScale& renderScale, ViewIdx view,
                                   const QPointF& viewportPos, const QPointF& pos, double pressure,
                                   double timestamp, PenType pen) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual bool onOverlayPenMotion(double time, const RenderScale& renderScale, ViewIdx view,
+                                    const QPointF& viewportPos, const QPointF& pos, double pressure,
+                                    double timestamp) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual bool onOverlayPenUp(double time, const RenderScale& renderScale, ViewIdx view,
+                                const QPointF& viewportPos, const QPointF& pos, double pressure,
+                                double timestamp) OVERRIDE FINAL WARN_UNUSED_RETURN;
 
 private:
 
@@ -130,6 +137,8 @@ private:
     void refreshKnobVisibility();
     // Align Focus Plane to Surface: tilt/swing from the normal under the last focus pivot.
     void alignFocusPlane();
+    // Sets focus from the cached depth at canonical position pos (per Focus mode).
+    void pickFocusAt(double time, const QPointF& pos);
 
     std::unique_ptr<LensDefocusPrivate> _imp;
 };

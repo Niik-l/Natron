@@ -245,7 +245,8 @@ struct LensDefocusPrivate
     KnobBoolWPtr zeroIsInfinity, normalizedInvert, depthPremultiplied;
     // Lens
     KnobChoiceWPtr cocMode, focusMode;
-    KnobBoolWPtr useCamera, cameraFromFile, filmBackFromFile;
+    KnobBoolWPtr useCamera, cameraFromFile, filmBackFromFile, pickFocus;
+    bool pickDragging = false;  // a Pick Focus drag is in progress (main thread)
     KnobDoubleWPtr focalLength, fStop, filmBack, focusDistance, focusPoint, sizeAtInfinity;
     KnobDoubleWPtr focusWorldPoint, focusTilt, focusSwing;
     KnobButtonWPtr alignPlane;
@@ -714,19 +715,32 @@ LensDefocus::initializeKnobs()
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Focus"));
         k->setName("focusMode");
         std::vector<ChoiceOption> o;
-        o.push_back(ChoiceOption("distance", "Distance", "Focus at Focus Distance. Ctrl+Alt+click in the viewer sets it from the depth under the cursor."));
+        o.push_back(ChoiceOption("distance", "Distance", "Focus at Focus Distance. With Pick Focus on, click in the viewer to set it from the depth under the cursor."));
         o.push_back(ChoiceOption("point", "Point (autofocus)", "Focus on whatever is under Focus Point, every frame. Link the point to a tracker for a follow-focus."));
-        o.push_back(ChoiceOption("world", "World Point", "Focus on a point in the scene: Ctrl+Alt+click it once and focus "
+        o.push_back(ChoiceOption("world", "World Point", "Focus on a point in the scene: pick it once (Pick Focus) and focus "
                                                          "stays on it while the camera moves. Needs a camera (Camera input "
                                                          "or the file's) and a Position pass or depth."));
         k->populateChoices(o);
         k->setDefaultValue(eFocusDistance);
         lens->addKnob(k); _imp->focusMode = k;
     }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Pick Focus"));
+        k->setName("pickFocus");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setIsPersistent(false);
+        k->setHintToolTip(tr("While on (with this panel open), clicking in the viewer picks focus from the depth "
+                             "under the cursor, and dragging scrubs it: Distance sets Focus Distance, Point moves "
+                             "the Focus Point, World Point sets the Focus World Point. Picks set keyframes when the "
+                             "knob is animated. Turn it off to use the viewer normally. Ctrl+middle-click picks "
+                             "without it."));
+        lens->addKnob(k); _imp->pickFocus = k;
+    }
     _imp->focusDistance = dbl(lens, "Focus Distance", "focusDistance", 5., 0.1, 100.,
-                              tr("Distance to the focus plane, in scene units (see Depth > Scene Units). Ctrl+Alt+click "
-                                 "(or Ctrl+middle-click) in the viewer picks it from the depth under the cursor; keyframed "
-                                 "if the knob is animated."));
+                              tr("Distance to the focus plane, in scene units (see Depth > Scene Units). Pick Focus (or "
+                                 "Ctrl+middle-click) picks it from the depth under the cursor; keyframed if the knob is "
+                                 "animated."));
     _imp->focusDistance.lock()->setMinimum(1e-4);
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Focus Point"), 2);
@@ -739,8 +753,9 @@ LensDefocus::initializeKnobs()
         k->setDisplayMinimum(0., 1); k->setDisplayMaximum(4096., 1);
         k->setAnimationEnabled(true);
         k->setHasHostOverlayHandle(true);
-        k->setHintToolTip(tr("Autofocus point in pixels: drag the crosshair, or Ctrl+Alt+click (Ctrl+middle-click) "
-                             "anywhere in the viewer. The nearest depth in a small window around it is used, so it "
+        k->setHintToolTip(tr("Autofocus point in pixels: drag the crosshair, or click anywhere with Pick Focus on (or "
+                             "Ctrl+middle-click). To animate it, set a key first (right-click > Set Key); then each "
+                             "drag or pick on another frame adds a key. The nearest depth in a small window around it is used, so it "
                              "doesn't land on an anti-aliased edge."));
         lens->addKnob(k); _imp->focusPoint = k;
     }
@@ -754,8 +769,8 @@ LensDefocus::initializeKnobs()
         k->setDimensionName(1, "y");
         k->setDimensionName(2, "z");
         k->setAnimationEnabled(true);
-        k->setHintToolTip(tr("World-space point that stays in focus (scene units). Ctrl+Alt+click (or Ctrl+middle-click) "
-                             "in the viewer picks it from the Position pass, or from depth through the camera."));
+        k->setHintToolTip(tr("World-space point that stays in focus (scene units). Pick Focus (or Ctrl+middle-click) "
+                             "picks it from the Position pass, or from depth through the camera."));
         lens->addKnob(k); _imp->focusWorldPoint = k;
     }
     _imp->focusTilt = dbl(lens, "Focus Tilt", "focusTilt", 0., -89., 89.,
@@ -1150,17 +1165,49 @@ LensDefocus::onOverlayPenDown(double time, const RenderScale& /*renderScale*/, V
                               const QPointF& /*viewportPos*/, const QPointF& pos, double /*pressure*/,
                               double /*timestamp*/, PenType pen)
 {
-    // Ctrl+Alt+left and Ctrl+middle both reach plugin overlays as the middle pen (the viewer keeps
-    // plain Alt+drag and middle-drag for panning, and Ctrl+left for colour picking).
-    if (pen != ePenTypeMMB) {
+    // Overlays get no modifier keys, so picking is a mode: with Pick Focus on, a left click picks
+    // (and a drag scrubs). Ctrl+middle-click reaches overlays as the middle pen (plain middle-drag
+    // pans before overlays see it), so it picks without the mode.
+    const bool pickMode = _imp->pickFocus.lock()->getValue();
+    if (!((pickMode && pen == ePenTypeLMB) || pen == ePenTypeMMB)) {
         return false;
     }
+    _imp->pickDragging = pickMode && pen == ePenTypeLMB;
+    pickFocusAt(time, pos);
+    return true;
+}
+
+bool
+LensDefocus::onOverlayPenMotion(double time, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+                                const QPointF& /*viewportPos*/, const QPointF& pos, double /*pressure*/,
+                                double /*timestamp*/)
+{
+    if (!_imp->pickDragging) {
+        return false;
+    }
+    pickFocusAt(time, pos);
+    return true;
+}
+
+bool
+LensDefocus::onOverlayPenUp(double /*time*/, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+                            const QPointF& /*viewportPos*/, const QPointF& /*pos*/, double /*pressure*/,
+                            double /*timestamp*/)
+{
+    const bool was = _imp->pickDragging;
+    _imp->pickDragging = false;
+    return was;
+}
+
+void
+LensDefocus::pickFocusAt(double time, const QPointF& pos)
+{
     KnobDoublePtr fp = _imp->focusPoint.lock();
     setMaybeKeyed(fp, time, pos.x(), 0);
     setMaybeKeyed(fp, time, pos.y(), 1);
     const int mode = _imp->focusMode.lock()->getValue();
     if (mode == eFocusPoint) {
-        return true;    // autofocus follows the point from the next render
+        return;    // autofocus follows the point from the next render
     }
 
     int bx = 0, by = 0;
@@ -1175,22 +1222,21 @@ LensDefocus::onOverlayPenDown(double time, const RenderScale& /*renderScale*/, V
     }
     if (!okDepth) {
         setPersistentMessage(eMessageTypeWarning, "Pick focus: no depth under the cursor (background, or nothing rendered yet).");
-        return true;
+        return;
     }
     if (mode == eFocusWorld) {
         if (!okWorld) {
             setPersistentMessage(eMessageTypeWarning, "Pick focus: World Point needs a world Position pass or a camera "
                                                       "(Camera input, or Camera From File).");
-            return true;
+            return;
         }
         KnobDoublePtr wp = _imp->focusWorldPoint.lock();
         for (int k = 0; k < 3; ++k) {
             setMaybeKeyed(wp, time, w[k], k);
         }
-        return true;
+        return;
     }
     setMaybeKeyed(_imp->focusDistance.lock(), time, depth, 0);
-    return true;
 }
 
 void
