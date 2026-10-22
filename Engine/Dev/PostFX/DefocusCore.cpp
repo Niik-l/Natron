@@ -769,6 +769,7 @@ struct Slice
     int level = 0;
     float maxAbsR = 0.f;
     std::vector<Sample> cells;  // level-grid samples
+    std::vector<Sample> fills;  // level-grid background filled in behind nearer slices
     std::vector<Sample> hi;     // full-res highlight samples
 };
 
@@ -1423,6 +1424,18 @@ render(const Inputs& in,
         const double a1 = zAt(i - 2 * di, j - 2 * dj), a0 = zAt(i - 3 * di, j - 3 * dj);
         const double b1 = zAt(ii + 2 * di, jj + 2 * dj), b0 = zAt(ii + 3 * di, jj + 3 * dj);
         if (a1 > 0. && a0 > 0. && b1 > 0. && b0 > 0.) {
+            // A real outline has a smooth surface on either side (steep is fine: a sphere near its
+            // silhouette). Noisy depth (a volume, fur, render noise) jumps about as much everywhere:
+            // not an outline, or every noisy pixel would force slices and cut the rest of the frame
+            // into thin bands. Smoothness = how much 1/depth's slope changes from pixel to pixel.
+            const double am = zAt(i - 4 * di, j - 4 * dj), bm = zAt(ii + 4 * di, jj + 4 * dj);
+            if (am > 0. && bm > 0.) {
+                const double curvL = std::fabs((1. / a1 - 1. / a0) - (1. / a0 - 1. / am));
+                const double curvR = std::fabs((1. / b0 - 1. / b1) - (1. / bm - 1. / b0));
+                if (std::max(curvL, curvR) > 0.25 * std::fabs(1. / zb - 1. / za)) {
+                    return -1;
+                }
+            }
             const double gap = 1. / b1 - 1. / a1;   // over 5 pixel steps
             const double err = std::min(std::fabs(gap - 5. * (1. / a1 - 1. / a0)), std::fabs(gap - 5. * (1. / b0 - 1. / b1)));
             return err > 4. * lateral / (za * zb) ? 1 : -1;   // the depth tolerance, in 1/depth
@@ -1909,7 +1922,9 @@ render(const Inputs& in,
     // step, and extra slice boundaries are placed (greedy interval stabbing) so that the front and
     // back of every depth edge land in different slices. Smooth surfaces and near-equal depths
     // still share slices and add up. (Fine bins: 1/16 of the step.)
-    const double fineStep = s.sliceStep / 16.;   // fine enough that a ~3% radius jump spans bins
+    // Forced boundaries fall on a grid of 1/8 of the step: finer cuts every outline more exactly but
+    // slices smooth surfaces elsewhere into thin bands, each band boundary a faint ripple.
+    const double fineStep = s.sliceStep / 8.;
     std::vector<short> sIdx(nIds, 0);
     parallelFor(Dh, 64, nThreads, aborted, [&](int b, int e) {
         for (size_t p = (size_t)b * Dw; p < (size_t)e * Dw; ++p) {
@@ -2284,6 +2299,10 @@ render(const Inputs& in,
                     if (distP[c] > (RoccC[c] + std::fabs(rSrc)) / sc + 2.) {
                         continue;
                     }
+                    // Same surface continuing under a nearer slice (its blur matches the occluder's),
+                    // as opposed to background hidden behind a different object.
+                    const double rF = RfrontC[c];
+                    const bool disc = std::fabs(rF - rSrc) > std::max(1.5 * rs, 0.2 * std::max(std::fabs(rF), std::fabs(rSrc)));
                     Sample f;
                     f.x = region.x1 + i;
                     f.y = region.y1 + j;
@@ -2298,9 +2317,6 @@ render(const Inputs& in,
                         for (int k = 0; k < 4; ++k) {
                             f.c[k] = (float)(P[(size_t)sidx * 4 + k] / wSrc * h);
                         }
-                        const double rF = RfrontC[c];
-                        const double gap = std::fabs(rF - rSrc);
-                        const bool disc = gap > std::max(1.5 * rs, 0.2 * std::max(std::fabs(rF), std::fabs(rSrc)));
                         f.c[4] = disc ? (float)h : 0.f;
                     }
                     chunk.push_back(f);
@@ -2331,8 +2347,9 @@ render(const Inputs& in,
                 sl.cells.push_back(o);
             }
         }
-        sl.cells.insert(sl.cells.end(), fills.begin(), fills.end());
         std::sort(sl.cells.begin(), sl.cells.end(), lessYX);
+        sl.fills.swap(fills);
+        std::sort(sl.fills.begin(), sl.fills.end(), lessYX);
         std::sort(sl.hi.begin(), sl.hi.end(), lessYX);
 
         // This slice now occludes everything farther.
@@ -2401,10 +2418,11 @@ render(const Inputs& in,
     };
 
     const bool okScatter = parallelFor(nStrips, 1, nThreads, aborted, [&](int b, int e) {
-        SpanBuffer full;
-        SpanBuffer lvl[5];
+        SpanBuffer full, fullF;
+        SpanBuffer lvl[5], lvlF[5];
         std::vector<Interval> scratch;
-        std::vector<float> acc, sl;
+        std::vector<float> acc, sl, inside, insideL[5];
+        int insideLAt[5][2];
         for (int st = b; st < e; ++st) {
             const int y0 = O.y1 + st * kStripRows;
             const int y1 = std::min(O.y2, y0 + kStripRows);
@@ -2412,96 +2430,191 @@ render(const Inputs& in,
             acc.assign((size_t)Ow * sh * kNumCh, 0.f);
             sl.assign((size_t)Ow * sh * kNumCh, 0.f);
             full.setup(O.x1, y0, Ow, sh);
+            fullF.setup(O.x1, y0, Ow, sh);
+            // Where the image has content (source alpha), full-res and per level. Filled-in
+            // background stands for surface hidden behind nearer slices, which only exists inside
+            // the image's own silhouette: its blur must not spill into empty space, where it would
+            // draw a second copy of an outline the nearer slice already blurs (a wavy edge against
+            // the sky at every slice boundary that meets it).
+            inside.resize((size_t)Ow * sh);
+            for (int y = y0; y < y1; ++y) {
+                for (int x = O.x1; x < O.x2; ++x) {
+                    float c[4];
+                    srcAt(x, y, c);
+                    inside[(size_t)(y - y0) * Ow + (x - O.x1)] = std::max(0.f, std::min(1.f, c[3]));
+                }
+            }
+            for (int L = 0; L < 5; ++L) {
+                insideL[L].clear();
+            }
 
             for (int k = (int)slices.size() - 1; k >= 0; --k) {
                 const Slice& S = slices[k];
                 const int L = S.level;
                 const int sc = 1 << L;
                 const double maxR = S.maxAbsR * 4. + std::fabs(caPx) + 2.;  // generous: swirl / squeeze
-                bool touched = false;
+                auto lu = [&](double val, int origin) { return (val - origin + 0.5) / sc - 0.5; };
+                const int ilo = (int)std::floor(lu(O.x1, D.x1)), ihi = (int)std::floor(lu(O.x2 - 1, D.x1)) + 1;
+                const int jlo = (int)std::floor(lu(y0, D.y1)), jhi = (int)std::floor(lu(y1 - 1, D.y1)) + 1;
 
-                // Highlights and level-0 cells: full-res buffer.
-                auto scatterFull = [&](const std::vector<Sample>& v, bool gridIsLevel) {
-                    const int yLo = (int)std::floor(y0 - maxR) - 1, yHi = (int)std::ceil(y1 + maxR) + 1;
-                    for (auto it = lowerY(v, gridIsLevel ? yLo - D.y1 : yLo); it != v.end(); ++it) {
-                        const int sy = gridIsLevel ? it->y + D.y1 : it->y;
-                        if (sy > yHi) {
-                            break;
-                        }
-                        const int sx = gridIsLevel ? it->x + D.x1 : it->x;
-                        scatterWithCA(full, scratch, *it, sx - O.x1, sy - y0, sx, sy, 1.);
-                        touched = true;
+                // Scatters samples (highlights: full-res pixels; else level-grid cells) into the
+                // full-res buffer (level 0) or the level buffer. Returns whether anything was written.
+                auto scatterSet = [&](const std::vector<Sample>& v, bool gridIsLevel, SpanBuffer& fullBuf,
+                                      SpanBuffer& lb) -> bool {
+                    bool touched = false;
+                    if (v.empty()) {
+                        return false;
                     }
-                };
-                if (!S.hi.empty()) {
-                    scatterFull(S.hi, false);
-                }
-                if (L == 0) {
-                    scatterFull(S.cells, true);
-                } else if (!S.cells.empty()) {
-                    // Level buffer covering the strip for bilinear upsampling.
-                    auto lu = [&](double v, int origin) { return (v - origin + 0.5) / sc - 0.5; };
-                    const int ilo = (int)std::floor(lu(O.x1, D.x1)), ihi = (int)std::floor(lu(O.x2 - 1, D.x1)) + 1;
-                    const int jlo = (int)std::floor(lu(y0, D.y1)), jhi = (int)std::floor(lu(y1 - 1, D.y1)) + 1;
-                    SpanBuffer& lb = lvl[L];
-                    lb.setup(ilo, jlo, ihi - ilo + 1, jhi - jlo + 1);
+                    if (!gridIsLevel || L == 0) {
+                        const int yLo = (int)std::floor(y0 - maxR) - 1, yHi = (int)std::ceil(y1 + maxR) + 1;
+                        for (auto it = lowerY(v, gridIsLevel ? yLo - D.y1 : yLo); it != v.end(); ++it) {
+                            const int sy = gridIsLevel ? it->y + D.y1 : it->y;
+                            if (sy > yHi) {
+                                break;
+                            }
+                            const int sx = gridIsLevel ? it->x + D.x1 : it->x;
+                            scatterWithCA(fullBuf, scratch, *it, sx - O.x1, sy - y0, sx, sy, 1.);
+                            touched = true;
+                        }
+                        return touched;
+                    }
                     const double maxRl = maxR / sc + 1.;
                     const int yLo = (int)std::floor(jlo - maxRl), yHi = (int)std::ceil(jhi + maxRl);
-                    bool lt = false;
-                    for (auto it = lowerY(S.cells, yLo); it != S.cells.end(); ++it) {
+                    for (auto it = lowerY(v, yLo); it != v.end(); ++it) {
                         if (it->y > yHi) {
                             break;
                         }
                         const double fullX = D.x1 + (it->x + 0.5) * sc - 0.5;
                         const double fullY = D.y1 + (it->y + 0.5) * sc - 0.5;
                         scatterWithCA(lb, scratch, *it, it->x - ilo, it->y - jlo, fullX, fullY, sc);
-                        lt = true;
-                    }
-                    if (lt) {
-                        lb.resolve();
-                        // Bilinear upsample into the slice strip.
-                        for (int y = y0; y < y1; ++y) {
-                            const double v = lu(y, D.y1) - jlo;
-                            int j0 = (int)std::floor(v);
-                            const float fy = (float)(v - j0);
-                            j0 = std::max(0, std::min(lb.h - 2, j0));
-                            const float* r0 = lb.row(lb.y0 + j0);
-                            const float* r1 = lb.row(lb.y0 + j0 + 1);
-                            float* dst = sl.data() + (size_t)(y - y0) * Ow * kNumCh;
-                            for (int x = O.x1; x < O.x2; ++x) {
-                                const double u = lu(x, D.x1) - ilo;
-                                int i0 = (int)std::floor(u);
-                                const float fx = (float)(u - i0);
-                                i0 = std::max(0, std::min(lb.w - 2, i0));
-                                const float* a0 = r0 + (size_t)i0 * kNumCh;
-                                const float* a1 = r1 + (size_t)i0 * kNumCh;
-                                float* o = dst + (size_t)(x - O.x1) * kNumCh;
-                                for (int c = 0; c < kNumCh; ++c) {
-                                    const float top = a0[c] + (a0[c + kNumCh] - a0[c]) * fx;
-                                    const float bot = a1[c] + (a1[c + kNumCh] - a1[c]) * fx;
-                                    o[c] += top + (bot - top) * fy;
-                                }
-                            }
-                        }
-                        lb.touchLo = 0;
-                        lb.touchHi = lb.h - 1;
-                        lb.clearTouched();
                         touched = true;
                     }
+                    return touched;
+                };
+
+                if (L > 0) {
+                    lvl[L].setup(ilo, jlo, ihi - ilo + 1, jhi - jlo + 1);
+                    lvlF[L].setup(ilo, jlo, ihi - ilo + 1, jhi - jlo + 1);
                 }
-                if (!touched) {
-                    continue;
+                bool touched = scatterSet(S.hi, false, full, lvl[L]);
+                bool touchedL = scatterSet(S.cells, true, full, lvl[L]);
+                const bool filled = scatterSet(S.fills, true, fullF, lvlF[L]);
+                if (L == 0) {
+                    touched = touched || touchedL;
                 }
-                if (full.touchHi >= full.touchLo) {
+
+                // Fills join the slice weighted by the silhouette: level 0 at full res (touched rows
+                // only), other levels on the level grid before the one upsample.
+                if (filled && L == 0 && fullF.touchHi >= fullF.touchLo) {
+                    fullF.resolve();
                     full.resolve();
+                    for (int ry = fullF.touchLo; ry <= fullF.touchHi; ++ry) {
+                        float* r = full.row(y0 + ry);
+                        const float* f = fullF.row(y0 + ry);
+                        const float* m = inside.data() + (size_t)ry * Ow;
+                        for (int x = 0; x < Ow; ++x) {
+                            for (int c = 0; c < kNumCh; ++c) {
+                                r[(size_t)x * kNumCh + c] += f[(size_t)x * kNumCh + c] * m[x];
+                            }
+                        }
+                    }
+                    full.touch(fullF.touchLo);
+                    full.touch(fullF.touchHi);
+                    fullF.clearTouched();
+                    // full is resolved now: copy it out directly below
                     for (int ry = full.touchLo; ry <= full.touchHi; ++ry) {
                         const float* r = full.row(y0 + ry);
-                        float* dst = sl.data() + (size_t)ry * Ow * kNumCh;
+                        float* dd = sl.data() + (size_t)ry * Ow * kNumCh;
                         for (size_t q = 0; q < (size_t)Ow * kNumCh; ++q) {
-                            dst[q] += r[q];
+                            dd[q] += r[q];
                         }
                     }
                     full.clearTouched();
+                    touched = true;
+                } else if (full.touchHi >= full.touchLo) {
+                    full.resolve();
+                    for (int ry = full.touchLo; ry <= full.touchHi; ++ry) {
+                        const float* r = full.row(y0 + ry);
+                        float* dd = sl.data() + (size_t)ry * Ow * kNumCh;
+                        for (size_t q = 0; q < (size_t)Ow * kNumCh; ++q) {
+                            dd[q] += r[q];
+                        }
+                    }
+                    full.clearTouched();
+                }
+                if (L > 0 && (touchedL || filled)) {
+                    SpanBuffer& lb = lvl[L];
+                    lb.resolve();
+                    if (filled) {
+                        SpanBuffer& lf = lvlF[L];
+                        lf.resolve();
+                        // Level-grid silhouette (mean source alpha per cell), once per strip and level.
+                        std::vector<float>& mL = insideL[L];
+                        if (mL.empty() || insideLAt[L][0] != ilo || insideLAt[L][1] != jlo) {
+                            mL.assign((size_t)lb.w * lb.h, 0.f);
+                            insideLAt[L][0] = ilo;
+                            insideLAt[L][1] = jlo;
+                            for (int j = 0; j < lb.h; ++j) {
+                                for (int i = 0; i < lb.w; ++i) {
+                                    double sum = 0.;
+                                    int n = 0;
+                                    for (int yy = D.y1 + (jlo + j) * sc; yy < D.y1 + (jlo + j + 1) * sc; ++yy) {
+                                        for (int xx = D.x1 + (ilo + i) * sc; xx < D.x1 + (ilo + i + 1) * sc; ++xx) {
+                                            float c[4];
+                                            srcAt(xx, yy, c);
+                                            sum += std::max(0.f, std::min(1.f, c[3]));
+                                            ++n;
+                                        }
+                                    }
+                                    mL[(size_t)j * lb.w + i] = (float)(sum / std::max(1, n));
+                                }
+                            }
+                        }
+                        for (int j = 0; j < lb.h; ++j) {
+                            float* r = lb.row(lb.y0 + j);
+                            const float* f = lf.row(lf.y0 + j);
+                            for (int i = 0; i < lb.w; ++i) {
+                                const float m = mL[(size_t)j * lb.w + i];
+                                for (int c = 0; c < kNumCh; ++c) {
+                                    r[(size_t)i * kNumCh + c] += f[(size_t)i * kNumCh + c] * m;
+                                }
+                            }
+                        }
+                        lf.touchLo = 0;
+                        lf.touchHi = lf.h - 1;
+                        lf.clearTouched();
+                    }
+                    // Bilinear upsample into the slice strip.
+                    for (int y = y0; y < y1; ++y) {
+                        const double vv = lu(y, D.y1) - jlo;
+                        int j0 = (int)std::floor(vv);
+                        const float fy = (float)(vv - j0);
+                        j0 = std::max(0, std::min(lb.h - 2, j0));
+                        const float* r0 = lb.row(lb.y0 + j0);
+                        const float* r1 = lb.row(lb.y0 + j0 + 1);
+                        float* dd = sl.data() + (size_t)(y - y0) * Ow * kNumCh;
+                        for (int x = O.x1; x < O.x2; ++x) {
+                            const double u = lu(x, D.x1) - ilo;
+                            int i0 = (int)std::floor(u);
+                            const float fx = (float)(u - i0);
+                            i0 = std::max(0, std::min(lb.w - 2, i0));
+                            const float* a0 = r0 + (size_t)i0 * kNumCh;
+                            const float* a1 = r1 + (size_t)i0 * kNumCh;
+                            float* o = dd + (size_t)(x - O.x1) * kNumCh;
+                            for (int c = 0; c < kNumCh; ++c) {
+                                const float top = a0[c] + (a0[c + kNumCh] - a0[c]) * fx;
+                                const float bot = a1[c] + (a1[c + kNumCh] - a1[c]) * fx;
+                                o[c] += top + (bot - top) * fy;
+                            }
+                        }
+                    }
+                    lb.touchLo = 0;
+                    lb.touchHi = lb.h - 1;
+                    lb.clearTouched();
+                    touched = true;
+                }
+                if (!touched) {
+                    continue;
                 }
                 // Composite this slice over everything behind it. Coverage above 1 inside one slice
                 // means the background fill overlapped the slice's own pixels (same surface counted
