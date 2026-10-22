@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -33,6 +34,7 @@
 #include <QtCore/QMutex>
 
 #include "DefocusCore.h"
+#include "LensTrace.h"
 
 #include "Engine/AppInstance.h"
 #include "Engine/AppManager.h"
@@ -75,6 +77,13 @@ enum FocusModeEnum
     eFocusPoint,            // autofocus: the depth under Focus Point
     eFocusWorld,            // a world-space point: stays on the object when the camera moves
 };
+
+// Lens menu: 0 = procedural (the Bokeh knobs), then the built-in traced lenses, then a file.
+enum LensModelEnum
+{
+    eLensProcedural = 0,
+};
+const char* const kLensFromFile = "file";
 
 enum SpaceChoiceEnum
 {
@@ -255,7 +264,17 @@ struct LensDefocusPrivate
     KnobDoubleWPtr focusWorldPoint, focusTilt, focusSwing;
     KnobButtonWPtr alignPlane;
     KnobDoubleWPtr nearGain, farGain, maxRadius;
+    // Traced lens table, rebuilt when its inputs change (render threads; built in ~0.05 s).
+    QMutex tableMutex;
+    std::string tableKey;
+    std::shared_ptr<const defocus::LensTable> table;
+    std::string tableError;
+
     // Bokeh
+    KnobChoiceWPtr lensModel;
+    KnobFileWPtr lensFile;
+    KnobDoubleWPtr lensCharacter;
+    KnobBoolWPtr lensColour;
     KnobIntWPtr blades;
     KnobDoubleWPtr curvature, rotation, squeeze, catEye, catEyeStart, swirl, sphericalAberration;
     KnobDoubleWPtr onionAmount, onionFrequency, axialCA;
@@ -625,6 +644,18 @@ LensDefocus::refreshKnobVisibility()
     _imp->focusTilt.lock()->setSecret(direct);
     _imp->focusSwing.lock()->setSecret(direct);
     _imp->alignPlane.lock()->setSecret(direct);
+
+    // Traced lens: its kernels replace the procedural character knobs.
+    const std::string lensId = _imp->lensModel.lock()->getActiveEntry().id;
+    const bool traced = !lensId.empty() && lensId != "procedural";
+    _imp->lensFile.lock()->setSecret(lensId != kLensFromFile);
+    _imp->lensCharacter.lock()->setSecret(!traced);
+    _imp->lensColour.lock()->setSecret(!traced);
+    _imp->catEye.lock()->setSecret(traced);
+    _imp->catEyeStart.lock()->setSecret(traced);
+    _imp->swirl.lock()->setSecret(traced);
+    _imp->sphericalAberration.lock()->setSecret(traced);
+    _imp->axialCA.lock()->setSecret(traced && _imp->lensColour.lock()->getValue());
 }
 
 bool
@@ -640,7 +671,8 @@ LensDefocus::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /
     }
     if (k == _imp->depthConvention.lock().get() || k == _imp->depthSource.lock().get() ||
         k == _imp->cocMode.lock().get() || k == _imp->focusMode.lock().get() || k == _imp->sceneUnits.lock().get() ||
-        k == _imp->focusTilt.lock().get() || k == _imp->focusSwing.lock().get()) {
+        k == _imp->focusTilt.lock().get() || k == _imp->focusSwing.lock().get() ||
+        k == _imp->lensModel.lock().get() || k == _imp->lensColour.lock().get()) {
         refreshKnobVisibility();
         return true;
     }
@@ -808,6 +840,48 @@ LensDefocus::initializeKnobs()
 
     // ---------------------------------------------------------------- Bokeh
     KnobPagePtr bokeh = AppManager::createKnob<KnobPage>(this, tr("Bokeh"));
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Lens"));
+        k->setName("lensModel");
+        std::vector<ChoiceOption> o;
+        o.push_back(ChoiceOption("procedural", "Procedural", "Bokeh from the knobs below (thin lens + cat's eye, swirl, "
+                                                             "spherical aberration ...)."));
+        for (const std::string& id : defocus::builtinLensIds()) {
+            defocus::LensPrescription lp;
+            defocus::builtinLens(id, &lp);
+            o.push_back(ChoiceOption(id, lp.name, lp.source));
+        }
+        o.push_back(ChoiceOption(kLensFromFile, "From File", "A lens prescription file (pbrt / Kolb .dat format)."));
+        k->populateChoices(o);
+        k->setDefaultValue(eLensProcedural);
+        k->setHintToolTip(tr("Procedural, or a real lens design ray traced through its glass: the bokeh's size, "
+                             "cat's eye at the frame edges (cut by the element rims), coma, spherical aberration and "
+                             "axial colour all come from the lens. The design is scaled to Focal Length; F-Stop sets "
+                             "its iris (clamped to the widest the design allows)."));
+        bokeh->addKnob(k); _imp->lensModel = k;
+    }
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Lens File"));
+        k->setName("lensFile");
+        k->setHintToolTip(tr("Lens prescription, one surface per line from the front: radius, thickness, index, "
+                             "clear diameter (mm), optional Abbe number; radius 0 with index 0 = the aperture stop. "
+                             "The format of pbrt's lens files and Kolb et al. 1995."));
+        bokeh->addKnob(k); _imp->lensFile = k;
+    }
+    _imp->lensCharacter = dbl(bokeh, "Lens Character", "lensCharacter", 1., 0., 1.,
+                              tr("How much of the traced lens to use: 1 = as traced (soft corners, cat's eye, coma, "
+                                 "aberrations), 0 = an ideal lens with the same iris."));
+    _imp->lensCharacter.lock()->setMinimum(0.);
+    _imp->lensCharacter.lock()->setMaximum(1.);
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Lens Colour"));
+        k->setName("lensColour");
+        k->setDefaultValue(true);
+        k->setHintToolTip(tr("Trace red, green and blue separately: the glass's dispersion gives axial colour "
+                             "(magenta / green fringes either side of focus). About 3x slower. The built-in designs "
+                             "have no published dispersion, so it is estimated from their indices."));
+        bokeh->addKnob(k); _imp->lensColour = k;
+    }
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Blades"));
         k->setName("blades");
@@ -1295,7 +1369,11 @@ LensDefocus::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale&
     s.lens.squeeze = _imp->squeeze.lock()->getValueAtTime(time);
     s.lens.swirl = _imp->swirl.lock()->getValueAtTime(time);
     s.lens.axialCA = _imp->axialCA.lock()->getValueAtTime(time);
-    const double pad = defocus::maxPaddingPx(s);
+    double pad = defocus::maxPaddingPx(s);
+    const std::string lensId = _imp->lensModel.lock()->getActiveEntry().id;
+    if (!lensId.empty() && lensId != "procedural") {
+        pad *= 2.;   // a traced kernel can outgrow the thin-lens disc (field curvature at the corners)
+    }
     rod->x1 -= pad; rod->x2 += pad;
     rod->y1 -= pad; rod->y2 += pad;
     return eStatusOK;
@@ -1552,6 +1630,72 @@ LensDefocus::render(const RenderActionArgs& args)
     s.lens.onionFrequency = _imp->onionFrequency.lock()->getValueAtTime(time);
     s.lens.axialCA = _imp->axialCA.lock()->getValueAtTime(time);
 
+    // Traced lens.
+    std::vector<std::string> lensWarnings;
+    {
+        const std::string lensId = _imp->lensModel.lock()->getActiveEntry().id;
+        if (!lensId.empty() && lensId != "procedural" && s.cocMode == defocus::eCocCamera) {
+            std::string path;
+            if (lensId == kLensFromFile) {
+                path = _imp->lensFile.lock()->getValue();
+                if (getApp() && getApp()->getProject()) {
+                    getApp()->getProject()->canonicalizePath(path);
+                }
+            }
+            const double pxPerMmFull = s.formatWidthPx / std::max(1e-9, s.filmbackWidthMm);
+            defocus::LensTableParams tp;
+            tp.focalLengthMm = s.focalLengthMm;
+            tp.fNumber = s.fNumber;
+            tp.focusDistanceMm = s.focusDistance * s.worldToMm;
+            tp.fieldRadiusMm = s.fieldRadiusPx / std::max(1e-9, pxScale) / pxPerMmFull;
+            std::ostringstream key;
+            key.precision(9);
+            key << lensId << '|' << path << '|' << tp.focalLengthMm << '|' << tp.fNumber << '|' << tp.focusDistanceMm << '|' << tp.fieldRadiusMm;
+            QMutexLocker l(&_imp->tableMutex);
+            if (key.str() != _imp->tableKey) {
+                _imp->tableKey = key.str();
+                _imp->table.reset();
+                _imp->tableError.clear();
+                defocus::LensPrescription lp;
+                bool ok = false;
+                if (lensId == kLensFromFile) {
+                    std::ifstream f(path.c_str());
+                    if (!f) {
+                        _imp->tableError = "Lens File: cannot read " + path;
+                    } else {
+                        std::ostringstream text;
+                        text << f.rdbuf();
+                        ok = defocus::parseLensFile(text.str(), &lp, &_imp->tableError);
+                    }
+                } else {
+                    ok = defocus::builtinLens(lensId, &lp);
+                }
+                if (ok) {
+                    std::string err;
+                    _imp->table = defocus::LensTable::build(lp, tp, &err);
+                    if (!_imp->table) {
+                        _imp->tableError = "Lens: " + err;
+                    }
+                }
+            }
+            s.lens.table = _imp->table;
+            if (!_imp->tableError.empty()) {
+                lensWarnings.push_back(_imp->tableError + " (using the procedural bokeh).");
+            } else if (_imp->table && _imp->table->effectiveFNumber() > s.fNumber * 1.01) {
+                std::ostringstream m;
+                m.precision(3);
+                m << "This lens opens to f/" << _imp->table->widestFNumber() << " at most: F-Stop f/" << s.fNumber << " is traced at f/"
+                  << _imp->table->effectiveFNumber() << " (the blur size still follows F-Stop).";
+                lensWarnings.push_back(m.str());
+            }
+            s.lens.character = _imp->lensCharacter.lock()->getValueAtTime(time);
+            s.lens.chromatic = _imp->lensColour.lock()->getValue();
+            if (s.lens.table && s.lens.chromatic) {
+                s.lens.axialCA = 0.;   // the traced lens gives its own
+            }
+        }
+    }
+
     s.sliceStep = std::max(0.02, _imp->sliceStep.lock()->getValue());
     s.fullResRadius = _imp->fullResRadius.lock()->getValue() * pxScale;
     s.highlightThreshold = _imp->highlightThreshold.lock()->getValueAtTime(time);
@@ -1769,6 +1913,8 @@ LensDefocus::render(const RenderActionArgs& args)
             warnings.push_back(m.str());
         }
     }
+
+    warnings.insert(warnings.end(), lensWarnings.begin(), lensWarnings.end());
 
     defocus::Stats stats;
     bool done = true;
