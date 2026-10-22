@@ -42,10 +42,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace defocus {
+
+class LensTable;   // LensTrace.h
 
 struct Rect
 {
@@ -199,6 +202,12 @@ struct LensSettings
     double onionFrequency = 6.;     // rings across the radius
     double axialCA = 0.;            // signed CoC offset in px: R gets +a, B gets -a (full-res px)
     int profileSteps = 6;           // nested shapes used to approximate a radial profile
+
+    // A traced real lens (LensTrace.h). When set, its kernels replace cat's eye, swirl and spherical
+    // aberration (the blades, rotation and squeeze still shape the iris).
+    std::shared_ptr<const LensTable> table;
+    double character = 1.;          // 0 = ideal thin lens .. 1 = the traced lens as is
+    bool chromatic = true;          // trace R, G and B separately (axial colour; 3x scatter)
 };
 
 struct Settings

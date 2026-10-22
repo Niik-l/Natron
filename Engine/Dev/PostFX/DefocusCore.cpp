@@ -17,6 +17,7 @@
  * ***** END LICENSE BLOCK ***** */
 
 #include "DefocusCore.h"
+#include "LensTrace.h"
 
 #include <algorithm>
 #include <atomic>
@@ -333,12 +334,14 @@ struct KernelShape
     double m[4];        // pixel = [m0 m1; m2 m3] * unit
     double inv[4];
     double yExtent;     // max |pixel.y| over the unit disc
-    bool clip;
-    double clipX, clipY;// cat's-eye clip disc (unit coords, radius 1)
+    int nClip;          // clip discs (unit coords): cat's eye, or the rims of a traced lens
+    double clipX[4], clipY[4], clipR[4];
     int nRings;
     const double* ringScale;
     const double* ringWeight;
+    double ringS[17], ringW[17];   // storage when the rings are built per sample (traced lens)
     double energy;      // optical vignetting: light lost to the clip
+    double offX, offY;  // kernel centre offset in pixels (coma of a traced lens)
     bool point;
 };
 
@@ -346,8 +349,11 @@ class ProceduralLens
 {
 public:
 
-    explicit ProceduralLens(const LensSettings& l)
+    // rInf: thin-lens radius at infinity (render-scale px), to place a sample in a traced lens's
+    // table.
+    explicit ProceduralLens(const LensSettings& l, double rInf = 0.)
         : _l(l)
+        , _rInf(rInf)
     {
         if (l.blades >= 3) {
             const int n = std::min(16, l.blades);
@@ -395,9 +401,18 @@ public:
 
     const std::vector<Constraint>& constraints() const { return _constraints; }
 
-    // r: signed radius in grid px; (fx, fy): field position, 1 = frame corner.
-    void shape(double r, double fx, double fy, KernelShape& out) const
+    // Separate kernels per colour channel (a traced chromatic lens).
+    bool perChannel() const { return _l.table && _l.chromatic && _l.character > 0.; }
+
+    // r: signed radius in grid px; (fx, fy): field position, 1 = frame corner; u: the sample's
+    // radius over the radius at infinity (traced lens); channel: 0 R, 1 G, 2 B.
+    void shape(double r, double fx, double fy, KernelShape& out, double u = 0., int channel = 1) const
     {
+        out.offX = out.offY = 0.;
+        if (_l.table) {
+            tracedShape(r, fx, fy, u, channel, out);
+            return;
+        }
         const double rad = std::fabs(r);
         double m0 = rad * _sqX, m1 = 0., m2 = 0., m3 = rad * _sqY;
         const double rho = std::sqrt(fx * fx + fy * fy);
@@ -428,14 +443,15 @@ public:
         }
         out.yExtent = std::sqrt(m2 * m2 + m3 * m3);
 
-        out.clip = false;
+        out.nClip = 0;
         out.energy = 1.;
         if (_l.catEye > 0. && rho > _l.catEyeStart) {
             const double o = std::min(1.9, _l.catEye * (rho - _l.catEyeStart) / std::max(1e-6, 1. - _l.catEyeStart));
             if (o > 1e-4) {
-                out.clip = true;
-                out.clipX = o * c;
-                out.clipY = o * s;
+                out.nClip = 1;
+                out.clipX[0] = o * c;
+                out.clipY[0] = o * s;
+                out.clipR[0] = 1.;
                 // Two unit discs offset by o: the light kept, which darkens the frame edges.
                 out.energy = (2. * std::acos(o / 2.) - (o / 2.) * std::sqrt(4. - o * o)) / kPi;
             }
@@ -453,6 +469,66 @@ public:
     }
 
 private:
+
+    // Traced lens: the table's kernel for this defocus, field position and channel, turned from the
+    // field frame (x towards the frame edge) into the image, blended with an ideal thin lens by
+    // Character (ideal = the traced convention: the stop image is inverted, a = -1).
+    void tracedShape(double r, double fx, double fy, double u, int channel, KernelShape& out) const
+    {
+        KernelLookup L;
+        const double rho = std::sqrt(fx * fx + fy * fy);
+        _l.table->lookup(u, rho, channel, &L);
+        const double ch = std::max(0., std::min(1., _l.character));
+        const double A[4] = {ch * L.a[0] - (1. - ch), ch * L.a[1], ch * L.a[2], ch * L.a[3] - (1. - ch)};
+        const double c = rho > 1e-9 ? fx / rho : 1., s = rho > 1e-9 ? fy / rho : 0.;
+        // M = R A R^T, R = [c -s; s c]; then the squeeze and the radius.
+        const double t0 = c * A[0] - s * A[2], t1 = c * A[1] - s * A[3];
+        const double t2 = s * A[0] + c * A[2], t3 = s * A[1] + c * A[3];
+        const double M[4] = {t0 * c - t1 * s, t0 * s + t1 * c, t2 * c - t3 * s, t2 * s + t3 * c};
+        const double m0 = r * M[0] * _sqX, m1 = r * M[1] * _sqY, m2 = r * M[2] * _sqX, m3 = r * M[3] * _sqY;
+        out.m[0] = m0; out.m[1] = m1; out.m[2] = m2; out.m[3] = m3;
+        const double det = m0 * m3 - m1 * m2;
+        out.point = std::sqrt(std::fabs(det)) < 0.1;
+        if (!out.point) {
+            out.inv[0] = m3 / det; out.inv[1] = -m1 / det;
+            out.inv[2] = -m2 / det; out.inv[3] = m0 / det;
+        }
+        out.yExtent = std::sqrt(m2 * m2 + m3 * m3);
+        const double sh = ch * L.shift * r;
+        out.offX = sh * c;
+        out.offY = sh * s;
+        // Rim clip discs: grow away as Character goes to 0 (a disc scaled by 1/ch keeps its side).
+        out.nClip = 0;
+        if (ch > 1e-3) {
+            for (int i = 0; i < L.nClip && i < 4; ++i) {
+                out.clipX[out.nClip] = L.clipX[i] / ch * c;
+                out.clipY[out.nClip] = L.clipX[i] / ch * s;
+                out.clipR[out.nClip] = L.clipR[i] / ch;
+                ++out.nClip;
+            }
+        }
+        out.energy = ch * L.energy + (1. - ch);
+        // Profile blended with uniform (a single full-size ring).
+        int n = 0;
+        bool hasOne = false;
+        for (int i = 0; i < L.nRings && n < 16; ++i) {
+            out.ringS[n] = L.ringScale[i];
+            out.ringW[n] = ch * L.ringWeight[i];
+            if (std::fabs(L.ringScale[i] - 1.) < 1e-9) {
+                out.ringW[n] += 1. - ch;
+                hasOne = true;
+            }
+            ++n;
+        }
+        if (!hasOne) {
+            out.ringS[n] = 1.;
+            out.ringW[n] = 1. - ch;
+            ++n;
+        }
+        out.nRings = n;
+        out.ringScale = out.ringS;
+        out.ringWeight = out.ringW;
+    }
 
     double profile(double rho, double sgn) const
     {
@@ -495,6 +571,7 @@ private:
     }
 
     LensSettings _l;
+    double _rInf = 0.;
     std::vector<Constraint> _constraints;
     double _sqX = 1., _sqY = 1.;
     std::vector<double> _nearScale, _nearWeight, _farScale, _farWeight;
@@ -540,10 +617,10 @@ inline bool clipLine(const std::vector<Constraint>& cons, double sc,
             return false;
         }
     }
-    if (k.clip) {
-        const double ox = bx - k.clipX, oy = by - k.clipY;
+    for (int i = 0; i < k.nClip; ++i) {
+        const double ox = bx - k.clipX[i], oy = by - k.clipY[i];
         const double B = 2. * (ax * ox + ay * oy);
-        const double C = ox * ox + oy * oy - 1.;
+        const double C = ox * ox + oy * oy - k.clipR[i] * k.clipR[i];
         const double disc = B * B - 4. * aa * C;
         if (disc <= 0.) {
             return false;
@@ -671,6 +748,8 @@ void scatterSample(SpanBuffer& buf, std::vector<Interval>& scratch,
                    const ProceduralLens& lens, const KernelShape& k,
                    double bx, double by, const float* v)
 {
+    bx += k.offX;
+    by += k.offY;
     if (k.point) {
         const int cx = (int)std::floor(bx + 0.5);
         const int cy = (int)std::floor(by + 0.5);
@@ -1054,8 +1133,11 @@ maxPaddingPx(const Settings& s)
 {
     const double q = std::max(0.05, s.lens.squeeze);
     const double sq = std::sqrt(std::max(q, 1. / q));
-    const double sw = 1. + std::max(0., std::fabs(s.lens.swirl));
-    return s.maxRadiusPx * s.renderScale * sq * std::min(4., sw)
+    double sw = std::min(4., 1. + std::max(0., std::fabs(s.lens.swirl)));
+    if (s.lens.table) {
+        sw = std::max(sw, s.lens.table->maxScale());   // a traced kernel can outgrow the thin-lens disc
+    }
+    return s.maxRadiusPx * s.renderScale * sq * sw
            + std::fabs(s.lens.axialCA) * s.renderScale + 2.;
 }
 
@@ -1080,7 +1162,7 @@ render(const Inputs& in,
     const Clock::time_point tDecode = Clock::now();
 
     const CocModel coc(s);
-    const ProceduralLens lens(s.lens);
+    const ProceduralLens lens(s.lens, coc.rInf);
     const double rs = s.renderScale;
     const double caPx = s.lens.axialCA * rs;
 
@@ -2392,8 +2474,10 @@ render(const Inputs& in,
                              double gx, double gy, double fullX, double fullY, double gridScale) {
         const double fx = (fullX - cx0) * invField, fy = (fullY - cy0) * invField;
         KernelShape k;
-        if (caPx == 0.) {
-            lens.shape(smp.r / gridScale, fx, fy, k);
+        // Where the sample sits in a traced lens's table: its radius over the radius at infinity.
+        const double u = coc.rInf != 0. ? smp.r / coc.rInf : 0.;
+        if (caPx == 0. && !lens.perChannel()) {
+            lens.shape(smp.r / gridScale, fx, fy, k, u, 1);
             scatterSample(buf, scratch, lens, k, gx, gy, smp.c);
             return;
         }
@@ -2408,7 +2492,7 @@ render(const Inputs& in,
                 v[3] = smp.c[3];
                 v[4] = smp.c[4];
             }
-            lens.shape(rr[ch] / gridScale, fx, fy, k);
+            lens.shape(rr[ch] / gridScale, fx, fy, k, u, ch);
             scatterSample(buf, scratch, lens, k, gx, gy, v);
         }
     };
