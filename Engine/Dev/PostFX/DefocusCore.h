@@ -97,7 +97,60 @@ enum DepthConventionEnum
     eDepthInverse,       // 1/Z, far = 0 (Nuke convention)
     eDepthNormalized,    // 0..1 remapped between Normalized Near/Far (AI / 2.5D depth maps)
     eDepthDirectCoC,     // the value is the signed CoC radius in pixels (full-res)
+    eDepthPosition,      // planar depth computed from the Position plane (needs camera space or a camera)
 };
+
+enum SpaceEnum
+{
+    eSpaceWorld = 0,
+    eSpaceCamera,        // camera space; either sign of the view axis is accepted
+};
+
+// Optional camera, for the Position/Normal features: depth from P, a focus point locked to the
+// world, filling hidden background along the surface plane. Camera space: +X right, +Y up, looking
+// down -Z.
+struct CameraModel
+{
+    bool valid = false;
+    double origin[3] = {0., 0., 0.};                    // world position
+    double rot[9] = {1., 0., 0., 0., 1., 0., 0., 0., 1.};// camera-to-world rotation, row-major (columns = camera axes)
+    double focalPx = 1000.;                             // focal length, render-scale px
+    double centreX = 0., centreY = 0.;                  // principal point, render-scale px (pixel corners at integers)
+
+    // World point -> camera space.
+    void toCamera(const double w[3], double c[3]) const
+    {
+        const double d[3] = {w[0] - origin[0], w[1] - origin[1], w[2] - origin[2]};
+        for (int k = 0; k < 3; ++k) {
+            c[k] = rot[0 * 3 + k] * d[0] + rot[1 * 3 + k] * d[1] + rot[2 * 3 + k] * d[2];
+        }
+    }
+    // World direction -> camera space.
+    void dirToCamera(const double w[3], double c[3]) const
+    {
+        for (int k = 0; k < 3; ++k) {
+            c[k] = rot[0 * 3 + k] * w[0] + rot[1 * 3 + k] * w[1] + rot[2 * 3 + k] * w[2];
+        }
+    }
+    // Planar depth of a world point (> 0 in front of the camera).
+    double planarDepth(const double w[3]) const
+    {
+        double c[3];
+        toCamera(w, c);
+        return -c[2];
+    }
+};
+
+// Builds a CameraModel from OpenEXR worldToCamera / worldToNDC header matrices (row-vector
+// convention, as Karma, RenderMan and Arnold write them), for an image of width x height pixels
+// (the display window) at the given render scale. Either camera-axis sign is handled. Returns
+// false if the matrices are degenerate.
+bool cameraFromExrMatrices(const double worldToCamera[16], const double worldToNDC[16],
+                           double width, double height, double renderScale, CameraModel* out);
+
+// Focus Tilt / Swing (degrees, Settings convention) that lay the focus plane along a surface with
+// camera-space normal nCam. Returns false for a surface seen edge-on.
+bool focusTiltFromNormal(const double nCam[3], double* tiltDeg, double* swingDeg);
 
 enum CocModeEnum
 {
@@ -174,6 +227,17 @@ struct Settings
     double opticalCentreY = 0.;
     double fieldRadiusPx = 1.;      // distance from the centre to the frame corner
 
+    // Camera for the Position/Normal features (optional).
+    CameraModel camera;
+
+    // Tilted focus plane (tilt-shift / Scheimpflug), degrees. The plane turns about the pivot pixel,
+    // which stays at Focus Distance. Tilt > 0: focus recedes towards the top of the frame (a floor);
+    // Swing > 0: towards the right.
+    double focusTiltDeg = 0.;
+    double focusSwingDeg = 0.;
+    double focusPivotX = 0.;        // render-scale px
+    double focusPivotY = 0.;
+
     LensSettings lens;
 
     // Quality
@@ -184,6 +248,9 @@ struct Settings
     EdgeModeEnum edgeMode = eEdgeUnmix;
     double edgeThresholdPx = 1.;    // CoC difference across a 3x3 that counts as a depth edge
     bool fillBehind = true;
+    // With Position/Normal: put every occlusion edge between slices, however small its blur
+    // difference (no seams; more slices, slower). Off = the radius test decides, as without P/N.
+    bool splitOcclusionEdges = true;
     BorderModeEnum border = eBorderRepeat;  // a real lens sees past the frame edge; Black darkens borders
 
     OutputModeEnum output = eOutputResult;
@@ -199,6 +266,15 @@ struct Inputs
     ConstImageView cleanBackground; // optional RGBA premultiplied, used to fill behind foreground
     ConstImageView mask;            // optional; limits the effect
     int maskChannel = 0;
+    // Optional surface geometry (one sample per pixel, aliased like depth). With both, depth edges
+    // are told apart from steep surfaces (a floor at a grazing angle) and hidden background is filled
+    // along the surface plane.
+    ConstImageView position;        // xyz in channels positionChannel..+2
+    int positionChannel = 0;
+    SpaceEnum positionSpace = eSpaceWorld;
+    ConstImageView normal;          // xyz in channels normalChannel..+2
+    int normalChannel = 0;
+    SpaceEnum normalSpace = eSpaceWorld;
 };
 
 struct Stats
@@ -222,6 +298,14 @@ double signedCocRadiusAtDepth(const Settings& s, double depthUnits);
 // Decode one depth sample to a planar distance in scene units (+inf for background). Returns
 // NaN for eDepthDirectCoC, which carries no distance. Radial depth is treated as planar here.
 double decodeDepthUnits(const Settings& s, double value);
+
+// Focus distance (scene units) of the pixel at (x, y) (render-scale px, pixel corners at integers):
+// Focus Distance, or where the pixel's ray meets the tilted focus plane.
+double focusDistanceAt(const Settings& s, double x, double y);
+
+// Signed CoC radius in full-res pixels (before gains and clamp) for a depth seen at (x, y)
+// (render-scale px, pixel corners at integers), with a tilted focus plane.
+double signedCocRadiusAt(const Settings& s, double depthUnits, double x, double y);
 
 // Upper bound of how far (render-scale px) the result can extend beyond the source window.
 double maxPaddingPx(const Settings& s);

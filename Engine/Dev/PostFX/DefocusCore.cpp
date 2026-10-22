@@ -116,24 +116,91 @@ struct CocModel
     double focus = 1.;      // scene units
     double maxR = 1.;       // render-scale px
     double pxPerMm = 1.;    // render-scale px per mm on the film back
+    bool sizeAtInfinity = false;
+    double fMm = 50., nStop = 2.8, worldToMm = 1000.;
 
     explicit CocModel(const Settings& s)
     {
         focus = std::max(1e-9, s.focusDistance);
         pxPerMm = s.formatWidthPx * s.renderScale / std::max(1e-9, s.filmbackWidthMm);
-        if (s.cocMode == eCocSizeAtInfinity) {
-            rInf = s.sizeAtInfinityPx * s.renderScale;
-        } else {
-            const double f = std::max(1e-6, s.focalLengthMm);
-            const double N = std::max(1e-3, s.fNumber);
-            const double S = std::max(focus * s.worldToMm, f * 1.0001);
-            const double cInfMm = f * f / (N * (S - f));   // diameter on the film back
-            rInf = 0.5 * cInfMm * pxPerMm;
-        }
+        sizeAtInfinity = s.cocMode == eCocSizeAtInfinity;
+        fMm = std::max(1e-6, s.focalLengthMm);
+        nStop = std::max(1e-3, s.fNumber);
+        worldToMm = s.worldToMm;
         maxR = std::max(0.5, s.maxRadiusPx * s.renderScale);
+        rInf = sizeAtInfinity ? s.sizeAtInfinityPx * s.renderScale : rInfAt(focus);
+    }
+
+    // Radius at infinity when focused at S (scene units).
+    double rInfAt(double S) const
+    {
+        if (sizeAtInfinity) {
+            return rInf;
+        }
+        const double Smm = std::max(S * worldToMm, fMm * 1.0001);
+        const double cInfMm = fMm * fMm / (nStop * (Smm - fMm));   // diameter on the film back
+        return 0.5 * cInfMm * pxPerMm;
     }
 
     double radius(double invDepth) const { return rInf * (1. - focus * invDepth); }
+    double radiusAt(double invDepth, double S) const { return rInfAt(S) * (1. - S * invDepth); }
+};
+
+// Pinhole projection for pixel rays: the camera's when there is one, else the lens knobs (focal
+// length on the film back) about the optical centre.
+struct Projection
+{
+    double fpx = 1., cx = 0., cy = 0.;
+
+    explicit Projection(const Settings& s)
+    {
+        if (s.camera.valid) {
+            fpx = s.camera.focalPx;
+            cx = s.camera.centreX;
+            cy = s.camera.centreY;
+        } else {
+            fpx = std::max(1e-6, s.focalLengthMm) * s.formatWidthPx * s.renderScale / std::max(1e-9, s.filmbackWidthMm);
+            cx = s.opticalCentreX;
+            cy = s.opticalCentreY;
+        }
+        fpx = std::max(1e-6, fpx);
+    }
+    // Camera-space ray (u, v, -1) through the centre of pixel (x, y).
+    double u(double x) const { return (x + 0.5 - cx) / fpx; }
+    double v(double y) const { return (y + 0.5 - cy) / fpx; }
+};
+
+// Focus distance per pixel: constant, or where the pixel's ray meets the tilted focus plane. In
+// camera space the plane is depth = S + tan(tilt) * (Y - Yq) + tan(swing) * (X - Xq), through the
+// pivot pixel's ray at depth S; along the ray (u Z, v Z, Z) that solves to num / den below.
+struct FocusField
+{
+    bool tilted = false;
+    double S = 1., tt = 0., ts = 0., num = 1.;
+    Projection proj;
+
+    explicit FocusField(const Settings& s)
+        : proj(s)
+    {
+        S = std::max(1e-9, s.focusDistance);
+        tt = std::tan(std::max(-89.9, std::min(89.9, s.focusTiltDeg)) * kPi / 180.);
+        ts = std::tan(std::max(-89.9, std::min(89.9, s.focusSwingDeg)) * kPi / 180.);
+        tilted = tt != 0. || ts != 0.;
+        const double uq = proj.u(s.focusPivotX - 0.5), vq = proj.v(s.focusPivotY - 0.5);
+        num = S * (1. - tt * vq - ts * uq);
+    }
+
+    double at(double x, double y) const
+    {
+        if (!tilted) {
+            return S;
+        }
+        const double den = 1. - tt * proj.v(y) - ts * proj.u(x);
+        if (den <= 1e-9 || num <= 0.) {
+            return 1e12;    // the ray never meets the plane in front: focused past infinity
+        }
+        return std::max(1e-9, std::min(1e12, num / den));
+    }
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -626,6 +693,136 @@ signedCocRadiusAtDepth(const Settings& s, double depthUnits)
 }
 
 double
+focusDistanceAt(const Settings& s, double x, double y)
+{
+    return FocusField(s).at(x - 0.5, y - 0.5);
+}
+
+double
+signedCocRadiusAt(const Settings& s, double depthUnits, double x, double y)
+{
+    // Full-res radius: evaluate at render scale, then divide it back out.
+    const CocModel m(s);
+    const double S = FocusField(s).at(x - 0.5, y - 0.5);
+    const double r = (!(depthUnits > 0.) || !std::isfinite(depthUnits)) ? m.rInfAt(S) : m.radiusAt(1. / depthUnits, S);
+    return r / std::max(1e-9, s.renderScale);
+}
+
+namespace {
+
+bool
+invert4(const double m[16], double out[16])
+{
+    double a[4][8];
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            a[r][c] = m[r * 4 + c];
+            a[r][c + 4] = r == c ? 1. : 0.;
+        }
+    }
+    for (int c = 0; c < 4; ++c) {
+        int piv = c;
+        for (int r = c + 1; r < 4; ++r) {
+            if (std::fabs(a[r][c]) > std::fabs(a[piv][c])) {
+                piv = r;
+            }
+        }
+        if (std::fabs(a[piv][c]) < 1e-12) {
+            return false;
+        }
+        if (piv != c) {
+            for (int k = 0; k < 8; ++k) {
+                std::swap(a[c][k], a[piv][k]);
+            }
+        }
+        const double d = a[c][c];
+        for (int k = 0; k < 8; ++k) {
+            a[c][k] /= d;
+        }
+        for (int r = 0; r < 4; ++r) {
+            if (r != c && a[r][c] != 0.) {
+                const double f = a[r][c];
+                for (int k = 0; k < 8; ++k) {
+                    a[r][k] -= f * a[c][k];
+                }
+            }
+        }
+    }
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            out[r * 4 + c] = a[r][c + 4];
+        }
+    }
+    return true;
+}
+
+} // anonymous namespace
+
+bool
+cameraFromExrMatrices(const double w2c[16], const double w2ndc[16], double width, double height,
+                      double renderScale, CameraModel* out)
+{
+    // Row-vector convention: camera = [world 1] * w2c, ndc = [world 1] * w2ndc.
+    double c2w[16];
+    if (width <= 0. || height <= 0. || !invert4(w2c, c2w)) {
+        return false;
+    }
+    // Projection from camera space: ndc = [camera 1] * proj, proj = c2w * w2ndc.
+    double proj[16];
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            double v = 0.;
+            for (int k = 0; k < 4; ++k) {
+                v += c2w[r * 4 + k] * w2ndc[k * 4 + c];
+            }
+            proj[r * 4 + c] = v;
+        }
+    }
+    // Perspective divide w = proj[2][3] * z: the camera looks along +z (Karma, RenderMan) or -z.
+    const double p23 = proj[2 * 4 + 3];
+    if (std::fabs(p23) < 1e-9) {
+        return false;   // orthographic, or not a camera
+    }
+    const double fwd = p23 > 0. ? 1. : -1.;
+    // ndc_x = ax * x / depth + bx, depth = p23 * z (likewise y).
+    const double ax = proj[0 * 4 + 0], ay = proj[1 * 4 + 1];
+    const double bx = proj[2 * 4 + 0] / p23, by = proj[2 * 4 + 1] / p23;
+    if (std::fabs(ax) < 1e-12 || std::fabs(ay) < 1e-12) {
+        return false;
+    }
+    const double sx = ax > 0. ? 1. : -1., sy = ay > 0. ? 1. : -1.;
+    CameraModel m;
+    m.valid = true;
+    for (int k = 0; k < 3; ++k) {
+        m.origin[k] = c2w[3 * 4 + k];
+        // Our camera axes in world space: X = sx * row 0, Y = sy * row 1, Z = -fwd * row 2.
+        m.rot[k * 3 + 0] = sx * c2w[0 * 4 + k];
+        m.rot[k * 3 + 1] = sy * c2w[1 * 4 + k];
+        m.rot[k * 3 + 2] = -fwd * c2w[2 * 4 + k];
+    }
+    // NDC -1..1 spans the display window on both axes.
+    m.focalPx = 0.25 * (std::fabs(ax) * width + std::fabs(ay) * height) * renderScale;
+    m.centreX = (bx * 0.5 + 0.5) * width * renderScale;
+    m.centreY = (by * 0.5 + 0.5) * height * renderScale;
+    *out = m;
+    return true;
+}
+
+bool
+focusTiltFromNormal(const double n[3], double* tiltDeg, double* swingDeg)
+{
+    // Plane n.X = c with X = (X, Y, -depth): depth = (n0 X + n1 Y - c) / n2, so
+    // tan(tilt) = n1 / n2 and tan(swing) = n0 / n2.
+    const double len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (!(len > 0.) || std::fabs(n[2]) < 1e-3 * len) {
+        return false;
+    }
+    *tiltDeg = std::atan(n[1] / n[2]) * 180. / kPi;
+    *swingDeg = std::atan(n[0] / n[2]) * 180. / kPi;
+    return true;
+}
+
+double
 decodeDepthUnits(const Settings& s, double v)
 {
     const double inf = std::numeric_limits<double>::infinity();
@@ -704,13 +901,91 @@ render(const Inputs& in,
         c[3] = srcCh > 3 ? p[3] : 1.f;
     };
 
+    // ---- 0. surface geometry (optional Position / Normal planes)
+    const FocusField focusField(s);
+    const Projection proj(s);
+    const ConstImageView& posV = in.position;
+    const ConstImageView& nrmV = in.normal;
+    const bool havePos = posV.valid() && posV.channels >= in.positionChannel + 3;
+    const bool haveNrm = nrmV.valid() && nrmV.channels >= in.normalChannel + 3;
+    // A camera-space P may look down +z or -z depending on the renderer: take the sign most
+    // pixels have, so that in front of the camera is -z.
+    double posZSign = 1.;
+    if (havePos && in.positionSpace == eSpaceCamera) {
+        long nPos = 0, nNeg = 0;
+        const Rect& b = posV.bounds;
+        const int step = std::max(1, std::max(b.width(), b.height()) / 128);
+        for (int y = b.y1; y < b.y2; y += step) {
+            for (int x = b.x1; x < b.x2; x += step) {
+                const float z = posV.pixel(x, y)[in.positionChannel + 2];
+                nPos += z > 0.f;
+                nNeg += z < 0.f;
+            }
+        }
+        posZSign = nPos > nNeg ? -1. : 1.;
+    }
+    // Geometry is compared in camera space when there is one (camera-space P, or world P plus a
+    // camera), else in world space (edges only: the fill plane needs pixel rays).
+    const bool geomCamera = havePos && (in.positionSpace == eSpaceCamera || s.camera.valid);
+    // Position at a source pixel in the geometry space. Exactly 0 = nothing there (background).
+    auto geomPos = [&](int x, int y, double c[3]) -> bool {
+        if (!havePos || !posV.bounds.contains(x, y)) {
+            return false;
+        }
+        const float* q = posV.pixel(x, y) + in.positionChannel;
+        if (!std::isfinite(q[0]) || !std::isfinite(q[1]) || !std::isfinite(q[2]) ||
+            (q[0] == 0.f && q[1] == 0.f && q[2] == 0.f)) {
+            return false;
+        }
+        if (in.positionSpace == eSpaceCamera) {
+            c[0] = q[0]; c[1] = q[1]; c[2] = q[2] * posZSign;
+        } else if (s.camera.valid) {
+            const double w[3] = {q[0], q[1], q[2]};
+            s.camera.toCamera(w, c);
+        } else {
+            c[0] = q[0]; c[1] = q[1]; c[2] = q[2];
+        }
+        return true;
+    };
+    auto geomNormal = [&](int x, int y, double n[3]) -> bool {
+        if (!haveNrm || !nrmV.bounds.contains(x, y)) {
+            return false;
+        }
+        const float* q = nrmV.pixel(x, y) + in.normalChannel;
+        const double w[3] = {q[0], q[1], q[2]};
+        if (geomCamera) {
+            if (in.normalSpace == eSpaceCamera) {
+                n[0] = w[0]; n[1] = w[1]; n[2] = w[2] * (in.positionSpace == eSpaceCamera ? posZSign : 1.);
+            } else if (s.camera.valid) {
+                s.camera.dirToCamera(w, n);
+            } else {
+                return false;   // world normals with camera-space P and no camera
+            }
+        } else {
+            if (in.normalSpace != eSpaceWorld) {
+                return false;
+            }
+            n[0] = w[0]; n[1] = w[1]; n[2] = w[2];
+        }
+        const double len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (!(len > 0.5) || !std::isfinite(len)) {
+            return false;   // no normal (empty pixel, volume)
+        }
+        n[0] /= len; n[1] /= len; n[2] /= len;
+        return true;
+    };
+    const bool useGeom = havePos && haveNrm;
+
     // ---- 1. depth -> signed radius per source pixel
     const Rect& SB = src.bounds;
     const int Sw = SB.width(), Sh = SB.height();
     std::vector<float> rSrc((size_t)Sw * Sh, 0.f);
     std::vector<unsigned char> clampedSrc((size_t)Sw * Sh, 0);
+    // Position/Normal can disagree with the depth pass: volumes and transparent objects (Karma
+    // writes the surface behind a VDB into P and N, but the volume into depth). Such pixels don't
+    // use the geometry.
+    std::vector<unsigned char> geomTrust(useGeom ? (size_t)Sw * Sh : 0, 1);
     const ConstImageView& dep = in.depth;
-    const double fMm = std::max(1e-6, s.focalLengthMm);
 
     parallelFor(Sh, 16, nThreads, aborted, [&](int b, int e) {
         for (int j = b; j < e; ++j) {
@@ -732,6 +1007,14 @@ render(const Inputs& in,
                 double r;
                 if (s.depthConvention == eDepthDirectCoC) {
                     r = std::isfinite(v) ? v * rs : 0.;
+                } else if (s.depthConvention == eDepthPosition) {
+                    // Planar depth from the camera-space position; no position = infinity.
+                    double c[3];
+                    double inv = 0.;
+                    if (geomCamera && geomPos(dx, dy, c) && -c[2] > 0.) {
+                        inv = 1. / -c[2];
+                    }
+                    r = focusField.tilted ? coc.radiusAt(inv, focusField.at(x, y)) : coc.radius(inv);
                 } else {
                     double inv = 0.;    // 1/depth, 0 = infinity
                     if (std::isfinite(v)) {
@@ -753,9 +1036,8 @@ render(const Inputs& in,
                             const bool inf = (s.zeroIsInfinity && z <= 0.) || (s.farThreshold > 0. && z >= s.farThreshold);
                             if (!inf && z > 0.) {
                                 if (s.depthConvention == eDepthRadial) {
-                                    const double xm = (x - s.opticalCentreX) / coc.pxPerMm;
-                                    const double ym = (y - s.opticalCentreY) / coc.pxPerMm;
-                                    z *= fMm / std::sqrt(fMm * fMm + xm * xm + ym * ym);
+                                    const double u = proj.u(x), w = proj.v(y);
+                                    z /= std::sqrt(1. + u * u + w * w);
                                 }
                                 inv = 1. / z;
                             }
@@ -763,7 +1045,13 @@ render(const Inputs& in,
                         }
                         }
                     }
-                    r = coc.radius(inv);
+                    r = focusField.tilted ? coc.radiusAt(inv, focusField.at(x, y)) : coc.radius(inv);
+                    if (useGeom && geomCamera) {
+                        double c[3];
+                        if (inv > 0. && geomPos(dx, dy, c) && std::fabs(-c[2] * inv - 1.) > 0.02) {
+                            geomTrust[(size_t)j * Sw + i] = 0;
+                        }
+                    }
                 }
                 r *= r < 0. ? s.nearGain : s.farGain;
                 const size_t p = (size_t)j * Sw + i;
@@ -850,8 +1138,48 @@ render(const Inputs& in,
         }
     });
 
+    // How two neighbouring domain pixels relate, from Position/Normal:
+    //  0 = the same surface: each lies on the other's tangent plane (a floor at a grazing angle, a
+    //      curved surface). Both planes must agree: past an object, a grazing floor's plane can
+    //      contain the step along the view, but the object's plane does not.
+    //  1 = an occlusion edge: far apart along the view compared with a pixel's width (camera space).
+    // -1 = unknown (no geometry, a crease, ambiguous): the radius-based tests decide.
+    auto geomRelation = [&](int i, int j, int ii, int jj) -> int {
+        if (!useGeom) {
+            return -1;
+        }
+        const int xa = std::max(SB.x1, std::min(SB.x2 - 1, D.x1 + i)), ya = std::max(SB.y1, std::min(SB.y2 - 1, D.y1 + j));
+        const int xb = std::max(SB.x1, std::min(SB.x2 - 1, D.x1 + ii)), yb = std::max(SB.y1, std::min(SB.y2 - 1, D.y1 + jj));
+        if (!geomTrust[(size_t)(ya - SB.y1) * Sw + (xa - SB.x1)] || !geomTrust[(size_t)(yb - SB.y1) * Sw + (xb - SB.x1)]) {
+            return -1;
+        }
+        double pa[3], na[3], pb[3], nb[3];
+        if (!geomPos(xa, ya, pa) || !geomNormal(xa, ya, na) || !geomPos(xb, yb, pb) || !geomNormal(xb, yb, nb)) {
+            return -1;
+        }
+        const double d[3] = {pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]};
+        const double dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (!(dl > 1e-12)) {
+            return 0;
+        }
+        const double e1 = std::fabs(na[0] * d[0] + na[1] * d[1] + na[2] * d[2]);
+        const double e2 = std::fabs(nb[0] * d[0] + nb[1] * d[1] + nb[2] * d[2]);
+        if (std::max(e1, e2) <= 0.25 * dl) {
+            return 0;
+        }
+        if (geomCamera) {
+            const double za = -pa[2], zb = -pb[2];
+            const double lateral = std::max(za, zb) / proj.fpx;   // scene units across one pixel
+            if (za > 0. && zb > 0. && std::fabs(za - zb) > 4. * lateral) {
+                return 1;
+            }
+        }
+        return -1;
+    };
+
     // ---- 2. samples, with depth-edge reconstruction
-    // Edge pixels: the CoC varies by more than the threshold across their 3x3.
+    // Edge pixels: the CoC varies by more than the threshold across their 3x3 (and, with surface
+    // geometry, not every neighbour is on the same surface).
     const float edgeThr = (float)(s.edgeThresholdPx * rs);
     std::vector<unsigned char> isEdge(N, 0);
     if (s.edgeMode != eEdgeOff) {
@@ -866,7 +1194,19 @@ render(const Inputs& in,
                             hi = std::max(hi, rq);
                         }
                     }
-                    isEdge[(size_t)j * Dw + i] = (hi - lo) > edgeThr ? 1 : 0;
+                    bool edge = (hi - lo) > edgeThr;
+                    if (edge && useGeom) {
+                        bool allSame = true;
+                        for (int jj = std::max(0, j - 1); jj <= std::min(Dh - 1, j + 1) && allSame; ++jj) {
+                            for (int ii = std::max(0, i - 1); ii <= std::min(Dw - 1, i + 1) && allSame; ++ii) {
+                                if ((ii != i || jj != j) && geomRelation(i, j, ii, jj) != 0) {
+                                    allSame = false;
+                                }
+                            }
+                        }
+                        edge = !allSame;
+                    }
+                    isEdge[(size_t)j * Dw + i] = edge ? 1 : 0;
                 }
             }
         });
@@ -1261,8 +1601,21 @@ render(const Inputs& in,
                                 continue;
                             }
                             const float lo = std::min(rSm[p], rSm[q]), hi = std::max(rSm[p], rSm[q]);
+                            // With Position/Normal the geometry decides: one surface never splits,
+                            // and a real occlusion edge splits even when the radii differ by
+                            // little (those leave the faint seams the radius test lets through).
+                            int rel = geomRelation(i, j, ii, jj);
+                            if (rel == 1 && !s.splitOcclusionEdges) {
+                                rel = -1;   // Fast: occlusion edges go by the radius test
+                            }
+                            if (rel == 0) {
+                                continue;
+                            }
+                            if (rel == 1 && hi - lo <= 0.02f * (float)rs) {
+                                continue;
+                            }
                             const float sliceThr = 0.1f * (float)rs + 0.015f * std::max(std::fabs(lo), std::fabs(hi));
-                            if (hi - lo <= sliceThr) {
+                            if (rel != 1 && hi - lo <= sliceThr) {
                                 continue;
                             }
                             // A steep but smooth surface (a floor running towards the lens) steps by
@@ -1270,7 +1623,7 @@ render(const Inputs& in,
                             // it puts a slice boundary on every row (visible as horizontal lines).
                             // Only a step that differs from the surface's own gradient on both sides
                             // is a depth edge.
-                            {
+                            if (rel != 1) {
                                 const float d = rSm[q] - rSm[p];
                                 const int di = ii - i, dj = jj - j;
                                 const int pi = i - di, pj = j - dj, ni = ii + di, nj = jj + dj;
