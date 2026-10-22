@@ -1210,10 +1210,15 @@ ViewerGL::drawPersistentMessage()
 
         glDisable(GL_BLEND);
 
-        if (_imp->persistentMessageType == 1) { // error
-            glColor4f(0.5, 0., 0., 1.);
-        } else { // warning
-            glColor4f(0.65, 0.65, 0., 1.);
+        // Banner colours chosen for contrast: the default light-grey overlay text was hard to
+        // read on the old olive-yellow warning bar.
+        QColor textColor;
+        if (_imp->persistentMessageType == 1) { // error: deep red, white text
+            glColor4f(0.60, 0.10, 0.10, 1.);
+            textColor = QColor(255, 255, 255, 255);
+        } else { // warning: amber, near-black text
+            glColor4f(0.95, 0.70, 0.15, 1.);
+            textColor = QColor(25, 20, 10, 255);
         }
         glBegin(GL_POLYGON);
         glVertex2f( topLeft.x(), topLeft.y() ); //top left
@@ -1225,7 +1230,7 @@ ViewerGL::drawPersistentMessage()
 
         for (int j = 0; j < _imp->persistentMessages.size(); ++j) {
             assert(_imp->_textFont);
-            renderText(textPos.x(), textPos.y(), _imp->persistentMessages.at(j), _imp->textRenderingColor, *_imp->_textFont);
+            renderText(textPos.x(), textPos.y(), _imp->persistentMessages.at(j), textColor, *_imp->_textFont);
             textPos.setY( textPos.y() - ( fmHeightZoomCoord + offsetZoomCoord.y() ) ); /*metrics.height() * 2 * zoomScreenPixelHeight*/
         }
         glCheckError();
