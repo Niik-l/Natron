@@ -56,6 +56,41 @@ double secondsSince(Clock::time_point t0)
 // Threading. Only the calling thread calls aborted(): Natron's abort check reads thread-local
 // render state, so worker threads just watch the shared stop flag.
 
+// Inside a parallel job: the job's stop flag (every thread) and the abort check (calling thread
+// only). Long work items poll stopRequested() so an abort (node deleted, knob changed) doesn't
+// wait for every item in flight to finish.
+thread_local std::atomic<bool>* tlsStop = nullptr;
+thread_local const std::function<bool()>* tlsAbort = nullptr;
+
+bool stopRequested()
+{
+    if (tlsAbort && *tlsAbort && (*tlsAbort)()) {
+        if (tlsStop) {
+            tlsStop->store(true);
+        }
+        return true;
+    }
+    return tlsStop && tlsStop->load(std::memory_order_relaxed);
+}
+
+// Sets the thread's stop flag / abort check for a scope.
+struct StopScope
+{
+    std::atomic<bool>* prevStop;
+    const std::function<bool()>* prevAbort;
+    StopScope(std::atomic<bool>* stop, const std::function<bool()>* abort)
+        : prevStop(tlsStop), prevAbort(tlsAbort)
+    {
+        tlsStop = stop;
+        tlsAbort = abort;
+    }
+    ~StopScope()
+    {
+        tlsStop = prevStop;
+        tlsAbort = prevAbort;
+    }
+};
+
 int threadCount(int requested)
 {
     if (requested > 0) {
@@ -105,16 +140,19 @@ public:
             ++_generation;
         }
         _wake.notify_all();
-        for (;;) {
-            if (aborted && aborted()) {
-                _stop = true;
-                break;
+        {
+            StopScope scope(&_stop, &aborted);
+            for (;;) {
+                if (_stop.load() || (aborted && aborted())) {
+                    _stop = true;
+                    break;
+                }
+                const int c = _next.fetch_add(1);
+                if (c >= chunks) {
+                    break;
+                }
+                fn(c);
             }
-            const int c = _next.fetch_add(1);
-            if (c >= chunks) {
-                break;
-            }
-            fn(c);
         }
         std::unique_lock<std::mutex> l(_m);
         _idle.wait(l, [this]() { return _busy == 0; });
@@ -125,6 +163,7 @@ public:
 private:
     void workerLoop()
     {
+        StopScope scope(&_stop, nullptr);
         unsigned seen = 0;
         for (;;) {
             const std::function<void(int)>* job;
@@ -189,6 +228,7 @@ bool parallelFor(int n, int grain, int threads,
     std::atomic<int> next(0);
     std::atomic<bool> stop(false);
     auto worker = [&](bool isCaller) {
+        StopScope scope(&stop, isCaller ? &aborted : nullptr);
         for (;;) {
             if (stop.load(std::memory_order_relaxed)) {
                 return;
@@ -2615,6 +2655,9 @@ render(const Inputs& in,
             }
 
             for (int k = (int)slices.size() - 1; k >= 0; --k) {
+                if (stopRequested()) {
+                    return;
+                }
                 const Slice& S = slices[k];
                 const int L = S.level;
                 const int sc = 1 << L;
