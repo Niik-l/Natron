@@ -26,6 +26,13 @@
 #include <limits>
 #include <thread>
 
+// DEFOCUS_TRACE (testbed builds only): DEFOCUS_TRACE_X / DEFOCUS_TRACE_Y env vars name one pixel
+// whose per-slice coverage is printed to stderr while compositing.
+#ifdef DEFOCUS_TRACE
+#include <cstdio>
+#include <cstdlib>
+#endif
+
 namespace defocus {
 
 namespace {
@@ -1186,16 +1193,114 @@ render(const Inputs& in,
         stats.highlights = (std::int64_t)cand.size();
     }
 
-    // ---- 4. bucket samples into slices (slice index computed once per sample)
+    // ---- 4. bucket samples into slices.
+    // Slices are spaced by Slice Step, but a depth edge (blur radius jumping by more than ~0.25 px
+    // between neighbours) must never fall inside one slice: within a slice samples add
+    // up without occlusion, and two surfaces with different radii leave a coverage seam where they
+    // meet (an object over the floor behind it). So samples are first binned at a fraction of the
+    // step, and extra slice boundaries are placed (greedy interval stabbing) so that the front and
+    // back of every depth edge land in different slices. Smooth surfaces and near-equal depths
+    // still share slices and add up. (Fine bins: 1/16 of the step.)
+    const double fineStep = s.sliceStep / 16.;   // fine enough that a ~3% radius jump spans bins
     std::vector<short> sIdx(nIds, 0);
     parallelFor(Dh, 64, nThreads, aborted, [&](int b, int e) {
         for (size_t p = (size_t)b * Dw; p < (size_t)e * Dw; ++p) {
             for (int k = 0; k < nSamp[p]; ++k) {
                 const size_t id = sampleOf(p, k);
-                sIdx[id] = (short)sliceIndexOf(sampleR(id), s.sliceStep);
+                sIdx[id] = (short)sliceIndexOf(sampleR(id), fineStep);
             }
         }
     });
+    {
+        int fMin = 0, fMax = 0;
+        bool anyF = false;
+        for (size_t p = 0; p < N; ++p) {
+            for (int k = 0; k < nSamp[p]; ++k) {
+                const int fi = sIdx[sampleOf(p, k)];
+                fMin = anyF ? std::min(fMin, fi) : fi;
+                fMax = anyF ? std::max(fMax, fi) : fi;
+                anyF = true;
+            }
+        }
+        if (anyF) {
+            const int nb = fMax - fMin + 1;
+            const int kInf = std::numeric_limits<int>::max();
+            // Depth-edge intervals [front bin, back bin]: per row chunk, merged afterwards.
+            const int grain = 32;
+            std::vector<std::vector<int> > chunkMinEnd((Dh + grain - 1) / grain);
+            parallelFor(Dh, grain, nThreads, aborted, [&](int b, int e) {
+                std::vector<int>& minEnd = chunkMinEnd[b / grain];
+                minEnd.assign(nb, kInf);
+                for (int j = b; j < e; ++j) {
+                    for (int i = 0; i < Dw; ++i) {
+                        const size_t p = (size_t)j * Dw + i;
+                        if (!occupied[p]) {
+                            continue;
+                        }
+                        // Jumps between directly adjacent pixels (right and up, so each pair once).
+                        // Two surfaces whose radii differ by d leave a seam of roughly d / r where
+                        // they meet in one slice, so even sub-pixel jumps count; a smooth ramp's
+                        // per-pixel step and (denoised) depth noise stay below the threshold.
+                        const int nbr[2][2] = {{i + 1, j}, {i, j + 1}};
+                        for (int k = 0; k < 2; ++k) {
+                            const int ii = nbr[k][0], jj = nbr[k][1];
+                            if (ii >= Dw || jj >= Dh) {
+                                continue;
+                            }
+                            const size_t q = (size_t)jj * Dw + ii;
+                            if (!occupied[q]) {
+                                continue;
+                            }
+                            const float lo = std::min(rSm[p], rSm[q]), hi = std::max(rSm[p], rSm[q]);
+                            const float sliceThr = 0.1f * (float)rs + 0.015f * std::max(std::fabs(lo), std::fabs(hi));
+                            if (hi - lo <= sliceThr) {
+                                continue;
+                            }
+                            const int fa = std::max(0, std::min(nb - 1, sliceIndexOf(lo, fineStep) - fMin));
+                            const int fb = std::max(0, std::min(nb - 1, sliceIndexOf(hi, fineStep) - fMin));
+                            if (fb > fa) {
+                                minEnd[fa] = std::min(minEnd[fa], fb);
+                            }
+                        }
+                    }
+                }
+            });
+            std::vector<int> minEnd(nb, kInf);
+            for (size_t c = 0; c < chunkMinEnd.size(); ++c) {
+                for (int k = 0; k < (int)chunkMinEnd[c].size(); ++k) {
+                    minEnd[k] = std::min(minEnd[k], chunkMinEnd[c][k]);
+                }
+            }
+            auto fineCentre = [&](int fi) {
+                const double v = kSliceR0 * (std::pow(1. + fineStep, std::fabs((double)fi)) - 1.);
+                return fi < 0 ? -v : v;
+            };
+            std::vector<short> sliceOf(nb, 0);
+            int slice = 0, need = kInf;
+            for (int k = 0; k < nb; ++k) {
+                bool boundary = false;
+                if (k > 0 && sliceIndexOf(fineCentre(fMin + k), s.sliceStep) != sliceIndexOf(fineCentre(fMin + k - 1), s.sliceStep)) {
+                    boundary = true;   // regular Slice Step spacing
+                }
+                if (k == need) {
+                    boundary = true;   // a depth edge spans the current slice
+                }
+                if (boundary) {
+                    ++slice;
+                    need = kInf;
+                }
+                need = std::min(need, minEnd[k]);
+                sliceOf[k] = (short)slice;
+            }
+            for (size_t id = 0; id < nIds; ++id) {
+                const size_t p = pixelOf(id);
+                if (nSamp[p] == 0 || (id >= N && nSamp[p] < 2)) {
+                    continue;
+                }
+                sIdx[id] = sliceOf[std::max(0, std::min(nb - 1, sIdx[id] - fMin))];
+            }
+        }
+    }
     int kMin = 0, kMax = 0;
     bool any = false;
     for (size_t p = 0; p < N; ++p) {
@@ -1428,15 +1533,24 @@ render(const Inputs& in,
             }
             // Distance to the nearest cell this slice actually covers decides how far the fill must
             // reach; the seeds above sit back from the edge and would cut the fill short.
+            // The nearest covered cell also gives the fill its blur radius: on a depth ramp that is
+            // the adjacent pixel, so the radius stays continuous; behind an object it is the
+            // background's own radius (not the object's), so their junction doesn't leave a seam.
             std::vector<float> distP(RN, std::numeric_limits<float>::infinity());
+            std::vector<int> srcP(RN, -1);
             for (size_t c = 0; c < RN; ++c) {
                 if (W[c] > 0.f) {
                     distP[c] = 0.f;
+                    srcP[c] = (int)c;
                 }
             }
             auto relaxP = [&](size_t c, int ni, int nj, float d) {
                 if (ni >= 0 && nj >= 0 && ni < rw && nj < rh) {
-                    distP[c] = std::min(distP[c], distP[(size_t)nj * rw + ni] + d);
+                    const size_t n = (size_t)nj * rw + ni;
+                    if (distP[n] + d < distP[c]) {
+                        distP[c] = distP[n] + d;
+                        srcP[c] = srcP[n];
+                    }
                 }
             };
             for (int j = 0; j < rh; ++j) {
@@ -1467,7 +1581,29 @@ render(const Inputs& in,
                         continue;
                     }
                     const int sidx = srcIdx[c];
-                    const double rSrc = Rs[sidx] / std::max(1e-12f, W[sidx] / (float)inv);
+                    const int pidx = srcP[c] >= 0 ? srcP[c] : sidx;
+                    // Continue the surface's radius gradient from that cell (exact on a depth ramp).
+                    auto rAt = [&](int q) { return Rs[q] / std::max(1e-12f, W[q] / (float)inv); };
+                    const int pi = pidx % rw, pj = pidx / rw;
+                    double gx = 0., gy = 0.;
+                    {
+                        const int l = pi > 0 && W[pidx - 1] > 0.f ? pidx - 1 : pidx;
+                        const int r = pi + 1 < rw && W[pidx + 1] > 0.f ? pidx + 1 : pidx;
+                        const int d = pj > 0 && W[pidx - rw] > 0.f ? pidx - rw : pidx;
+                        const int u = pj + 1 < rh && W[pidx + rw] > 0.f ? pidx + rw : pidx;
+                        if (r != l) {
+                            gx = (rAt(r) - rAt(l)) / ((r - l));
+                        }
+                        if (u != d) {
+                            gy = (rAt(u) - rAt(d)) / ((u - d) / rw);
+                        }
+                    }
+                    const double rNear = rAt(pidx);
+                    double rSrc = rNear + gx * (i - pi) + gy * (j - pj);
+                    // Never extrapolate past zero or by more than the local blur itself.
+                    if ((rSrc > 0.) != (rNear > 0.) || std::fabs(rSrc - rNear) > std::fabs(rNear)) {
+                        rSrc = rNear;
+                    }
                     if (distP[c] > (RoccC[c] + std::fabs(rSrc)) / sc + 2.) {
                         continue;
                     }
@@ -1489,12 +1625,6 @@ render(const Inputs& in,
                         const double gap = std::fabs(rF - rSrc);
                         const bool disc = gap > std::max(1.5 * rs, 0.2 * std::max(std::fabs(rF), std::fabs(rSrc)));
                         f.c[4] = disc ? (float)h : 0.f;
-                        if (!disc) {
-                            // Same continuous surface split across slices: the fill stands in for
-                            // the occluder itself, so give it the occluder's radius. A radius
-                            // mismatch at the junction leaves coverage slightly off 1 (darkening).
-                            f.r = (float)rF;
-                        }
                     }
                     fills.push_back(f);
                 }
@@ -1698,6 +1828,14 @@ render(const Inputs& in,
                 for (size_t q = 0; q < (size_t)Ow * sh; ++q) {
                     float* o = acc.data() + q * kNumCh;
                     float* v = sl.data() + q * kNumCh;
+#ifdef DEFOCUS_TRACE
+                    static const int traceX = std::getenv("DEFOCUS_TRACE_X") ? std::atoi(std::getenv("DEFOCUS_TRACE_X")) : -1000000000;
+                    static const int traceY = std::getenv("DEFOCUS_TRACE_Y") ? std::atoi(std::getenv("DEFOCUS_TRACE_Y")) : -1000000000;
+                    if (O.x1 + (int)(q % Ow) == traceX && y0 + (int)(q / Ow) == traceY) {
+                        std::fprintf(stderr, "trace slice %d level %d maxR %.2f cells %zu hi %zu: a %.4f g %.4f | behind a %.4f\n",
+                                     S.index, S.level, S.maxAbsR, S.cells.size(), S.hi.size(), v[3], v[1], o[3]);
+                    }
+#endif
                     if (v[3] > 1.f) {
                         const float n = 1.f / v[3];
                         for (int c = 0; c < kNumCh; ++c) {
