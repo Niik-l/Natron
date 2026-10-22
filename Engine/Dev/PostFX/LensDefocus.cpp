@@ -1025,6 +1025,12 @@ LensDefocus::initializeKnobs()
         o.push_back(ChoiceOption("coc", "Blur Radius", "R = signed blur radius (px), G = |radius|, B = clamped."));
         o.push_back(ChoiceOption("slices", "Slices", "False-colour depth slices."));
         o.push_back(ChoiceOption("edge", "Edge Split", "Front coverage of edge pixels split by Edge Reconstruction."));
+        o.push_back(ChoiceOption("surfaceEdges", "Surface Edges",
+                                 "Where depth slices are cut, and why. Red: an object outline found by the Position/"
+                                 "Normal passes. Yellow: cut by the blur-size test (no passes there). Green: one "
+                                 "steep surface the passes keep whole where the blur-size test alone would cut it "
+                                 "(a floor towards the lens). Blue: passes ignored because they disagree with depth "
+                                 "(volumes, glass). Elsewhere: the image, dimmed."));
         k->populateChoices(o);
         k->setDefaultValue(defocus::eOutputResult);
         out->addKnob(k); _imp->output = k;

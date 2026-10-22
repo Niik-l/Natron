@@ -178,6 +178,10 @@ enum OutputModeEnum
     eOutputSignedCoC,    // R = signed CoC px, G = |CoC|, B = clamped
     eOutputSlices,       // false-colour slice index
     eOutputEdge,         // front coverage of split edge pixels
+    eOutputSurfaceEdges, // slicing decisions: red = outline split by Position/Normal, yellow = split
+                         // by the blur-radius test, green = kept whole by Position/Normal where the
+                         // radius test would split, blue = Position/Normal ignored (disagree with
+                         // depth: volumes, glass); elsewhere the dimmed image
 };
 
 // Procedural lens character. All zero = plain disc.

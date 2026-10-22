@@ -1177,6 +1177,51 @@ render(const Inputs& in,
         return -1;
     };
 
+    // Whether two neighbouring (occupied) domain pixels must go into different slices:
+    //  0 = no; 1 = yes, an occlusion edge (Position/Normal); 2 = yes, by the blur-radius test;
+    //  3 = no, because Position/Normal say one surface where the radius test would split (only
+    //      told apart from 0 with `explain`, which costs the radius test).
+    auto pairSplit = [&](int i, int j, int ii, int jj, bool explain) -> int {
+        const size_t p = (size_t)j * Dw + i, q = (size_t)jj * Dw + ii;
+        const float lo = std::min(rSm[p], rSm[q]), hi = std::max(rSm[p], rSm[q]);
+        // With Position/Normal the geometry decides: one surface never splits, and a real
+        // occlusion edge splits even when the radii differ by little (those leave the faint seams
+        // the radius test lets through).
+        int rel = geomRelation(i, j, ii, jj);
+        if (rel == 1 && !s.splitOcclusionEdges) {
+            rel = -1;   // Fast: occlusion edges go by the radius test
+        }
+        if (rel == 1) {
+            return hi - lo > 0.02f * (float)rs ? 1 : 0;
+        }
+        if (rel == 0 && !explain) {
+            return 0;
+        }
+        const float sliceThr = 0.1f * (float)rs + 0.015f * std::max(std::fabs(lo), std::fabs(hi));
+        bool radiusSplit = hi - lo > sliceThr;
+        // A steep but smooth surface (a floor running towards the lens) steps by about as much on
+        // either side: that is a ramp, not an edge, and splitting it puts a slice boundary on every
+        // row (visible as horizontal lines). Only a step that differs from the surface's own
+        // gradient on both sides is a depth edge.
+        if (radiusSplit) {
+            const float d = rSm[q] - rSm[p];
+            const int di = ii - i, dj = jj - j;
+            const int pi = i - di, pj = j - dj, ni = ii + di, nj = jj + dj;
+            float excess = std::fabs(d);
+            if (pi >= 0 && pj >= 0 && pi < Dw && pj < Dh && occupied[(size_t)pj * Dw + pi]) {
+                excess = std::min(excess, std::fabs(d - (rSm[p] - rSm[(size_t)pj * Dw + pi])));
+            }
+            if (ni >= 0 && nj >= 0 && ni < Dw && nj < Dh && occupied[(size_t)nj * Dw + ni]) {
+                excess = std::min(excess, std::fabs(d - (rSm[(size_t)nj * Dw + ni] - rSm[q])));
+            }
+            radiusSplit = excess > sliceThr;
+        }
+        if (rel == 0) {
+            return radiusSplit ? 3 : 0;
+        }
+        return radiusSplit ? 2 : 0;
+    };
+
     // ---- 2. samples, with depth-edge reconstruction
     // Edge pixels: the CoC varies by more than the threshold across their 3x3 (and, with surface
     // geometry, not every neighbour is on the same surface).
@@ -1454,6 +1499,33 @@ render(const Inputs& in,
 
     // ---- debug outputs that need no scatter
     if (s.output != eOutputResult) {
+        // Surface Edges: per pixel, the strongest slicing decision with its 4 neighbours (see
+        // pairSplit).
+        std::vector<unsigned char> surfaceMark(s.output == eOutputSurfaceEdges ? N : 0, 0);
+        if (!surfaceMark.empty()) {
+            parallelFor(Dh, 16, nThreads, aborted, [&](int b, int e) {
+                for (int j = b; j < e; ++j) {
+                    for (int i = 0; i < Dw; ++i) {
+                        if (!occupied[(size_t)j * Dw + i]) {
+                            continue;
+                        }
+                        int kind = 0;
+                        const int nb[4][2] = {{i + 1, j}, {i - 1, j}, {i, j + 1}, {i, j - 1}};
+                        for (int k = 0; k < 4 && kind != 1; ++k) {
+                            const int ii = nb[k][0], jj = nb[k][1];
+                            if (ii < 0 || jj < 0 || ii >= Dw || jj >= Dh || !occupied[(size_t)jj * Dw + ii]) {
+                                continue;
+                            }
+                            const int d = pairSplit(i, j, ii, jj, true);
+                            if (d == 1 || (d == 2 && kind != 1) || (d == 3 && kind == 0)) {
+                                kind = d;
+                            }
+                        }
+                        surfaceMark[(size_t)j * Dw + i] = (unsigned char)kind;
+                    }
+                }
+            });
+        }
         const Rect& O = output.bounds;
         for (int y = O.y1; y < O.y2; ++y) {
             for (int x = O.x1; x < O.x2; ++x) {
@@ -1495,6 +1567,35 @@ render(const Inputs& in,
                         o[2] = 0.f;
                     }
                     break;
+                case eOutputSurfaceEdges: {
+                    // Strongest mark in the 3x3 (thickened so single-pixel outlines are visible).
+                    const int i = x - D.x1, j = y - D.y1;
+                    int kind = 0;
+                    for (int jj = std::max(0, j - 1); jj <= std::min(Dh - 1, j + 1); ++jj) {
+                        for (int ii = std::max(0, i - 1); ii <= std::min(Dw - 1, i + 1); ++ii) {
+                            const int d = surfaceMark[(size_t)jj * Dw + ii];
+                            if (d == 1 || (d == 2 && kind != 1) || (d == 3 && kind == 0)) {
+                                kind = d;
+                            }
+                        }
+                    }
+                    const int sx = std::max(SB.x1, std::min(SB.x2 - 1, x)), sy = std::max(SB.y1, std::min(SB.y2 - 1, y));
+                    const bool distrusted = useGeom && !geomTrust[(size_t)(sy - SB.y1) * Sw + (sx - SB.x1)];
+                    float c[4];
+                    srcAt(x, y, c);
+                    const float dim = 0.25f * std::min(1.f, luminance(c));
+                    o[0] = o[1] = o[2] = dim;
+                    if (kind == 1) {
+                        o[0] = 1.f; o[1] = 0.1f; o[2] = 0.1f;
+                    } else if (kind == 2) {
+                        o[0] = 1.f; o[1] = 0.85f; o[2] = 0.1f;
+                    } else if (kind == 3) {
+                        o[0] = 0.1f; o[1] = 0.9f; o[2] = 0.2f;
+                    } else if (distrusted) {
+                        o[0] = dim; o[1] = dim; o[2] = 0.35f + dim;
+                    }
+                    break;
+                }
                 default:
                     break;
                 }
@@ -1600,44 +1701,10 @@ render(const Inputs& in,
                             if (!occupied[q]) {
                                 continue;
                             }
+                            if (pairSplit(i, j, ii, jj, false) == 0) {
+                                continue;
+                            }
                             const float lo = std::min(rSm[p], rSm[q]), hi = std::max(rSm[p], rSm[q]);
-                            // With Position/Normal the geometry decides: one surface never splits,
-                            // and a real occlusion edge splits even when the radii differ by
-                            // little (those leave the faint seams the radius test lets through).
-                            int rel = geomRelation(i, j, ii, jj);
-                            if (rel == 1 && !s.splitOcclusionEdges) {
-                                rel = -1;   // Fast: occlusion edges go by the radius test
-                            }
-                            if (rel == 0) {
-                                continue;
-                            }
-                            if (rel == 1 && hi - lo <= 0.02f * (float)rs) {
-                                continue;
-                            }
-                            const float sliceThr = 0.1f * (float)rs + 0.015f * std::max(std::fabs(lo), std::fabs(hi));
-                            if (rel != 1 && hi - lo <= sliceThr) {
-                                continue;
-                            }
-                            // A steep but smooth surface (a floor running towards the lens) steps by
-                            // about as much on either side: that is a ramp, not an edge, and splitting
-                            // it puts a slice boundary on every row (visible as horizontal lines).
-                            // Only a step that differs from the surface's own gradient on both sides
-                            // is a depth edge.
-                            if (rel != 1) {
-                                const float d = rSm[q] - rSm[p];
-                                const int di = ii - i, dj = jj - j;
-                                const int pi = i - di, pj = j - dj, ni = ii + di, nj = jj + dj;
-                                float excess = std::fabs(d);
-                                if (pi >= 0 && pj >= 0 && occupied[(size_t)pj * Dw + pi]) {
-                                    excess = std::min(excess, std::fabs(d - (rSm[p] - rSm[(size_t)pj * Dw + pi])));
-                                }
-                                if (ni < Dw && nj < Dh && occupied[(size_t)nj * Dw + ni]) {
-                                    excess = std::min(excess, std::fabs(d - (rSm[(size_t)nj * Dw + ni] - rSm[q])));
-                                }
-                                if (excess <= sliceThr) {
-                                    continue;
-                                }
-                            }
                             const int fa = std::max(0, std::min(nb - 1, sliceIndexOf(lo, fineStep) - fMin));
                             const int fb = std::max(0, std::min(nb - 1, sliceIndexOf(hi, fineStep) - fMin));
                             if (fb > fa) {
