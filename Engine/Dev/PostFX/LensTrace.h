@@ -81,25 +81,33 @@ struct TracedKernel
 {
     double a[4] = {1., 0., 0., 1.};   // relative 2x2 map (x', y') = a (x, y)
     double shift = 0.;                // relative centre offset along the tangential axis
+    double centroid = 0.;             // centre of the clipped, profiled outline (stop coordinates, x)
     int nClip = 0;
     double clipX[4] = {0., 0., 0., 0.};   // clip discs in stop coordinates (centre on the x axis)
     double clipR[4] = {1., 1., 1., 1.};
+    int clipRim[4] = {-1, -1, -1, -1};    // the surface each disc comes from (lookups blend by rim)
     double energy = 1.;               // light passed, relative to the unvignetted stop
-    std::vector<double> ringScale, ringWeight;   // radial profile as nested copies of the outline
+    bool valid = false;               // traced (false: the fit failed, a plain disc)
+    // Radial profile: density in kRings equal-width annuli of the outline, mean 1 over the area.
+    static const int kRings = 8;
+    double density[kRings] = {1., 1., 1., 1., 1., 1., 1., 1.};
+    std::vector<double> ringScale, ringWeight;   // the same as nested copies of the outline
 };
 
-// A table lookup for the scatter: interpolated numbers, the profile of the nearest entry by
-// pointer (no allocation per sample).
+// A table lookup for the scatter, everything interpolated between the 4 nearest entries (no
+// allocation per sample). ringScale / ringWeight point into the lookup itself.
 struct KernelLookup
 {
     double a[4];
     double shift;
+    double centroid;
     double energy;
     int nClip;
     double clipX[4], clipR[4];
     int nRings;
     const double* ringScale;
     const double* ringWeight;
+    double ringS[TracedKernel::kRings], ringW[TracedKernel::kRings];
 };
 
 struct LensTableParams

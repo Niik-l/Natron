@@ -404,6 +404,27 @@ public:
     // Separate kernels per colour channel (a traced chromatic lens).
     bool perChannel() const { return _l.table && _l.chromatic && _l.character > 0.; }
 
+    // How far a traced kernel reaches, over the thin-lens radius, at defocus u and field radius rho
+    // (1 for the procedural lens). Near focus it can be many times the thin-lens disc (field
+    // curvature, astigmatism), which the fill behind nearer slices has to cover.
+    double extentScale(double u, double rho) const
+    {
+        if (!_l.table) {
+            return 1.;
+        }
+        const double ch = std::max(0., std::min(1., _l.character));
+        double e = 1.;
+        for (int c = 0; c < 3; c += perChannel() ? 1 : 3) {
+            KernelLookup L;
+            _l.table->lookup(u, rho, perChannel() ? c : 1, &L);
+            const double A[4] = {ch * L.a[0] - (1. - ch), ch * L.a[1], ch * L.a[2], ch * L.a[3] - (1. - ch)};
+            const double E = 0.5 * (A[0] + A[3]), F = 0.5 * (A[0] - A[3]), G = 0.5 * (A[2] + A[1]), H = 0.5 * (A[2] - A[1]);
+            const double sMax = std::sqrt(E * E + H * H) + std::sqrt(F * F + G * G);
+            e = std::max(e, sMax);
+        }
+        return std::min(e, 64.);
+    }
+
     // r: signed radius in grid px; (fx, fy): field position, 1 = frame corner; u: the sample's
     // radius over the radius at infinity (traced lens); channel: 0 R, 1 G, 2 B.
     void shape(double r, double fx, double fy, KernelShape& out, double u = 0., int channel = 1) const
@@ -475,6 +496,13 @@ private:
     // Character (ideal = the traced convention: the stop image is inverted, a = -1).
     void tracedShape(double r, double fx, double fy, double u, int channel, KernelShape& out) const
     {
+        // The kernel is r times the table's map, which is relative to u; at focus both go to zero
+        // while the lens's own blur there doesn't. Keep the pair consistent (the lookup holds u
+        // away from zero the same way), or in-focus pixels become points next to 2 px kernels.
+        if (std::fabs(u) < 1e-6) {
+            u = u < 0. ? -1e-6 : 1e-6;
+            r = u * _rInf;
+        }
         KernelLookup L;
         const double rho = std::sqrt(fx * fx + fy * fy);
         _l.table->lookup(u, rho, channel, &L);
@@ -485,18 +513,41 @@ private:
         const double t0 = c * A[0] - s * A[2], t1 = c * A[1] - s * A[3];
         const double t2 = s * A[0] + c * A[2], t3 = s * A[1] + c * A[3];
         const double M[4] = {t0 * c - t1 * s, t0 * s + t1 * c, t2 * c - t3 * s, t2 * s + t3 * c};
-        const double m0 = r * M[0] * _sqX, m1 = r * M[1] * _sqY, m2 = r * M[2] * _sqX, m3 = r * M[3] * _sqY;
+        double m0 = r * M[0] * _sqX, m1 = r * M[1] * _sqY, m2 = r * M[2] * _sqX, m3 = r * M[3] * _sqY;
+        // Near a line focus (astigmatism) the kernel is a long thin line. Treating it as a point
+        // because its area is small, while a neighbour a little further from the line focus is
+        // drawn at full length, leaves holes and doubled pixels in an opaque surface: keep the thin
+        // axis at least a third of a pixel (m = U S V^T, S clamped) and use the long axis for the
+        // point test.
+        const double E = 0.5 * (m0 + m3), F = 0.5 * (m0 - m3), G = 0.5 * (m2 + m1), Hh = 0.5 * (m2 - m1);
+        const double Q = std::sqrt(E * E + Hh * Hh), Rr = std::sqrt(F * F + G * G);
+        const double sMax = Q + Rr, sMin = Q - Rr;   // sMin < 0: the map flips (det < 0)
+        if (std::fabs(sMin) < 0.33 && sMax >= 0.5) {
+            const double a1 = std::atan2(G, F), a2 = std::atan2(Hh, E);
+            const double th = 0.5 * (a2 - a1), ph = 0.5 * (a2 + a1);   // m = R(ph) diag(sMax, sMin) R(th)
+            const double s2 = sMin < 0. ? -0.33 : 0.33;
+            const double cp = std::cos(ph), sp = std::sin(ph), ct = std::cos(th), st = std::sin(th);
+            m0 = cp * sMax * ct - sp * s2 * st;
+            m1 = -cp * sMax * st - sp * s2 * ct;
+            m2 = sp * sMax * ct + cp * s2 * st;
+            m3 = -sp * sMax * st + cp * s2 * ct;
+        }
         out.m[0] = m0; out.m[1] = m1; out.m[2] = m2; out.m[3] = m3;
         const double det = m0 * m3 - m1 * m2;
-        out.point = std::sqrt(std::fabs(det)) < 0.1;
+        out.point = sMax < 0.5;
         if (!out.point) {
             out.inv[0] = m3 / det; out.inv[1] = -m1 / det;
             out.inv[2] = -m2 / det; out.inv[3] = m0 / det;
         }
         out.yExtent = std::sqrt(m2 * m2 + m3 * m3);
-        const double sh = ch * L.shift * r;
-        out.offX = sh * c;
-        out.offY = sh * s;
+        // Centred on the pixel: the kernel's own centre (the clip discs make it one-sided) goes back
+        // to the sample, and the lens's centre offset (coma) is not applied. Both move with depth
+        // and field position, and a moving centre leaves seams in surfaces; the image doesn't shift.
+        {
+            const double cu = ch * L.centroid;
+            out.offX = -(m0 * cu * c + m1 * cu * s);
+            out.offY = -(m2 * cu * c + m3 * cu * s);
+        }
         // Rim clip discs: grow away as Character goes to 0 (a disc scaled by 1/ch keeps its side).
         out.nClip = 0;
         if (ch > 1e-3) {
@@ -507,7 +558,10 @@ private:
                 ++out.nClip;
             }
         }
-        out.energy = ch * L.energy + (1. - ch);
+        // Unit energy: the light a lens's rims cut away depends on the field and on the entry the
+        // lookup lands on, so applying it here darkens alpha and leaves bands where neighbouring
+        // samples use different entries. Vignetting is a separate (colour-only) stage.
+        out.energy = 1.;
         // Profile blended with uniform (a single full-size ring).
         int n = 0;
         bool hasOne = false;
@@ -742,6 +796,32 @@ struct Interval
     double t0, t1, w;
 };
 
+// A sample too small to draw: all of it into its pixel. A traced lens's centre offset (coma) moves
+// it by a fraction of a pixel; rounding that would move whole pixels where the rounding flips
+// (holes and doubled pixels in a flat surface), so it is split bilinearly instead.
+inline void pointSample(SpanBuffer& buf, const KernelShape& k, double bx, double by, const float* v)
+{
+    if (k.offX == 0. && k.offY == 0.) {
+        const int cx = (int)std::floor(bx + 0.5);
+        const int cy = (int)std::floor(by + 0.5);
+        if (cy >= 0 && cy < buf.h) {
+            buf.point(cy, cx, v, k.energy);
+        }
+        return;
+    }
+    const int x0 = (int)std::floor(bx), y0 = (int)std::floor(by);
+    const double fx = bx - x0, fy = by - y0;
+    for (int j = 0; j < 2; ++j) {
+        const int cy = y0 + j;
+        if (cy < 0 || cy >= buf.h) {
+            continue;
+        }
+        const double wy = j ? fy : 1. - fy;
+        buf.point(cy, x0, v, k.energy * wy * (1. - fx));
+        buf.point(cy, x0 + 1, v, k.energy * wy * fx);
+    }
+}
+
 // Scatter one sample centred at buffer coordinates (bx, by) (buffer-relative, in buffer pixels).
 // The kernel is normalised to unit energy (times the shape's vignetting energy).
 void scatterSample(SpanBuffer& buf, std::vector<Interval>& scratch,
@@ -751,11 +831,7 @@ void scatterSample(SpanBuffer& buf, std::vector<Interval>& scratch,
     bx += k.offX;
     by += k.offY;
     if (k.point) {
-        const int cx = (int)std::floor(bx + 0.5);
-        const int cy = (int)std::floor(by + 0.5);
-        if (cy >= 0 && cy < buf.h) {
-            buf.point(cy, cx, v, k.energy);
-        }
+        pointSample(buf, k, bx, by, v);
         return;
     }
     const double ext = k.yExtent;
@@ -801,11 +877,7 @@ void scatterSample(SpanBuffer& buf, std::vector<Interval>& scratch,
         }
     }
     if (area <= 1e-9) {
-        const int cx = (int)std::floor(bx + 0.5);
-        const int cy = (int)std::floor(by + 0.5);
-        if (cy >= 0 && cy < buf.h) {
-            buf.point(cy, cx, v, k.energy);
-        }
+        pointSample(buf, k, bx, by, v);
         return;
     }
     const double norm = k.energy / area;
@@ -2378,7 +2450,17 @@ render(const Inputs& in,
                     if ((rSrc > 0.) != (rNear > 0.) || std::fabs(rSrc - rNear) > std::fabs(rNear)) {
                         rSrc = rNear;
                     }
-                    if (distP[c] > (RoccC[c] + std::fabs(rSrc)) / sc + 2.) {
+                    double reachOcc = RoccC[c], reachSrc = std::fabs(rSrc);
+                    if (s.lens.table && coc.rInf != 0.) {
+                        // A traced kernel can be larger than the thin-lens disc, and offset.
+                        const double fxF = (D.x1 + (i + region.x1 + 0.5) * sc - s.opticalCentreX);
+                        const double fyF = (D.y1 + (j + region.y1 + 0.5) * sc - s.opticalCentreY);
+                        const double rho = std::sqrt(fxF * fxF + fyF * fyF) / std::max(1e-6, s.fieldRadiusPx);
+                        const double uO = RoccC[c] / coc.rInf;
+                        reachOcc *= std::max(lens.extentScale(uO, rho), lens.extentScale(-uO, rho));
+                        reachSrc *= lens.extentScale(rSrc / coc.rInf, rho);
+                    }
+                    if (distP[c] > (reachOcc + reachSrc) / sc + 2.) {
                         continue;
                     }
                     // Same surface continuing under a nearer slice (its blur matches the occluder's),

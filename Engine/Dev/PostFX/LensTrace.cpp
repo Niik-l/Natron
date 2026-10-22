@@ -465,7 +465,7 @@ LensTableBuilder::fitKernel(const std::vector<double>& sx, const std::vector<dou
         std::nth_element(qs.begin(), qs.begin() + i98, qs.end());
         qm = std::max(1., std::min(1.6, qs[i98]));
     }
-    const int nb = 8;
+    const int nb = TracedKernel::kRings;
     std::vector<double> cntQ(nb, 0.), cntS(nb, 0.), allS(nb, 0.);
     for (size_t i = 0, j = 0; i < sx.size(); ++i) {
         if (!valid[i]) {
@@ -484,34 +484,47 @@ LensTableBuilder::fitKernel(const std::vector<double>& sx, const std::vector<dou
         cntQ[std::min(nb - 1, (int)(q[j++] / qm * nb))] += 1.;
     }
     // Density per annulus area, corrected for the part of each annulus the clip discs remove.
-    std::vector<double> prof(nb + 1, 0.);
-    double total = 0.;
+    // Regularised: the kernel changes from pixel to pixel, so a noisy or extreme profile shows as
+    // uneven coverage (alpha seams) where neighbouring samples use different entries. Near a line
+    // focus (astigmatism: the affine map nearly singular) q means little: uniform.
+    double prof[TracedKernel::kRings];
+    const double nA2 = A[0] * A[0] + A[1] * A[1] + A[2] * A[2] + A[3] * A[3];
+    const bool degenerate = std::fabs(det) < 0.05 * nA2 || q.size() < 200;
     for (int b = 0; b < nb; ++b) {
         const double area = ((b + 1.) * (b + 1.) - (double)b * b) / (nb * nb);
         const double kept = allS[b] > 0. ? cntS[b] / allS[b] : 1.;
-        prof[b] = cntQ[b] / area / std::max(0.05, kept);
-        total += cntQ[b];
+        prof[b] = degenerate ? 1. : cntQ[b] / area / std::max(0.15, kept);
     }
-    const double mean = total > 0. ? total : 1.;
+    double sm[TracedKernel::kRings];
     for (int b = 0; b < nb; ++b) {
-        prof[b] /= mean;
+        const double l = prof[std::max(0, b - 1)], r = prof[std::min(nb - 1, b + 1)];
+        sm[b] = 0.25 * l + 0.5 * prof[b] + 0.25 * r;
     }
-    for (int b = 0; b < nb; ++b) {
-        const double w = prof[b] - prof[b + 1];
-        if (std::fabs(w) > 1e-9) {
-            k->ringScale.push_back((b + 1.) / nb);
-            k->ringWeight.push_back(w);
+    auto normalise = [&](double* d) {
+        double tot = 0.;
+        for (int b = 0; b < nb; ++b) {
+            tot += d[b] * ((b + 1.) * (b + 1.) - (double)b * b) / (nb * nb);
         }
+        for (int b = 0; b < nb; ++b) {
+            d[b] = tot > 1e-12 ? d[b] / tot : 1.;
+        }
+    };
+    normalise(sm);
+    for (int b = 0; b < nb; ++b) {
+        sm[b] = std::min(3., sm[b]);
     }
-    if (k->ringScale.empty()) {
-        k->ringScale.push_back(1.);
-        k->ringWeight.push_back(1.);
+    normalise(sm);
+    for (int b = 0; b < nb; ++b) {
+        k->density[b] = sm[b];
+        k->ringScale.push_back((b + 1.) / nb);
+        k->ringWeight.push_back(sm[b] - (b + 1 < nb ? sm[b + 1] : 0.));
     }
+    k->valid = true;
 
     // 3. Clip discs: each rim that blocks rays inside the stop cuts a disc-shaped region out of it
     // (in stop coordinates; centre on the tangential axis by symmetry). Fitted to the boundary
     // between neighbouring grid rays that pass / fail that rim: x^2 + y^2 = 2 cx x + K.
-    struct Cand { double cx, R, frac; };
+    struct Cand { double cx, R, frac; int rim; };
     std::vector<Cand> cands;
     for (int sbit = 0; sbit < 32; ++sbit) {
         const unsigned m = 1u << sbit;
@@ -560,7 +573,7 @@ LensTableBuilder::fitKernel(const std::vector<double>& sx, const std::vector<dou
         if (!(R2 > 1e-6)) {
             continue;
         }
-        cands.push_back(Cand{cx, std::sqrt(R2), (double)nFail / nIn});
+        cands.push_back(Cand{cx, std::sqrt(R2), (double)nFail / nIn, sbit});
     }
     std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.frac > b.frac; });
     for (const Cand& c : cands) {
@@ -576,7 +589,36 @@ LensTableBuilder::fitKernel(const std::vector<double>& sx, const std::vector<dou
         // the scaled outline's edge), so the discs need no rescaling.
         k->clipX[k->nClip] = c.cx;
         k->clipR[k->nClip] = c.R;
+        k->clipRim[k->nClip] = c.rim;
         ++k->nClip;
+    }
+
+    // Centre of the drawn outline (unit disc with the profile, minus the clip discs): the scatter
+    // keeps each kernel centred on its pixel, since a centre that moves with depth and field leaves
+    // uneven coverage (seams) in a surface wherever its rate of change steps.
+    {
+        double sw = 0., sx = 0.;
+        const int g = 64;
+        for (int gy = 0; gy < g; ++gy) {
+            for (int gx = 0; gx < g; ++gx) {
+                const double x = 2. * (gx + 0.5) / g - 1., y = 2. * (gy + 0.5) / g - 1.;
+                const double rr = std::sqrt(x * x + y * y);
+                if (rr > 1.) {
+                    continue;
+                }
+                bool in = true;
+                for (int i = 0; i < k->nClip && in; ++i) {
+                    in = (x - k->clipX[i]) * (x - k->clipX[i]) + y * y <= k->clipR[i] * k->clipR[i];
+                }
+                if (!in) {
+                    continue;
+                }
+                const double d = k->density[std::min(nb - 1, (int)(rr * nb))];
+                sw += d;
+                sx += d * x;
+            }
+        }
+        k->centroid = sw > 0. ? sx / sw : 0.;
     }
 
     // 4. Relative to the thin-lens radius; the outline grows by qm so the profile fits inside.
@@ -900,7 +942,7 @@ LensTable::build(const LensPrescription& lens, const LensTableParams& p, std::st
         }
         TracedKernel& k = tab->_k[((size_t)c * nU + iu) * nR + ir];
         LensTableBuilder::fitKernel(pr.sx, pr.sy, pr.hx, pr.hy, pr.blk, pr.val, grid, rInfMm * u, &k);
-        if (k.ringScale.empty()) {
+        if (!k.valid) {
             ++tab->_failFit;
         }
     };
@@ -932,7 +974,7 @@ LensTable::build(const LensPrescription& lens, const LensTableParams& p, std::st
             int lastGood = -1;
             for (size_t ir = 0; ir < nR; ++ir) {
                 TracedKernel& k = tab->_k[((size_t)c * nU + iu) * nR + ir];
-                if (!k.ringScale.empty()) {
+                if (k.valid) {
                     lastGood = (int)ir;
                 } else if (lastGood >= 0) {
                     k = tab->at(c, (int)iu, lastGood);
@@ -1021,6 +1063,59 @@ LensTable::kernel(double u, double rho, int channel, TracedKernel* out) const
 
 namespace defocus {
 
+namespace {
+
+// Clip discs blended rim by rim (centre and radius averaged over the entries that have it). Where
+// an entry has no cut from that rim, the disc grows towards one that contains the whole stop, so a
+// cut fades in across the table instead of appearing at once.
+void blendClips(const TracedKernel* const k[4], const double w[4], KernelLookup* out)
+{
+    struct Rim { int id; double wHave, cx, R; };
+    Rim rims[16];
+    int nR = 0;
+    for (int j = 0; j < 4; ++j) {
+        for (int i = 0; i < k[j]->nClip; ++i) {
+            const int id = k[j]->clipRim[i];
+            int r = 0;
+            while (r < nR && rims[r].id != id) {
+                ++r;
+            }
+            if (r == nR) {
+                if (nR == 16) {
+                    continue;
+                }
+                rims[nR++] = Rim{id, 0., 0., 0.};
+            }
+            rims[r].wHave += w[j];
+            rims[r].cx += w[j] * k[j]->clipX[i];
+            rims[r].R += w[j] * k[j]->clipR[i];
+        }
+    }
+    out->nClip = 0;
+    while (out->nClip < 4) {
+        int bi = -1;
+        double bs = 1e-9;
+        for (int r = 0; r < nR; ++r) {
+            if (rims[r].id != -2 && rims[r].wHave > bs) {
+                bs = rims[r].wHave;
+                bi = r;
+            }
+        }
+        if (bi < 0) {
+            break;
+        }
+        Rim& rm = rims[bi];
+        const double cx = rm.cx / rm.wHave, R = rm.R / rm.wHave;
+        const double rOpen = std::fabs(cx) + 1.02;   // same centre, cuts nothing
+        out->clipX[out->nClip] = cx;
+        out->clipR[out->nClip] = rm.wHave * R + (1. - rm.wHave) * std::max(R, rOpen);
+        ++out->nClip;
+        rm.id = -2;
+    }
+}
+
+} // namespace
+
 void
 LensTable::lookup(double u, double rho, int channel, KernelLookup* out) const
 {
@@ -1032,9 +1127,6 @@ LensTable::lookup(double u, double rho, int channel, KernelLookup* out) const
     }
     double fu = (u - _u[iu]) / (_u[iu + 1] - _u[iu]);
     fu = std::max(0., std::min(1., fu));
-    if (_u[iu] < 0. && _u[iu + 1] > 0.) {
-        fu = u < 0. ? 0. : 1.;   // no interpolation across focus
-    }
     rho = std::max(0., rho);
     int ir = 0;
     while (ir + 2 < (int)_rho.size() && rho > _rho[ir + 1]) {
@@ -1043,26 +1135,45 @@ LensTable::lookup(double u, double rho, int channel, KernelLookup* out) const
     const double fr = std::max(0., std::min(1., (rho - _rho[ir]) / (_rho[ir + 1] - _rho[ir])));
     const TracedKernel* k[4] = {&at(channel, iu, ir), &at(channel, iu + 1, ir), &at(channel, iu, ir + 1), &at(channel, iu + 1, ir + 1)};
     const double w[4] = {(1 - fu) * (1 - fr), fu * (1 - fr), (1 - fu) * fr, fu * fr};
+    // The map and the offset are relative to the thin-lens radius, which goes through zero at
+    // focus while the kernel itself doesn't (the lens's own blur at best focus). So the absolute
+    // kernel (relative x u) is what's interpolated, also across focus, and then made relative to
+    // this u again; the kernel stays continuous through the focus plane.
+    // Beyond the ends of the table the relative kernel is held (it keeps growing with the blur).
+    const double uq = std::fabs(u) > 1e-6 ? u : (u < 0. ? -1e-6 : 1e-6);
+    const bool inTable = u >= _u.front() && u <= _u.back();
+    const double uu[4] = {inTable ? _u[iu] : uq, inTable ? _u[iu + 1] : uq, inTable ? _u[iu] : uq, inTable ? _u[iu + 1] : uq};
     for (int i = 0; i < 4; ++i) {
-        out->a[i] = w[0] * k[0]->a[i] + w[1] * k[1]->a[i] + w[2] * k[2]->a[i] + w[3] * k[3]->a[i];
-    }
-    out->shift = w[0] * k[0]->shift + w[1] * k[1]->shift + w[2] * k[2]->shift + w[3] * k[3]->shift;
-    out->energy = w[0] * k[0]->energy + w[1] * k[1]->energy + w[2] * k[2]->energy + w[3] * k[3]->energy;
-    int best = 0;
-    for (int j = 1; j < 4; ++j) {
-        if (w[j] > w[best]) {
-            best = j;
+        double b = 0.;
+        for (int j = 0; j < 4; ++j) {
+            b += w[j] * k[j]->a[i] * uu[j];
         }
+        out->a[i] = b / uq;
     }
-    const TracedKernel& b = *k[best];
-    out->nClip = b.nClip;
-    for (int i = 0; i < b.nClip; ++i) {
-        out->clipX[i] = b.clipX[i];
-        out->clipR[i] = b.clipR[i];
+    {
+        double b = 0.;
+        for (int j = 0; j < 4; ++j) {
+            b += w[j] * k[j]->shift * uu[j];
+        }
+        out->shift = b / uq;
     }
-    out->nRings = (int)b.ringScale.size();
-    out->ringScale = b.ringScale.data();
-    out->ringWeight = b.ringWeight.data();
+    out->energy = w[0] * k[0]->energy + w[1] * k[1]->energy + w[2] * k[2]->energy + w[3] * k[3]->energy;
+    out->centroid = w[0] * k[0]->centroid + w[1] * k[1]->centroid + w[2] * k[2]->centroid + w[3] * k[3]->centroid;
+    // Profile: the densities blend (they stay positive), then become nested-disc weights.
+    const int nb = TracedKernel::kRings;
+    double d[TracedKernel::kRings + 1];
+    for (int i = 0; i < nb; ++i) {
+        d[i] = w[0] * k[0]->density[i] + w[1] * k[1]->density[i] + w[2] * k[2]->density[i] + w[3] * k[3]->density[i];
+    }
+    d[nb] = 0.;
+    for (int i = 0; i < nb; ++i) {
+        out->ringS[i] = (i + 1.) / nb;
+        out->ringW[i] = d[i] - d[i + 1];
+    }
+    out->nRings = nb;
+    out->ringScale = out->ringS;
+    out->ringWeight = out->ringW;
+    blendClips(k, w, out);
 }
 
 } // namespace defocus
