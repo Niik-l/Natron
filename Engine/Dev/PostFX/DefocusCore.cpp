@@ -552,6 +552,15 @@ void scatterSample(SpanBuffer& buf, std::vector<Interval>& scratch,
     const double norm = k.energy / area;
     for (size_t i = 0; i < scratch.size(); ++i) {
         const Interval& iv = scratch[i];
+#ifdef DEFOCUS_TRACE
+        if (!(std::fabs(iv.t0) < 4. * ext + 8.) || !(std::fabs(iv.t1) < 4. * ext + 8.) || !std::isfinite(norm)) {
+            static int nBad = 0;
+            if (nBad++ < 5) {
+                std::printf("bad span: bx %.2f by %.2f ext %.3f t %g..%g norm %g area %g inv %g %g %g %g v %g\n", bx, by, ext,
+                            iv.t0, iv.t1, norm, area, k.inv[0], k.inv[1], k.inv[2], k.inv[3], v[0]);
+            }
+        }
+#endif
         buf.span(iv.dy, bx + iv.t0, bx + iv.t1, v, iv.w * norm);
     }
 }
@@ -1256,6 +1265,26 @@ render(const Inputs& in,
                             if (hi - lo <= sliceThr) {
                                 continue;
                             }
+                            // A steep but smooth surface (a floor running towards the lens) steps by
+                            // about as much on either side: that is a ramp, not an edge, and splitting
+                            // it puts a slice boundary on every row (visible as horizontal lines).
+                            // Only a step that differs from the surface's own gradient on both sides
+                            // is a depth edge.
+                            {
+                                const float d = rSm[q] - rSm[p];
+                                const int di = ii - i, dj = jj - j;
+                                const int pi = i - di, pj = j - dj, ni = ii + di, nj = jj + dj;
+                                float excess = std::fabs(d);
+                                if (pi >= 0 && pj >= 0 && occupied[(size_t)pj * Dw + pi]) {
+                                    excess = std::min(excess, std::fabs(d - (rSm[p] - rSm[(size_t)pj * Dw + pi])));
+                                }
+                                if (ni < Dw && nj < Dh && occupied[(size_t)nj * Dw + ni]) {
+                                    excess = std::min(excess, std::fabs(d - (rSm[(size_t)nj * Dw + ni] - rSm[q])));
+                                }
+                                if (excess <= sliceThr) {
+                                    continue;
+                                }
+                            }
                             const int fa = std::max(0, std::min(nb - 1, sliceIndexOf(lo, fineStep) - fMin));
                             const int fb = std::max(0, std::min(nb - 1, sliceIndexOf(hi, fineStep) - fMin));
                             if (fb > fa) {
@@ -1580,8 +1609,16 @@ render(const Inputs& in,
                     if (h < 1e-3) {
                         continue;
                     }
-                    const int sidx = srcIdx[c];
+                    int sidx = srcIdx[c];
                     const int pidx = srcP[c] >= 0 ? srcP[c] : sidx;
+                    // The eroded seeds normally sit a cell or two behind the covered edge. When the
+                    // nearest one is much farther than that (a thin strip of this slice, e.g. a few
+                    // floor rows, erodes away entirely), it belongs to some other surface, and its
+                    // colour would streak along the strip (a cone's colour drawn as a line across
+                    // the floor). Use the nearest covered cell instead.
+                    if (dist[c] > distP[c] + 3.f) {
+                        sidx = pidx;
+                    }
                     // Continue the surface's radius gradient from that cell (exact on a depth ramp).
                     auto rAt = [&](int q) { return Rs[q] / std::max(1e-12f, W[q] / (float)inv); };
                     const int pi = pidx % rw, pj = pidx / rw;
