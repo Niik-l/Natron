@@ -255,11 +255,17 @@ LensDefocus::refreshLayerChoices()
     }
 
     std::vector<ChoiceOption> entries;
-    entries.push_back(ChoiceOption("depth", "depth.Z", "The depth plane written by ScanlineRender and most renderers."));
+    entries.push_back(ChoiceOption("depth", "depth", "The depth plane written by ScanlineRender, Karma and most renderers."));
     for (std::list<ImagePlaneDesc>::const_iterator it = availableLayers.begin(); it != availableLayers.end(); ++it) {
         const ImagePlaneDesc& layer = *it;
         const std::string id = layer.getPlaneID();
-        if (id == "Color" || id == "Alpha" || id == "depth") {
+        if (id == "Color" || id == "Alpha") {
+            continue;
+        }
+        if (id == "depth") {
+            // The default entry: use the input's own plane, whatever its channel is called
+            // (ScanlineRender writes depth.Z, Karma and others depth.z).
+            _imp->cachedLayers.push_back(layer);
             continue;
         }
         std::string label = layer.getPlaneLabel();

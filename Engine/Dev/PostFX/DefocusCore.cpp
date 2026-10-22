@@ -796,6 +796,44 @@ render(const Inputs& in,
         return false;
     }
 
+    // ---- 1b. denoise the radius map within surfaces. Depth passes carry render noise, and at
+    // sub-pixel radii a +-0.05 px jitter between neighbours swings how much light a pixel keeps by
+    // several percent, which shows as speckled cracks. Average over the 5x5 neighbours on the same
+    // surface (radius within tolerance, and only pixels with content: empty pixels carry no
+    // surface) so depth edges stay sharp; a linear ramp is unchanged.
+    std::vector<unsigned char> occupied(N, 0);
+    parallelFor(Dh, 16, nThreads, aborted, [&](int b, int e) {
+        for (int j = b; j < e; ++j) {
+            for (int i = 0; i < Dw; ++i) {
+                float c[4];
+                srcAt(D.x1 + i, D.y1 + j, c);
+                occupied[(size_t)j * Dw + i] = (c[0] != 0.f || c[1] != 0.f || c[2] != 0.f || c[3] != 0.f) ? 1 : 0;
+            }
+        }
+    });
+    std::vector<float> rSm(N, 0.f);
+    parallelFor(Dh, 16, nThreads, aborted, [&](int b, int e) {
+        for (int j = b; j < e; ++j) {
+            for (int i = 0; i < Dw; ++i) {
+                const float r0 = rPix[(size_t)j * Dw + i];
+                const float tol = 0.25f * (float)rs + 0.03f * std::fabs(r0);
+                double sum = 0.;
+                int n = 0;
+                for (int jj = std::max(0, j - 2); jj <= std::min(Dh - 1, j + 2); ++jj) {
+                    for (int ii = std::max(0, i - 2); ii <= std::min(Dw - 1, i + 2); ++ii) {
+                        const size_t q = (size_t)jj * Dw + ii;
+                        const float rq = rPix[q];
+                        if (std::fabs(rq - r0) <= tol && (occupied[q] || (jj == j && ii == i))) {
+                            sum += rq;
+                            ++n;
+                        }
+                    }
+                }
+                rSm[(size_t)j * Dw + i] = (float)(sum / n);
+            }
+        }
+    });
+
     // ---- 2. samples, with depth-edge reconstruction
     // Edge pixels: the CoC varies by more than the threshold across their 3x3.
     const float edgeThr = (float)(s.edgeThresholdPx * rs);
@@ -842,7 +880,7 @@ render(const Inputs& in,
                 if (C[0] == 0.f && C[1] == 0.f && C[2] == 0.f && C[3] == 0.f) {
                     continue;
                 }
-                const float rOwn = rPix[p];
+                const float rOwn = rSm[p];
                 PixSample out[2];
                 float rFront = rOwn, rBack = rOwn;
                 if (s.edgeMode != eEdgeOff) {
@@ -856,7 +894,7 @@ render(const Inputs& in,
                             if (ii < 0 || ii >= Dw) {
                                 continue;
                             }
-                            const float rq = rPix[(size_t)jj * Dw + ii];
+                            const float rq = rSm[(size_t)jj * Dw + ii];
                             rFront = std::min(rFront, rq);
                             rBack = std::max(rBack, rq);
                         }
@@ -908,7 +946,7 @@ render(const Inputs& in,
                             if (pass == 0 && isEdge[q]) {
                                 continue;
                             }
-                            const float rq = rPix[q];
+                            const float rq = rSm[q];
                             float Q[4];
                             srcAt(D.x1 + ii, D.y1 + jj, Q);
                             if (std::fabs(rq - rFront) <= tol) {
@@ -1388,6 +1426,33 @@ render(const Inputs& in,
                     relax(c, i + 1, j + 1, d2); relax(c, i - 1, j + 1, d2);
                 }
             }
+            // Distance to the nearest cell this slice actually covers decides how far the fill must
+            // reach; the seeds above sit back from the edge and would cut the fill short.
+            std::vector<float> distP(RN, std::numeric_limits<float>::infinity());
+            for (size_t c = 0; c < RN; ++c) {
+                if (W[c] > 0.f) {
+                    distP[c] = 0.f;
+                }
+            }
+            auto relaxP = [&](size_t c, int ni, int nj, float d) {
+                if (ni >= 0 && nj >= 0 && ni < rw && nj < rh) {
+                    distP[c] = std::min(distP[c], distP[(size_t)nj * rw + ni] + d);
+                }
+            };
+            for (int j = 0; j < rh; ++j) {
+                for (int i = 0; i < rw; ++i) {
+                    const size_t c = (size_t)j * rw + i;
+                    relaxP(c, i - 1, j, d1); relaxP(c, i, j - 1, d1);
+                    relaxP(c, i - 1, j - 1, d2); relaxP(c, i + 1, j - 1, d2);
+                }
+            }
+            for (int j = rh - 1; j >= 0; --j) {
+                for (int i = rw - 1; i >= 0; --i) {
+                    const size_t c = (size_t)j * rw + i;
+                    relaxP(c, i + 1, j, d1); relaxP(c, i, j + 1, d1);
+                    relaxP(c, i + 1, j + 1, d2); relaxP(c, i - 1, j + 1, d2);
+                }
+            }
             for (int j = 0; j < rh; ++j) {
                 for (int i = 0; i < rw; ++i) {
                     const size_t c = (size_t)j * rw + i;
@@ -1403,7 +1468,7 @@ render(const Inputs& in,
                     }
                     const int sidx = srcIdx[c];
                     const double rSrc = Rs[sidx] / std::max(1e-12f, W[sidx] / (float)inv);
-                    if (dist[c] > (RoccC[c] + std::fabs(rSrc)) / sc + 2.) {
+                    if (distP[c] > (RoccC[c] + std::fabs(rSrc)) / sc + 2.) {
                         continue;
                     }
                     Sample f;
