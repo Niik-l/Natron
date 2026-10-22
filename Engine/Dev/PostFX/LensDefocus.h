@@ -89,7 +89,7 @@ public:
     virtual void addAcceptedComponents(int inputNb, std::list<ImagePlaneDesc>* comps) OVERRIDE FINAL;
     virtual void addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const OVERRIDE FINAL;
 
-    // cachedLayers is mutated from the main thread; render() reads it.
+    // The depth-channel list is rebuilt on the main thread and read by render() under a mutex.
     virtual RenderSafetyEnum renderThreadSafety() const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return eRenderSafetyInstanceSafe; }
 

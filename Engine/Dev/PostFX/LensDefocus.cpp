@@ -23,10 +23,13 @@
 #include "LensDefocus.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <limits>
 #include <sstream>
 #include <vector>
+
+#include <QtCore/QMutex>
 
 #include "DefocusCore.h"
 
@@ -82,17 +85,79 @@ errorPlane()
     return ImagePlaneDesc("defocusError", "defocusError", "", channels);
 }
 
-const double kUnitsToMm[] = {1000., 10., 1., 25.4, 304.8};
+const double kUnitsToMm[] = {1000., 10., 1., 25.4, 304.8};   // metres, cm, mm, inches, feet; then Custom
+
+std::string
+lower(std::string v)
+{
+    for (size_t i = 0; i < v.size(); ++i) {
+        v[i] = (char)std::tolower((unsigned char)v[i]);
+    }
+    return v;
+}
+
+bool
+contains(const std::string& hay, const char* needle)
+{
+    return hay.find(needle) != std::string::npos;
+}
+
+// How likely a channel is to be the depth pass, from its plane and channel names. Covers the names
+// renderers use: depth.Z (Nuke, ScanlineRender), depth.z (Karma), Z (Arnold, Redshift, RenderMan),
+// ZDepth / Z-depth / z_depth (V-Ray, Octane, Corona), Pz (Mantra), Depth (Blender, Cycles),
+// SceneDepth (Unreal), P_camera.z / Pcam.z (camera-space position).
+int
+depthScore(const std::string& planeId, const std::string& planeLabel, const std::string& channel, int chIndex)
+{
+    const std::string p = lower(planeLabel.empty() ? planeId : planeLabel);
+    const std::string c = lower(channel);
+    const bool positionLike = contains(p, "position") || p == "p" || contains(p, "world") || contains(p, "normal") ||
+                              p == "n" || contains(p, "motion") || contains(p, "vel") || contains(p, "uv") ||
+                              contains(p, "disparity") || contains(p, "vector");
+    int score = 0;
+    if (p == "depth") {
+        score = 100;
+    } else if (contains(p, "depth")) {
+        score = 90;   // ZDepth, Z-depth, z_depth, SceneDepth, camDepth, Depth layers of multilayer EXRs
+    } else if (p == "z" || p == "pz" || c == "pz") {
+        score = 90;
+    } else if (c == "z" && (p == "color" || p == "rgba" || p == "rgb" || p.empty())) {
+        score = 88;   // a bare Z channel next to RGBA
+    } else if ((contains(p, "p_camera") || contains(p, "pcam") || contains(p, "camera_p") || contains(p, "camerap")) && c == "z") {
+        score = 60;   // camera-space position: |z| is planar depth
+    } else if (c == "z" && !positionLike) {
+        score = 50;
+    }
+    if (score > 0) {
+        if (c == "z" || c == "depth") {
+            score += 2;
+        } else if (chIndex == 0) {
+            score += 1;   // ZDepth.R / Depth.R etc.: first channel
+        }
+    }
+    return score;
+}
 
 } // anonymous namespace
 
+struct DepthOption
+{
+    ImagePlaneDesc plane;
+    int channel;
+    std::string label;
+};
+
 struct LensDefocusPrivate
 {
-    std::vector<ImagePlaneDesc> cachedLayers;   // planes of input 0, refreshed on input/metadata change
+    // Every channel of every plane of the depth input, refreshed on input/metadata change (main
+    // thread); render() reads it under the mutex. autoIndex = the best-scoring one, -1 if none.
+    mutable QMutex optionsMutex;
+    std::vector<DepthOption> depthOptions;
+    int autoIndex = -1;
 
     // Depth
-    KnobChoiceWPtr depthSource, depthPlane, depthConvention, sceneUnits;
-    KnobDoubleWPtr farThreshold, normalizedNear, normalizedFar;
+    KnobChoiceWPtr depthSource, depthChannel, depthConvention, sceneUnits;
+    KnobDoubleWPtr unitScale, farThreshold, normalizedNear, normalizedFar;
     KnobBoolWPtr zeroIsInfinity, normalizedInvert, depthPremultiplied;
     // Lens
     KnobChoiceWPtr cocMode, focusMode;
@@ -114,20 +179,35 @@ struct LensDefocusPrivate
     KnobDoubleWPtr mix;
 };
 
-static ImagePlaneDesc
-resolveDepthPlane(const KnobChoiceWPtr& knob, const std::vector<ImagePlaneDesc>& cached)
+// The depth channel chosen in the menu ("auto" = the detected one). Returns false if there is none.
+static bool
+resolveDepthChannel(const LensDefocusPrivate& imp, ImagePlaneDesc* plane, int* channel, std::string* label)
 {
-    KnobChoicePtr k = knob.lock();
-    if (!k) {
-        return defaultDepthPlane();
-    }
-    const std::string id = k->getActiveEntry().id;
-    for (size_t i = 0; i < cached.size(); ++i) {
-        if (cached[i].getPlaneID() == id) {
-            return cached[i];
+    KnobChoicePtr k = imp.depthChannel.lock();
+    QMutexLocker l(&imp.optionsMutex);
+    int idx = imp.autoIndex;
+    if (k) {
+        const std::string id = k->getActiveEntry().id;
+        if (!id.empty() && id != "auto") {
+            idx = -1;
+            for (size_t i = 0; i < imp.depthOptions.size(); ++i) {
+                const DepthOption& o = imp.depthOptions[i];
+                if (o.plane.getPlaneID() + "|" + std::to_string(o.channel) == id) {
+                    idx = (int)i;
+                    break;
+                }
+            }
         }
     }
-    return defaultDepthPlane();
+    if (idx < 0 || idx >= (int)imp.depthOptions.size()) {
+        return false;
+    }
+    *plane = imp.depthOptions[idx].plane;
+    *channel = imp.depthOptions[idx].channel;
+    if (label) {
+        *label = imp.depthOptions[idx].label;
+    }
+    return true;
 }
 
 LensDefocus::LensDefocus(NodePtr node)
@@ -206,10 +286,13 @@ LensDefocus::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
 {
     (*comps)[eInputSource].push_back( ImagePlaneDesc::getRGBAComponents() );
     KnobChoicePtr src = _imp->depthSource.lock();
-    if (!src || src->getValue() == eDepthSourcePlane) {
-        (*comps)[eInputSource].push_back( resolveDepthPlane(_imp->depthPlane, _imp->cachedLayers) );
+    const int depthInput = (src && src->getValue() == eDepthSourceInput) ? eInputDepth : eInputSource;
+    ImagePlaneDesc dPlane;
+    int dCh = 0;
+    if (resolveDepthChannel(*_imp, &dPlane, &dCh, NULL)) {
+        (*comps)[depthInput].push_back(dPlane);
     } else {
-        (*comps)[eInputDepth].push_back( ImagePlaneDesc::getRGBAComponents() );
+        (*comps)[depthInput].push_back( defaultDepthPlane() );
     }
     (*comps)[eInputCleanBg].push_back( ImagePlaneDesc::getRGBAComponents() );
     (*comps)[eInputMask].push_back( ImagePlaneDesc::getAlphaComponents() );
@@ -228,7 +311,7 @@ LensDefocus::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
 void
 LensDefocus::onInputChanged(int inputNo)
 {
-    if (inputNo == eInputSource) {
+    if (inputNo == eInputSource || inputNo == eInputDepth) {
         refreshLayerChoices();
     }
 }
@@ -242,10 +325,10 @@ LensDefocus::onMetadataRefreshed(const NodeMetadata& /*metadata*/)
 void
 LensDefocus::refreshLayerChoices()
 {
-    _imp->cachedLayers.clear();
-
+    KnobChoicePtr src = _imp->depthSource.lock();
+    const int inputNb = (src && src->getValue() == eDepthSourceInput) ? eInputDepth : eInputSource;
     std::list<ImagePlaneDesc> availableLayers;
-    EffectInstancePtr input = getInput(eInputSource);
+    EffectInstancePtr input = getInput(inputNb);
     if (input) {
         double time = 0;
         if (getApp() && getApp()->getTimeLine()) {
@@ -254,32 +337,56 @@ LensDefocus::refreshLayerChoices()
         input->getAvailableLayers(time, ViewIdx(0), -1, &availableLayers);
     }
 
-    std::vector<ChoiceOption> entries;
-    entries.push_back(ChoiceOption("depth", "depth", "The depth plane written by ScanlineRender, Karma and most renderers."));
+    std::vector<DepthOption> options;
+    int best = -1, bestScore = 0;
     for (std::list<ImagePlaneDesc>::const_iterator it = availableLayers.begin(); it != availableLayers.end(); ++it) {
         const ImagePlaneDesc& layer = *it;
+        if (layer.getNumComponents() == 0) {
+            continue;
+        }
         const std::string id = layer.getPlaneID();
-        if (id == "Color" || id == "Alpha") {
+        // OpenFX's standard stereo-disparity and motion-vector planes are always listed by Natron
+        // even when the file has no such data; they would only clutter the menu.
+        if (id.find("StereoDisparity") != std::string::npos || id.find("MotionVector") != std::string::npos) {
             continue;
         }
-        if (id == "depth") {
-            // The default entry: use the input's own plane, whatever its channel is called
-            // (ScanlineRender writes depth.Z, Karma and others depth.z).
-            _imp->cachedLayers.push_back(layer);
-            continue;
-        }
-        std::string label = layer.getPlaneLabel();
-        std::string chans;
+        const std::string label = layer.getPlaneLabel().empty() ? id : layer.getPlaneLabel();
         const std::vector<std::string>& channels = layer.getChannels();
         for (size_t c = 0; c < channels.size(); ++c) {
-            chans += channels[c];
+            DepthOption o;
+            o.plane = layer;
+            o.channel = (int)c;
+            o.label = label + "." + channels[c];
+            const int score = depthScore(id, label, channels[c], (int)c);
+            if (score > bestScore) {
+                bestScore = score;
+                best = (int)options.size();
+            }
+            options.push_back(o);
         }
-        const std::string displayName = (label.empty() ? id : label) + "." + chans;
-        entries.push_back(ChoiceOption(id, displayName, "Read depth from the first channel of " + displayName));
-        _imp->cachedLayers.push_back(layer);
     }
 
-    KnobChoicePtr k = _imp->depthPlane.lock();
+    // On the separate Depth input a plain image (a greyscale depth Read, a ramp) has no depth-like
+    // names: its first channel is the depth.
+    if (best < 0 && inputNb == eInputDepth && !options.empty()) {
+        best = 0;
+    }
+
+    std::vector<ChoiceOption> entries;
+    entries.push_back(ChoiceOption("auto",
+                                   best >= 0 ? "Auto (" + options[best].label + ")" : std::string("Auto (none found)"),
+                                   "Pick the depth channel by name: depth.Z/z, Z, ZDepth, Z-depth, Pz, Depth, SceneDepth, "
+                                   "P_camera.z ... Choose a channel below if the guess is wrong."));
+    for (size_t i = 0; i < options.size(); ++i) {
+        entries.push_back(ChoiceOption(options[i].plane.getPlaneID() + "|" + std::to_string(options[i].channel),
+                                       options[i].label, ""));
+    }
+    {
+        QMutexLocker l(&_imp->optionsMutex);
+        _imp->depthOptions.swap(options);
+        _imp->autoIndex = best;
+    }
+    KnobChoicePtr k = _imp->depthChannel.lock();
     if (k) {
         k->populateChoices(entries);
     }
@@ -299,7 +406,7 @@ LensDefocus::refreshKnobVisibility()
     const bool normalized = c == defocus::eDepthNormalized;
     const bool planar = c == defocus::eDepthPlanarZ || c == defocus::eDepthRadial;
     const bool direct = c == defocus::eDepthDirectCoC;
-    _imp->depthPlane.lock()->setSecret(src->getValue() != eDepthSourcePlane);
+    _imp->unitScale.lock()->setSecret(_imp->sceneUnits.lock()->getValue() != 5);
     _imp->normalizedNear.lock()->setSecret(!normalized);
     _imp->normalizedFar.lock()->setSecret(!normalized);
     _imp->normalizedInvert.lock()->setSecret(!normalized);
@@ -321,8 +428,11 @@ bool
 LensDefocus::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /*view*/, double /*time*/,
                          bool /*originatedFromMainThread*/)
 {
+    if (k == _imp->depthSource.lock().get()) {
+        refreshLayerChoices();
+    }
     if (k == _imp->depthConvention.lock().get() || k == _imp->depthSource.lock().get() ||
-        k == _imp->cocMode.lock().get() || k == _imp->focusMode.lock().get()) {
+        k == _imp->cocMode.lock().get() || k == _imp->focusMode.lock().get() || k == _imp->sceneUnits.lock().get()) {
         refreshKnobVisibility();
         return true;
     }
@@ -455,22 +565,34 @@ LensDefocus::initializeKnobs()
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Depth Source"));
         k->setName("depthSource");
         std::vector<ChoiceOption> o;
-        o.push_back(ChoiceOption("plane", "Source Plane", "A plane of the Source input (pick it below)."));
-        o.push_back(ChoiceOption("input", "Depth Input", "The first channel of the Depth input."));
+        o.push_back(ChoiceOption("plane", "Source Input", "Depth is a channel of the Source input (a multi-layer EXR or a renderer node)."));
+        o.push_back(ChoiceOption("input", "Depth Input", "Depth comes from the separate Depth input (pick the channel below)."));
         k->populateChoices(o);
         k->setDefaultValue(eDepthSourcePlane);
         depth->addKnob(k); _imp->depthSource = k;
     }
     {
-        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Depth Plane"));
-        k->setName("depthPlane");
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Depth Channel"));
+        k->setName("depthChannel");
         std::vector<ChoiceOption> o;
-        o.push_back(ChoiceOption("depth", "depth.Z", "The depth plane written by ScanlineRender and most renderers."));
+        o.push_back(ChoiceOption("auto", "Auto", ""));
         k->populateChoices(o);
         k->setDefaultValue(0);
-        k->setHintToolTip(tr("Which Source plane holds depth (its first channel is used; CyclesRender's 3-channel "
-                             "Depth plane works too)."));
-        depth->addKnob(k); _imp->depthPlane = k;
+        k->setHintToolTip(tr("The channel that holds depth. Every channel of every layer is listed; Auto picks one by name "
+                             "and shows which.\n\n"
+                             "Typical names and settings:\n"
+                             "- ScanlineRender, Nuke: depth.Z (Z, scene units)\n"
+                             "- CyclesRender: Depth (Z, 0 = nothing hit)\n"
+                             "- Karma / Mantra: depth.z or Pz (Z, metres)\n"
+                             "- Arnold, RenderMan, Redshift: Z (Z; Arnold/Maya scenes often in cm)\n"
+                             "- Blender: Depth.Z or ViewLayer.Depth.Z (Z, metres)\n"
+                             "- V-Ray: ZDepth (usually Normalized, white = near, with its min/max depth)\n"
+                             "- Octane, Corona: Z-depth (often Normalized against a max depth)\n"
+                             "- Unreal: SceneDepth (Z, centimetres)\n"
+                             "- P_camera.z / Pcam.z: camera-space position, |z| = Z\n"
+                             "- FastVolumeRender: Depth (Distance along the ray)\n"
+                             "- AI / 2.5D depth maps: Normalized, usually 1 = near"));
+        depth->addKnob(k); _imp->depthChannel = k;
     }
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Depth Is"));
@@ -494,11 +616,15 @@ LensDefocus::initializeKnobs()
         o.push_back(ChoiceOption("mm", "Millimetres", ""));
         o.push_back(ChoiceOption("in", "Inches", ""));
         o.push_back(ChoiceOption("ft", "Feet", ""));
+        o.push_back(ChoiceOption("custom", "Custom", "Millimetres per scene unit given below."));
         k->populateChoices(o);
         k->setDefaultValue(0);
-        k->setHintToolTip(tr("Units of the depth values and Focus Distance. Our 3D nodes and Cycles use metres."));
+        k->setHintToolTip(tr("Units of the depth values and Focus Distance. Our 3D nodes, Cycles, Karma and Blender use "
+                             "metres; Maya/Arnold and Unreal scenes are usually centimetres."));
         depth->addKnob(k); _imp->sceneUnits = k;
     }
+    _imp->unitScale = dbl(depth, "Millimetres per Unit", "unitScale", 1000., 0.01, 10000.,
+                          tr("Custom scene scale: how many millimetres one depth unit is."), false);
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Zero Is Infinity"));
         k->setName("zeroIsInfinity");
@@ -678,14 +804,12 @@ LensDefocus::render(const RenderActionArgs& args)
         return eStatusFailed;
     }
     ImagePtr depthImg;
-    if (_imp->depthSource.lock()->getValue() == eDepthSourceInput) {
-        if (getInput(eInputDepth)) {
-            depthImg = getImage(eInputDepth, time, args.mappedScale, args.view,
-                                NULL, NULL, false, false, eStorageModeRAM, 0, NULL);
-        }
-    } else {
-        ImagePlaneDesc dDesc = resolveDepthPlane(_imp->depthPlane, _imp->cachedLayers);
-        depthImg = getImage(eInputSource, time, args.mappedScale, args.view,
+    ImagePlaneDesc dDesc;
+    int dChannel = 0;
+    std::string dLabel;
+    const int depthInputNb = _imp->depthSource.lock()->getValue() == eDepthSourceInput ? eInputDepth : eInputSource;
+    if (getInput(depthInputNb) && resolveDepthChannel(*_imp, &dDesc, &dChannel, &dLabel)) {
+        depthImg = getImage(depthInputNb, time, args.mappedScale, args.view,
                             NULL, &dDesc, false, false, eStorageModeRAM, 0, NULL);
     }
     ImagePtr cleanImg = getInput(eInputCleanBg)
@@ -705,8 +829,8 @@ LensDefocus::render(const RenderActionArgs& args)
     s.normalizedFar = _imp->normalizedFar.lock()->getValueAtTime(time);
     s.normalizedInvert = _imp->normalizedInvert.lock()->getValue();
     s.depthPremultiplied = _imp->depthPremultiplied.lock()->getValue();
-    const int units = std::max(0, std::min(4, _imp->sceneUnits.lock()->getValue()));
-    s.worldToMm = kUnitsToMm[units];
+    const int units = _imp->sceneUnits.lock()->getValue();
+    s.worldToMm = units >= 0 && units <= 4 ? kUnitsToMm[units] : std::max(1e-6, _imp->unitScale.lock()->getValue());
 
     s.cocMode = (defocus::CocModeEnum)_imp->cocMode.lock()->getValue();
     s.focalLengthMm = _imp->focalLength.lock()->getValueAtTime(time);
@@ -767,6 +891,7 @@ LensDefocus::render(const RenderActionArgs& args)
     if (depthImg) {
         depthRa.reset(new Image::ReadAccess(depthImg.get()));
         in.depth = viewOf(depthImg, *depthRa);
+        in.depthChannel = std::max(0, std::min(in.depth.channels - 1, dChannel));
     }
     if (cleanImg) {
         cleanRa.reset(new Image::ReadAccess(cleanImg.get()));
@@ -788,7 +913,7 @@ LensDefocus::render(const RenderActionArgs& args)
         for (int y = py - 2; y <= py + 2; ++y) {
             for (int x = px - 2; x <= px + 2; ++x) {
                 if (in.depth.bounds.contains(x, y)) {
-                    const double d = defocus::decodeDepthUnits(s, in.depth.pixel(x, y)[0]);
+                    const double d = defocus::decodeDepthUnits(s, in.depth.pixel(x, y)[in.depthChannel]);
                     if (d > 0. && d < best) {
                         best = d;
                     }
@@ -834,8 +959,66 @@ LensDefocus::render(const RenderActionArgs& args)
         ev.rowStride = (std::ptrdiff_t)W * 3;
     }
 
+    // Depth sanity checks: a wrong channel or convention is the most common setup mistake.
+    std::vector<std::string> warnings;
+    if (!in.depth.valid() && s.depthConvention != defocus::eDepthDirectCoC) {
+        warnings.push_back("No depth channel found: pick one in Depth > Depth Channel. Output = source.");
+    } else if (in.depth.valid()) {
+        double vMin = std::numeric_limits<double>::infinity(), vMax = -vMin;
+        long nFinite = 0, nNeg = 0, nAtMax = 0;
+        const defocus::Rect& b = in.depth.bounds;
+        const int step = std::max(1, std::max(b.width(), b.height()) / 256);
+        for (int y = b.y1; y < b.y2; y += step) {
+            for (int x = b.x1; x < b.x2; x += step) {
+                const double v = in.depth.pixel(x, y)[in.depthChannel];
+                if (!std::isfinite(v) || v == 0.) {
+                    continue;
+                }
+                ++nFinite;
+                nNeg += v < 0.;
+                vMin = std::min(vMin, std::fabs(v));
+                vMax = std::max(vMax, std::fabs(v));
+            }
+        }
+        for (int y = b.y1; y < b.y2 && nFinite > 0; y += step) {
+            for (int x = b.x1; x < b.x2; x += step) {
+                nAtMax += std::fabs(in.depth.pixel(x, y)[in.depthChannel]) == vMax;
+            }
+        }
+        const bool planar = s.depthConvention == defocus::eDepthPlanarZ || s.depthConvention == defocus::eDepthRadial;
+        if (nFinite == 0) {
+            warnings.push_back("Depth channel " + dLabel + " is empty (all 0 or not finite): everything is treated as infinitely far.");
+        } else if (planar && vMax <= 1.0001 && vMax > vMin) {
+            warnings.push_back("Depth values of " + dLabel + " are all within 0..1: if this is a normalized depth map, set "
+                               "Depth Is to Normalized (and its Near/Far).");
+        } else if (s.depthConvention == defocus::eDepthNormalized && vMax > 1.0001) {
+            warnings.push_back("Depth Is = Normalized but " + dLabel + " has values above 1: is it real distance (Z)?");
+        }
+        if (planar && s.farThreshold <= 0. && vMax >= 1000. && nAtMax > nFinite / 20) {
+            std::ostringstream m;
+            m << "Many depth values equal " << vMax << " (a far-clip background?): set Infinity Beyond to treat them as infinity.";
+            warnings.push_back(m.str());
+        }
+    }
+
     defocus::Stats stats;
-    const bool done = defocus::render(in, s, ov, wantErr ? &ev : NULL, &stats, [this]() { return aborted(); });
+    bool done = true;
+    if (!in.depth.valid() && s.depthConvention != defocus::eDepthDirectCoC) {
+        // No depth: pass the source through rather than blurring everything as if at infinity.
+        for (int y = outRect.y1; y < outRect.y2; ++y) {
+            for (int x = outRect.x1; x < outRect.x2; ++x) {
+                float* o = &rgba[((size_t)(y - outRect.y1) * W + (x - outRect.x1)) * 4];
+                if (in.source.bounds.contains(x, y)) {
+                    const float* sp = in.source.pixel(x, y);
+                    for (int c = 0; c < 4; ++c) {
+                        o[c] = c < in.source.channels ? sp[c] : 1.f;
+                    }
+                }
+            }
+        }
+    } else {
+        done = defocus::render(in, s, ov, wantErr ? &ev : NULL, &stats, [this]() { return aborted(); });
+    }
     if (!done) {
         return eStatusOK;   // aborted
     }
@@ -843,7 +1026,14 @@ LensDefocus::render(const RenderActionArgs& args)
     if (stats.clamped > 0) {
         std::ostringstream m;
         m << stats.clamped << " pixels hit Max Radius (" << s.maxRadiusPx << " px) and were clamped.";
-        setPersistentMessage(eMessageTypeWarning, m.str());
+        warnings.push_back(m.str());
+    }
+    if (!warnings.empty()) {
+        std::string m;
+        for (size_t i = 0; i < warnings.size(); ++i) {
+            m += (i ? "\n" : "") + warnings[i];
+        }
+        setPersistentMessage(eMessageTypeWarning, m);
     } else {
         clearPersistentMessage(false);
     }
