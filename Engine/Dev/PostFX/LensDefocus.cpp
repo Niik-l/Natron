@@ -45,6 +45,8 @@
 #include "Engine/KnobFile.h"
 #include "Engine/Project.h"
 #include "../DotUtils.h"
+#include "../Deep/DeepImage.h"
+#include "../Deep/DeepUtils.h"
 #include "../Scene3D/CameraProvider.h"
 #include "../Scene3D/RotationConventions.h"
 
@@ -254,6 +256,7 @@ struct LensDefocusPrivate
 
     // Depth
     KnobChoiceWPtr depthSource, depthChannel, depthConvention, sceneUnits;
+    KnobBoolWPtr useDeep;
     KnobChoiceWPtr positionPlane, positionSpace, normalPlane, normalSpace;
     KnobDoubleWPtr unitScale, farThreshold, normalizedNear, normalizedFar;
     KnobBoolWPtr zeroIsInfinity, normalizedInvert, depthPremultiplied;
@@ -977,6 +980,19 @@ LensDefocus::initializeKnobs()
         depth->addKnob(k); _imp->depthSource = k;
     }
     {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Use Deep Data"));
+        k->setName("useDeep");
+        k->setDefaultValue(true);
+        k->setHintToolTip(tr("When the Source is a deep image (DeepRead, CyclesRender's deep output or another deep "
+                             "node, connected directly or through Dots), defocus its deep samples: every sample "
+                             "blurs at its own depth, layers hidden behind the foreground show through its blur "
+                             "as they really are (no guessing), transparent and anti-aliased edges keep their "
+                             "own depths, and volume samples blur along their depth range. Depth comes from the "
+                             "deep Z (planar, in Scene Units); the depth channel settings are not used. Full "
+                             "resolution only (proxy renders use the flat image)."));
+        depth->addKnob(k); _imp->useDeep = k;
+    }
+    {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Depth Channel"));
         k->setName("depthChannel");
         std::vector<ChoiceOption> o;
@@ -1593,12 +1609,26 @@ LensDefocus::render(const RenderActionArgs& args)
     if (!srcImg) {
         return eStatusFailed;
     }
+    // Deep: the Source carries deep samples (a deep node upstream, through Dots at most).
+    DeepImagePtr deepImg;
+    if (_imp->useDeep.lock()->getValue() && pxScale == 1.) {
+        EffectInstancePtr srcEffect = skipDots(getInput(eInputSource));
+        deepImg = srcEffect ? getDeepImageFromEffect(srcEffect.get()) : DeepImagePtr();
+        if (deepImg && (deepImg->findChannelIndex("A") < 0 || deepImg->findChannelIndex("Z") < 0)) {
+            deepImg.reset();
+        }
+    }
+    // An alpha / depth-only deep stream carries no colour of its own: defocus the flat image.
+    const bool deepNoColour = deepImg && deepImg->findChannelIndex("R") < 0;
+    if (deepNoColour) {
+        deepImg.reset();
+    }
     ImagePtr depthImg;
     ImagePlaneDesc dDesc;
     int dChannel = 0;
     std::string dLabel;
     const int depthInputNb = _imp->depthSource.lock()->getValue() == eDepthSourceInput ? eInputDepth : eInputSource;
-    if (getInput(depthInputNb) && resolveDepthChannel(*_imp, &dDesc, &dChannel, &dLabel)) {
+    if (!deepImg && getInput(depthInputNb) && resolveDepthChannel(*_imp, &dDesc, &dChannel, &dLabel)) {
         depthImg = getImage(depthInputNb, time, args.mappedScale, args.view,
                             NULL, &dDesc, false, false, eStorageModeRAM, 0, NULL);
     }
@@ -1694,6 +1724,10 @@ LensDefocus::render(const RenderActionArgs& args)
 
     // Traced lens.
     std::vector<std::string> lensWarnings;
+    if (deepNoColour) {
+        lensWarnings.push_back("The deep Source has no colour channels (alpha / depth only): defocusing the flat image. "
+                               "Recolour it first (DeepRecolor) to use its depth samples.");
+    }
     if (focusFromCamera && !cam) {
         lensWarnings.push_back("Focus = Camera needs a Camera3D (or Alembic camera) on the Camera input. Using "
                                "Focus Distance.");
@@ -1842,6 +1876,63 @@ LensDefocus::render(const RenderActionArgs& args)
         maskRa.reset(new Image::ReadAccess(maskImg.get()));
         in.mask = viewOf(maskImg, *maskRa);
         in.maskChannel = std::max(0, in.mask.channels - 1);
+    }
+    // Deep samples: deep images are stored top-down within their data window, Natron images
+    // bottom-up (the same flip as DeepImage::flattenToImage). The front depth of each pixel stands
+    // in for the depth pass (silhouette, slicing outlines, autofocus, picking).
+    std::unique_ptr<QReadLocker> deepLock;
+    std::vector<float> deepFront;
+    if (deepImg) {
+        deepLock.reset(new QReadLocker(&deepImg->getLock()));
+        const RectI dw = deepImg->getDataWindow();
+        const DeepImage* dimg = deepImg.get();
+        defocus::DeepView& dv = in.deep;
+        dv.bounds = defocus::Rect(dw.x1, dw.y1, dw.x2, dw.y2);
+        dv.stride = deepImg->getNumChannels();
+        dv.iR = deepImg->findChannelIndex("R");
+        dv.iG = deepImg->findChannelIndex("G");
+        dv.iB = deepImg->findChannelIndex("B");
+        dv.iA = deepImg->findChannelIndex("A");
+        dv.iZ = deepImg->findChannelIndex("Z");
+        dv.iZBack = deepImg->findChannelIndex("ZBack");
+        if (dv.iG < 0) dv.iG = dv.iR;   // a single colour channel: grey
+        if (dv.iB < 0) dv.iB = dv.iR;
+        const int flipY = dw.y1 + dw.y2 - 1;
+        dv.at = [dimg, dw, flipY](int x, int y, int* n) -> const float* {
+            if (x < dw.x1 || x >= dw.x2 || y < dw.y1 || y >= dw.y2) {
+                *n = 0;
+                return nullptr;
+            }
+            const int yd = flipY - y;
+            *n = dimg->getSampleCount(x, yd);
+            return *n > 0 ? dimg->getSampleData(x, yd) : nullptr;
+        };
+        const defocus::Rect sb = in.source.bounds;
+        deepFront.assign((size_t)sb.width() * sb.height(), 0.f);
+        for (int y = sb.y1; y < sb.y2; ++y) {
+            for (int x = sb.x1; x < sb.x2; ++x) {
+                int n = 0;
+                const float* d = dv.at(x, y, &n);
+                float zf = 0.f;
+                for (int k = 0; k < n; ++k) {
+                    const float* q = d + (size_t)k * dv.stride;
+                    if (q[dv.iA] > 0.f && q[dv.iZ] > 0.f && (zf == 0.f || q[dv.iZ] < zf)) {
+                        zf = q[dv.iZ];
+                    }
+                }
+                deepFront[(size_t)(y - sb.y1) * sb.width() + (x - sb.x1)] = zf;
+            }
+        }
+        in.depth.data = deepFront.data();
+        in.depth.bounds = sb;
+        in.depth.channels = 1;
+        in.depth.rowStride = sb.width();
+        in.depthChannel = 0;
+        s.depthConvention = defocus::eDepthPlanarZ;
+        s.zeroIsInfinity = true;
+        s.farThreshold = 0.;
+        s.depthPremultiplied = false;
+        dLabel = "deep Z";
     }
     const bool fromPosition = s.depthConvention == defocus::eDepthPosition;
 
