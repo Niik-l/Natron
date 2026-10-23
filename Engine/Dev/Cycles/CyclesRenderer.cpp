@@ -893,20 +893,26 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         const int n = matLogCounter.fetch_add(1);
         double rr, gg, bb;
         mat->getMaterialBaseColor(time, rr, gg, bb);
-        std::fprintf(stderr, "[CYCMAT] #%d base=(%.3f,%.3f,%.3f) rough=%.3f metal=%.3f tex='%s' texIm=%d alpha=%d\n",
+        std::        fprintf(stderr, "[CYCMAT] #%d base=(%.3f,%.3f,%.3f) rough=%.3f metal=%.3f tex='%s' texIm=%d texA=%d op=%.3f opMap=%d opInv=%d\n",
                      n, rr, gg, bb, mat->getMaterialRoughness(time), mat->getMaterialMetallic(time),
                      texFile.c_str(), texFile.empty() ? 0 : 1,
-                     mat->getMaterialTextureUsesAlpha() ? 1 : 0);
+                     mat->getMaterialTextureUsesAlpha() ? 1 : 0,
+                     mat->getMaterialOpacity(time),
+                     resolveTextureFrame(mat->getMaterialOpacityMapFile(), frame).empty() ? 0 : 1,
+                     mat->getMaterialOpacityInvert() ? 1 : 0);
     }
     if (!texFile.empty()) {
         baseTex = graph->create_node<ccl::ImageTextureNode>();
         baseTex->set_filename(ccl::ustring(texFile));
         baseTex->set_colorspace(materialColorspaceToCycles(mat->getMaterialDiffuseColorspace()));
         if (mat->getMaterialTextureUsesAlpha()) {
-            // Card3D's baked img input: premultiplied RGBA straight from the
-            // comp. Telling Cycles the alpha is associated makes the image node
-            // un-premultiply for its Color output once Alpha is linked below.
-            baseTex->set_alpha_type(ccl::IMAGE_ALPHA_ASSOCIATED);
+            // Alpha interpretation when Alpha gets linked below: PREMULTIPLIED
+            // images (Card3D's baked img input — comp RGBA) must be
+            // un-premultiplied once alpha is used; straight-alpha file textures
+            // (glTF/FBX/user albedos) must NOT be.
+            if (mat->getMaterialTextureAlphaPremultiplied()) {
+                baseTex->set_alpha_type(ccl::IMAGE_ALPHA_ASSOCIATED);
+            }
         }
         graph->connect(texCoord->output("UV"), baseTex->input("Vector"));
         if (!particleColorTint) {
@@ -1109,30 +1115,53 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         graph->connect(transTex->output("Color"), principled->input("Transmission Weight"));
     }
 
-    // Opacity map -> Principled "Alpha". Atlas foliage lives or dies on this:
-    // the leaf shapes only exist in the cutout, so without it every card is a
-    // solid quad and a shrub renders as a green box.
-    std::string opacityFile = resolveTextureFrame(mat->getMaterialOpacityMapFile(), frame);
-    if (!opacityFile.empty()) {
-        ccl::ImageTextureNode* opacityTex = graph->create_node<ccl::ImageTextureNode>();
-        opacityTex->set_filename(ccl::ustring(opacityFile));
-        opacityTex->set_colorspace(ccl::ustring("__builtin_raw"));
-        graph->connect(texCoord->output("UV"), opacityTex->input("Vector"));
-        if ( mat->getMaterialOpacityInvert() ) {
-            // "Transparency"-style mask: white means see-through. Fac stays at
-            // its default 1.0, i.e. fully inverted.
-            ccl::InvertNode* inv = graph->create_node<ccl::InvertNode>();
-            graph->connect(opacityTex->output("Color"), inv->input("Color"));
-            graph->connect(inv->output("Color"), principled->input("Alpha"));
-        } else {
-            graph->connect(opacityTex->output("Color"), principled->input("Alpha"));
+    // Alpha assembly for Principled's Alpha input, in priority order:
+    //   1. explicit opacity map (Megascans-style cutout masks — atlas foliage
+    //      lives or dies on this: without it every leaf card is a solid quad),
+    //   2. the base texture's own alpha channel (Card3D's baked comp input -
+    //      a logo card rendered as an opaque square in Cycles while the
+    //      viewport and ScanlineRender showed the cutout — and glTF
+    //      BLEND/MASK materials whose albedo packs the opacity, e.g. Mixamo
+    //      hair), overridden by neither of the above,
+    //   3. the scalar opacity (glTF baseColorFactor alpha) which multiplies
+    //      into whichever alpha source was linked, or sets Alpha alone.
+    {
+        std::string opacityFile =
+            resolveTextureFrame(mat->getMaterialOpacityMapFile(), frame);
+        ccl::ShaderOutput* alphaSrc = nullptr;
+        if (!opacityFile.empty()) {
+            ccl::ImageTextureNode* opacityTex = graph->create_node<ccl::ImageTextureNode>();
+            opacityTex->set_filename(ccl::ustring(opacityFile));
+            opacityTex->set_colorspace(ccl::ustring("__builtin_raw"));
+            graph->connect(texCoord->output("UV"), opacityTex->input("Vector"));
+            if ( mat->getMaterialOpacityInvert() ) {
+                // "Transparency"-style mask: white means see-through. Fac stays at
+                // its default 1.0, i.e. fully inverted.
+                ccl::InvertNode* inv = graph->create_node<ccl::InvertNode>();
+                graph->connect(opacityTex->output("Color"), inv->input("Color"));
+                alphaSrc = inv->output("Color");
+            } else {
+                alphaSrc = opacityTex->output("Color");
+            }
+        } else if (baseTex && !particleColorTint && mat->getMaterialTextureUsesAlpha()) {
+            alphaSrc = baseTex->output("Alpha");
         }
-    } else if (baseTex && !particleColorTint && mat->getMaterialTextureUsesAlpha()) {
-        // No opacity map: let the base texture's own alpha cut the surface out.
-        // Card3D asks for this for its baked img input - a logo card was
-        // rendering as an opaque square in Cycles while the viewport and
-        // ScanlineRender showed the cutout. An explicit Opacity map still wins.
-        graph->connect(baseTex->output("Alpha"), principled->input("Alpha"));
+        const float opacityScalar = (float)mat->getMaterialOpacity(time);
+        if (alphaSrc) {
+            if (opacityScalar < 1.0f) {
+                ccl::MathNode* alphaMul = graph->create_node<ccl::MathNode>();
+                alphaMul->set_math_type(ccl::NODE_MATH_MULTIPLY);
+                alphaMul->set_value2(opacityScalar);
+                graph->connect(alphaSrc, alphaMul->input("Value1"));
+                graph->connect(alphaMul->output("Value"), principled->input("Alpha"));
+            } else {
+                graph->connect(alphaSrc, principled->input("Alpha"));
+            }
+        } else if (opacityScalar < 1.0f) {
+            // No alpha source at all: bare scalar (uniform transparency,
+            // e.g. a glTF BLEND material whose factor is < 1).
+            principled->set_alpha(opacityScalar);
+        }
     }
 
     // Translucency: blend a Translucent BSDF over the Principled result, using

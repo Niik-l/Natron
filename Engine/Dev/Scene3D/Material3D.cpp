@@ -101,6 +101,7 @@ struct Material3DPrivate
     KnobDoubleWPtr emissionStrength;
     KnobDoubleWPtr transmission, ior;
     KnobFileWPtr textureFile;
+    KnobBoolWPtr textureUsesAlpha;
 
     // PBR texture maps
     KnobFileWPtr normalMapFile;
@@ -270,6 +271,20 @@ Material3D::initializeKnobs()
         k->setName("textureFile");
         k->setHintToolTip(tr("Base color / albedo texture. Supports .exr, .hdr, .png, .jpg"));
         texPage->addKnob(k); _imp->textureFile = k;
+    }
+    {
+        // Opt-in: link the albedo's own alpha channel to Principled Alpha.
+        // glTF-style packed textures (e.g. Mixamo's Diffuse-Opacity hair) need
+        // this to keep their cutout when the imported material is mirrored
+        // into a standalone Material3D (Re-build Materials). Default off —
+        // an albedo with stray alpha must not silently punch holes.
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Diffuse Uses Alpha"));
+        k->setName("textureUsesAlpha"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Link the diffuse texture's ALPHA channel to the surface's "
+                             "opacity (what glTF BLEND materials do). Off by default: an "
+                             "albedo with stray alpha must not punch holes in the mesh."));
+        k->setAnimationEnabled(false);
+        texPage->addKnob(k); _imp->textureUsesAlpha = k;
     }
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Diffuse Colorspace"));
@@ -586,6 +601,9 @@ std::string Material3D::getMaterialOpacityMapFile() const
 
 bool Material3D::getMaterialOpacityInvert() const
 { KnobBoolPtr k = _imp->opacityInvert.lock(); return k ? k->getValue() : false; }
+
+bool Material3D::getMaterialTextureUsesAlpha() const
+{ KnobBoolPtr k = _imp->textureUsesAlpha.lock(); return k ? k->getValue() : false; }
 
 std::string Material3D::getMaterialTranslucencyMapFile() const
 { KnobFilePtr k = _imp->translucencyMapFile.lock(); return k ? k->getValue() : std::string(); }

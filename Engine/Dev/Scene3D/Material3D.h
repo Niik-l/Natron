@@ -113,6 +113,7 @@ public:
     virtual std::string getMaterialDisplacementMapFile() const OVERRIDE;
     virtual std::string getMaterialOpacityMapFile() const OVERRIDE;
     virtual bool getMaterialOpacityInvert() const OVERRIDE;
+    virtual bool getMaterialTextureUsesAlpha() const OVERRIDE;
     virtual std::string getMaterialTranslucencyMapFile() const OVERRIDE;
     virtual double getMaterialTranslucencyStrength(double time) const OVERRIDE;
     virtual double getMaterialDisplacementScale(double time) const OVERRIDE;

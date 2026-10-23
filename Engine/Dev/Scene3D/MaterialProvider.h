@@ -81,6 +81,17 @@ public:
     virtual bool getMaterialOpacityInvert() const { return false; }
     virtual std::string getMaterialTranslucencyMapFile() const { return std::string(); }
     virtual double getMaterialTranslucencyStrength(double /*time*/) const { return 1.0; }
+    /**
+     * @brief Scalar opacity (1 = opaque) multiplied into Principled's Alpha.
+     *
+     * glTF baseColorFactor alpha (BLEND with rgba<1) and similar per-material
+     * alpha factors. Applied when no opacity MAP is set and the base texture
+     * doesn't drive alpha through getMaterialTextureUsesAlpha(): the scalar
+     * multiplies whatever alpha source is connected; with no alpha source at
+     * all it sets Principled's Alpha directly. 1.0 = fully opaque (the
+     * default for every material without an explicit alpha factor).
+     */
+    virtual double getMaterialOpacity(double /*time*/) const { return 1.0; }
     virtual std::string getMaterialDisplacementMapFile() const { return std::string(); }
     virtual double getMaterialDisplacementScale(double /*time*/) const { return 0.1; }
     virtual double getMaterialDisplacementMidlevel(double /*time*/) const { return 0.5; }
@@ -100,6 +111,12 @@ public:
      *  should not silently punch holes in a mesh. Card3D turns it on for the
      *  image it bakes from its img input, which is the whole point of a card. */
     virtual bool getMaterialTextureUsesAlpha() const { return false; }
+    /** Alpha INTERPRETATION of the base-color image when Alpha is linked
+     *  (getMaterialTextureUsesAlpha true): true = PREMULTIPLIED (Card3D's
+     *  baked img input carries comp RGBA — Cycles must un-premultiply the
+     *  color once alpha is used); false = STRAIGHT alpha, the default for
+     *  every file-borne texture (glTF/FBX albedos, user file knobs). */
+    virtual bool getMaterialTextureAlphaPremultiplied() const { return false; }
     /** Called once per Cycles render request (CyclesPassRender) before the
      *  scene is built: shapes whose texture comes from an img input bake it to
      *  a file here (see MaterialTextureBake.h). No-op for file-based providers. */

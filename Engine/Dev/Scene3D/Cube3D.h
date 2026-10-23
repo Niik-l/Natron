@@ -149,6 +149,10 @@ public:
     virtual std::string getMaterialTextureFile() const OVERRIDE;
     virtual std::string getMaterialDiffuseColorspace() const OVERRIDE;
     virtual bool getMaterialTextureUsesAlpha() const OVERRIDE;
+    // The baked img input carries the comp's premultiplied RGBA (unlike
+    // file-borne textures, whose alpha is straight).
+    virtual bool getMaterialTextureAlphaPremultiplied() const OVERRIDE
+    { return true; }
     virtual unsigned long long getMaterialInputsHash(double time) const OVERRIDE;
     virtual void bakeImageInput(double time) OVERRIDE;
     virtual bool hasMaterialInput() const OVERRIDE;
