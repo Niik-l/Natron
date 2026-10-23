@@ -26,25 +26,21 @@
 
 #include "../../../Global/Macros.h"
 
-#include "../../EffectInstance.h"
-#include "../../ViewIdx.h"
-#include "../../EngineFwd.h"
+#include "../PostFX/LensDefocus.h"
 
 NATRON_NAMESPACE_ENTER
 
-struct DeepDefocusPrivate;
-
 /**
- * @brief Depth-of-field effect directly on deep compositing data.
+ * @brief Depth of field on deep compositing data: LensDefocus with a deep input.
  *
- * Stratifies deep samples into depth layers, computes circle of confusion
- * per layer, applies Gaussian blur, and composites back-to-front.
- *
- * Output is a flat RGBA image (defocus destroys deep structure).
- * This is a unique feature — Nuke only has this via the Bokeh plugin.
+ * Every deep sample blurs at its own depth (hidden layers show through a blurred foreground as
+ * they are, edges and volumes keep their own depths), with all of LensDefocus: camera matching
+ * (Camera input, camera from file, focal length / film back / f-stop), real lens designs, bokeh
+ * shape, image stages, focus picking and the debug outputs. The depth-pass settings are not used.
+ * Old DeepDefocus projects carry their knob values over (LensDefocus::onKnobsLoaded).
  */
 class DeepDefocus
-    : public EffectInstance
+    : public LensDefocus
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -54,13 +50,8 @@ public:
 
     static EffectInstance* BuildEffect(NodePtr n) { return new DeepDefocus(n); }
 
-    DeepDefocus(NodePtr node);
-    virtual ~DeepDefocus();
-
-    virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
-    virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
-    virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
+    DeepDefocus(NodePtr node) : LensDefocus(node, true) {}
+    virtual ~DeepDefocus() {}
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return PLUGINID_NATRON_DEEPDEFOCUS; }
@@ -72,51 +63,6 @@ public:
 
     virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
     { grouping->push_back(PLUGIN_GROUP_DEEP); }
-
-    virtual std::string getInputLabel(int /*inputNb*/) const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "Deep"; }
-
-    virtual bool isInputOptional(int /*inputNb*/) const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return false; }
-
-    virtual void addAcceptedComponents(int inputNb, std::list<ImagePlaneDesc>* comps) OVERRIDE FINAL;
-    virtual void addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const OVERRIDE FINAL;
-
-    virtual RenderSafetyEnum renderThreadSafety() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return eRenderSafetyFullySafe; }
-
-    virtual bool supportsTiles() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
-    virtual bool supportsMultiResolution() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
-    virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
-    virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
-
-    // Viewer focus picking, as LensDefocus: with Pick Focus on, a click (or drag) picks focus from
-    // the nearest deep sample under the cursor; Ctrl+middle-click does it any time.
-    virtual bool hasOverlay() const OVERRIDE FINAL { return true; }
-    virtual bool onOverlayPenDown(double time, const RenderScale& renderScale, ViewIdx view,
-                                  const QPointF& viewportPos, const QPointF& pos, double pressure,
-                                  double timestamp, PenType pen) OVERRIDE FINAL WARN_UNUSED_RETURN;
-    virtual bool onOverlayPenMotion(double time, const RenderScale& renderScale, ViewIdx view,
-                                    const QPointF& viewportPos, const QPointF& pos, double pressure,
-                                    double timestamp) OVERRIDE FINAL WARN_UNUSED_RETURN;
-    virtual bool onOverlayPenUp(double time, const RenderScale& renderScale, ViewIdx view,
-                                const QPointF& viewportPos, const QPointF& pos, double pressure,
-                                double timestamp) OVERRIDE FINAL WARN_UNUSED_RETURN;
-
-private:
-
-    // Nearest front depth of the deep input in a 5x5 window around (x, y) (Natron pixels).
-    bool depthNear(double x, double y, double* depth) const;
-    void pickFocusAt(double time, const QPointF& pos);
-    void refreshFocusKnobs();
-    virtual void onKnobsLoaded() OVERRIDE FINAL;
-
-    virtual void initializeKnobs() OVERRIDE FINAL;
-    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
-    virtual StatusEnum getRegionOfDefinition(U64 hash, double time, const RenderScale& scale, ViewIdx view, RectD* rod) OVERRIDE FINAL WARN_UNUSED_RETURN;
-    virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
-
-    std::unique_ptr<DeepDefocusPrivate> _imp;
 };
 
 NATRON_NAMESPACE_EXIT

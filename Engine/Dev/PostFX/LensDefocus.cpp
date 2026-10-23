@@ -364,11 +364,13 @@ resolveGeomPlane(const LensDefocusPrivate& imp, int kind, ImagePlaneDesc* plane,
     return true;
 }
 
-LensDefocus::LensDefocus(NodePtr node)
+LensDefocus::LensDefocus(NodePtr node, bool deepNode)
     : EffectInstance(node)
+    , _deepNode(deepNode)
     , _imp(new LensDefocusPrivate())
 {
-    setSupportsRenderScaleMaybe(eSupportsYes);
+    // deep data is full resolution only
+    setSupportsRenderScaleMaybe(deepNode ? eSupportsNo : eSupportsYes);
 }
 
 LensDefocus::~LensDefocus()
@@ -395,8 +397,8 @@ std::string
 LensDefocus::getInputLabel(int inputNb) const
 {
     switch (inputNb) {
-    case eInputSource: return "Source";
-    case eInputDepth: return "Depth";
+    case eInputSource: return _deepNode ? "Deep" : "Source";
+    case eInputDepth: return _deepNode ? "unused" : "Depth";
     case eInputCamera: return "Camera";
     case eInputCleanBg: return "CleanBg";
     case eInputMask: return "Mask";
@@ -649,6 +651,24 @@ LensDefocus::refreshKnobVisibility()
     _imp->focusTilt.lock()->setSecret(direct);
     _imp->focusSwing.lock()->setSecret(direct);
     _imp->alignPlane.lock()->setSecret(direct);
+
+    // DeepDefocus: depth comes from the deep samples.
+    if (_deepNode) {
+        _imp->useDeep.lock()->setSecret(true);
+        _imp->depthSource.lock()->setSecret(true);
+        _imp->depthChannel.lock()->setSecret(true);
+        _imp->depthConvention.lock()->setSecret(true);
+        _imp->zeroIsInfinity.lock()->setSecret(true);
+        _imp->farThreshold.lock()->setSecret(true);
+        _imp->normalizedNear.lock()->setSecret(true);
+        _imp->normalizedFar.lock()->setSecret(true);
+        _imp->normalizedInvert.lock()->setSecret(true);
+        _imp->depthPremultiplied.lock()->setSecret(true);
+        _imp->positionPlane.lock()->setSecret(true);
+        _imp->positionSpace.lock()->setSecret(true);
+        _imp->normalPlane.lock()->setSecret(true);
+        _imp->normalSpace.lock()->setSecret(true);
+    }
 
     // Traced lens: its kernels replace the procedural character knobs.
     const std::string lensId = _imp->lensModel.lock()->getActiveEntry().id;
@@ -1206,6 +1226,97 @@ LensDefocus::initializeKnobs()
     _imp->mix.lock()->setMinimum(0.);
     _imp->mix.lock()->setMaximum(1.);
 
+    if (_deepNode) {
+        // The knobs of the old DeepDefocus, hidden: a saved project restores them, and
+        // onKnobsLoaded carries their values over to the knobs above.
+        auto legacyD = [&](const char* name, double def) {
+            KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr(name));
+            k->setName(name);
+            k->setDefaultValue(def);
+            k->setSecret(true);
+            lens->addKnob(k);
+        };
+        legacyD("focalDistance", 5.);
+        legacyD("blurScale", 1.);
+        legacyD("maxBlur", 50.);
+        legacyD("apertureRotation", 0.);
+        auto legacyI = [&](const char* name, int def) {
+            KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr(name));
+            k->setName(name);
+            k->setDefaultValue(def);
+            k->setSecret(true);
+            lens->addKnob(k);
+        };
+        legacyI("apertureBlades", 0);
+        legacyI("numLayers", 15);
+        legacyI("focusPointX", 640);
+        legacyI("focusPointY", 360);
+        auto legacyB = [&](const char* name) {
+            KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr(name));
+            k->setName(name);
+            k->setDefaultValue(true);
+            k->setSecret(true);
+            lens->addKnob(k);
+        };
+        legacyB("defocusForeground");
+        legacyB("defocusBackground");
+    }
+
+    refreshKnobVisibility();
+}
+
+void
+LensDefocus::onKnobsLoaded()
+{
+    if (_deepNode) {
+        // An old DeepDefocus: a legacy knob that differs from its old default was set by the
+        // user, so it takes over the matching knob (old defaults equal the new ones otherwise).
+        auto dval = [&](const char* name, double def, double* v) {
+            KnobDoublePtr k = std::dynamic_pointer_cast<KnobDouble>(getKnobByName(name));
+            if (!k) {
+                return false;
+            }
+            *v = k->getValue();
+            return std::fabs(*v - def) > 1e-9 || k->isAnimated(0);
+        };
+        auto ival = [&](const char* name, int def, int* v) {
+            KnobIntPtr k = std::dynamic_pointer_cast<KnobInt>(getKnobByName(name));
+            if (!k) {
+                return false;
+            }
+            *v = k->getValue();
+            return *v != def;
+        };
+        double v = 0.;
+        int iv = 0;
+        if (dval("focalDistance", 5., &v)) {
+            KnobDoublePtr src = std::dynamic_pointer_cast<KnobDouble>(getKnobByName("focalDistance"));
+            if (src && src->isAnimated(0)) {
+                _imp->focusDistance.lock()->clone(src.get());
+            } else {
+                _imp->focusDistance.lock()->setValue(v);
+            }
+        }
+        double gain = 1.;
+        const bool gainSet = dval("blurScale", 1., &gain);
+        KnobBoolPtr fg = std::dynamic_pointer_cast<KnobBool>(getKnobByName("defocusForeground"));
+        KnobBoolPtr bg = std::dynamic_pointer_cast<KnobBool>(getKnobByName("defocusBackground"));
+        if (gainSet || (fg && !fg->getValue())) {
+            _imp->nearGain.lock()->setValue(fg && !fg->getValue() ? 0. : gain);
+        }
+        if (gainSet || (bg && !bg->getValue())) {
+            _imp->farGain.lock()->setValue(bg && !bg->getValue() ? 0. : gain);
+        }
+        if (dval("maxBlur", 50., &v)) {
+            _imp->maxRadius.lock()->setValue(v);
+        }
+        if (ival("apertureBlades", 0, &iv)) {
+            _imp->blades.lock()->setValue(iv);
+        }
+        if (dval("apertureRotation", 0., &v)) {
+            _imp->rotation.lock()->setValue(v);
+        }
+    }
     refreshKnobVisibility();
 }
 
@@ -1611,7 +1722,7 @@ LensDefocus::render(const RenderActionArgs& args)
     }
     // Deep: the Source carries deep samples (a deep node upstream, through Dots at most).
     DeepImagePtr deepImg;
-    if (_imp->useDeep.lock()->getValue() && pxScale == 1.) {
+    if (_deepNode || (_imp->useDeep.lock()->getValue() && pxScale == 1.)) {
         EffectInstancePtr srcEffect = skipDots(getInput(eInputSource));
         deepImg = srcEffect ? getDeepImageFromEffect(srcEffect.get()) : DeepImagePtr();
         if (deepImg && (deepImg->findChannelIndex("A") < 0 || deepImg->findChannelIndex("Z") < 0)) {
@@ -1622,6 +1733,14 @@ LensDefocus::render(const RenderActionArgs& args)
     const bool deepNoColour = deepImg && deepImg->findChannelIndex("R") < 0;
     if (deepNoColour) {
         deepImg.reset();
+    }
+    if (_deepNode && !deepImg) {
+        setPersistentMessage(eMessageTypeError, deepNoColour
+                             ? "The deep input has no colour channels (alpha / depth only): recolour it first "
+                               "(DeepRecolor)."
+                             : "Connect a deep image (DeepRead, CyclesRender deep output, DeepMerge ...) to the "
+                               "Deep input.");
+        return eStatusFailed;
     }
     ImagePtr depthImg;
     ImagePlaneDesc dDesc;
@@ -1687,7 +1806,9 @@ LensDefocus::render(const RenderActionArgs& args)
         s.focusDistance = std::max(1e-4, cam->getCameraFocusDistance(time));
     }
 
-    const RectI format = getOutputFormat();
+    // The frame the lens maps onto: the output format, or with deep samples the deep image's own
+    // window (DeepRead reports the project format, not the render's).
+    const RectI format = deepImg ? deepImg->getDataWindow() : getOutputFormat();
     s.formatWidthPx = std::max(1, format.width());
     s.opticalCentreX = 0.5 * (format.x1 + format.x2) * pxScale;
     s.opticalCentreY = 0.5 * (format.y1 + format.y2) * pxScale;

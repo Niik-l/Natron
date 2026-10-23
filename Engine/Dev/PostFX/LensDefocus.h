@@ -63,7 +63,8 @@ public:
 
     static EffectInstance* BuildEffect(NodePtr n) { return new LensDefocus(n); }
 
-    LensDefocus(NodePtr node);
+    // deepNode: the DeepDefocus variant (input 0 must be a deep image; see DeepDefocus).
+    LensDefocus(NodePtr node, bool deepNode = false);
     virtual ~LensDefocus();
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
@@ -71,15 +72,15 @@ public:
     virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 5; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
-    virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
+    virtual std::string getPluginID() const OVERRIDE WARN_UNUSED_RETURN
     { return PLUGINID_NATRON_LENSDEFOCUS; }
 
-    virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
+    virtual std::string getPluginLabel() const OVERRIDE WARN_UNUSED_RETURN
     { return "LensDefocus"; }
 
-    virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual std::string getPluginDescription() const OVERRIDE WARN_UNUSED_RETURN;
 
-    virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
+    virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE
     { grouping->push_back(PLUGIN_GROUP_FILTER); }
 
     virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
@@ -113,6 +114,7 @@ public:
                                                 int* passThroughInput) OVERRIDE FINAL;
 
     virtual void onInputChanged(int inputNo) OVERRIDE FINAL;
+    virtual void onKnobsLoaded() OVERRIDE FINAL;
     virtual void onMetadataRefreshed(const NodeMetadata& metadata) OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time,
                              bool originatedFromMainThread) OVERRIDE FINAL;
@@ -130,6 +132,10 @@ public:
     virtual bool onOverlayPenUp(double time, const RenderScale& renderScale, ViewIdx view,
                                 const QPointF& viewportPos, const QPointF& pos, double pressure,
                                 double timestamp) OVERRIDE FINAL WARN_UNUSED_RETURN;
+
+protected:
+
+    const bool _deepNode;
 
 private:
 
