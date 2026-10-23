@@ -41,7 +41,13 @@ namespace defocus {
 namespace {
 
 const double kPi = 3.14159265358979323846;
-const int kNumCh = 5;          // r, g, b, a, guess
+// Scatter buffers: r, g, b, a, guess, then the coverage of the red and the blue kernels. With
+// axial colour (or a traced lens's per-channel kernels) red and blue are blurred by different
+// kernels than green, so each composites over the slices behind with its own coverage; sharing
+// green's alpha leaves coloured lines wherever a surface spans several depth slices.
+const int kNumCh = 7;
+const int kSampleCh = 5;       // per sample: r, g, b, a, guess
+const int kAlphaR = 5, kAlphaB = 6;
 const int kStripRows = 32;     // full-res output rows per scatter work item
 const double kSliceR0 = 4.;    // px; slice spacing is relative above this radius
 
@@ -816,7 +822,7 @@ struct SpanBuffer
     {
         for (int y = touchLo; y <= touchHi; ++y) {
             float* r = d.data() + (size_t)y * (w + 1) * kNumCh;
-            float acc[kNumCh] = {0.f, 0.f, 0.f, 0.f, 0.f};
+            float acc[kNumCh] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
             for (int i = 0; i < w; ++i) {
                 for (int c = 0; c < kNumCh; ++c) {
                     acc[c] += r[(size_t)i * kNumCh + c];
@@ -951,7 +957,7 @@ struct Sample
 {
     int x, y;       // grid cell (level grid) or full-res pixel
     float r;        // render-scale px
-    float c[kNumCh];
+    float c[kSampleCh];
 };
 
 struct Slice
@@ -2500,7 +2506,9 @@ render(const Inputs& in,
                         reachOcc *= std::max(lens.extentScale(uO, rho), lens.extentScale(-uO, rho));
                         reachSrc *= lens.extentScale(rSrc / coc.rInf, rho);
                     }
-                    if (distP[c] > (reachOcc + reachSrc) / sc + 2.) {
+                    // Axial colour: red and blue blur up to |axialCA| further than green.
+                    const double caReach = 2. * std::fabs(s.lens.axialCA) * s.renderScale;
+                    if (distP[c] > (reachOcc + reachSrc + caReach) / sc + 2.) {
                         continue;
                     }
                     // Same surface continuing under a nearer slice (its blur matches the occluder's),
@@ -2598,21 +2606,29 @@ render(const Inputs& in,
         KernelShape k;
         // Where the sample sits in a traced lens's table: its radius over the radius at infinity.
         const double u = coc.rInf != 0. ? smp.r / coc.rInf : 0.;
+        float v[kNumCh];
         if (caPx == 0. && !lens.perChannel()) {
+            for (int c = 0; c < kSampleCh; ++c) {
+                v[c] = smp.c[c];
+            }
+            v[kAlphaR] = v[kAlphaB] = smp.c[3];
             lens.shape(smp.r / gridScale, fx, fy, k, u, 1);
-            scatterSample(buf, scratch, lens, k, gx, gy, smp.c);
+            scatterSample(buf, scratch, lens, k, gx, gy, v);
             return;
         }
-        float v[kNumCh];
         const double rr[3] = {smp.r + caPx, smp.r, smp.r - caPx};
         for (int ch = 0; ch < 3; ++ch) {
             for (int c = 0; c < kNumCh; ++c) {
                 v[c] = 0.f;
             }
             v[ch] = smp.c[ch];
-            if (ch == 1) {
+            if (ch == 0) {
+                v[kAlphaR] = smp.c[3];
+            } else if (ch == 1) {
                 v[3] = smp.c[3];
                 v[4] = smp.c[4];
+            } else {
+                v[kAlphaB] = smp.c[3];
             }
             lens.shape(rr[ch] / gridScale, fx, fy, k, u, ch);
             scatterSample(buf, scratch, lens, k, gx, gy, v);
@@ -2839,16 +2855,24 @@ render(const Inputs& in,
                                      S.index, S.level, S.maxAbsR, S.cells.size(), S.hi.size(), v[3], v[1], o[3]);
                     }
 #endif
-                    if (v[3] > 1.f) {
-                        const float n = 1.f / v[3];
-                        for (int c = 0; c < kNumCh; ++c) {
-                            v[c] *= n;
+                    // Per channel group: red with its coverage, blue with its, the rest with alpha.
+                    static const int groups[3][3] = {{0, kAlphaR, -1}, {2, kAlphaB, -1}, {1, 3, 4}};
+                    static const int cov[3] = {kAlphaR, kAlphaB, 3};
+                    for (int g = 0; g < 3; ++g) {
+                        float a = v[cov[g]];
+                        if (a > 1.f) {
+                            const float n = 1.f / a;
+                            for (int i = 0; i < 3 && groups[g][i] >= 0; ++i) {
+                                v[groups[g][i]] *= n;
+                            }
+                            a = 1.f;
                         }
-                    }
-                    const float t = 1.f - std::max(0.f, v[3]);
-                    for (int c = 0; c < kNumCh; ++c) {
-                        o[c] = v[c] + o[c] * t;
-                        v[c] = 0.f;
+                        const float t = 1.f - std::max(0.f, a);
+                        for (int i = 0; i < 3 && groups[g][i] >= 0; ++i) {
+                            const int c = groups[g][i];
+                            o[c] = v[c] + o[c] * t;
+                            v[c] = 0.f;
+                        }
                     }
                 }
             }

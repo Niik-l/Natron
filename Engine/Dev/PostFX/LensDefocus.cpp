@@ -877,10 +877,9 @@ LensDefocus::initializeKnobs()
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Lens Colour"));
         k->setName("lensColour");
         k->setDefaultValue(false);
-        k->setHintToolTip(tr("Experimental. Trace red, green and blue separately: the glass's dispersion gives axial "
-                             "colour (magenta / green fringes either side of focus). About 4x slower, and surfaces "
-                             "that recede in depth can show faint green / magenta lines along the depth bands. The "
-                             "built-in designs have no published dispersion, so it is estimated from their indices."));
+        k->setHintToolTip(tr("Trace red, green and blue separately: the glass's dispersion gives axial colour "
+                             "(magenta / green fringes either side of focus). About 4x slower. The built-in designs "
+                             "have no published dispersion, so it is estimated from their indices."));
         bokeh->addKnob(k); _imp->lensColour = k;
     }
     {
