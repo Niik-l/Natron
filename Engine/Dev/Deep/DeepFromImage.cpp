@@ -158,6 +158,9 @@ DeepFromImage::render(const RenderActionArgs& args)
     // Create deep image with 6 channels: R, G, B, A, Z, ZBack
     std::vector<std::string> chanNames = {"R", "G", "B", "A", "Z", "ZBack"};
     DeepImagePtr result = std::make_shared<DeepImage>(bounds, 6, chanNames);
+    // Deep images are stored top-down within their data window (as DeepRead loads them and
+    // DeepImage::flattenToImage expects); Natron images are bottom-up.
+    const int flipY = bounds.y1 + bounds.y2 - 1;
 
     // First pass: set sample counts (1 for non-transparent pixels, 0 otherwise)
     {
@@ -166,9 +169,9 @@ DeepFromImage::render(const RenderActionArgs& args)
             for (int x = bounds.x1; x < bounds.x2; ++x) {
                 const float* pix = (const float*)ra.pixelAt(x, y);
                 if (pix && pix[3] > 0.0001f) {
-                    result->setSampleCount(x, y, 1);
+                    result->setSampleCount(x, flipY - y, 1);
                 } else {
-                    result->setSampleCount(x, y, 0);
+                    result->setSampleCount(x, flipY - y, 0);
                 }
             }
         }
@@ -187,10 +190,10 @@ DeepFromImage::render(const RenderActionArgs& args)
 
         for (int y = bounds.y1; y < bounds.y2; ++y) {
             for (int x = bounds.x1; x < bounds.x2; ++x) {
-                if (result->getSampleCount(x, y) == 0) continue;
+                if (result->getSampleCount(x, flipY - y) == 0) continue;
 
                 const float* pix = (const float*)ra.pixelAt(x, y);
-                float* dst = result->getSampleData(x, y);
+                float* dst = result->getSampleData(x, flipY - y);
 
                 // RGBA (already premultiplied)
                 dst[0] = pix[0]; // R

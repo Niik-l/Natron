@@ -224,6 +224,9 @@ DeepFromFrames::render(const RenderActionArgs& args)
     dw.y2 = srcBounds.y2;
 
     DeepImagePtr result = std::make_shared<DeepImage>(dw, nChannels, chanNames);
+    // Deep images are stored top-down within their data window (as DeepRead loads them and
+    // DeepImage::flattenToImage expects); Natron images are bottom-up.
+    const int flipY = dw.y1 + dw.y2 - 1;
 
     // First pass: count samples (1 per pixel with A > 0, 0 otherwise)
     Image::ReadAccess ra(srcImg.get());
@@ -233,9 +236,9 @@ DeepFromFrames::render(const RenderActionArgs& args)
             const float* pix = (const float*)ra.pixelAt(x, y);
             if (pix) {
                 float a = pix[3]; // Alpha
-                result->setSampleCount(x, y, (a > 0.0f) ? 1 : 0);
+                result->setSampleCount(x, flipY - y, (a > 0.0f) ? 1 : 0);
             } else {
-                result->setSampleCount(x, y, 0);
+                result->setSampleCount(x, flipY - y, 0);
             }
         }
     }
@@ -245,13 +248,13 @@ DeepFromFrames::render(const RenderActionArgs& args)
     // Second pass: fill sample data
     for (int y = srcBounds.y1; y < srcBounds.y2; ++y) {
         for (int x = srcBounds.x1; x < srcBounds.x2; ++x) {
-            int nSamples = result->getSampleCount(x, y);
+            int nSamples = result->getSampleCount(x, flipY - y);
             if (nSamples == 0) continue;
 
             const float* pix = (const float*)ra.pixelAt(x, y);
             if (!pix) continue;
 
-            float* dstData = result->getSampleData(x, y);
+            float* dstData = result->getSampleData(x, flipY - y);
             if (!dstData) continue;
 
             dstData[0] = pix[0]; // R
