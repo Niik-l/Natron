@@ -882,6 +882,22 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     // Base color texture
     ccl::ImageTextureNode* baseTex = nullptr;
     std::string texFile = resolveTextureFrame(mat->getMaterialTextureFile(), frame);
+    if (std::getenv("NATRON_CYCLES_NOTEX")) {
+        static std::atomic<int> notexCount{0};
+        const int n = notexCount.fetch_add(1);
+        std::fprintf(stderr, "[CYCMAT] #%d NOTEX override (would be '%s')\n", n, texFile.c_str());
+        texFile.clear();
+    }
+    {
+        static std::atomic<int> matLogCounter{0};
+        const int n = matLogCounter.fetch_add(1);
+        double rr, gg, bb;
+        mat->getMaterialBaseColor(time, rr, gg, bb);
+        std::fprintf(stderr, "[CYCMAT] #%d base=(%.3f,%.3f,%.3f) rough=%.3f metal=%.3f tex='%s' texIm=%d alpha=%d\n",
+                     n, rr, gg, bb, mat->getMaterialRoughness(time), mat->getMaterialMetallic(time),
+                     texFile.c_str(), texFile.empty() ? 0 : 1,
+                     mat->getMaterialTextureUsesAlpha() ? 1 : 0);
+    }
     if (!texFile.empty()) {
         baseTex = graph->create_node<ccl::ImageTextureNode>();
         baseTex->set_filename(ccl::ustring(texFile));
@@ -1575,7 +1591,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                                                   (float)lb * strengthScale));
             light->set_size(ltype == Light3D::eLightArea ? 1.0f : 0.1f);
             light->set_use_mis(true);
-            light->set_cast_shadow(true);
+            light->set_cast_shadow(std::getenv("NATRON_CYCLES_NOSHADOW") ? false : true);
             if (ltype == Light3D::eLightSpot) {
                 light->set_spot_angle((float)light3d->getSpotAngle(time) * (float)M_PI / 180.0f);
                 light->set_spot_smooth((float)light3d->getSpotSmooth(time));
@@ -1667,6 +1683,17 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             std::string lgName = light3d->getLightGroup();
             if (!lgName.empty()) {
                 obj->set_lightgroup(ccl::ustring(lgName));
+            }
+
+            if (scDebugEnabled()) {
+                std::fprintf(stderr,
+                             "[Cycles LIGHTS] '%s' type=%d strength=(%.2f,%.2f,%.2f) "
+                             "tfm=(%.4f,%.4f,%.4f | %.4f,%.4f,%.4f)\n",
+                             sn.name.c_str(), (int)ltype,
+                             (float)lr * strengthScale, (float)lg * strengthScale,
+                             (float)lb * strengthScale,
+                             sn.worldMatrix[12], sn.worldMatrix[13], sn.worldMatrix[14],
+                             sn.worldMatrix[0], sn.worldMatrix[5], sn.worldMatrix[10]);
             }
 
             obj->tag_update(scene);
@@ -1881,7 +1908,11 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     // Transparent bg controls whether HDRI is visible in camera.
     // Dome light ALWAYS contributes lighting (scatter, reflections, etc).
     // "Renderable" on dome = camera visibility only (like Arnold's skydome Camera flag).
-    scene->background->set_transparent(!hasDomeCameraVisible);
+    // A/B probes (hair-dark bug): NATRON_CYCLES_TRANSPBG=0 forces the
+    // background opaque (probe parity); default stays as designed.
+    bool transpBg = !hasDomeCameraVisible;
+    if (getenv("NATRON_CYCLES_TRANSPBG0")) transpBg = false;
+    scene->background->set_transparent(transpBg);
     scene->background->set_visibility(domeBgVisibility);  // dome out of reflections/diffuse/etc. if overridden
 
     // --- Integrator ---
@@ -1900,7 +1931,9 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     }
 
     // Light sampling — reduces noise especially with HDRI environments
-    scene->integrator->set_use_light_tree(true);
+    // A/B probes (hair-dark bug): NATRON_CYCLES_NOTREE skips the light tree.
+    if (!getenv("NATRON_CYCLES_NOTREE"))
+        scene->integrator->set_use_light_tree(true);
 
     // Motion blur
     if (motionBlur && motionBlur->enabled) {
@@ -2854,6 +2887,38 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                             sn.worldMatrix[12], sn.worldMatrix[13], sn.worldMatrix[14],
                             sn.worldMatrix[0], sn.worldMatrix[5], sn.worldMatrix[10],
                             bmn.x, bmx.x, bmn.y, bmx.y, bmn.z, bmx.z, bad ? 1 : 0);
+                }
+                {
+                    // NATRON_SC_DUMP=<path>: APPEND full arrays of every mesh
+                    // sync (verts, tri indices, per-corner uvs) for offline
+                    // comparison against loader-side ground truth.
+                    const char* dumpPath = std::getenv("NATRON_SC_DUMP");
+                    if (dumpPath) {
+                        static std::atomic<int> scDumpSyncCounter{0};
+                        const int syncN = scDumpSyncCounter.fetch_add(1);
+                        std::fprintf(stderr, "[SCDUMP] sync#%d t=%.6f node=%s\n",
+                                     syncN, time, sn.name.c_str());
+                        std::FILE* df = std::fopen(dumpPath, "ab");
+                        if (df) {
+                            std::fprintf(df, "SYNC#%d t=%.6f\n", syncN, time);
+                            std::fprintf(df, "MESH %s verts=%d tris=%d uvs=%d\n",
+                                         sn.name.c_str(), (int)verts.size(),
+                                         (int)triVerts.size() / 3, (int)uvs.size());
+                            for (size_t vi = 0; vi < verts.size(); ++vi) {
+                                std::fprintf(df, "v %.6f %.6f %.6f\n",
+                                             verts[vi].x, verts[vi].y, verts[vi].z);
+                            }
+                            for (size_t ti = 0; ti < triVerts.size(); ti += 3) {
+                                std::fprintf(df, "t %d %d %d\n",
+                                             (int)triVerts[ti], (int)triVerts[ti + 1],
+                                             (int)triVerts[ti + 2]);
+                            }
+                            for (size_t ui = 0; ui < uvs.size(); ++ui) {
+                                std::fprintf(df, "u %.6f %.6f\n", uvs[ui].x, uvs[ui].y);
+                            }
+                            std::fclose(df);
+                        }
+                    }
                 }
                 break;
             }
