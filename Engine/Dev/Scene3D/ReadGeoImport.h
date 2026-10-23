@@ -67,6 +67,18 @@ struct GeoImportMaterial
     double transmission = 0.0;
     double ior = 1.45;
     std::string diffuseMapPath;   // resolved texture file path (empty = none)
+    // Opacity (alpha cutout). FBX: the legacy TransparentColor texture (Mixamo
+    // serializes its "..._Opacity" masks there; white = opaque — the same
+    // legacy convention that gives TransparencyFactor 1.0 = opaque, so the
+    // mask is NOT inverted). glTF: alpha lives in the diffuse texture's own
+    // alpha channel (alphaMode BLEND/MASK) plus the baseColorFactor alpha;
+    // those arrive as textureUsesAlpha + opacity (no separate map file).
+    std::string opacityMapPath;
+    double opacity = 1.0;         // scalar alpha, 1 = opaque
+    // True when the base-color texture carries an alpha channel that Cycles
+    // should link to Principled Alpha (glTF alphaMode != OPAQUE). Off for
+    // FBX: JPEG albedos have no alpha (their opacity is the mask file above).
+    bool textureUsesAlpha = false;
     // glTF metallicRoughness texture (R=AO unused, G=roughness, B=metallic) and
     // normal texture, staged into the .glm side folder like the diffuse map.
     // Empty = the file carries none (FBX imports leave these unset).

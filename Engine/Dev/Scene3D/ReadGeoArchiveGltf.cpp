@@ -296,6 +296,7 @@ loadGltfArchiveImport(const std::string& path)
         mat.baseColor[0] = pbr.base_color_factor[0];
         mat.baseColor[1] = pbr.base_color_factor[1];
         mat.baseColor[2] = pbr.base_color_factor[2];
+        mat.opacity = pbr.base_color_factor[3];   // glTF base alpha (1 = opaque)
         mat.metallic = pbr.metallic_factor;
         mat.roughness = pbr.roughness_factor;
         double strength = 1.0;
@@ -316,6 +317,15 @@ loadGltfArchiveImport(const std::string& path)
             const cgltf_image* img = pbr.base_color_texture.texture->image;
             mat.diffuseMapPath = resolveCgltfImage(img, dir, glmDir,
                                                    img->name ? img->name : "gltf_tex");
+            // Blend/Mask materials cut the surface out through the diffuse
+            // texture's own alpha (glTF packs it there — Mixamo's hair texture
+            // is Diffuse-Opacity packed; Blender's exporter writes alphaMode
+            // BLEND for those). glTF textures carry STRAIGHT alpha, which
+            // matters for Cycles (see MaterialProvider's premultiplied flag).
+            if (!mat.diffuseMapPath.empty() &&
+                cm->alpha_mode != cgltf_alpha_mode_opaque) {
+                mat.textureUsesAlpha = true;
+            }
         }
         // glTF packs roughness in the MR texture's GREEN channel and metallic
         // in BLUE; consumers that read a single channel must split it (see

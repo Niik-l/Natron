@@ -125,6 +125,13 @@ struct EntryMaterialProvider : public MaterialProvider
     std::string getMaterialMetallicMapFile() const OVERRIDE
     { return mat->ormMetallicEnabled ? mat->metallicRoughnessMapPath : std::string(); }
     std::string getMaterialNormalMapFile() const OVERRIDE { return mat->normalMapPath; }
+    // Alpha cutout: FBX stages the legacy TransparentColor mask as the
+    // opacity map; glTF either ticks the diffuse texture's own alpha
+    // (BLEND/MASK) or hands the baseColorFactor alpha across as a scalar.
+    // Premultiplied stays FALSE — file-borne textures carry straight alpha.
+    std::string getMaterialOpacityMapFile() const OVERRIDE { return mat->opacityMapPath; }
+    double getMaterialOpacity(double) const OVERRIDE { return mat->opacity; }
+    bool getMaterialTextureUsesAlpha() const OVERRIDE { return mat->textureUsesAlpha; }
     std::string getMaterialDiffuseColorspace() const OVERRIDE { return "sRGB"; }
 };
 
@@ -695,6 +702,18 @@ setRebuildMaterialKnobs(NodePtr matNode, const GeoImportMaterial& m)
     setFileKnob("metallicMapFile",
                 m.ormMetallicEnabled ? m.metallicRoughnessMapPath : std::string());
     setFileKnob("normalMapFile", m.normalMapPath);
+    setFileKnob("opacityMapFile", m.opacityMapPath);
+    // glTF BLEND/MASK materials (no separate mask file): tick the albedo's
+    // own alpha so the rebuilt Material3D keeps the cutout 1:1 (Cycles links
+    // the base texture's Alpha; the archive path gets this through
+    // EntryMaterialProvider::getMaterialTextureUsesAlpha instead).
+    if (m.textureUsesAlpha && matNode) {
+        if (KnobIPtr k = matNode->getKnobByName("textureUsesAlpha")) {
+            if (KnobBoolPtr b = std::dynamic_pointer_cast<KnobBool>(k)) {
+                b->setValue(true);
+            }
+        }
+    }
     // Texture colorspaces: EntryMaterialProvider hardcodes "sRGB" for both
     // (getMaterialDiffuseColorspace / getMaterialEmissionColorspace), while a
     // fresh Material3D's defaults are the first sRGB-ish entry of the OCIO

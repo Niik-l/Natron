@@ -109,6 +109,15 @@ mapUfbxMaterialArc(const ufbx_material* m, const std::string& dir,
     if (!m) return out;
     out.present = true;
 
+    // Shading model class: FBX builtin (Lambert/Phong/Blender-Phong) materials
+    // follow the LEGACY transparency convention (below) and ship no PBR
+    // channel values; genuine PBR models map their own conventions.
+    const bool builtinShading =
+        m->shader_type == UFBX_SHADER_UNKNOWN ||
+        m->shader_type == UFBX_SHADER_FBX_LAMBERT ||
+        m->shader_type == UFBX_SHADER_FBX_PHONG ||
+        m->shader_type == UFBX_SHADER_BLENDER_PHONG;
+
     const ufbx_material_map& baseColor = m->pbr.base_color;
     if (baseColor.has_value && baseColor.value_components >= 3) {
         out.baseColor[0] = baseColor.value_vec3.x;
@@ -147,6 +156,23 @@ mapUfbxMaterialArc(const ufbx_material* m, const std::string& dir,
         out.normalMapPath = resolveUfbxTextureArc(m->pbr.normal_map.texture, dir, fbmDir);
     }
 
+    // Opacity (alpha cutout) — FBX builtin shading only. ufbx leaves
+    // pbr.opacity EMPTY for FBX-Phong (its mapping table has no opacity
+    // channel): Mixamo serializes the "..._Opacity" masks under the legacy
+    // TransparentColor property instead (same slot family as
+    // TransparencyFactor, verified with the standalone probe: hair/eyelash
+    // carry the mask there with factor 1.0 = opaque). Legacy convention says
+    // the mask reads OPACITY — white is opaque, no invert (the same asset's
+    // Blender glTF export produced a straight-alpha hair texture that renders
+    // hair strands opaque, gaps transparent; reading it as transparency would
+    // vanish the hair outright). Genuine PBR shading models keep the default
+    // fully opaque and map nothing: their transparency conventions differ and
+    // the pbr.opacity channel would need per-shader handling.
+    if (builtinShading && m->fbx.transparency_color.texture) {
+        out.opacityMapPath =
+            resolveUfbxTextureArc(m->fbx.transparency_color.texture, dir, fbmDir);
+    }
+
     // FBX builtin shading models (Lambert/Phong/Blender-Phong) have no PBR
     // transmission: ufbx fills their pbr.transmission_factor from the FBX
     // LEGACY TransparencyFactor, whose convention is INVERTED (1.0 = fully
@@ -155,11 +181,6 @@ mapUfbxMaterialArc(const ufbx_material* m, const std::string& dir,
     // renders correctly (cgltf has_transmission false). Only trust
     // transmission from shading models that actually define it, and mirror
     // the glTF emission rule (all-zero emissive color = no emission).
-    const bool builtinShading =
-        m->shader_type == UFBX_SHADER_UNKNOWN ||
-        m->shader_type == UFBX_SHADER_FBX_LAMBERT ||
-        m->shader_type == UFBX_SHADER_FBX_PHONG ||
-        m->shader_type == UFBX_SHADER_BLENDER_PHONG;
     if (!builtinShading && m->pbr.transmission_factor.has_value) {
         out.transmission = m->pbr.transmission_factor.value_real;
     }
