@@ -274,7 +274,7 @@ struct LensDefocusPrivate
     KnobChoiceWPtr lensModel;
     KnobFileWPtr lensFile;
     KnobDoubleWPtr lensCharacter;
-    KnobBoolWPtr lensColour;
+    KnobBoolWPtr lensColour, clampToLens;
     KnobDoubleWPtr lensDistortion, lensBreathing, lensLateralCA, lensVignetting, lensVignettingSpread;
     KnobIntWPtr blades;
     KnobDoubleWPtr curvature, rotation, squeeze, catEye, catEyeStart, swirl, sphericalAberration;
@@ -652,6 +652,7 @@ LensDefocus::refreshKnobVisibility()
     _imp->lensFile.lock()->setSecret(lensId != kLensFromFile);
     _imp->lensCharacter.lock()->setSecret(!traced);
     _imp->lensColour.lock()->setSecret(!traced);
+    _imp->clampToLens.lock()->setSecret(!traced);
     _imp->lensDistortion.lock()->setSecret(!traced);
     _imp->lensBreathing.lock()->setSecret(!traced);
     _imp->lensLateralCA.lock()->setSecret(!traced);
@@ -887,6 +888,15 @@ LensDefocus::initializeKnobs()
                              "(magenta / green fringes either side of focus). About 4x slower. The built-in designs "
                              "have no published dispersion, so it is estimated from their indices."));
         bokeh->addKnob(k); _imp->lensColour = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Clamp to Lens"));
+        k->setName("clampToLens");
+        k->setDefaultValue(false);
+        k->setHintToolTip(tr("When F-Stop asks for a wider iris than the lens design has, use the lens's widest "
+                             "f-stop for the blur size too, as a real camera would. Off: the blur size follows "
+                             "F-Stop and only the bokeh's shape comes from the widest the lens allows."));
+        bokeh->addKnob(k); _imp->clampToLens = k;
     }
     // Image stages of the traced lens (0 = off, 1 = as traced; off by default: they move and
     // darken the picture, which a comp matched to the plate may not want).
@@ -1717,11 +1727,15 @@ LensDefocus::render(const RenderActionArgs& args)
             if (!_imp->tableError.empty()) {
                 lensWarnings.push_back(_imp->tableError + " (using the procedural bokeh).");
             } else if (_imp->table && _imp->table->effectiveFNumber() > s.fNumber * 1.01) {
-                std::ostringstream m;
-                m.precision(3);
-                m << "This lens opens to f/" << _imp->table->widestFNumber() << " at most: F-Stop f/" << s.fNumber << " is traced at f/"
-                  << _imp->table->effectiveFNumber() << " (the blur size still follows F-Stop).";
-                lensWarnings.push_back(m.str());
+                if (_imp->clampToLens.lock()->getValue()) {
+                    s.fNumber = _imp->table->effectiveFNumber();   // the blur size follows the lens too
+                } else {
+                    std::ostringstream m;
+                    m.precision(3);
+                    m << "This lens opens to f/" << _imp->table->widestFNumber() << " at most: F-Stop f/" << s.fNumber << " is traced at f/"
+                      << _imp->table->effectiveFNumber() << " (the blur size still follows F-Stop; tick Clamp to Lens to match the lens).";
+                    lensWarnings.push_back(m.str());
+                }
             }
             s.lens.character = _imp->lensCharacter.lock()->getValueAtTime(time);
             s.lens.chromatic = _imp->lensColour.lock()->getValue();
