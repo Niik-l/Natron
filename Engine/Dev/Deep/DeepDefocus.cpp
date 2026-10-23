@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -53,7 +54,11 @@ struct DeepDefocusPrivate
     KnobBoolWPtr defocusForeground;
     KnobBoolWPtr defocusBackground;
 
-    // Focus picker
+    // Focus picker (as LensDefocus); the old integer point and button are kept hidden
+    KnobChoiceWPtr focusMode;
+    KnobBoolWPtr pickFocusMode;
+    KnobDoubleWPtr focusPoint;
+    bool pickDragging = false;
     KnobIntWPtr focusPointX;
     KnobIntWPtr focusPointY;
     KnobButtonWPtr pickFocusBtn;
@@ -209,26 +214,73 @@ DeepDefocus::initializeKnobs()
     page->addKnob(dbg);
     _imp->defocusBackground = dbg;
 
-    // --- Focus picker ---
+    // --- Focus (same controls as LensDefocus) ---
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Focus"));
+        k->setName("focusMode");
+        std::vector<ChoiceOption> o;
+        o.push_back(ChoiceOption("distance", "Distance", "Focus at Focal Distance. With Pick Focus on, click in the "
+                                                         "viewer to set it from the deep sample under the cursor."));
+        o.push_back(ChoiceOption("point", "Point (autofocus)", "Focus on whatever is under Focus Point, every frame. "
+                                                               "Link the point to a tracker for a follow-focus."));
+        k->populateChoices(o);
+        k->setDefaultValue(0);
+        page->addKnob(k);
+        _imp->focusMode = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Pick Focus"));
+        k->setName("pickFocusMode");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setIsPersistent(false);
+        k->setHintToolTip(tr("While on (with this panel open), clicking in the viewer picks focus from the nearest "
+                             "deep sample under the cursor, and dragging scrubs it: Distance sets Focal Distance, "
+                             "Point moves the Focus Point. Picks set keyframes when the knob is animated. Turn it "
+                             "off to use the viewer normally. Ctrl+middle-click picks without it."));
+        page->addKnob(k);
+        _imp->pickFocusMode = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Focus Point"), 2);
+        k->setName("focusPoint");
+        k->setDefaultValue(960., 0);
+        k->setDefaultValue(540., 1);
+        k->setDimensionName(0, "x");
+        k->setDimensionName(1, "y");
+        k->setDisplayMinimum(0., 0); k->setDisplayMaximum(4096., 0);
+        k->setDisplayMinimum(0., 1); k->setDisplayMaximum(4096., 1);
+        k->setAnimationEnabled(true);
+        k->setHasHostOverlayHandle(true);
+        k->setHintToolTip(tr("Autofocus point in pixels: drag the crosshair, or click anywhere with Pick Focus on (or "
+                             "Ctrl+middle-click). To animate it, set a key first (right-click > Set Key); then each "
+                             "drag or pick on another frame adds a key. The nearest deep sample in a small window "
+                             "around it is used, so it doesn't land on an anti-aliased edge."));
+        page->addKnob(k);
+        _imp->focusPoint = k;
+    }
+
+    // Old focus picker (integer point + button), kept so saved projects load.
     KnobPagePtr pickPage = AppManager::createKnob<KnobPage>(this, tr("Focus Picker"));
 
     KnobIntPtr fpx = AppManager::createKnob<KnobInt>(this, tr("Focus Point X"));
     fpx->setName("focusPointX"); fpx->setDefaultValue(640);
-    fpx->setHintToolTip(tr("X pixel coordinate to sample Z depth from."));
+    fpx->setSecret(true);
     pickPage->addKnob(fpx);
     _imp->focusPointX = fpx;
 
     KnobIntPtr fpy = AppManager::createKnob<KnobInt>(this, tr("Focus Point Y"));
     fpy->setName("focusPointY"); fpy->setDefaultValue(360);
-    fpy->setHintToolTip(tr("Y pixel coordinate (from the bottom, as in the viewer) to sample Z depth from."));
+    fpy->setSecret(true);
     pickPage->addKnob(fpy);
     _imp->focusPointY = fpy;
 
     KnobButtonPtr pickBtn = AppManager::createKnob<KnobButton>(this, tr("Set Focus From Point"));
     pickBtn->setName("pickFocus");
-    pickBtn->setHintToolTip(tr("Read the nearest Z at the Focus Point and set Focal Distance to it."));
+    pickBtn->setSecret(true);
     pickPage->addKnob(pickBtn);
     _imp->pickFocusBtn = pickBtn;
+    pickPage->setSecret(true);
 
     // --- Bokeh ---
     KnobPagePtr bokehPage = AppManager::createKnob<KnobPage>(this, tr("Bokeh"));
@@ -258,9 +310,134 @@ DeepDefocus::initializeKnobs()
 }
 
 bool
+DeepDefocus::depthNear(double cx, double cy, double* depth) const
+{
+    DeepImagePtr srcDeep = getDeepImageFromEffect(getInput(0).get());
+    if (!srcDeep) {
+        return false;
+    }
+    const int zIdx = srcDeep->findChannelIndex("Z");
+    const int aIdx = srcDeep->findChannelIndex("A");
+    if (zIdx < 0) {
+        return false;
+    }
+    QReadLocker l(&srcDeep->getLock());
+    const RectI& dw = srcDeep->getDataWindow();
+    const int nc = srcDeep->getNumChannels();
+    const int px = (int)std::floor(cx), py = (int)std::floor(cy);
+    double best = std::numeric_limits<double>::infinity();
+    for (int y = py - 2; y <= py + 2; ++y) {
+        for (int x = px - 2; x <= px + 2; ++x) {
+            if (x < dw.x1 || x >= dw.x2 || y < dw.y1 || y >= dw.y2) {
+                continue;
+            }
+            const int yd = dw.y1 + dw.y2 - 1 - y;   // deep rows are top-down
+            const int n = srcDeep->getSampleCount(x, yd);
+            const float* d = n > 0 ? srcDeep->getSampleData(x, yd) : nullptr;
+            for (int s = 0; s < n; ++s) {
+                const float* q = d + (size_t)s * nc;
+                if ((aIdx < 0 || q[aIdx] > 0.f) && q[zIdx] > 0.f && q[zIdx] < best) {
+                    best = q[zIdx];
+                }
+            }
+        }
+    }
+    *depth = best;
+    return std::isfinite(best);
+}
+
+namespace {
+void
+setMaybeKeyed(const KnobDoublePtr& k, double time, double v, int dim)
+{
+    if (k->isAnimated(dim)) {
+        k->setValueAtTime(time, v, ViewSpec::all(), dim);   // keep focus pulls keyframed
+    } else {
+        k->setValue(v, ViewSpec::all(), dim);
+    }
+}
+}
+
+void
+DeepDefocus::pickFocusAt(double time, const QPointF& pos)
+{
+    KnobDoublePtr fp = _imp->focusPoint.lock();
+    setMaybeKeyed(fp, time, pos.x(), 0);
+    setMaybeKeyed(fp, time, pos.y(), 1);
+    if (_imp->focusMode.lock()->getValue() == 1) {
+        return;   // autofocus follows the point from the next render
+    }
+    double depth = 0.;
+    if (depthNear(pos.x(), pos.y(), &depth)) {
+        setMaybeKeyed(_imp->focalDistance.lock(), time, depth, 0);
+    }
+}
+
+bool
+DeepDefocus::onOverlayPenDown(double time, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+                              const QPointF& /*viewportPos*/, const QPointF& pos, double /*pressure*/,
+                              double /*timestamp*/, PenType pen)
+{
+    // Overlays get no modifier keys, so picking is a mode: with Pick Focus on, a left click picks
+    // (and a drag scrubs). Ctrl+middle-click reaches overlays as the middle pen (plain middle-drag
+    // pans before overlays see it), so it picks without the mode.
+    const bool pickMode = _imp->pickFocusMode.lock()->getValue();
+    if (!((pickMode && pen == ePenTypeLMB) || pen == ePenTypeMMB)) {
+        return false;
+    }
+    _imp->pickDragging = pickMode && pen == ePenTypeLMB;
+    pickFocusAt(time, pos);
+    return true;
+}
+
+bool
+DeepDefocus::onOverlayPenMotion(double time, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+                                const QPointF& /*viewportPos*/, const QPointF& pos, double /*pressure*/,
+                                double /*timestamp*/)
+{
+    if (!_imp->pickDragging) {
+        return false;
+    }
+    pickFocusAt(time, pos);
+    return true;
+}
+
+bool
+DeepDefocus::onOverlayPenUp(double /*time*/, const RenderScale& /*renderScale*/, ViewIdx /*view*/,
+                            const QPointF& /*viewportPos*/, const QPointF& /*pos*/, double /*pressure*/,
+                            double /*timestamp*/)
+{
+    const bool was = _imp->pickDragging;
+    _imp->pickDragging = false;
+    return was;
+}
+
+void
+DeepDefocus::refreshFocusKnobs()
+{
+    KnobChoicePtr m = _imp->focusMode.lock();
+    if (!m) {
+        return;
+    }
+    const bool point = m->getValue() == 1;
+    _imp->focalDistance.lock()->setSecret(point);
+    _imp->focusPoint.lock()->setSecret(!point);
+}
+
+void
+DeepDefocus::onKnobsLoaded()
+{
+    refreshFocusKnobs();
+}
+
+bool
 DeepDefocus::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
                          ViewSpec /*view*/, double time, bool /*originatedFromMainThread*/)
 {
+    if (_imp->focusMode.lock().get() == k) {
+        refreshFocusKnobs();
+        return true;
+    }
     if (_imp->pickFocusBtn.lock().get() == k) {
         DeepImagePtr srcDeep = getDeepImageFromEffect(getInput(0).get());
         if (!srcDeep) {
@@ -398,6 +575,18 @@ DeepDefocus::render(const RenderActionArgs& args)
     s.fNumber = std::max(0.1, _imp->fStop.lock()->getValueAtTime(time));
     s.filmbackWidthMm = _imp->filmBack.lock()->getValue();
     s.focusDistance = std::max(1e-4, _imp->focalDistance.lock()->getValueAtTime(time));
+    if (_imp->focusMode.lock()->getValue() == 1) {
+        // autofocus: the nearest deep sample under Focus Point (unlocked: the render holds the
+        // deep image's read lock, and depthNear takes its own)
+        double d = 0.;
+        KnobDoublePtr fp = _imp->focusPoint.lock();
+        deepLock.unlock();
+        const bool ok = depthNear(fp->getValueAtTime(time, 0), fp->getValueAtTime(time, 1), &d);
+        deepLock.relock();
+        if (ok) {
+            s.focusDistance = d;
+        }
+    }
     const double gain = std::max(0., _imp->blurScale.lock()->getValueAtTime(time));
     s.nearGain = _imp->defocusForeground.lock()->getValue() ? gain : 0.;
     s.farGain = _imp->defocusBackground.lock()->getValue() ? gain : 0.;

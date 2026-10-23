@@ -90,7 +90,26 @@ public:
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
+    // Viewer focus picking, as LensDefocus: with Pick Focus on, a click (or drag) picks focus from
+    // the nearest deep sample under the cursor; Ctrl+middle-click does it any time.
+    virtual bool hasOverlay() const OVERRIDE FINAL { return true; }
+    virtual bool onOverlayPenDown(double time, const RenderScale& renderScale, ViewIdx view,
+                                  const QPointF& viewportPos, const QPointF& pos, double pressure,
+                                  double timestamp, PenType pen) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual bool onOverlayPenMotion(double time, const RenderScale& renderScale, ViewIdx view,
+                                    const QPointF& viewportPos, const QPointF& pos, double pressure,
+                                    double timestamp) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual bool onOverlayPenUp(double time, const RenderScale& renderScale, ViewIdx view,
+                                const QPointF& viewportPos, const QPointF& pos, double pressure,
+                                double timestamp) OVERRIDE FINAL WARN_UNUSED_RETURN;
+
 private:
+
+    // Nearest front depth of the deep input in a 5x5 window around (x, y) (Natron pixels).
+    bool depthNear(double x, double y, double* depth) const;
+    void pickFocusAt(double time, const QPointF& pos);
+    void refreshFocusKnobs();
+    virtual void onKnobsLoaded() OVERRIDE FINAL;
 
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
