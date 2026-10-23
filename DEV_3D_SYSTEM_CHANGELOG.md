@@ -1,4 +1,34 @@
 # Natron 3D System
+- **FBX materials: transmission gating + full map staging; Cycles packed-MR factor multiply (2026-10-23, headless-verified)** —
+  side-by-side A/B of the same Mixamo asset loaded as `.glb` vs `.fbx` (`tools/geoio-tests/glb_fbx_ab.py`,
+  renders in `tools/geoio-tests/out/mixamo_glbcmp/`) exposed three FBX material-mapping defects that the
+  10-22 "resolved" verdict missed (its blessed render was the defect: whole-body black glass), plus a
+  spec-conformance bug in Cycles itself. Ground truth came from a standalone ufbx probe compiled against
+  the vendored lib with the importer's exact load options (`%TEMP%\opencode\ufbx_mats.c`): all six Mixamo
+  materials are `UFBX_SHADER_FBX_PHONG` with embedded diffuse + specular + gloss + normal maps.
+  (1) **mapUfbxMaterialArc (ReadGeoArchiveFbx.cpp)**: ufbx's `use_blender_pbr_material` conversion copies the
+  legacy FBX `TransparencyFactor` into `pbr.transmission_factor` where 1.0 means OPAQUE (pre-2011 FBX semantic,
+  not a glass knob) — piping it into `transmission` rendered every FBX-Phong asset as black translucent glass
+  with fireflies. Transmission now only maps for genuine PBR shading models; builtin
+  `UNKNOWN/LAMBERT/PHONG/BLENDER_PHONG` stay opaque. All-zero emission colors no longer force emission strength 1.
+  (2) The gloss and normal maps were silently dropped (only diffuse staged) — now staged via
+  `resolveUfbxTextureArc` into the existing metallicRoughness/normal map paths.
+  (3) **New `GeoImportMaterial::ormMetallicEnabled` tri-state (ReadGeoImport.h)**: FBX stays false unless the
+  file declares metalness (`features.metalness.enabled`) — legacy gloss maps no longer enter Cycles'
+  metallic B-channel wiring (the half-metal washed look); consumed by ReadGeoArchive's
+  `EntryMaterialProvider::getMaterialMetallicMapFile` and the Re-build-Materials knob mirror
+  (ReadGeoArchive.cpp, both `setFileKnob("metallicMapFile", ...)` sites). GLB/OBJ paths unaffected (default true).
+  (4) **CyclesRenderer.cpp createMaterialShader** (user-picked "spec/Blender-correct" target): the glTF spec says
+  metallic = metallicFactor × MR.B and roughness = roughnessFactor × MR.G — the wiring REPLACED the scalar,
+  so Blender-exported non-metal assets (metallicFactor 0 written, MR texture still carries B=1) rendered full
+  copper metal in Natron. When the same file is staged as both roughness and metallic maps (packed MR texture
+  detection by path equality), the Separate-Color G/B outputs now go through Math-multiply nodes by the scalar
+  factors; standalone grayscale maps keep Material3D's documented "map overrides slider" behavior.
+  Verify: rebuild + `build.cmd 06-install`, A/B re-render @ f249/8spp — GLB dark-metal pixel-mean
+  (41/31/23) → dielectric (90/79/65) alongside FBX (94/77/61), both matching Blender's own render of each
+  format (10-21 `bl_ref_*` ground truth); pre-convergence GLB look kept as `out/mixamo_glbcmp/glb_f249_v1metal.png`.
+  Remaining known gap (by design): opacity maps still ignored by both import paths — `GeoImportMaterial` has no
+  alpha/opacity-mapping field yet (`getMaterialOpacityMapFile`/`getMaterialTextureUsesAlpha` unoverridden).
 - **ReadGeoArchive: rig-toggle shading fix (2026-10-20, headless-verified)** —
   unticking the rig subtree in the archive tree re-shaded every mesh entry (much brighter in
   the 3D viewport; in Cycles textures toggled on/off). Cause: `getEntryMaterialProvider` used
