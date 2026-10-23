@@ -24,24 +24,19 @@
 #include "DeepDefocus.h"
 
 #include <algorithm>
-#include <cassert>
 #include <cmath>
-#include <limits>
 #include <sstream>
 #include <vector>
 
 #include "../../AppInstance.h"
 #include "DeepImage.h"
 #include "DeepUtils.h"
+#include "../PostFX/DefocusCore.h"
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
 #include "../../ViewIdx.h"
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 NATRON_NAMESPACE_ENTER
 
@@ -49,8 +44,11 @@ struct DeepDefocusPrivate
 {
     KnobDoubleWPtr focalDistance;
     KnobDoubleWPtr fStop;
+    KnobDoubleWPtr focalLength;
+    KnobDoubleWPtr filmBack;
+    KnobDoubleWPtr unitScale;
     KnobDoubleWPtr blurScale;
-    KnobIntWPtr numLayers;
+    KnobIntWPtr numLayers;      // kept for old projects; the engine slices by itself
     KnobDoubleWPtr maxBlur;
     KnobBoolWPtr defocusForeground;
     KnobBoolWPtr defocusBackground;
@@ -61,7 +59,7 @@ struct DeepDefocusPrivate
     KnobButtonWPtr pickFocusBtn;
 
     // Bokeh
-    KnobIntWPtr apertureBlades; // 0 = circular, 6 = hex, 8 = octagonal
+    KnobIntWPtr apertureBlades; // 0 = circular
     KnobDoubleWPtr apertureRotation;
 
     KnobStringWPtr info;
@@ -82,17 +80,14 @@ DeepDefocus::~DeepDefocus()
 std::string
 DeepDefocus::getPluginDescription() const
 {
-    return tr("Depth-of-field effect directly on deep compositing data.\n\n"
-              "Stratifies deep samples into depth layers, computes circle of confusion "
-              "per layer based on distance from focal plane, applies Gaussian blur, "
-              "and composites layers back-to-front.\n\n"
-              "Output is a flat RGBA image (defocus destroys deep structure).\n\n"
-              "Parameters:\n"
-              "- Focal Distance: Z-depth of the focal plane\n"
-              "- F-Stop: Lower values = shallower depth of field (more blur)\n"
-              "- Blur Scale: Artistic multiplier on blur radius\n"
-              "- Num Layers: More layers = better quality, slower (15-20 is good)\n"
-              "- Max Blur: Maximum blur radius in pixels (clamp large CoC values)").toStdString();
+    return tr("Depth of field on deep compositing data.\n\n"
+              "Every deep sample blurs at its own depth with a thin-lens circle of confusion (focus "
+              "distance, f-stop, focal length, film back), so layers hidden behind the foreground show "
+              "through its blur as they really are, transparent and anti-aliased edges keep their own "
+              "depths, and volume samples blur along their depth range. Uses the LensDefocus engine "
+              "(disc / blade bokeh, occlusion-correct layering); LensDefocus itself takes a deep Source "
+              "too and adds real lens designs, camera input and viewer focus picking.\n\n"
+              "Output is a flat RGBA image.").toStdString();
 }
 
 void
@@ -120,119 +115,143 @@ DeepDefocus::initializeKnobs()
 
     KnobDoublePtr fd = AppManager::createKnob<KnobDouble>(this, tr("Focal Distance"));
     fd->setName("focalDistance");
-    fd->setHintToolTip(tr("Z-depth of the focal plane. Samples at this depth will be sharp."));
-    fd->setAnimationEnabled(true);
+    fd->setHintToolTip(tr("Distance of the plane in focus, in the deep image's Z units."));
     fd->setDefaultValue(5.0);
-    fd->setMinimum(0.001);
+    fd->setMinimum(1e-4);
     fd->setDisplayMinimum(0.1);
     fd->setDisplayMaximum(100.0);
+    fd->setAnimationEnabled(true);
     page->addKnob(fd);
     _imp->focalDistance = fd;
 
     KnobDoublePtr fs = AppManager::createKnob<KnobDouble>(this, tr("F-Stop"));
     fs->setName("fStop");
-    fs->setHintToolTip(tr("Aperture f-stop. Lower values = shallower depth of field (more blur). "
-                           "f/1.4 = very shallow, f/16 = deep focus."));
-    fs->setAnimationEnabled(true);
+    fs->setHintToolTip(tr("Aperture f-stop. Lower values = shallower depth of field (more blur)."));
     fs->setDefaultValue(2.8);
-    fs->setMinimum(0.5);
-    fs->setMaximum(128.0);
+    fs->setMinimum(0.1);
     fs->setDisplayMinimum(0.5);
     fs->setDisplayMaximum(22.0);
+    fs->setAnimationEnabled(true);
     page->addKnob(fs);
     _imp->fStop = fs;
 
+    KnobDoublePtr fl = AppManager::createKnob<KnobDouble>(this, tr("Focal Length"));
+    fl->setName("focalLength");
+    fl->setHintToolTip(tr("Lens focal length (mm) of the camera that rendered the deep image."));
+    fl->setDefaultValue(50.0);
+    fl->setMinimum(1.0);
+    fl->setDisplayMinimum(8.0);
+    fl->setDisplayMaximum(300.0);
+    fl->setAnimationEnabled(true);
+    page->addKnob(fl);
+    _imp->focalLength = fl;
+
+    KnobDoublePtr fb = AppManager::createKnob<KnobDouble>(this, tr("Film Back"));
+    fb->setName("filmBack");
+    fb->setHintToolTip(tr("Horizontal film back / sensor width (mm) of that camera."));
+    fb->setDefaultValue(36.0);
+    fb->setMinimum(1.0);
+    fb->setDisplayMinimum(4.0);
+    fb->setDisplayMaximum(70.0);
+    page->addKnob(fb);
+    _imp->filmBack = fb;
+
+    KnobDoublePtr us = AppManager::createKnob<KnobDouble>(this, tr("Scene Unit (mm)"));
+    us->setName("unitScale");
+    us->setHintToolTip(tr("Millimetres per deep Z unit: 1000 = metres, 10 = centimetres, 1 = millimetres."));
+    us->setDefaultValue(1000.0);
+    us->setMinimum(1e-6);
+    us->setDisplayMinimum(1.0);
+    us->setDisplayMaximum(1000.0);
+    page->addKnob(us);
+    _imp->unitScale = us;
+
     KnobDoublePtr bs = AppManager::createKnob<KnobDouble>(this, tr("Blur Scale"));
     bs->setName("blurScale");
-    bs->setHintToolTip(tr("Artistic multiplier on the blur radius. 1.0 = physically based, "
-                           "higher values exaggerate the effect."));
-    bs->setAnimationEnabled(true);
+    bs->setHintToolTip(tr("Artistic multiplier on the blur radius. 1.0 = physically based."));
     bs->setDefaultValue(1.0);
     bs->setMinimum(0.0);
     bs->setDisplayMinimum(0.0);
-    bs->setDisplayMaximum(10.0);
+    bs->setDisplayMaximum(4.0);
+    bs->setAnimationEnabled(true);
     page->addKnob(bs);
     _imp->blurScale = bs;
 
     KnobDoublePtr mb = AppManager::createKnob<KnobDouble>(this, tr("Max Blur"));
     mb->setName("maxBlur");
-    mb->setHintToolTip(tr("Maximum blur radius in pixels. Clamps large circle of confusion values."));
-    mb->setAnimationEnabled(false);
+    mb->setHintToolTip(tr("Maximum blur radius in pixels."));
     mb->setDefaultValue(50.0);
     mb->setMinimum(1.0);
     mb->setDisplayMinimum(1.0);
-    mb->setDisplayMaximum(200.0);
+    mb->setDisplayMaximum(500.0);
     page->addKnob(mb);
     _imp->maxBlur = mb;
 
     KnobIntPtr nl = AppManager::createKnob<KnobInt>(this, tr("Num Layers"));
     nl->setName("numLayers");
-    nl->setHintToolTip(tr("Number of depth layers for stratification. More = better quality, slower. "
-                           "15-20 is good for most cases."));
-    nl->setAnimationEnabled(false);
+    nl->setHintToolTip(tr("Unused: depth slices are chosen automatically."));
     nl->setDefaultValue(15);
-    nl->setMinimum(3);
-    nl->setMaximum(50);
-    nl->setDisplayMinimum(3);
-    nl->setDisplayMaximum(30);
+    nl->setSecret(true);
     page->addKnob(nl);
     _imp->numLayers = nl;
 
     KnobBoolPtr dfg = AppManager::createKnob<KnobBool>(this, tr("Defocus Foreground"));
     dfg->setName("defocusForeground");
     dfg->setDefaultValue(true);
-    dfg->setHintToolTip(tr("Apply defocus to samples in front of the focal plane."));
+    dfg->setHintToolTip(tr("Blur samples in front of the focal plane."));
     page->addKnob(dfg);
     _imp->defocusForeground = dfg;
 
     KnobBoolPtr dbg = AppManager::createKnob<KnobBool>(this, tr("Defocus Background"));
     dbg->setName("defocusBackground");
     dbg->setDefaultValue(true);
-    dbg->setHintToolTip(tr("Apply defocus to samples behind the focal plane."));
+    dbg->setHintToolTip(tr("Blur samples behind the focal plane."));
     page->addKnob(dbg);
     _imp->defocusBackground = dbg;
 
-    // Focus picker page
+    // --- Focus picker ---
     KnobPagePtr pickPage = AppManager::createKnob<KnobPage>(this, tr("Focus Picker"));
 
     KnobIntPtr fpx = AppManager::createKnob<KnobInt>(this, tr("Focus Point X"));
     fpx->setName("focusPointX"); fpx->setDefaultValue(640);
-    fpx->setDisplayMinimum(0); fpx->setDisplayMaximum(4096);
-    fpx->setHintToolTip(tr("X pixel coordinate to sample Z depth from. Set to the pixel you want in focus."));
-    pickPage->addKnob(fpx); _imp->focusPointX = fpx;
+    fpx->setHintToolTip(tr("X pixel coordinate to sample Z depth from."));
+    pickPage->addKnob(fpx);
+    _imp->focusPointX = fpx;
 
     KnobIntPtr fpy = AppManager::createKnob<KnobInt>(this, tr("Focus Point Y"));
     fpy->setName("focusPointY"); fpy->setDefaultValue(360);
-    fpy->setDisplayMinimum(0); fpy->setDisplayMaximum(4096);
-    fpy->setHintToolTip(tr("Y pixel coordinate to sample Z depth from."));
-    pickPage->addKnob(fpy); _imp->focusPointY = fpy;
+    fpy->setHintToolTip(tr("Y pixel coordinate (from the bottom, as in the viewer) to sample Z depth from."));
+    pickPage->addKnob(fpy);
+    _imp->focusPointY = fpy;
 
     KnobButtonPtr pickBtn = AppManager::createKnob<KnobButton>(this, tr("Set Focus From Point"));
     pickBtn->setName("pickFocus");
-    pickBtn->setHintToolTip(tr("Read the Z depth at the Focus Point X/Y coordinates and set Focal Distance to that value."));
-    pickPage->addKnob(pickBtn); _imp->pickFocusBtn = pickBtn;
+    pickBtn->setHintToolTip(tr("Read the nearest Z at the Focus Point and set Focal Distance to it."));
+    pickPage->addKnob(pickBtn);
+    _imp->pickFocusBtn = pickBtn;
 
-    // Bokeh page
+    // --- Bokeh ---
     KnobPagePtr bokehPage = AppManager::createKnob<KnobPage>(this, tr("Bokeh"));
 
     KnobIntPtr blades = AppManager::createKnob<KnobInt>(this, tr("Aperture Blades"));
     blades->setName("apertureBlades"); blades->setDefaultValue(0);
-    blades->setMinimum(0); blades->setMaximum(12);
-    blades->setDisplayMinimum(0); blades->setDisplayMaximum(12);
-    blades->setHintToolTip(tr("Number of aperture blades. 0 = circular (disk), 6 = hexagonal, 8 = octagonal."));
-    bokehPage->addKnob(blades); _imp->apertureBlades = blades;
+    blades->setHintToolTip(tr("Number of aperture blades. 0 = circular (disc), 6 = hexagonal, 8 = octagonal."));
+    blades->setMinimum(0);
+    blades->setMaximum(16);
+    bokehPage->addKnob(blades);
+    _imp->apertureBlades = blades;
 
     KnobDoublePtr rot = AppManager::createKnob<KnobDouble>(this, tr("Aperture Rotation"));
     rot->setName("apertureRotation"); rot->setDefaultValue(0.0);
-    rot->setDisplayMinimum(0.0); rot->setDisplayMaximum(360.0);
     rot->setHintToolTip(tr("Rotation of the aperture shape in degrees."));
-    bokehPage->addKnob(rot); _imp->apertureRotation = rot;
+    rot->setDisplayMinimum(0.0);
+    rot->setDisplayMaximum(360.0);
+    bokehPage->addKnob(rot);
+    _imp->apertureRotation = rot;
 
     KnobStringPtr info = AppManager::createKnob<KnobString>(this, tr("Info"));
     info->setName("info");
-    info->setAnimationEnabled(false);
-    info->setEvaluateOnChange(false);
-    info->setIsPersistent(false);
+    info->setAsLabel();
     info->setDefaultValue("Connect a deep node to the input.");
     page->addKnob(info);
     _imp->info = info;
@@ -243,44 +262,38 @@ DeepDefocus::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
                          ViewSpec /*view*/, double time, bool /*originatedFromMainThread*/)
 {
     if (_imp->pickFocusBtn.lock().get() == k) {
-        // Read Z depth at the focus point coordinates from the deep image
-        EffectInstancePtr deepInput = getInput(0);
-        DeepImagePtr srcDeep = getDeepImageFromEffect(deepInput.get());
+        DeepImagePtr srcDeep = getDeepImageFromEffect(getInput(0).get());
         if (!srcDeep) {
             setPersistentMessage(eMessageTypeError, "No deep image connected.");
             return true;
         }
-
-        int fpx = _imp->focusPointX.lock()->getValue();
-        int fpy = _imp->focusPointY.lock()->getValue();
-
-        const RectI& dw = srcDeep->getDataWindow();
-        int nChannels = srcDeep->getNumChannels();
-        int zIdx = srcDeep->findChannelIndex("Z");
+        const int zIdx = srcDeep->findChannelIndex("Z");
         if (zIdx < 0) {
             setPersistentMessage(eMessageTypeError, "No Z channel in deep image.");
             return true;
         }
-
-        // Clamp to data window
-        fpx = std::max(dw.x1, std::min(dw.x2 - 1, fpx));
-        fpy = std::max(dw.y1, std::min(dw.y2 - 1, fpy));
-
-        int nSamples = srcDeep->getSampleCount(fpx, fpy);
-        if (nSamples == 0) {
+        const RectI& dw = srcDeep->getDataWindow();
+        const int fpx = std::max(dw.x1, std::min(dw.x2 - 1, (int)_imp->focusPointX.lock()->getValue()));
+        const int fpy = std::max(dw.y1, std::min(dw.y2 - 1, (int)_imp->focusPointY.lock()->getValue()));
+        const int yd = dw.y1 + dw.y2 - 1 - fpy;   // deep rows are top-down
+        QReadLocker l(&srcDeep->getLock());
+        const int n = srcDeep->getSampleCount(fpx, yd);
+        if (n == 0) {
             setPersistentMessage(eMessageTypeWarning, "No deep samples at focus point.");
             return true;
         }
-
-        // Get the frontmost Z value
-        const float* data = srcDeep->getSampleData(fpx, fpy);
+        const float* data = srcDeep->getSampleData(fpx, yd);
+        const int nc = srcDeep->getNumChannels();
         float frontZ = data[zIdx];
-        for (int s = 1; s < nSamples; ++s) {
-            float z = data[s * nChannels + zIdx];
-            if (z < frontZ) frontZ = z;
+        for (int s = 1; s < n; ++s) {
+            frontZ = std::min(frontZ, data[s * nc + zIdx]);
         }
-
-        _imp->focalDistance.lock()->setValue((double)frontZ);
+        KnobDoublePtr fd = _imp->focalDistance.lock();
+        if (fd->isAnimated(0)) {
+            fd->setValueAtTime(time, (double)frontZ, ViewSpec::all(), 0);
+        } else {
+            fd->setValue((double)frontZ);
+        }
         clearPersistentMessage(false);
         return true;
     }
@@ -297,397 +310,141 @@ DeepDefocus::getRegionOfDefinition(U64 /*hash*/, double time, const RenderScale&
     return input->getRegionOfDefinition_public(input->getHash(), time, scale, view, rod, &isProjectFormat);
 }
 
-// Check if a point is inside a regular polygon (for bokeh kernel)
-static bool
-isInsidePolygon(float x, float y, int numSides, float radius, float rotationDeg)
-{
-    if (numSides <= 0) {
-        // Circle: just check distance
-        return (x * x + y * y) <= (radius * radius);
-    }
-
-    float rotRad = rotationDeg * (float)M_PI / 180.0f;
-    // Rotate the point by -rotation to align polygon
-    float cosR = cosf(-rotRad);
-    float sinR = sinf(-rotRad);
-    float rx = x * cosR - y * sinR;
-    float ry = x * sinR + y * cosR;
-
-    // Check if point is inside regular polygon
-    float angle = atan2f(ry, rx);
-    if (angle < 0) angle += 2.0f * (float)M_PI;
-
-    float segmentAngle = 2.0f * (float)M_PI / numSides;
-    float halfAngle = segmentAngle * 0.5f;
-
-    // Distance from center to edge at this angle
-    float localAngle = fmodf(angle, segmentAngle);
-    if (localAngle > halfAngle) localAngle = segmentAngle - localAngle;
-
-    float edgeDist = radius * cosf(halfAngle) / cosf(localAngle);
-    float pointDist = sqrtf(rx * rx + ry * ry);
-
-    return pointDist <= edgeDist;
-}
-
-// Bokeh blur: convolve with a shaped kernel (disk or polygon)
-static void
-bokehBlurRGBA(const std::vector<float>& src, std::vector<float>& dst,
-              int width, int height, float radius, int blades, float rotationDeg)
-{
-    if (radius < 0.5f) {
-        dst = src;
-        return;
-    }
-
-    int kernelRadius = std::min((int)std::ceil(radius), 100);
-    if (kernelRadius < 1) kernelRadius = 1;
-
-    // Build 2D kernel
-    int kernelSize = kernelRadius * 2 + 1;
-    std::vector<float> kernel(kernelSize * kernelSize, 0.0f);
-    float sum = 0;
-
-    for (int ky = -kernelRadius; ky <= kernelRadius; ++ky) {
-        for (int kx = -kernelRadius; kx <= kernelRadius; ++kx) {
-            if (isInsidePolygon((float)kx, (float)ky, blades, radius, rotationDeg)) {
-                kernel[(ky + kernelRadius) * kernelSize + (kx + kernelRadius)] = 1.0f;
-                sum += 1.0f;
-            }
-        }
-    }
-
-    // Normalize
-    if (sum > 0) {
-        for (size_t i = 0; i < kernel.size(); ++i) kernel[i] /= sum;
-    }
-
-    // Convolve
-    dst.resize(width * height * 4, 0.0f);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            float r = 0, g = 0, b = 0, a = 0;
-            for (int ky = -kernelRadius; ky <= kernelRadius; ++ky) {
-                int sy = std::max(0, std::min(height - 1, y + ky));
-                for (int kx = -kernelRadius; kx <= kernelRadius; ++kx) {
-                    int sx = std::max(0, std::min(width - 1, x + kx));
-                    float w = kernel[(ky + kernelRadius) * kernelSize + (kx + kernelRadius)];
-                    if (w <= 0) continue;
-                    int srcIdx = (sy * width + sx) * 4;
-                    r += src[srcIdx + 0] * w;
-                    g += src[srcIdx + 1] * w;
-                    b += src[srcIdx + 2] * w;
-                    a += src[srcIdx + 3] * w;
-                }
-            }
-            int dstIdx = (y * width + x) * 4;
-            dst[dstIdx + 0] = r;
-            dst[dstIdx + 1] = g;
-            dst[dstIdx + 2] = b;
-            dst[dstIdx + 3] = a;
-        }
-    }
-}
-
-// Separable Gaussian blur on a float RGBA buffer (fast fallback)
-static void
-gaussianBlurRGBA(const std::vector<float>& src, std::vector<float>& dst,
-                 int width, int height, float radius)
-{
-    if (radius < 0.5f) {
-        dst = src;
-        return;
-    }
-
-    int kernelRadius = std::min((int)std::ceil(radius * 2.5f), 100);
-    if (kernelRadius < 1) kernelRadius = 1;
-
-    // Build 1D Gaussian kernel
-    std::vector<float> kernel(kernelRadius * 2 + 1);
-    float sigma = radius;
-    float sum = 0;
-    for (int i = -kernelRadius; i <= kernelRadius; ++i) {
-        float val = std::exp(-(float)(i * i) / (2.0f * sigma * sigma));
-        kernel[i + kernelRadius] = val;
-        sum += val;
-    }
-    for (int i = 0; i < (int)kernel.size(); ++i) {
-        kernel[i] /= sum;
-    }
-
-    // Horizontal pass
-    std::vector<float> temp(width * height * 4, 0.0f);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            float r = 0, g = 0, b = 0, a = 0;
-            for (int k = -kernelRadius; k <= kernelRadius; ++k) {
-                int sx = std::max(0, std::min(width - 1, x + k));
-                int srcIdx = (y * width + sx) * 4;
-                float w = kernel[k + kernelRadius];
-                r += src[srcIdx + 0] * w;
-                g += src[srcIdx + 1] * w;
-                b += src[srcIdx + 2] * w;
-                a += src[srcIdx + 3] * w;
-            }
-            int dstIdx = (y * width + x) * 4;
-            temp[dstIdx + 0] = r;
-            temp[dstIdx + 1] = g;
-            temp[dstIdx + 2] = b;
-            temp[dstIdx + 3] = a;
-        }
-    }
-
-    // Vertical pass
-    dst.resize(width * height * 4);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            float r = 0, g = 0, b = 0, a = 0;
-            for (int k = -kernelRadius; k <= kernelRadius; ++k) {
-                int sy = std::max(0, std::min(height - 1, y + k));
-                int srcIdx = (sy * width + x) * 4;
-                float w = kernel[k + kernelRadius];
-                r += temp[srcIdx + 0] * w;
-                g += temp[srcIdx + 1] * w;
-                b += temp[srcIdx + 2] * w;
-                a += temp[srcIdx + 3] * w;
-            }
-            int dstIdx = (y * width + x) * 4;
-            dst[dstIdx + 0] = r;
-            dst[dstIdx + 1] = g;
-            dst[dstIdx + 2] = b;
-            dst[dstIdx + 3] = a;
-        }
-    }
-}
-
 StatusEnum
 DeepDefocus::render(const RenderActionArgs& args)
 {
-    EffectInstancePtr deepInput = getInput(0);
-    DeepImagePtr srcDeep = getDeepImageFromEffect(deepInput.get());
-    if (!srcDeep) return eStatusFailed;
-
-    double focalDist = _imp->focalDistance.lock()->getValue();
-    double fStopVal = _imp->fStop.lock()->getValue();
-    double blurScaleVal = _imp->blurScale.lock()->getValue();
-    double maxBlurVal = _imp->maxBlur.lock()->getValue();
-    int numLayersVal = _imp->numLayers.lock()->getValue();
-    bool defocusFG = _imp->defocusForeground.lock()->getValue();
-    bool defocusBG = _imp->defocusBackground.lock()->getValue();
-    int bladesVal = _imp->apertureBlades.lock()->getValue();
-    float rotationVal = (float)_imp->apertureRotation.lock()->getValue();
-
-    const RectI& dw = srcDeep->getDataWindow();
-    int w = dw.width();
-    int h = dw.height();
-    int nChannels = srcDeep->getNumChannels();
-
-    int rIdx = srcDeep->findChannelIndex("R");
-    int gIdx = srcDeep->findChannelIndex("G");
-    int bIdx = srcDeep->findChannelIndex("B");
-    int aIdx = srcDeep->findChannelIndex("A");
-    int zIdx = srcDeep->findChannelIndex("Z");
-
-    if (zIdx < 0 || aIdx < 0) return eStatusFailed;
-
-    // Find Z range
-    float minZ = std::numeric_limits<float>::max();
-    float maxZ = -std::numeric_limits<float>::max();
-
-    for (int y = dw.y1; y < dw.y2; ++y) {
-        for (int x = dw.x1; x < dw.x2; ++x) {
-            int nSamples = srcDeep->getSampleCount(x, y);
-            if (nSamples == 0) continue;
-            const float* data = srcDeep->getSampleData(x, y);
-            for (int s = 0; s < nSamples; ++s) {
-                float z = data[s * nChannels + zIdx];
-                if (z < minZ) minZ = z;
-                if (z > maxZ) maxZ = z;
-            }
-        }
+    const double time = args.time;
+    DeepImagePtr srcDeep = getDeepImageFromEffect(getInput(0).get());
+    if (!srcDeep || args.outputPlanes.empty()) {
+        return eStatusFailed;
     }
-
-    if (minZ >= maxZ) {
-        // All at same depth — just flatten
-        assert(!args.outputPlanes.empty());
-        ImagePtr outImg = args.outputPlanes.front().second;
-        if (outImg) srcDeep->flattenToImage(outImg.get());
-        return eStatusOK;
-    }
-
-    // Create depth layer boundaries
-    std::vector<float> layerDepths(numLayersVal);
-    for (int i = 0; i < numLayersVal; ++i) {
-        layerDepths[i] = minZ + (maxZ - minZ) * ((float)i / (numLayersVal - 1));
-    }
-
-    // Flatten each layer: for each pixel, accumulate samples that fall in each layer's depth range
-    std::vector<std::vector<float>> layerImages(numLayersVal);
-    for (int i = 0; i < numLayersVal; ++i) {
-        layerImages[i].resize(w * h * 4, 0.0f);
-    }
-
-    for (int y = dw.y1; y < dw.y2; ++y) {
-        for (int x = dw.x1; x < dw.x2; ++x) {
-            int nSamples = srcDeep->getSampleCount(x, y);
-            if (nSamples == 0) continue;
-
-            const float* data = srcDeep->getSampleData(x, y);
-            int px = x - dw.x1;
-            int py = y - dw.y1;
-            int pixIdx = (py * w + px) * 4;
-
-            for (int s = 0; s < nSamples; ++s) {
-                const float* sample = data + s * nChannels;
-                float z = sample[zIdx];
-                float alpha = sample[aIdx];
-                if (alpha < 0.0001f) continue;
-
-                float r = (rIdx >= 0) ? sample[rIdx] : 0;
-                float g = (gIdx >= 0) ? sample[gIdx] : 0;
-                float b = (bIdx >= 0) ? sample[bIdx] : 0;
-
-                // Soft layer blending: distribute sample across two nearest layers
-                // Find which two layers this sample falls between
-                int lowerLayer = 0;
-                for (int i = 0; i < numLayersVal - 1; ++i) {
-                    if (z >= layerDepths[i] && z <= layerDepths[i + 1]) {
-                        lowerLayer = i;
-                        break;
-                    }
-                    if (z > layerDepths[numLayersVal - 1]) {
-                        lowerLayer = numLayersVal - 2;
-                    }
-                }
-                int upperLayer = lowerLayer + 1;
-                if (upperLayer >= numLayersVal) upperLayer = numLayersVal - 1;
-
-                // Compute interpolation weight
-                float layerSpan = layerDepths[upperLayer] - layerDepths[lowerLayer];
-                float weightUpper = 0.5f;
-                if (layerSpan > 0.0001f) {
-                    weightUpper = (z - layerDepths[lowerLayer]) / layerSpan;
-                    weightUpper = std::max(0.0f, std::min(1.0f, weightUpper));
-                }
-                float weightLower = 1.0f - weightUpper;
-
-                // Add weighted sample to both layers
-                for (int li = 0; li < 2; ++li) {
-                    int layerIdx = (li == 0) ? lowerLayer : upperLayer;
-                    float weight = (li == 0) ? weightLower : weightUpper;
-
-                    if (weight < 0.001f) continue;
-
-                    float wR = r * weight;
-                    float wG = g * weight;
-                    float wB = b * weight;
-                    float wA = alpha * weight;
-
-                    // Additive blending into layer (weighted)
-                    float dstA = layerImages[layerIdx][pixIdx + 3];
-
-                    layerImages[layerIdx][pixIdx + 0] += wR * (1.0f - dstA);
-                    layerImages[layerIdx][pixIdx + 1] += wG * (1.0f - dstA);
-                    layerImages[layerIdx][pixIdx + 2] += wB * (1.0f - dstA);
-                    layerImages[layerIdx][pixIdx + 3] += wA * (1.0f - dstA);
-                }
-            }
-        }
-    }
-
-    // Blur each layer based on its CoC
-    std::vector<std::vector<float>> blurredLayers(numLayersVal);
-
-    for (int i = 0; i < numLayersVal; ++i) {
-        float layerZ = layerDepths[i];
-        float distFromFocal = std::abs(layerZ - (float)focalDist);
-
-        // Check foreground/background toggle
-        bool isForeground = (layerZ < focalDist);
-        if (isForeground && !defocusFG) {
-            blurredLayers[i] = layerImages[i];
-            continue;
-        }
-        if (!isForeground && !defocusBG) {
-            blurredLayers[i] = layerImages[i];
-            continue;
-        }
-
-        // CoC = distance * scale / f-stop
-        float coc = distFromFocal * (float)blurScaleVal / std::max(0.5f, (float)fStopVal);
-        coc = std::min(coc, (float)maxBlurVal);
-
-        if (bladesVal > 0) {
-            // Shaped bokeh blur (disk or polygon)
-            bokehBlurRGBA(layerImages[i], blurredLayers[i], w, h, coc, bladesVal, rotationVal);
-        } else {
-            // Fast separable Gaussian (circular approximation)
-            gaussianBlurRGBA(layerImages[i], blurredLayers[i], w, h, coc);
-        }
-    }
-
-    // Composite layers back-to-front
-    std::vector<float> result(w * h * 4, 0.0f);
-
-    for (int i = numLayersVal - 1; i >= 0; --i) {
-        const std::vector<float>& layer = blurredLayers[i];
-        for (int p = 0; p < w * h; ++p) {
-            int idx = p * 4;
-            float srcR = layer[idx + 0];
-            float srcG = layer[idx + 1];
-            float srcB = layer[idx + 2];
-            float srcA = layer[idx + 3];
-
-            float dstA = result[idx + 3];
-
-            // "Over" compositing: dst = src + dst * (1 - srcA)
-            result[idx + 0] = srcR + result[idx + 0] * (1.0f - srcA);
-            result[idx + 1] = srcG + result[idx + 1] * (1.0f - srcA);
-            result[idx + 2] = srcB + result[idx + 2] * (1.0f - srcA);
-            result[idx + 3] = srcA + dstA * (1.0f - srcA);
-        }
-    }
-
-    // Write to output image with Y-flip (deep is top-down, Natron is bottom-up)
-    assert(!args.outputPlanes.empty());
     ImagePtr outImg = args.outputPlanes.front().second;
-    if (!outImg) return eStatusFailed;
+    if (!outImg) {
+        return eStatusFailed;
+    }
+    QReadLocker deepLock(&srcDeep->getLock());
 
-    RectI outBounds = outImg->getBounds();
-    int outW = outBounds.width();
-    int outH = outBounds.height();
+    defocus::DeepView dv;
+    dv.stride = srcDeep->getNumChannels();
+    dv.iR = srcDeep->findChannelIndex("R");
+    dv.iG = srcDeep->findChannelIndex("G");
+    dv.iB = srcDeep->findChannelIndex("B");
+    dv.iA = srcDeep->findChannelIndex("A");
+    dv.iZ = srcDeep->findChannelIndex("Z");
+    dv.iZBack = srcDeep->findChannelIndex("ZBack");
+    if (dv.iR < 0 || dv.iA < 0 || dv.iZ < 0) {
+        setPersistentMessage(eMessageTypeError, "The deep input needs R, A and Z channels (recolour an alpha-only "
+                                                "deep image first, e.g. with DeepRecolor).");
+        return eStatusFailed;
+    }
+    if (dv.iG < 0) dv.iG = dv.iR;
+    if (dv.iB < 0) dv.iB = dv.iR;
 
-    Image::WriteAccess wa(outImg.get());
-    for (int y = outBounds.y1; y < outBounds.y2; ++y) {
-        // Y-flip: Natron bottom-up, deep top-down
-        float normY = (float)(y - outBounds.y1) / std::max(1, outH - 1);
-        int srcRow = (int)((1.0f - normY) * (h - 1) + 0.5f);
-        srcRow = std::max(0, std::min(h - 1, srcRow));
+    // Deep images are top-down within their data window, Natron images bottom-up.
+    const RectI dw = srcDeep->getDataWindow();
+    const int W = dw.width(), H = dw.height();
+    if (W <= 0 || H <= 0) {
+        return eStatusFailed;
+    }
+    const int flipY = dw.y1 + dw.y2 - 1;
+    const DeepImage* dimg = srcDeep.get();
+    dv.bounds = defocus::Rect(dw.x1, dw.y1, dw.x2, dw.y2);
+    dv.at = [dimg, dw, flipY](int x, int y, int* n) -> const float* {
+        if (x < dw.x1 || x >= dw.x2 || y < dw.y1 || y >= dw.y2) {
+            *n = 0;
+            return nullptr;
+        }
+        *n = dimg->getSampleCount(x, flipY - y);
+        return *n > 0 ? dimg->getSampleData(x, flipY - y) : nullptr;
+    };
 
-        for (int x = outBounds.x1; x < outBounds.x2; ++x) {
-            float* dst = (float*)wa.pixelAt(x, y);
-            if (!dst) continue;
-
-            float normX = (float)(x - outBounds.x1) / std::max(1, outW - 1);
-            int srcCol = (int)(normX * (w - 1) + 0.5f);
-            srcCol = std::max(0, std::min(w - 1, srcCol));
-
-            int srcIdx = (srcRow * w + srcCol) * 4;
-            dst[0] = result[srcIdx + 0];
-            dst[1] = result[srcIdx + 1];
-            dst[2] = result[srcIdx + 2];
-            dst[3] = result[srcIdx + 3];
+    // Flattened image and front depth (silhouette, slicing outlines, background fill colours).
+    std::vector<float> flatTop((size_t)W * H * 4, 0.f), flat((size_t)W * H * 4, 0.f), front((size_t)W * H, 0.f);
+    srcDeep->flattenToRGBA(dw, flatTop.data(), W * 4 * (int)sizeof(float));
+    for (int y = dw.y1; y < dw.y2; ++y) {
+        const size_t rowB = (size_t)(y - dw.y1) * W, rowT = (size_t)(flipY - y - dw.y1) * W;
+        std::copy(&flatTop[rowT * 4], &flatTop[rowT * 4] + (size_t)W * 4, &flat[rowB * 4]);
+        for (int x = dw.x1; x < dw.x2; ++x) {
+            int n = 0;
+            const float* d = dv.at(x, y, &n);
+            float zf = 0.f;
+            for (int k = 0; k < n; ++k) {
+                const float* q = d + (size_t)k * dv.stride;
+                if (q[dv.iA] > 0.f && q[dv.iZ] > 0.f && (zf == 0.f || q[dv.iZ] < zf)) {
+                    zf = q[dv.iZ];
+                }
+            }
+            front[rowB + (x - dw.x1)] = zf;
         }
     }
 
-    // Update info
-    std::ostringstream ss;
-    ss << "Layers: " << numLayersVal
-       << " | Z range: " << minZ << " - " << maxZ
-       << " | Focal: " << focalDist
-       << " | Max CoC: " << (maxZ - (float)focalDist) * (float)blurScaleVal / std::max(0.5f, (float)fStopVal) << "px";
-    _imp->info.lock()->setValue(ss.str());
+    defocus::Inputs in;
+    in.source.data = flat.data();
+    in.source.bounds = dv.bounds;
+    in.source.channels = 4;
+    in.source.rowStride = (std::ptrdiff_t)W * 4;
+    in.depth.data = front.data();
+    in.depth.bounds = dv.bounds;
+    in.depth.channels = 1;
+    in.depth.rowStride = W;
+    in.deep = dv;
 
+    defocus::Settings s;
+    s.depthConvention = defocus::eDepthPlanarZ;
+    s.zeroIsInfinity = true;
+    s.cocMode = defocus::eCocCamera;
+    s.worldToMm = std::max(1e-6, _imp->unitScale.lock()->getValue());
+    s.focalLengthMm = _imp->focalLength.lock()->getValueAtTime(time);
+    s.fNumber = std::max(0.1, _imp->fStop.lock()->getValueAtTime(time));
+    s.filmbackWidthMm = _imp->filmBack.lock()->getValue();
+    s.focusDistance = std::max(1e-4, _imp->focalDistance.lock()->getValueAtTime(time));
+    const double gain = std::max(0., _imp->blurScale.lock()->getValueAtTime(time));
+    s.nearGain = _imp->defocusForeground.lock()->getValue() ? gain : 0.;
+    s.farGain = _imp->defocusBackground.lock()->getValue() ? gain : 0.;
+    s.maxRadiusPx = _imp->maxBlur.lock()->getValue();
+    s.formatWidthPx = W;
+    s.opticalCentreX = 0.5 * (dw.x1 + dw.x2);
+    s.opticalCentreY = 0.5 * (dw.y1 + dw.y2);
+    s.fieldRadiusPx = 0.5 * std::sqrt((double)W * W + (double)H * H);
+    s.lens.blades = _imp->apertureBlades.lock()->getValue();
+    s.lens.rotationDeg = _imp->apertureRotation.lock()->getValue();
+    s.border = defocus::eBorderBlack;
+    s.renderScale = 1.;
+
+    // Render over the output window, then copy (the output may have more channels or a
+    // different window than the deep data).
+    const RectI ob = outImg->getBounds();
+    std::vector<float> res((size_t)ob.width() * ob.height() * 4, 0.f);
+    defocus::ImageView ov;
+    ov.data = res.data();
+    ov.bounds = defocus::Rect(ob.x1, ob.y1, ob.x2, ob.y2);
+    ov.channels = 4;
+    ov.rowStride = (std::ptrdiff_t)ob.width() * 4;
+    defocus::Stats st;
+    if (!defocus::render(in, s, ov, nullptr, &st, [this]() { return aborted(); })) {
+        return eStatusFailed;
+    }
+    {
+        Image::WriteAccess wa(outImg.get());
+        const int nc = outImg->getComponents().getNumComponents();
+        for (int y = ob.y1; y < ob.y2; ++y) {
+            for (int x = ob.x1; x < ob.x2; ++x) {
+                float* dst = (float*)wa.pixelAt(x, y);
+                if (!dst) {
+                    continue;
+                }
+                const float* r = &res[((size_t)(y - ob.y1) * ob.width() + (x - ob.x1)) * 4];
+                for (int c = 0; c < nc && c < 4; ++c) {
+                    dst[c] = nc == 1 ? r[3] : r[c];
+                }
+            }
+        }
+    }
+
+    std::ostringstream ss;
+    ss << st.samples << " deep samples, " << st.slices << " slices, max blur "
+       << (int)std::round(st.maxAbsRadius) << " px";
+    _imp->info.lock()->setValue(ss.str());
     return eStatusOK;
 }
 
