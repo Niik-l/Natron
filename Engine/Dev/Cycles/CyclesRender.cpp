@@ -96,6 +96,7 @@ struct CyclesRenderPrivate
     // Depth of Field (render-side params; F-Stop lives on Camera3D Lens tab)
     KnobBoolWPtr dofEnabled;
     KnobDoubleWPtr focusDistance;
+    KnobBoolWPtr focusFromCamera;
     KnobIntWPtr bokehBlades;
     KnobDoubleWPtr bladeRotation;
     // Real lens traced in the Cycles camera (the same lenses as LensDefocus)
@@ -423,6 +424,14 @@ CyclesRender::initializeKnobs()
         k->setHintToolTip(tr("Distance from the camera where objects are in perfect focus (world units)."));
         k->setAnimationEnabled(true);
         dofPage->addKnob(k); _imp->focusDistance = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Focus From Camera"));
+        k->setName("focusFromCamera"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("Use the connected camera's Focus Distance (Camera3D Lens tab, or an Alembic "
+                             "camera's) instead of the one here, so the camera drives this render and "
+                             "LensDefocus (Focus = Camera) alike. Set Focus then sets the camera's knob."));
+        dofPage->addKnob(k); _imp->focusFromCamera = k;
     }
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Bokeh Blades"));
@@ -871,6 +880,9 @@ CyclesRender::render(const RenderActionArgs& args)
             double focusDist = settings
                 ? settings->getFocusDistance(args.time)
                 : _imp->focusDistance.lock()->getValueAtTime(args.time);
+            if (cam && _imp->focusFromCamera.lock() && _imp->focusFromCamera.lock()->getValue()) {
+                focusDist = std::max(0.001, cam->getCameraFocusDistance(args.time));
+            }
             int blades = settings
                 ? settings->getBokehBlades(args.time)
                 : (_imp->bokehBlades.lock() ? _imp->bokehBlades.lock()->getValue() : 0);
@@ -1652,10 +1664,17 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
         double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
         if (dist < 0.001) dist = 0.001;
 
-        // Set this node's focusDistance knob
+        // Set this node's focusDistance knob, or the camera's (Focus From Camera); keyed when animated
         KnobDoublePtr fd = _imp->focusDistance.lock();
+        if (_imp->focusFromCamera.lock() && _imp->focusFromCamera.lock()->getValue()) {
+            fd = std::dynamic_pointer_cast<KnobDouble>(camEffect->getKnobByName("focusDistance"));
+        }
         if (fd) {
-            fd->setValue(dist);
+            if (fd->isAnimated(0)) {
+                fd->setValueAtTime(time, dist, ViewSpec::all(), 0);
+            } else {
+                fd->setValue(dist);
+            }
             clearPersistentMessage(false);
         }
         return true;

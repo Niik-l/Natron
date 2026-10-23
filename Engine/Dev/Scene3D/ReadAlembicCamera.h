@@ -113,6 +113,9 @@ public:
     virtual double getCameraVAperture(double time) const OVERRIDE
     { return getVAperture(time); }
 
+    virtual double getCameraFStop(double time) const OVERRIDE;
+    virtual double getCameraFocusDistance(double time) const OVERRIDE;
+
 private:
 
     /** Freeze at Frame: when enabled, every time-based accessor evaluates at

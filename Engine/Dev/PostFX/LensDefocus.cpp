@@ -76,6 +76,7 @@ enum FocusModeEnum
     eFocusDistance = 0,
     eFocusPoint,            // autofocus: the depth under Focus Point
     eFocusWorld,            // a world-space point: stays on the object when the camera moves
+    eFocusCamera,           // the Camera input's focus distance (Camera3D / Alembic)
 };
 
 // Lens menu: 0 = procedural (the Bokeh knobs), then the built-in traced lenses, then a file.
@@ -640,7 +641,7 @@ LensDefocus::refreshKnobVisibility()
                         _imp->focusTilt.lock()->isAnimated(0) || _imp->focusSwing.lock()->isAnimated(0);
     _imp->focusDistance.lock()->setSecret(direct || fm != eFocusDistance);
     // In Distance mode the point is the tilted plane's pivot.
-    _imp->focusPoint.lock()->setSecret(direct || !(fm == eFocusPoint || (fm == eFocusDistance && tilted)));
+    _imp->focusPoint.lock()->setSecret(direct || !(fm == eFocusPoint || ((fm == eFocusDistance || fm == eFocusCamera) && tilted)));
     _imp->focusWorldPoint.lock()->setSecret(direct || fm != eFocusWorld);
     _imp->focusTilt.lock()->setSecret(direct);
     _imp->focusSwing.lock()->setSecret(direct);
@@ -763,6 +764,10 @@ LensDefocus::initializeKnobs()
         o.push_back(ChoiceOption("world", "World Point", "Focus on a point in the scene: pick it once (Pick Focus) and focus "
                                                          "stays on it while the camera moves. Needs a camera (Camera input "
                                                          "or the file's) and a Position pass or depth."));
+        o.push_back(ChoiceOption("camera", "Camera", "The focus distance of the camera on the Camera input "
+                                                     "(Camera3D's Focus Distance, or an Alembic camera's), so the "
+                                                     "camera drives this and CyclesRender alike. Pick Focus sets "
+                                                     "the camera's knob."));
         k->populateChoices(o);
         k->setDefaultValue(eFocusDistance);
         lens->addKnob(k); _imp->focusMode = k;
@@ -1387,6 +1392,14 @@ LensDefocus::alignFocusPlane()
     setMaybeKeyed(_imp->focusSwing.lock(), time, swing, 0);
     if (_imp->focusMode.lock()->getValue() == eFocusDistance) {
         setMaybeKeyed(_imp->focusDistance.lock(), time, depth, 0);
+    } else if (_imp->focusMode.lock()->getValue() == eFocusCamera) {
+        // the camera's own knob, so the camera keeps driving every node that uses it
+        EffectInstancePtr camEffect = skipDots(getInput(eInputCamera));
+        KnobDoublePtr cf = camEffect ? std::dynamic_pointer_cast<KnobDouble>(camEffect->getKnobByName("focusDistance"))
+                                     : KnobDoublePtr();
+        if (cf) {
+            setMaybeKeyed(cf, time, depth, 0);
+        }
     }
     refreshKnobVisibility();
 }
@@ -1639,6 +1652,10 @@ LensDefocus::render(const RenderActionArgs& args)
             s.farThreshold = cam->getCameraFar(time) * 0.9999;
         }
     }
+    const bool focusFromCamera = _imp->focusMode.lock()->getValue() == eFocusCamera;
+    if (focusFromCamera && cam) {
+        s.focusDistance = std::max(1e-4, cam->getCameraFocusDistance(time));
+    }
 
     const RectI format = getOutputFormat();
     s.formatWidthPx = std::max(1, format.width());
@@ -1677,6 +1694,10 @@ LensDefocus::render(const RenderActionArgs& args)
 
     // Traced lens.
     std::vector<std::string> lensWarnings;
+    if (focusFromCamera && !cam) {
+        lensWarnings.push_back("Focus = Camera needs a Camera3D (or Alembic camera) on the Camera input. Using "
+                               "Focus Distance.");
+    }
     {
         const std::string lensId = _imp->lensModel.lock()->getActiveEntry().id;
         if (!lensId.empty() && lensId != "procedural" && s.cocMode == defocus::eCocCamera) {

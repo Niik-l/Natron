@@ -94,6 +94,7 @@ struct ReadAlembicCameraPrivate
     KnobDoubleWPtr focalLength;
     KnobDoubleWPtr hAperture, vAperture;
     KnobDoubleWPtr nearClipKnob, farClipKnob;
+    KnobDoubleWPtr fStopKnob, focusDistanceKnob;
     KnobDoubleWPtr frustumDisplayLength;  // viewport gizmo size only
     KnobStringWPtr info;
 
@@ -308,6 +309,21 @@ ReadAlembicCamera::initializeKnobs()
     fc->setName("farClip"); fc->setAnimationEnabled(true); fc->setEvaluateOnChange(false);
     fc->setDefaultValue(10000.0);
     camPage->addKnob(fc); _imp->farClipKnob = fc;
+
+    // Depth of field as stored in the file (Alembic camera f-stop and focus distance; the focus
+    // distance is in the file's linear units, like the translation).
+    KnobDoublePtr fs = AppManager::createKnob<KnobDouble>(this, tr("F-Stop"));
+    fs->setName("fStop"); fs->setAnimationEnabled(true); fs->setEvaluateOnChange(false);
+    fs->setDefaultValue(5.6);
+    fs->setHintToolTip(tr("The camera's f-stop from the file. Used by CyclesRender's depth of field and LensDefocus."));
+    camPage->addKnob(fs); _imp->fStopKnob = fs;
+
+    KnobDoublePtr fd = AppManager::createKnob<KnobDouble>(this, tr("Focus Distance"));
+    fd->setName("focusDistance"); fd->setAnimationEnabled(true); fd->setEvaluateOnChange(false);
+    fd->setDefaultValue(5.0);
+    fd->setHintToolTip(tr("The camera's focus distance from the file (scene units). Used by CyclesRender "
+                          "(Focus From Camera) and LensDefocus (Focus = Camera)."));
+    camPage->addKnob(fd); _imp->focusDistanceKnob = fd;
 
     KnobStringPtr info = AppManager::createKnob<KnobString>(this, tr("Info"));
     info->setName("info"); info->setAnimationEnabled(false);
@@ -580,6 +596,8 @@ ReadAlembicCamera::loadAlembicFile(const std::string& path)
             double vAp = sample.getVerticalAperture() * 10.0;   // cm → mm
             double nearC = sample.getNearClippingPlane();
             double farC = sample.getFarClippingPlane();
+            double fStop = sample.getFStop();
+            double focusD = sample.getFocusDistance();
 
             if (numCamSamples == 1) {
                 // Static camera intrinsics — set as default values (no keyframes)
@@ -588,12 +606,16 @@ ReadAlembicCamera::loadAlembicFile(const std::string& path)
                 _imp->vAperture.lock()->setValue(vAp);
                 _imp->nearClipKnob.lock()->setValue(nearC);
                 _imp->farClipKnob.lock()->setValue(farC);
+                _imp->fStopKnob.lock()->setValue(fStop);
+                _imp->focusDistanceKnob.lock()->setValue(focusD);
             } else {
                 _imp->focalLength.lock()->setValueAtTime(natronFrame, fl, ViewSpec::all(), 0);
                 _imp->hAperture.lock()->setValueAtTime(natronFrame, hAp, ViewSpec::all(), 0);
                 _imp->vAperture.lock()->setValueAtTime(natronFrame, vAp, ViewSpec::all(), 0);
                 _imp->nearClipKnob.lock()->setValueAtTime(natronFrame, nearC, ViewSpec::all(), 0);
                 _imp->farClipKnob.lock()->setValueAtTime(natronFrame, farC, ViewSpec::all(), 0);
+                _imp->fStopKnob.lock()->setValueAtTime(natronFrame, fStop, ViewSpec::all(), 0);
+                _imp->focusDistanceKnob.lock()->setValueAtTime(natronFrame, focusD, ViewSpec::all(), 0);
             }
         }
 
@@ -720,6 +742,18 @@ double
 ReadAlembicCamera::getFocalLength(double time) const
 {
     return _imp->focalLength.lock()->getValueAtTime( effectiveTime(time) );
+}
+
+double
+ReadAlembicCamera::getCameraFStop(double time) const
+{
+    return _imp->fStopKnob.lock()->getValueAtTime( effectiveTime(time) );
+}
+
+double
+ReadAlembicCamera::getCameraFocusDistance(double time) const
+{
+    return _imp->focusDistanceKnob.lock()->getValueAtTime( effectiveTime(time) );
 }
 
 double

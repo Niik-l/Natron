@@ -116,6 +116,7 @@ public:
 
     // Depth of Field (F-Stop only — other DOF params on CyclesRender)
     virtual double getCameraFStop(double time) const OVERRIDE;
+    virtual double getCameraFocusDistance(double time) const OVERRIDE;
 
     /** True when the Lock Transform knob is on: Translate/Rotate must not be
      *  edited (panel knobs disabled; viewport gizmo + look-through navigation

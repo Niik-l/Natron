@@ -68,6 +68,7 @@ struct Camera3DNodePrivate
 
     // Depth of Field (F-Stop on Lens page; other DOF params on CyclesRender)
     KnobDoubleWPtr fStop;
+    KnobDoubleWPtr focusDistance;
 
     // Viewport display only — length of the frustum gizmo drawn in the 3D viewport.
     KnobDoubleWPtr frustumDisplayLength;
@@ -336,6 +337,17 @@ Camera3DNode::initializeKnobs()
         k->setHintToolTip(tr("Lens f-stop. Controls depth of field strength when DOF is enabled on CyclesRender."));
         k->setAnimationEnabled(true);
         lensPage->addKnob(k); _imp->fStop = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Focus Distance"));
+        k->setName("focusDistance");
+        k->setDefaultValue(10.0);
+        k->setMinimum(0.001); k->setDisplayMinimum(0.1); k->setDisplayMaximum(100.0);
+        k->setHintToolTip(tr("Distance from the camera to the plane in focus (world units). Animate it for a "
+                             "focus pull. Used by CyclesRender (Depth of Field > Focus From Camera) and "
+                             "LensDefocus (Focus = Camera), so the 3D render and a 2D defocus share one focus."));
+        k->setAnimationEnabled(true);
+        lensPage->addKnob(k); _imp->focusDistance = k;
     }
 
     {
@@ -848,6 +860,13 @@ Camera3DNode::getCameraFStop(double time) const
 {
     KnobDoublePtr k = _imp->fStop.lock();
     return k ? k->getValueAtTime(time) : 2.8;
+}
+
+double
+Camera3DNode::getCameraFocusDistance(double time) const
+{
+    KnobDoublePtr k = _imp->focusDistance.lock();
+    return k ? k->getValueAtTime(time) : 10.0;
 }
 
 // ==================== RoD / Render ====================
