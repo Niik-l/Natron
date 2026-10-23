@@ -53,6 +53,10 @@ class CyclesRenderer
 public:
     // Why the real lens is off after the last sync (empty when it is on or wasn't asked for).
     std::string lensMessage() const;
+    // Deep hidden layers: with k > 0 the next deep render's camera rays pass through their first
+    // k objects, recording what lies behind them (layer k), with a transparent film so its alpha
+    // is that layer's coverage.
+    void setDeepPeel(int k);
 
     CyclesRenderer();
     ~CyclesRenderer();

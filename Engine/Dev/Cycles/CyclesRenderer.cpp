@@ -339,6 +339,7 @@ static ccl::LightType mapLightType(Light3D::LightType lt)
 struct CyclesRenderer::Impl
 {
     ccl::unique_ptr<ccl::Session> session;
+    int deepPeel = 0;
     int width = 0;
     int height = 0;
     int samples = 64;
@@ -1109,6 +1110,12 @@ CyclesRenderer::CyclesRenderer()
         fprintf(stderr, "[Cycles Session] CyclesRenderer ctor this=%p -> live renderers=%d (sessions=%d)\n",
                 (void*)this, n, g_liveCyclesSessions.load());
     }
+}
+
+void
+CyclesRenderer::setDeepPeel(int k)
+{
+    _impl->deepPeel = std::max(0, k);
 }
 
 std::string
@@ -3067,7 +3074,13 @@ CyclesRenderer::renderToBufferWithCamera(const SceneGraph& sg,
     if (outDeep) {
         _impl->session->scene->film->set_use_deep_output(true);
         _impl->session->scene->film->set_deep_max_samples(deepMaxSamples);
+        _impl->session->scene->film->set_deep_peel(_impl->deepPeel);
         _impl->session->scene->film->tag_modified();
+        if (_impl->deepPeel > 0) {
+            // a hidden layer's alpha must be its coverage, not the background's
+            _impl->session->scene->background->set_transparent(true);
+            _impl->session->scene->background->tag_update(_impl->session->scene.get());
+        }
 
         auto deepDriver = ccl::make_unique<ccl::DeepOutputDriver>(_impl->session->device.get());
         deepDriver->set_enabled(true);
@@ -3284,7 +3297,13 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
     if (outDeep) {
         _impl->session->scene->film->set_use_deep_output(true);
         _impl->session->scene->film->set_deep_max_samples(deepMaxSamples);
+        _impl->session->scene->film->set_deep_peel(_impl->deepPeel);
         _impl->session->scene->film->tag_modified();
+        if (_impl->deepPeel > 0) {
+            // a hidden layer's alpha must be its coverage, not the background's
+            _impl->session->scene->background->set_transparent(true);
+            _impl->session->scene->background->tag_update(_impl->session->scene.get());
+        }
         auto deepDriver = ccl::make_unique<ccl::DeepOutputDriver>(_impl->session->device.get());
         deepDriver->set_enabled(true);
         deepDriver->set_merge_threshold(deepMergeThreshold);

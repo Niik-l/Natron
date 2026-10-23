@@ -76,6 +76,7 @@ struct CyclesRenderPrivate
     KnobBoolWPtr denoise;
     KnobBoolWPtr deepOutput;
     KnobIntWPtr  deepMaxSamples;
+    KnobIntWPtr  deepLayers;
     KnobFileWPtr deepExrPath;
     KnobButtonWPtr deepWriteBtn;
     KnobChoiceWPtr deepChannels;
@@ -572,6 +573,18 @@ CyclesRender::initializeKnobs()
         outPage->addKnob(k); _imp->deepMaxSamples = k;
     }
     {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Deep Layers"));
+        k->setName("deepLayers"); k->setDefaultValue(1);
+        k->setMinimum(1); k->setMaximum(8); k->setDisplayMinimum(1); k->setDisplayMaximum(4);
+        k->setHintToolTip(tr("Hidden layers in the deep output. 1 = what the camera sees (a camera ray "
+                             "stops at the first opaque surface). 2 or more render again with camera "
+                             "rays passing through the first, second ... object along them, so the deep "
+                             "image also holds the surfaces hidden behind the foreground, lit and shadowed "
+                             "as in the scene: DeepDefocus / LensDefocus then show them through a blurred "
+                             "foreground instead of guessing. Each layer costs about one more render."));
+        outPage->addKnob(k); _imp->deepLayers = k;
+    }
+    {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Deep Channels"));
         k->setName("deepChannels");
         k->setHintToolTip(tr("RGBA: full recolored deep (R,G,B,A,Z,ZBack). "
@@ -1010,6 +1023,7 @@ CyclesRender::render(const RenderActionArgs& args)
                                ? (float)_imp->deepMergeThreshold.lock()->getValue() : 0.001f;
     const float deepAlphaMergeVal = _imp->deepAlphaMergeThreshold.lock()
                                ? (float)_imp->deepAlphaMergeThreshold.lock()->getValue() : 0.01f;
+    const int deepLayersVal = _imp->deepLayers.lock() ? std::max(1, std::min(8, _imp->deepLayers.lock()->getValue())) : 1;
     CyclesRenderer::DeepPixelData deepRaw;
     if (deepEnabled) {
         req.outDeep = &deepRaw;
@@ -1062,6 +1076,7 @@ CyclesRender::render(const RenderActionArgs& args)
         hashFloat(req.subdivision.offscreenScale);
         sceneHash = hashCombine(sceneHash, deepEnabled ? 1ULL : 0ULL);
         sceneHash = hashCombine(sceneHash, (U64)deepMaxSamplesVal);
+        sceneHash = hashCombine(sceneHash, (U64)deepLayersVal);
         sceneHash = hashCombine(sceneHash, deepAlphaOnly ? 1ULL : 0ULL);
         sceneHash = hashCombine(sceneHash, (U64)(deepMergeVal * 1e6f));
         sceneHash = hashCombine(sceneHash, (U64)(deepAlphaMergeVal * 1e6f));
@@ -1327,6 +1342,41 @@ CyclesRender::render(const RenderActionArgs& args)
             return eStatusFailed;
         }
 
+        // Deep hidden layers: render again with camera rays passing through the first k objects
+        // and add those samples behind (each pixel's list stays front to back).
+        if (deepEnabled && deepLayersVal > 1 && !deepRaw.empty()) {
+            for (int layer = 1; layer < deepLayersVal; ++layer) {
+                if (aborted()) {
+                    return eStatusFailed;
+                }
+                CyclesRenderer layerRenderer;
+                layerRenderer.setDeepPeel(layer);
+                CyclesRenderer::DeepPixelData layerDeep;
+                CyclesPassRequest layerReq = req;
+                layerReq.outDeep = &layerDeep;
+                std::map<std::string, std::vector<float>> layerBuffers;
+                std::string layerErr;
+                if (!executeCyclesPasses(layerRenderer, prepared, layerReq, layerBuffers, layerErr) ||
+                    layerDeep.size() != deepRaw.size()) {
+                    fprintf(stderr, "[CyclesDeep] hidden layer %d failed: %s\n", layer, layerErr.c_str());
+                    break;
+                }
+                size_t added = 0;
+                for (size_t p = 0; p < deepRaw.size(); ++p) {
+                    if (layerDeep[p].empty()) {
+                        continue;
+                    }
+                    std::vector<CyclesRenderer::DeepPixelSample>& px = deepRaw[p];
+                    px.insert(px.end(), layerDeep[p].begin(), layerDeep[p].end());
+                    std::stable_sort(px.begin(), px.end(),
+                                     [](const CyclesRenderer::DeepPixelSample& a,
+                                        const CyclesRenderer::DeepPixelSample& b) { return a.z < b.z; });
+                    added += layerDeep[p].size();
+                }
+                fprintf(stderr, "[CyclesDeep] hidden layer %d: %zu samples\n", layer, added);
+            }
+        }
+
         _imp->cachedHash = sceneHash;
         _imp->cachedWidth = renderW;
         _imp->cachedHeight = renderH;
@@ -1351,7 +1401,7 @@ CyclesRender::render(const RenderActionArgs& args)
         // render) stays published.
         if (deepEnabled) {
             DeepImagePtr deep = deepImageFromCyclesDeepData(deepRaw, renderW, renderH,
-                                                            deepAlphaOnly);
+                                                            deepAlphaOnly, outW, outH);
             if (deep) {
                 {
                 std::lock_guard<std::mutex> l(_deepMutex);
