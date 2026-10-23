@@ -32,11 +32,12 @@ namespace defocus {
 namespace {
 
 // Built-in prescriptions: pbrt / Kolb format rows (radius, thickness, n_d, clear diameter; mm),
-// as published with pbrt's example scenes, which cite the original designs in W. J. Smith,
-// "Modern Lens Design". The data have no Abbe numbers: estimated from the index (see abbeFor).
+// optionally the Abbe number. The first four are as published with pbrt's example scenes, which
+// cite the original designs in W. J. Smith, "Modern Lens Design", and have no Abbe numbers:
+// estimated from the index (see abbeFor).
 struct BuiltinRow
 {
-    double r, t, n, ap;
+    double r, t, n, ap, v = 0.;
 };
 
 struct Builtin
@@ -73,6 +74,35 @@ builtins()
           {8.3349, 11.1549, 1, 13.42}, {9.5882, 2.0054, 1.654, 9.02}, {43.8677, 5.3895, 1, 8.14},
           {0, 1.4163, 0, 6.08}, {29.4541, 2.1934, 1.517, 5.96}, {-5.2265, 0.9714, 1.805, 5.84},
           {-14.2884, 0.0627, 1, 5.96}, {-22.3726, 0.94, 1.673, 5.96}, {-15.0404, 0, 1, 6.52}}},
+        {"triplet50", "Cooke Triplet 50mm f/4",
+         "Cooke triplet f/4, 20 deg half field (Geiser, Optical Engineering; via J. Sasian, OPTI 517 lecture 20). Glass LaK9 / SF5; clear apertures computed (full beam to 0.7 field)",
+         {{23.713, 4.831, 1.691, 18.417, 54.71}, {7331.288, 5.06, 1, 15.457}, {0, 0.8, 0, 9.622},
+          {-24.456, 0.975, 1.6727, 9.902, 32.21}, {21.896, 4.822, 1, 9.804},
+          {86.759, 3.127, 1.691, 14.762, 54.71}, {-20.4942, 0, 1, 15.873}}},
+        {"tessar50", "Tessar 50mm f/3.5",
+         "Zeiss Tessar 50mm f/3.5, 48 deg. CH 314381 A example 1, data via B. Claff, PhotonsToPhotos OpticalBench (clear diameters estimated there)",
+         {{15.1503, 3.059, 1.62041, 15.64, 60.3}, {380.5595, 3.174, 1, 14.76},
+          {-34.9072, 0.889, 1.59551, 13.48, 39.2}, {12.7472, 2.05, 1, 12.76}, {0, 0.417, 0, 11.586},
+          {329.5515, 0.861, 1.58144, 12.66, 40.8}, {10.8812, 6.214, 1.67003, 13.5, 47.2}, {-24.3596, 0, 1, 13.5}}},
+        {"sonnar50", "Sonnar 50mm f/1.5",
+         "Zeiss Sonnar 50mm f/1.5 (Contax). US 2,186,621 fig. 1 (Bertele), f=100 halved; stop position and clear diameters estimated by B. Claff, PhotonsToPhotos OpticalBench",
+         {{34.605, 4.665, 1.671, 33.35, 47.2}, {216.92, 0.19, 1, 33.35}, {17.93, 5.905, 1.671, 29, 47.2},
+          {42.89, 3.525, 1.4892, 29, 70.1}, {-323.155, 0.95, 1.7394, 29, 28.2}, {11.755, 6.49, 1, 19.56},
+          {0, 1.13, 0, 19.076}, {0, 1.24, 1.5232, 20.08, 50.9}, {25.545, 9.905, 1.6578, 20.08, 51.2},
+          {-11.06, 2.285, 1.5894, 20.08, 61.2}, {-51.565, 0, 1, 23.66}}},
+        {"petzval100", "Petzval 100mm f/2.4",
+         "Petzval portrait type f/2.4 (M. J. Kidger, Fundamental Optical Design p.191, via the COMSOL Petzval Lens model); field flattener removed for the classic curved field and swirl, clear apertures enlarged to cover full frame with natural vignetting",
+         {{98.45049, 13, 1.5168, 70.089, 64.17}, {-83.29386, 4, 1.65412, 63.735, 39.7},
+          {-1421.38828, 40, 1, 61.94}, {0, 40, 0, 31.153}, {59.00613, 12, 1.60738, 51.805, 56.65},
+          {-54.3647, 3, 1.6727, 50.817, 32.25}, {-549.36547, 0, 1, 50.581}}},
+        {"planar50", "Planar 50mm f/1.4",
+         "Zeiss Planar T 50mm f/1.4 double-Gauss. US 3,874,771 example 5, data via B. Claff, PhotonsToPhotos OpticalBench (clear diameters estimated there)",
+         {{44.452, 5.09105, 1.717, 37.5, 47.99}, {288.6605, 0.05885, 1, 37.5},
+          {21.8035, 4.85565, 1.78831, 32.71, 47.37}, {34.062, 1.5891, 1, 32.71},
+          {47.086, 1.18695, 1.68893, 31.19, 31.17}, {15.324, 7.136325, 1, 24.88}, {0, 7.136325, 0, 24.289},
+          {-17.3185, 1.1477, 1.7283, 25.2, 28.68}, {374.0215, 5.1499, 1.78831, 30.35, 47.37},
+          {-30.357, 0.28445, 1, 30.35}, {-87.426, 4.3848, 1.78831, 31.61, 47.37}, {-28.25, 0.1275, 1, 31.61},
+          {164.6795, 2.8349, 1.744, 30.57, 44.77}, {-130.808, 0, 1, 30.57}}},
     };
     return b;
 }
@@ -154,8 +184,8 @@ struct Optics
             } else if (h2 > semi[i] * semi[i] && i < 32) {
                 blk |= 1u << i;
             }
-            if (r[i] != 0.) {
-                // Refract (Snell), normal facing the incoming ray.
+            if (nAfter[i] != nPrev) {
+                // Refract (Snell), normal facing the incoming ray (flat glass surfaces too).
                 double cosi = -(nrm.x * d.x + nrm.y * d.y + nrm.z * d.z);
                 if (cosi < 0.) {
                     nrm = Vec3{-nrm.x, -nrm.y, -nrm.z};
@@ -284,6 +314,10 @@ builtinLens(const std::string& id, LensPrescription* out)
             s.thickness = r.t;
             s.ior = r.n <= 0. ? 1. : r.n;
             s.semiAperture = 0.5 * r.ap;
+            s.abbe = r.v;
+            if (r.v > 0.) {
+                p.abbeEstimated = false;
+            }
             p.surfaces.push_back(s);
         }
         *out = p;
@@ -810,6 +844,12 @@ LensTable::build(const LensPrescription& lens, const LensTableParams& p, std::st
             double s0 = -X / (zEP - zObj);
             Vec3 hit;
             double f0 = sx(s0, &hit);
+            // the paraxial aim can miss a surface far off axis (a strongly distorting lens): aim
+            // less steeply until a ray gets through
+            for (int h = 0; h < 12 && !std::isfinite(f0); ++h) {
+                s0 *= 0.85;
+                f0 = sx(s0, &hit);
+            }
             if (!std::isfinite(f0)) {
                 return false;
             }
@@ -853,16 +893,30 @@ LensTable::build(const LensPrescription& lens, const LensTableParams& p, std::st
             if (!chief(X0, &h0c, &f0v) || !chief(X1, &h1c, &f1v)) {
                 return 1;
             }
-            for (int it = 0; it < 10 && std::fabs(h1c - hTarget) > 1e-4; ++it) {
+            const double dir0 = (h1c - h0c) / (X1 - X0);   // near the axis: image height grows with X
+            for (int it = 0; it < 20 && std::fabs(h1c - hTarget) > 1e-4; ++it) {
                 if (h1c == h0c) {
                     break;
                 }
-                const double X2 = X1 - (h1c - hTarget) * (X1 - X0) / (h1c - h0c);
-                X0 = X1; h0c = h1c;
-                X1 = X2;
-                if (!chief(X1, &h1c, &f1v)) {
+                double X2 = X1 - (h1c - hTarget) * (X1 - X0) / (h1c - h0c);
+                double h2c;
+                Vec3 f2v;
+                // a step past where the lens still images falls back halfway to the last good one
+                bool ok = chief(X2, &h2c, &f2v);
+                for (int b = 0; b < 16 && !ok; ++b) {
+                    X2 = 0.5 * (X1 + X2);
+                    ok = chief(X2, &h2c, &f2v);
+                }
+                if (!ok) {
                     return 1;
                 }
+                X0 = X1; h0c = h1c;
+                X1 = X2; h1c = h2c; f1v = f2v;
+            }
+            // Not reached, or reached past the lens's largest image height (where the image folds
+            // back and a wider field lands lower): outside what the lens can image.
+            if (std::fabs(h1c - hTarget) > 1e-3 * std::max(1., hTarget) || (h1c - h0c) / (X1 - X0) * dir0 <= 0.) {
+                return 1;
             }
             X = X1;
             hc = h1c;
