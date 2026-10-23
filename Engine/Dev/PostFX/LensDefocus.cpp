@@ -275,6 +275,7 @@ struct LensDefocusPrivate
     KnobFileWPtr lensFile;
     KnobDoubleWPtr lensCharacter;
     KnobBoolWPtr lensColour;
+    KnobDoubleWPtr lensDistortion, lensBreathing, lensLateralCA, lensVignetting;
     KnobIntWPtr blades;
     KnobDoubleWPtr curvature, rotation, squeeze, catEye, catEyeStart, swirl, sphericalAberration;
     KnobDoubleWPtr onionAmount, onionFrequency, axialCA;
@@ -651,6 +652,10 @@ LensDefocus::refreshKnobVisibility()
     _imp->lensFile.lock()->setSecret(lensId != kLensFromFile);
     _imp->lensCharacter.lock()->setSecret(!traced);
     _imp->lensColour.lock()->setSecret(!traced);
+    _imp->lensDistortion.lock()->setSecret(!traced);
+    _imp->lensBreathing.lock()->setSecret(!traced);
+    _imp->lensLateralCA.lock()->setSecret(!traced);
+    _imp->lensVignetting.lock()->setSecret(!traced);
     _imp->catEye.lock()->setSecret(traced);
     _imp->catEyeStart.lock()->setSecret(traced);
     _imp->swirl.lock()->setSecret(traced);
@@ -882,6 +887,29 @@ LensDefocus::initializeKnobs()
                              "have no published dispersion, so it is estimated from their indices."));
         bokeh->addKnob(k); _imp->lensColour = k;
     }
+    // Image stages of the traced lens (0 = off, 1 = as traced; off by default: they move and
+    // darken the picture, which a comp matched to the plate may not want).
+    auto stage = [&](const char* label, const char* name, const QString& tip) {
+        KnobDoublePtr k = dbl(bokeh, label, name, 0., 0., 1., tip);
+        k->setMinimum(0.);
+        k->setMaximum(2.);
+        return k;
+    };
+    _imp->lensDistortion = stage("Distortion", "lensDistortion",
+                                 tr("The lens's distortion (barrel / pincushion), traced at the focus distance. 1 = as "
+                                    "traced. Barrel distortion pulls in image from outside the frame: give the input "
+                                    "overscan, or the corners show the Frame Border."));
+    _imp->lensBreathing = stage("Focus Breathing", "lensBreathing",
+                                tr("How the framing changes as the lens focuses closer than infinity (most lenses zoom "
+                                   "in slightly). Animate Focus Distance to see it breathe. 1 = as traced."));
+    _imp->lensLateralCA = stage("Lateral Colour", "lensLateralCA",
+                                tr("Lateral chromatic aberration: red and blue images a little larger or smaller than "
+                                   "green, so edges get colour fringes towards the frame corners. 1 = as traced (from "
+                                   "the estimated glass dispersion)."));
+    _imp->lensVignetting = stage("Vignetting", "lensVignetting",
+                                 tr("Natural vignetting: the light the lens delivers across the frame (angle, the "
+                                    "iris seen obliquely, element rims). Darkens colour, not alpha. 1 = as traced; it "
+                                    "changes with F-Stop."));
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Blades"));
         k->setName("blades");
@@ -1692,6 +1720,39 @@ LensDefocus::render(const RenderActionArgs& args)
             s.lens.chromatic = _imp->lensColour.lock()->getValue();
             if (s.lens.table && s.lens.chromatic) {
                 s.lens.axialCA = 0.;   // the traced lens gives its own
+            }
+            // Image stages from the table's field maps (at the focus distance).
+            const double aD = _imp->lensDistortion.lock()->getValueAtTime(time);
+            const double aB = _imp->lensBreathing.lock()->getValueAtTime(time);
+            const double aL = _imp->lensLateralCA.lock()->getValueAtTime(time);
+            const double aV = _imp->lensVignetting.lock()->getValueAtTime(time);
+            const defocus::LensTable* t = s.lens.table.get();
+            if (t && t->mapSize() > 1 && (aD != 0. || aB != 0. || aL != 0. || aV != 0.)) {
+                const int n = t->mapSize();
+                const std::vector<double>& g = t->mapScale(1);
+                const double k0 = g[0] > 0. ? g[0] : 1.;
+                s.stages.rhoMax = t->mapRhoMax();
+                if (aD != 0. || aB != 0. || aL != 0.) {
+                    for (int c = 0; c < 3; ++c) {
+                        s.stages.scale[c].resize(n);
+                    }
+                    for (int i = 0; i < n; ++i) {
+                        // breathing = the ratio at the centre; distortion = the rest of the radial
+                        // change; lateral colour = red / blue against green
+                        const double gu = (1. + aB * (k0 - 1.)) * (1. + aD * (g[i] / k0 - 1.));
+                        s.stages.scale[1][i] = (float)gu;
+                        for (int c = 0; c < 3; c += 2) {
+                            const double L = g[i] > 0. ? t->mapScale(c)[i] / g[i] : 1.;
+                            s.stages.scale[c][i] = (float)(gu * (1. + aL * (L - 1.)));
+                        }
+                    }
+                }
+                if (aV != 0.) {
+                    s.stages.illum.resize(n);
+                    for (int i = 0; i < n; ++i) {
+                        s.stages.illum[i] = (float)std::max(0., 1. + aV * (t->mapIllum()[i] - 1.));
+                    }
+                }
             }
         }
     }

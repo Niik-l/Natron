@@ -210,6 +210,22 @@ struct LensSettings
     bool chromatic = true;          // trace R, G and B separately (axial colour; 3x scatter)
 };
 
+// Image stages of a real lens, applied to the result (Result output only), radial about the optical
+// centre. Maps are sampled uniformly over the normalised field radius 0..rhoMax (1 = fieldRadiusPx)
+// and held beyond it. Empty maps = that stage off; all off = the plain result, untouched.
+struct LensStages
+{
+    double rhoMax = 1.;
+    // Per channel R, G, B: the output pixel at radius rho takes the result at radius rho * scale
+    // (distortion, focus breathing, lateral colour). Alpha follows green.
+    std::vector<float> scale[3];
+    // Multiplies colour (not alpha): natural vignetting.
+    std::vector<float> illum;
+
+    bool geometric() const { return !scale[0].empty() || !scale[1].empty() || !scale[2].empty(); }
+    bool active() const { return geometric() || !illum.empty(); }
+};
+
 struct Settings
 {
     // Depth decoding
@@ -267,6 +283,7 @@ struct Settings
     BorderModeEnum border = eBorderRepeat;  // a real lens sees past the frame edge; Black darkens borders
 
     OutputModeEnum output = eOutputResult;
+    LensStages stages;
     double mix = 1.;
     int threads = 0;                // 0 = hardware concurrency
 };

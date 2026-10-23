@@ -42,6 +42,7 @@
  */
 
 #include <functional>
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -140,6 +141,20 @@ public:
     // Largest extent of any kernel relative to the thin-lens radius (padding, scatter windows).
     double maxScale() const { return _maxScale; }
 
+    // Field maps at the focus distance, sampled uniformly over the normalised field radius
+    // 0..mapRhoMax() (mapSize() samples), for the image stages:
+    // - mapScale(c): where a point at field radius rho on the sensor comes from in the pinhole
+    //   image (same focal length), as a ratio of radii, per channel. Holds the lens's distortion,
+    //   its focus breathing (the ratio at the centre, != 1 when focused closer than infinity) and
+    //   lateral colour (red / blue against green).
+    // - mapIllum(): relative illumination (natural vignetting: the light that passes every
+    //   aperture, over the image area it lands on), 1 at the centre.
+    // Empty if the lens could not be traced across the field.
+    int mapSize() const { return (int)_mapIllum.size(); }
+    double mapRhoMax() const { return _mapRhoMax; }
+    const std::vector<double>& mapScale(int channel) const { return _mapScale[std::max(0, std::min(2, channel))]; }
+    const std::vector<double>& mapIllum() const { return _mapIllum; }
+
     // Facts about the traced lens, for the UI.
     double effectiveFNumber() const { return _fNumber; }     // clamped to the lens's widest stop
     double widestFNumber() const { return _widestF; }
@@ -161,6 +176,8 @@ private:
     std::function<int(int, double, double, int, void*)> _sampler;   // see LensTable::build   // counted from worker threads: diagnostic only
     std::vector<double> _u, _rho;
     std::vector<TracedKernel> _k;   // [channel][u][rho]
+    double _mapRhoMax = 1.;
+    std::vector<double> _mapScale[3], _mapIllum;
     const TracedKernel& at(int ch, int iu, int ir) const { return _k[((size_t)ch * _u.size() + iu) * _rho.size() + ir]; }
     friend struct LensTableBuilder;
 };

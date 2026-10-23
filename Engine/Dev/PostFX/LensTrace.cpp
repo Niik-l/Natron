@@ -242,6 +242,8 @@ struct PointRays
     std::vector<double> sx, sy, hx, hy;   // stop position (unit = stop radius), sensor hit - chief hit (mm)
     std::vector<unsigned> blk;            // rims missed
     std::vector<unsigned char> val;       // traced at all
+    double objX = 0., objD = 0.;          // the object point: height (mm, chief ray at the target) and distance from the entrance pupil
+    double omega = 0.;                    // solid angle of the rays from it that pass every aperture
 };
 
 Vec3
@@ -871,6 +873,12 @@ LensTable::build(const LensPrescription& lens, const LensTableParams& p, std::st
                 return 1;
             }
         }
+        out.objX = X;
+        out.objD = d;
+        out.omega = 0.;
+        if (grid <= 0) {
+            return 0;   // the object point only (field maps)
+        }
         // Rays from the object point to a grid on the front vertex plane, traced without enforcing
         // apertures; each records stop position, blocking rims and hit (relative to the chief
         // ray's). Two passes: a coarse grid over the whole front element finds where the rays that
@@ -883,6 +891,9 @@ LensTable::build(const LensPrescription& lens, const LensTableParams& p, std::st
         out.blk.assign(grid * grid, 0);
         out.val.assign(grid * grid, 0);
         auto sample = [&](double cx, double cy, double hx, double hy) {
+            // solid angle of each grid cell seen from the object point: dA cos / r^2
+            const double dA = (2. * hx / grid) * (2. * hy / grid);
+            out.omega = 0.;
             for (int gy = 0; gy < grid; ++gy) {
                 for (int gx = 0; gx < grid; ++gx) {
                     const int i = gy * grid + gx;
@@ -900,6 +911,11 @@ LensTable::build(const LensPrescription& lens, const LensTableParams& p, std::st
                         out.hx[i] = hit.x - hc;
                         out.hy[i] = hit.y;
                         out.blk[i] = b;
+                        if (b == 0 && s[0] * s[0] + s[1] * s[1] <= 1.) {
+                            const double rx = fx - X, ry = fy, rz = 0. - zObj;
+                            const double r2 = rx * rx + ry * ry + rz * rz;
+                            out.omega += dA * rz / (r2 * std::sqrt(r2));
+                        }
                     }
                 }
             }
@@ -994,6 +1010,68 @@ LensTable::build(const LensPrescription& lens, const LensTableParams& p, std::st
                 const double ext = std::max(std::sqrt(k.a[0] * k.a[0] + k.a[2] * k.a[2]), std::sqrt(k.a[1] * k.a[1] + k.a[3] * k.a[3]));
                 tab->_maxScale = std::max(tab->_maxScale, std::min(4., ext + std::fabs(k.shift)));
             }
+        }
+    }
+
+    // Field maps at the focus distance (u = 0): per channel where each sensor radius comes from in
+    // the pinhole image, and the light reaching it. A field position the lens can't reach holds
+    // the last one it can.
+    {
+        const int n = 33;
+        tab->_mapRhoMax = 1.05;
+        const double rho0 = 0.01;   // the centre itself has no ratio: its limit
+        std::vector<double> X(n, 0.), om(n, 0.);
+        bool ok = true;
+        for (int c = 0; c < 3 && ok; ++c) {
+            std::vector<double>& sc = tab->_mapScale[c];
+            sc.assign(n, 1.);
+            int lastGood = -1;
+            for (int i = 0; i < n; ++i) {
+                const double rho = std::max(rho0, tab->_mapRhoMax * i / (n - 1.));
+                const double h = rho * p.fieldRadiusMm;
+                PointRays pr;
+                const bool illum = c == 1;
+                const int r = tab->_sampler(c, 0., h, illum ? grid : 0, &pr);
+                if (r == 0 && pr.objD > 0.) {
+                    sc[i] = p.focalLengthMm * std::fabs(pr.objX) / (pr.objD * h);
+                    if (illum) {
+                        X[i] = std::fabs(pr.objX);
+                        om[i] = pr.omega;
+                    }
+                    lastGood = i;
+                } else if (lastGood >= 0) {
+                    sc[i] = sc[lastGood];
+                    if (illum) {
+                        X[i] = X[lastGood] * h / (tab->_mapRhoMax * lastGood / (n - 1.) * p.fieldRadiusMm);
+                        om[i] = om[lastGood];
+                    }
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if (ok) {
+            // Irradiance ~ solid angle of the passing rays x object area per image area
+            // (X dX / h dh, which is where distortion's stretching dims or brightens).
+            tab->_mapIllum.assign(n, 1.);
+            for (int i = 0; i < n; ++i) {
+                const int a = std::max(0, i - 1), b = std::min(n - 1, i + 1);
+                const double ha = std::max(rho0, tab->_mapRhoMax * a / (n - 1.)) * p.fieldRadiusMm;
+                const double hb = std::max(rho0, tab->_mapRhoMax * b / (n - 1.)) * p.fieldRadiusMm;
+                const double hi = std::max(rho0, tab->_mapRhoMax * i / (n - 1.)) * p.fieldRadiusMm;
+                const double dXdh = (X[b] - X[a]) / std::max(1e-12, hb - ha);
+                tab->_mapIllum[i] = om[i] * (X[i] * dXdh) / hi;
+            }
+            const double c0 = tab->_mapIllum[0];
+            for (int i = 0; i < n; ++i) {
+                tab->_mapIllum[i] = c0 > 0. ? std::max(0., std::min(1.5, tab->_mapIllum[i] / c0)) : 1.;
+            }
+        } else {
+            for (int c = 0; c < 3; ++c) {
+                tab->_mapScale[c].clear();
+            }
+            tab->_mapIllum.clear();
         }
     }
     return tab;

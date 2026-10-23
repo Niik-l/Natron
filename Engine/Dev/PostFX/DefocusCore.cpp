@@ -1259,13 +1259,185 @@ maxPaddingPx(const Settings& s)
            + std::fabs(s.lens.axialCA) * s.renderScale + 2.;
 }
 
+namespace {
+
+bool renderDefocus(const Inputs& in, const Settings& s, const ImageView& output, const ImageView* errorMap,
+                   Stats* stats, const std::function<bool()>& aborted);
+
+// A radial map at normalised field radius rho (linear, held past the ends).
+inline float mapAt(const std::vector<float>& m, double rhoMax, double rho)
+{
+    if (m.empty()) {
+        return 1.f;
+    }
+    const double t = std::max(0., rho) / std::max(1e-9, rhoMax) * (m.size() - 1);
+    if (t >= m.size() - 1) {
+        return m.back();
+    }
+    const int i = (int)t;
+    const float f = (float)(t - i);
+    return m[i] + (m[i + 1] - m[i]) * f;
+}
+
+// Catmull-Rom sample of channel c of src at (x, y) (pixel centres at integer + 0.5); 0 outside.
+inline float sampleCubic(const ImageView& src, int c, double x, double y)
+{
+    const double fx = x - 0.5, fy = y - 0.5;
+    const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+    const double tx = fx - x0, ty = fy - y0;
+    auto w = [](double t, double* k) {
+        const double t2 = t * t, t3 = t2 * t;
+        k[0] = 0.5 * (-t3 + 2. * t2 - t);
+        k[1] = 0.5 * (3. * t3 - 5. * t2 + 2.);
+        k[2] = 0.5 * (-3. * t3 + 4. * t2 + t);
+        k[3] = 0.5 * (t3 - t2);
+    };
+    double kx[4], ky[4];
+    w(tx, kx);
+    w(ty, ky);
+    double acc = 0.;
+    for (int j = 0; j < 4; ++j) {
+        const int yy = y0 - 1 + j;
+        if (yy < src.bounds.y1 || yy >= src.bounds.y2) {
+            continue;
+        }
+        double row = 0.;
+        for (int i = 0; i < 4; ++i) {
+            const int xx = x0 - 1 + i;
+            if (xx < src.bounds.x1 || xx >= src.bounds.x2) {
+                continue;
+            }
+            row += kx[i] * src.pixel(xx, yy)[c];
+        }
+        acc += ky[j] * row;
+    }
+    return (float)acc;
+}
+
+// The output pixel (x, y) -> where it comes from, for map m.
+inline void mapPoint(const Settings& s, const std::vector<float>& m, double x, double y, double* sx, double* sy)
+{
+    const double dx = x - s.opticalCentreX, dy = y - s.opticalCentreY;
+    const double rho = std::sqrt(dx * dx + dy * dy) / std::max(1e-6, s.fieldRadiusPx);
+    const double k = mapAt(m, s.stages.rhoMax, rho);
+    *sx = s.opticalCentreX + dx * k;
+    *sy = s.opticalCentreY + dy * k;
+}
+
+// Resample src into dst through the stages' radial maps (per channel; channels past 2 follow green).
+void warpThrough(const Settings& s, const ImageView& src, const ImageView& dst, int nThreads,
+                 const std::function<bool()>& aborted)
+{
+    const LensStages& st = s.stages;
+    parallelFor(dst.bounds.height(), 16, nThreads, aborted, [&](int b, int e) {
+        for (int y = dst.bounds.y1 + b; y < dst.bounds.y1 + e; ++y) {
+            for (int x = dst.bounds.x1; x < dst.bounds.x2; ++x) {
+                float* o = dst.pixel(x, y);
+                double gx = 0., gy = 0.;
+                mapPoint(s, st.scale[1], x + 0.5, y + 0.5, &gx, &gy);
+                for (int c = 0; c < dst.channels; ++c) {
+                    double px = gx, py = gy;
+                    if (c == 0 || c == 2) {
+                        mapPoint(s, st.scale[c], x + 0.5, y + 0.5, &px, &py);
+                    }
+                    o[c] = c < src.channels ? sampleCubic(src, c, px, py) : 0.f;
+                }
+            }
+        }
+    });
+}
+
+} // namespace
+
 bool
 render(const Inputs& in,
        const Settings& s,
        const ImageView& output,
        const ImageView* errorMap,
-       Stats* statsOut,
+       Stats* stats,
        const std::function<bool()>& aborted)
+{
+    if (!s.stages.active() || s.output != eOutputResult || !output.valid()) {
+        return renderDefocus(in, s, output, errorMap, stats, aborted);
+    }
+    const int nThreads = threadCount(s.threads);
+    if (!s.stages.geometric()) {
+        if (!renderDefocus(in, s, output, errorMap, stats, aborted)) {
+            return false;
+        }
+    } else {
+        // The result over every point the warp reads (the output's outline mapped back, plus the
+        // centre), then resampled into the output.
+        double x1 = output.bounds.x1, y1 = output.bounds.y1, x2 = output.bounds.x2, y2 = output.bounds.y2;
+        auto take = [&](double x, double y) {
+            for (int c = 0; c < 3; ++c) {
+                double sx, sy;
+                mapPoint(s, s.stages.scale[c], x, y, &sx, &sy);
+                x1 = std::min(x1, sx); x2 = std::max(x2, sx);
+                y1 = std::min(y1, sy); y2 = std::max(y2, sy);
+            }
+        };
+        const Rect& ob = output.bounds;
+        for (int i = 0; i <= 64; ++i) {
+            const double fx = ob.x1 + (ob.x2 - ob.x1) * i / 64., fy = ob.y1 + (ob.y2 - ob.y1) * i / 64.;
+            take(fx, ob.y1); take(fx, ob.y2); take(ob.x1, fy); take(ob.x2, fy);
+        }
+        take(s.opticalCentreX, s.opticalCentreY);
+        Rect tb((int)std::floor(x1) - 3, (int)std::floor(y1) - 3, (int)std::ceil(x2) + 3, (int)std::ceil(y2) + 3);
+        // no more than the output plus a frame's worth around it (a lens that can't image the
+        // corners shouldn't ask for an unbounded window)
+        const int mw = ob.width(), mh = ob.height();
+        tb = Rect(std::max(tb.x1, ob.x1 - mw), std::max(tb.y1, ob.y1 - mh), std::min(tb.x2, ob.x2 + mw), std::min(tb.y2, ob.y2 + mh));
+        std::vector<float> tmp((size_t)tb.width() * tb.height() * 4, 0.f), tmpE;
+        ImageView tv;
+        tv.data = tmp.data();
+        tv.bounds = tb;
+        tv.channels = 4;
+        tv.rowStride = (std::ptrdiff_t)tb.width() * 4;
+        ImageView ev;
+        if (errorMap && errorMap->valid()) {
+            tmpE.assign((size_t)tb.width() * tb.height() * errorMap->channels, 0.f);
+            ev.data = tmpE.data();
+            ev.bounds = tb;
+            ev.channels = errorMap->channels;
+            ev.rowStride = (std::ptrdiff_t)tb.width() * errorMap->channels;
+        }
+        if (!renderDefocus(in, s, tv, ev.valid() ? &ev : nullptr, stats, aborted)) {
+            return false;
+        }
+        warpThrough(s, tv, output, nThreads, aborted);
+        if (ev.valid()) {
+            Settings sg = s;   // the error map follows green
+            sg.stages.scale[0] = sg.stages.scale[2] = sg.stages.scale[1];
+            warpThrough(sg, ev, *errorMap, nThreads, aborted);
+        }
+    }
+    if (!s.stages.illum.empty()) {
+        parallelFor(output.bounds.height(), 16, nThreads, aborted, [&](int b, int e) {
+            for (int y = output.bounds.y1 + b; y < output.bounds.y1 + e; ++y) {
+                for (int x = output.bounds.x1; x < output.bounds.x2; ++x) {
+                    const double dx = x + 0.5 - s.opticalCentreX, dy = y + 0.5 - s.opticalCentreY;
+                    const float v = mapAt(s.stages.illum, s.stages.rhoMax, std::sqrt(dx * dx + dy * dy) / std::max(1e-6, s.fieldRadiusPx));
+                    float* o = output.pixel(x, y);
+                    for (int c = 0; c < 3 && c < output.channels; ++c) {
+                        o[c] *= v;
+                    }
+                }
+            }
+        });
+    }
+    return !(aborted && aborted());
+}
+
+namespace {
+
+bool
+renderDefocus(const Inputs& in,
+              const Settings& s,
+              const ImageView& output,
+              const ImageView* errorMap,
+              Stats* statsOut,
+              const std::function<bool()>& aborted)
 {
     Stats stats;
     const int nThreads = threadCount(s.threads);
@@ -2922,5 +3094,7 @@ render(const Inputs& in,
     }
     return okScatter;
 }
+
+} // namespace
 
 } // namespace defocus
