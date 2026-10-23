@@ -1,4 +1,32 @@
 # Natron 3D System
+- **Alpha cutouts: opacity maps + texture alpha wired for FBX AND glTF (2026-10-23, headless-verified)** —
+  the last gap from the morning's material fixes: `GeoImportMaterial` had no alpha/opacity mapping at all, so
+  Mixamo's hair/eyelash masks were ignored by both import paths and glTF BLEND materials rendered solid.
+  (1) **ReadGeoImport.h**: `GeoImportMaterial` gains `opacityMapPath`, scalar `opacity` (1 = opaque) and
+  `textureUsesAlpha` (base-color texture's own alpha drives the cutout).
+  (2) **ReadGeoArchiveFbx.cpp**: ufbx leaves `pbr.opacity` EMPTY for FBX-Phong (its mapping tables have no
+  opacity channel — verified with the standalone probe); Mixamo serializes the "..._Opacity" masks under the
+  legacy `TransparentColor` property instead (`fbx.transparency_color.texture`, factor 1.0 = opaque). The
+  mask stages as an OPACITY map (white = opaque, no invert — same legacy convention that gives
+  TransparencyFactor 1.0 = opaque; reading it as transparency would vanish the hair where the asset's Blender
+  glTF export renders strands opaque). Gated to builtin shading models (UNKNOWN/LAMBERT/PHONG/BLENDER_PHONG);
+  genuine PBR FBX shaders map nothing until a file actually needs per-shader opacity handling.
+  (3) **ReadGeoArchiveGltf.cpp**: `base_color_factor[3]` becomes the scalar opacity; `alphaMode != OPAQUE` +
+  a diffuse texture ticks `textureUsesAlpha` (glTF packs the alpha into the albedo — Mixamo's
+  "Remy_Hair_Diffuse-Remy_Hair_Opacity" export). glTF textures carry STRAIGHT alpha, which surfaced a latent
+  wrongness: Cycles set `IMAGE_ALPHA_ASSOCIATED` whenever usesAlpha was on (correct only for Card3D's baked
+  comp input) — a new `MaterialProvider::getMaterialTextureAlphaPremultiplied()` flag (default false, true for
+  the baked img inputs of Card3D/Cube3D/Cylinder3D/Sphere3D) now picks the interpretation.
+  (4) **MaterialProvider**: `getMaterialOpacity(time)` scalar (default 1.0); **CyclesRenderer** alpha assembly:
+  opacity map > base-texture alpha > scalar, scalar multiplies a linked alpha (Math multiply) and sets bare
+  Alpha when nothing is linked. (5) **Material3D** gains a `textureUsesAlpha` ("Diffuse Uses Alpha") tick so
+  the Re-build Materials mirror reproduces packed-alpha glTF cutouts (ReadGeoArchive sets both
+  `opacityMapFile` and the tick); **EntryMaterialProvider** exposes opacityMapPath/opacity/textureUsesAlpha.
+  Verify: rebuild + 06-install, A/B @ f249/8spp — FBX and GLB both render feathered hair wisps + eyelash/brow
+  cutouts (`out/mixamo_glbcmp/{fbx,glb}_op_f249.png`, ear visible through the hair gap in the FBX; CYCMAT log
+  shows GLB packed textures texA=1 and FBX hair/eyelash opMap=1, all op=1.0). Also closes the "GLB a bit
+  darker" delta: identical staged texture pixels + Blender's own glTF KHR_specular re-interpretation
+  (FBX specular 1.0 → glTF 0.5) explain the old ~5% offset — conversion artifact, not an engine bug.
 - **FBX materials: transmission gating + full map staging; Cycles packed-MR factor multiply (2026-10-23, headless-verified)** —
   side-by-side A/B of the same Mixamo asset loaded as `.glb` vs `.fbx` (`tools/geoio-tests/glb_fbx_ab.py`,
   renders in `tools/geoio-tests/out/mixamo_glbcmp/`) exposed three FBX material-mapping defects that the
@@ -26,9 +54,8 @@
   factors; standalone grayscale maps keep Material3D's documented "map overrides slider" behavior.
   Verify: rebuild + `build.cmd 06-install`, A/B re-render @ f249/8spp — GLB dark-metal pixel-mean
   (41/31/23) → dielectric (90/79/65) alongside FBX (94/77/61), both matching Blender's own render of each
-  format (10-21 `bl_ref_*` ground truth); pre-convergence GLB look kept as `out/mixamo_glbcmp/glb_f249_v1metal.png`.
-  Remaining known gap (by design): opacity maps still ignored by both import paths — `GeoImportMaterial` has no
-  alpha/opacity-mapping field yet (`getMaterialOpacityMapFile`/`getMaterialTextureUsesAlpha` unoverridden).
+  format (10-21 `bl_ref_*` ground truth);   pre-convergence GLB look kept as `out/mixamo_glbcmp/glb_f249_v1metal.png`.
+  The opacity-map gap described below was closed the same day (see the following entry).
 - **ReadGeoArchive: rig-toggle shading fix (2026-10-20, headless-verified)** —
   unticking the rig subtree in the archive tree re-shaded every mesh entry (much brighter in
   the 3D viewport; in Cycles textures toggled on/off). Cause: `getEntryMaterialProvider` used
