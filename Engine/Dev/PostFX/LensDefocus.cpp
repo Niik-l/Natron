@@ -1316,6 +1316,17 @@ LensDefocus::onKnobsLoaded()
         if (dval("apertureRotation", 0., &v)) {
             _imp->rotation.lock()->setValue(v);
         }
+        // The project restores the old node's tab order (Controls, Focus Picker, Bokeh), which
+        // puts Bokeh first: back to LensDefocus's order.
+        std::list<std::string> pages;
+        pages.push_back("Lens");
+        pages.push_back("Bokeh");
+        pages.push_back("Depth");
+        pages.push_back("Quality");
+        pages.push_back("Output");
+        pages.push_back("Node");
+        pages.push_back("Info");
+        getNode()->setPagesOrder(pages);
     }
     refreshKnobVisibility();
 }
