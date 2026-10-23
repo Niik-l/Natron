@@ -123,18 +123,57 @@ mapUfbxMaterialArc(const ufbx_material* m, const std::string& dir,
     if (m->pbr.specular_ior.has_value && m->pbr.specular_ior.value_real >= 1.0) {
         out.ior = m->pbr.specular_ior.value_real;
     }
-    if (m->pbr.transmission_factor.has_value) {
+    if (baseColor.texture) {
+        out.diffuseMapPath = resolveUfbxTextureArc(baseColor.texture, dir, fbmDir);
+    }
+
+    // Roughness/metallic texture + normal map, staged like the diffuse map —
+    // glTF parity (the same GeoImportMaterial fields feed the per-entry
+    // provider and the Re-build Materials Material3D chains; CyclesRenderer
+    // channel-splits the ORM file G=roughness / B=metallic, grayscale gloss
+    // maps are channel-equal). FBX builtin Phong carries its gloss/shininess
+    // map here (ufbx re-derives the roughness factor from the exponent);
+    // genuine PBR shading models bring a true roughness map directly.
+    // ormMetallicEnabled stays FALSE for FBX: its ORM B channel is gloss, not
+    // metalness — letting it drive metallic shaded the surface half-metal
+    // (washed pastel) where the same model through Blender's glTF export
+    // renders as the file's own metallic factor (0 = dielectric).
+    if (m->pbr.roughness.texture) {
+        out.metallicRoughnessMapPath =
+            resolveUfbxTextureArc(m->pbr.roughness.texture, dir, fbmDir);
+        if (m->features.metalness.enabled) out.ormMetallicEnabled = true;
+    }
+    if (m->pbr.normal_map.texture) {
+        out.normalMapPath = resolveUfbxTextureArc(m->pbr.normal_map.texture, dir, fbmDir);
+    }
+
+    // FBX builtin shading models (Lambert/Phong/Blender-Phong) have no PBR
+    // transmission: ufbx fills their pbr.transmission_factor from the FBX
+    // LEGACY TransparencyFactor, whose convention is INVERTED (1.0 = fully
+    // opaque). Mapping it through made every Mixamo FIGURE material glass
+    // (dark refractive + fireflies) while the same model exported to glTF
+    // renders correctly (cgltf has_transmission false). Only trust
+    // transmission from shading models that actually define it, and mirror
+    // the glTF emission rule (all-zero emissive color = no emission).
+    const bool builtinShading =
+        m->shader_type == UFBX_SHADER_UNKNOWN ||
+        m->shader_type == UFBX_SHADER_FBX_LAMBERT ||
+        m->shader_type == UFBX_SHADER_FBX_PHONG ||
+        m->shader_type == UFBX_SHADER_BLENDER_PHONG;
+    if (!builtinShading && m->pbr.transmission_factor.has_value) {
         out.transmission = m->pbr.transmission_factor.value_real;
     }
     if (m->pbr.emission_color.has_value && m->pbr.emission_color.value_components >= 3) {
-        out.emission[0] = m->pbr.emission_color.value_vec3.x;
-        out.emission[1] = m->pbr.emission_color.value_vec3.y;
-        out.emission[2] = m->pbr.emission_color.value_vec3.z;
-        out.emissionStrength = m->pbr.emission_factor.has_value
-                                   ? m->pbr.emission_factor.value_real : 1.0;
-    }
-    if (baseColor.texture) {
-        out.diffuseMapPath = resolveUfbxTextureArc(baseColor.texture, dir, fbmDir);
+        const bool zero = m->pbr.emission_color.value_vec3.x == 0.0 &&
+                          m->pbr.emission_color.value_vec3.y == 0.0 &&
+                          m->pbr.emission_color.value_vec3.z == 0.0;
+        if (!zero) {
+            out.emission[0] = m->pbr.emission_color.value_vec3.x;
+            out.emission[1] = m->pbr.emission_color.value_vec3.y;
+            out.emission[2] = m->pbr.emission_color.value_vec3.z;
+            out.emissionStrength = m->pbr.emission_factor.has_value
+                                       ? m->pbr.emission_factor.value_real : 1.0;
+        }
     }
     return out;
 }

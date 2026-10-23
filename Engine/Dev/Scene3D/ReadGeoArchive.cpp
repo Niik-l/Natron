@@ -119,7 +119,11 @@ struct EntryMaterialProvider : public MaterialProvider
     // glTF ORM: one file, roughness in G / metallic in B (CyclesRenderer splits
     // the channels); normal is the tangent-space map.
     std::string getMaterialRoughnessMapFile() const OVERRIDE { return mat->metallicRoughnessMapPath; }
-    std::string getMaterialMetallicMapFile() const OVERRIDE { return mat->metallicRoughnessMapPath; }
+    // FBX builtin shading: the ORM file is the legacy gloss map (its B channel
+    // is gloss, not metalness) — don't let it drive metallic (see
+    // GeoImportMaterial::ormMetallicEnabled).
+    std::string getMaterialMetallicMapFile() const OVERRIDE
+    { return mat->ormMetallicEnabled ? mat->metallicRoughnessMapPath : std::string(); }
     std::string getMaterialNormalMapFile() const OVERRIDE { return mat->normalMapPath; }
     std::string getMaterialDiffuseColorspace() const OVERRIDE { return "sRGB"; }
 };
@@ -688,7 +692,8 @@ setRebuildMaterialKnobs(NodePtr matNode, const GeoImportMaterial& m)
         }
     };
     setFileKnob("roughnessMapFile", m.metallicRoughnessMapPath);
-    setFileKnob("metallicMapFile", m.metallicRoughnessMapPath);
+    setFileKnob("metallicMapFile",
+                m.ormMetallicEnabled ? m.metallicRoughnessMapPath : std::string());
     setFileKnob("normalMapFile", m.normalMapPath);
     // Texture colorspaces: EntryMaterialProvider hardcodes "sRGB" for both
     // (getMaterialDiffuseColorspace / getMaterialEmissionColorspace), while a

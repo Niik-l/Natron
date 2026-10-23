@@ -72,6 +72,15 @@ struct GeoImportMaterial
     // Empty = the file carries none (FBX imports leave these unset).
     std::string metallicRoughnessMapPath;
     std::string normalMapPath;
+    // Whether metallicRoughnessMapPath's BLUE channel may drive the metallic
+    // input. glTF says yes (the file guarantees B is metallic); FBX texture
+    // conventions do NOT — for FBX builtin Phong ufbx fills the ORM slot from
+    // the legacy gloss/shininess map, whose baked channels mean gloss, not
+    // metalness (metalness_feature off in the material), so reading B would
+    // shade the surface half-metal. FBX imports leave this false: roughness
+    // still comes from the ORM file's GREEN channel, metallic stays the
+    // scalar value.
+    bool ormMetallicEnabled = true;
 };
 
 // --- Archive import (hierarchy-preserving) ----------------------------------
