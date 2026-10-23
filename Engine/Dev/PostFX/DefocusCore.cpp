@@ -1901,19 +1901,39 @@ renderDefocus(const Inputs& in,
             }
         });
     }
-    // Compact samples: most pixels are one whole sample (colour = the source pixel, radius in rS);
-    // pixels split at a depth edge keep both parts in `splits`. Sample ids: p is a pixel's first
-    // sample, N + k the second part of split k.
-    struct SplitRec
+    // Compact samples: most pixels are one whole sample (colour = the source pixel, radius in rS).
+    // Pixels with more (both parts of a depth-edge split, or a deep pixel's samples) list all of
+    // them in `extra`, contiguous; sample ids: p is a pixel's first sample, N + k its others.
+    // `layer`: deep samples, which composite front to back within a slice; the two parts of a split
+    // sit side by side in the pixel and add up.
+    struct ExtraRec
     {
         size_t p;
-        PixSample s[2];
+        PixSample s;
+        bool layer;
     };
     std::vector<float> rS(N, 0.f);
-    std::vector<unsigned char> nSamp(N, 0);
-    std::vector<int> splitIdx(N, -1);
-    std::vector<std::vector<SplitRec> > splitChunks((Dh + 15) / 16);
+    std::vector<unsigned short> nSamp(N, 0);
+    std::vector<int> firstExtra(N, -1);
+    std::vector<std::vector<ExtraRec> > extraChunks((Dh + 15) / 16);
     std::vector<float> edgeA(N, -1.f);
+
+    // Deep: the blur radius of a planar depth at a pixel, as step 1 decodes the depth pass.
+    const bool deepOn = in.deep.valid();
+    auto radiusOfZ = [&](int x, int y, double z) -> float {
+        double inv = 0.;
+        const bool inf = !(z > 0.) || !std::isfinite(z) || (s.farThreshold > 0. && z >= s.farThreshold);
+        if (!inf) {
+            if (s.depthConvention == eDepthRadial) {
+                const double u = proj.u(x), w = proj.v(y);
+                z /= std::sqrt(1. + u * u + w * w);
+            }
+            inv = 1. / z;
+        }
+        double r = focusField.tilted ? coc.radiusAt(inv, focusField.at(x, y)) : coc.radius(inv);
+        r *= r < 0. ? s.nearGain : s.farGain;
+        return (float)std::max(-coc.maxR, std::min(coc.maxR, r));
+    };
 
     parallelFor(Dh, 16, nThreads, aborted, [&](int b, int e) {
         for (int j = b; j < e; ++j) {
@@ -1921,6 +1941,61 @@ renderDefocus(const Inputs& in,
             for (int i = 0; i < Dw; ++i) {
                 const int x = D.x1 + i;
                 const size_t p = (size_t)j * Dw + i;
+                if (deepOn) {
+                    // Every deep sample at its own radius, front to back; a volume segment
+                    // (ZBack > Z) in pieces along its radius range (OpenEXR's split: each piece
+                    // alpha 1 - (1 - a)^(1/m), colour in proportion), so fog blurs with depth.
+                    int cnt = 0;
+                    const float* d = in.deep.at(x, y, &cnt);
+                    if (!d || cnt <= 0) {
+                        continue;
+                    }
+                    std::vector<std::pair<float, int> > zs;
+                    zs.reserve(cnt);
+                    for (int k = 0; k < cnt; ++k) {
+                        const float* q = d + (size_t)k * in.deep.stride;
+                        if (q[in.deep.iA] <= 0.f && q[in.deep.iR] == 0.f && q[in.deep.iG] == 0.f && q[in.deep.iB] == 0.f) {
+                            continue;
+                        }
+                        zs.push_back(std::make_pair(q[in.deep.iZ], k));
+                    }
+                    std::stable_sort(zs.begin(), zs.end());
+                    std::vector<ExtraRec>& out = extraChunks[b / 16];
+                    const size_t first = out.size();
+                    for (size_t k = 0; k < zs.size() && out.size() - first < 60000; ++k) {
+                        const float* q = d + (size_t)zs[k].second * in.deep.stride;
+                        const float c[4] = {q[in.deep.iR], q[in.deep.iG], q[in.deep.iB], q[in.deep.iA]};
+                        const double z0 = q[in.deep.iZ];
+                        const double z1 = in.deep.iZBack >= 0 ? (double)q[in.deep.iZBack] : z0;
+                        const float r0 = radiusOfZ(x, y, z0);
+                        int m = 1;
+                        float r1 = r0;
+                        if (z1 > z0 * 1.0001) {
+                            r1 = radiusOfZ(x, y, z1);
+                            m = std::max(1, std::min(16, (int)std::ceil(std::fabs(r1 - r0) / std::max(0.5, rs))));
+                        }
+                        const double a = std::max(0.f, std::min(1.f, c[3]));
+                        const double am = m == 1 ? a : 1. - std::pow(1. - a, 1. / m);
+                        const double scale = m == 1 ? 1. : (a > 1e-9 ? am / a : 1. / m);
+                        for (int piece = 0; piece < m; ++piece) {
+                            ExtraRec er;
+                            er.p = p;
+                            er.layer = true;
+                            er.s.r = m == 1 ? r0 : r0 + (r1 - r0) * (piece + 0.5f) / m;
+                            er.s.w = 1.f;
+                            for (int ch = 0; ch < 4; ++ch) {
+                                er.s.c[ch] = (float)(c[ch] * scale);
+                            }
+                            er.s.hi = false;
+                            out.push_back(er);
+                        }
+                    }
+                    if (out.size() > first) {
+                        rS[p] = out[first].s.r;
+                        nSamp[p] = (unsigned short)(out.size() - first);
+                    }
+                    continue;
+                }
                 float C[4];
                 srcAt(x, y, C);
                 if (C[0] == 0.f && C[1] == 0.f && C[2] == 0.f && C[3] == 0.f) {
@@ -2097,46 +2172,64 @@ renderDefocus(const Inputs& in,
                 std::memcpy(out[1].c, B, sizeof(B));
                 out[1].hi = false;
                 nSamp[p] = 2;
-                SplitRec sr;
-                sr.p = p;
-                sr.s[0] = out[0];
-                sr.s[1] = out[1];
-                splitChunks[b / 16].push_back(sr);
+                for (int k = 0; k < 2; ++k) {
+                    ExtraRec er;
+                    er.p = p;
+                    er.s = out[k];
+                    er.layer = false;
+                    extraChunks[b / 16].push_back(er);
+                }
             }
         }
     });
     if (aborted && aborted()) {
         return false;
     }
-    std::vector<SplitRec> splits;
-    for (size_t c = 0; c < splitChunks.size(); ++c) {
-        for (size_t k = 0; k < splitChunks[c].size(); ++k) {
-            splitIdx[splitChunks[c][k].p] = (int)splits.size();
-            splits.push_back(splitChunks[c][k]);
+    std::vector<ExtraRec> extra;
+    {
+        size_t total = 0;
+        for (size_t c = 0; c < extraChunks.size(); ++c) {
+            total += extraChunks[c].size();
+        }
+        extra.reserve(total);
+        for (size_t c = 0; c < extraChunks.size(); ++c) {
+            for (size_t k = 0; k < extraChunks[c].size(); ++k) {
+                const ExtraRec& er = extraChunks[c][k];
+                if (firstExtra[er.p] < 0) {
+                    firstExtra[er.p] = (int)extra.size();
+                }
+                extra.push_back(er);
+            }
         }
     }
-    std::vector<std::vector<SplitRec> >().swap(splitChunks);
-    const size_t nIds = N + splits.size();
+    std::vector<std::vector<ExtraRec> >().swap(extraChunks);
+    const size_t nIds = N + extra.size();
     std::vector<unsigned char> hiFlag(nIds, 0);
-    auto sampleOf = [&](size_t p, int k) -> size_t { return k == 0 ? p : N + (size_t)splitIdx[p]; };
-    auto pixelOf = [&](size_t id) -> size_t { return id < N ? id : splits[id - N].p; };
-    auto sampleR = [&](size_t id) -> float {
+    // A pixel's first sample is its own id; the k-th of a listed pixel is N + its record.
+    auto sampleOf = [&](size_t p, int k) -> size_t { return k == 0 ? p : N + (size_t)firstExtra[p] + (size_t)k; };
+    auto pixelOf = [&](size_t id) -> size_t { return id < N ? id : extra[id - N].p; };
+    auto recOf = [&](size_t id) -> const ExtraRec* {
         if (id >= N) {
-            return splits[id - N].s[1].r;
+            return &extra[id - N];
         }
-        return splitIdx[id] >= 0 ? splits[splitIdx[id]].s[0].r : rS[id];
+        return firstExtra[id] >= 0 ? &extra[firstExtra[id]] : nullptr;
+    };
+    auto sampleR = [&](size_t id) -> float {
+        const ExtraRec* er = recOf(id);
+        return er ? er->s.r : rS[id];
     };
     auto sampleW = [&](size_t id) -> float {
-        if (id >= N) {
-            return splits[id - N].s[1].w;
-        }
-        return splitIdx[id] >= 0 ? splits[splitIdx[id]].s[0].w : 1.f;
+        const ExtraRec* er = recOf(id);
+        return er ? er->s.w : 1.f;
+    };
+    auto sampleLayer = [&](size_t id) -> bool {
+        const ExtraRec* er = recOf(id);
+        return er && er->layer;
     };
     auto sampleColour = [&](size_t id, float* c) {
-        if (id >= N) {
-            std::memcpy(c, splits[id - N].s[1].c, sizeof(float) * 4);
-        } else if (splitIdx[id] >= 0) {
-            std::memcpy(c, splits[splitIdx[id]].s[0].c, sizeof(float) * 4);
+        const ExtraRec* er = recOf(id);
+        if (er) {
+            std::memcpy(c, er->s.c, sizeof(float) * 4);
         } else {
             srcAt(D.x1 + (int)(id % Dw), D.y1 + (int)(id / Dw), c);
         }
@@ -2390,7 +2483,8 @@ renderDefocus(const Inputs& in,
             }
             for (size_t id = 0; id < nIds; ++id) {
                 const size_t p = pixelOf(id);
-                if (nSamp[p] == 0 || (id >= N && nSamp[p] < 2)) {
+                // (a listed pixel's first record is reached through the pixel id, not its own)
+                if (nSamp[p] == 0 || (id >= N && (size_t)firstExtra[p] == id - N)) {
                     continue;
                 }
                 sIdx[id] = sliceOf[std::max(0, std::min(nb - 1, sIdx[id] - fMin))];
@@ -2516,6 +2610,21 @@ renderDefocus(const Inputs& in,
         P.assign(RN * 4, 0.f);
         Rs.assign(RN, 0.f);
         const double inv = 1. / ((double)sc * sc);
+        // A deep pixel's layers in this slice (adjacent in `order`, front first) composite over
+        // each other before they join the cell; the radius is weighted by what each layer shows.
+        size_t layP = std::numeric_limits<size_t>::max(), layC = 0;
+        double layCol[4] = {0., 0., 0., 0.}, layRW = 0., layVis = 0., layR0 = 0.;
+        auto flushLayers = [&]() {
+            if (layP == std::numeric_limits<size_t>::max()) {
+                return;
+            }
+            W[layC] += (float)inv;
+            for (int k = 0; k < 4; ++k) {
+                P[layC * 4 + k] += (float)(layCol[k] * inv);
+            }
+            Rs[layC] += (float)(layVis > 0. ? layRW / layVis : layR0);
+            layP = std::numeric_limits<size_t>::max();
+        };
         for (int q = b; q < e; ++q) {
             PixSample ps;
             ps.r = sampleR(order[q]);
@@ -2524,6 +2633,26 @@ renderDefocus(const Inputs& in,
             ps.hi = hiFlag[order[q]] != 0;
             const size_t p = pixelOf(order[q]);
             const int pi = (int)(p % Dw), pj = (int)(p / Dw);
+            if (!ps.hi && sampleLayer(order[q])) {
+                const size_t c = (size_t)(pj / sc - region.y1) * rw + (pi / sc - region.x1);
+                if (p != layP) {
+                    flushLayers();
+                    layP = p;
+                    layC = c;
+                    layCol[0] = layCol[1] = layCol[2] = layCol[3] = 0.;
+                    layRW = layVis = 0.;
+                    layR0 = ps.r;
+                }
+                const double t = std::max(0., 1. - layCol[3]);
+                const double vis = t * std::max(1e-6f, ps.c[3]);
+                for (int k = 0; k < 4; ++k) {
+                    layCol[k] += t * ps.c[k];
+                }
+                layRW += vis * ps.r;
+                layVis += vis;
+                continue;
+            }
+            flushLayers();
             if (ps.hi) {
                 Sample hs;
                 hs.x = D.x1 + pi;
@@ -2541,6 +2670,7 @@ renderDefocus(const Inputs& in,
             }
             Rs[c] += ps.w * ps.r;
         }
+        flushLayers();
 
         // Background fill behind nearer slices.
         std::vector<Sample> fills;
@@ -2766,7 +2896,7 @@ renderDefocus(const Inputs& in,
             if (std::isnan(Rfront[p])) {
                 Rfront[p] = ps.r;
             }
-            H[p] += ps.w;
+            H[p] = std::min(1.f, H[p] + ps.w);   // (deep layers: several per pixel)
             Rocc[p] = std::max(Rocc[p], std::fabs(ps.r));
             maxRocc = std::max(maxRocc, std::fabs(ps.r));
             maxReachOcc = std::max(maxReachOcc, sl.reach);

@@ -288,6 +288,19 @@ struct Settings
     int threads = 0;                // 0 = hardware concurrency
 };
 
+// Deep samples: a list per pixel, each sample `stride` floats with RGBA premultiplied by its own
+// alpha (not attenuated by the samples in front, as in OpenEXR deep), planar depth Z (scene
+// units) and optionally ZBack (> Z: a volume segment). `at` returns a pixel's samples (core,
+// bottom-up coordinates) and their count, or null. Order within a pixel doesn't matter.
+struct DeepView
+{
+    Rect bounds;
+    int stride = 0;
+    int iR = 0, iG = 1, iB = 2, iA = 3, iZ = 4, iZBack = -1;
+    std::function<const float*(int x, int y, int* count)> at;
+    bool valid() const { return stride > 0 && iZ >= 0 && iA >= 0 && (bool)at; }
+};
+
 struct Inputs
 {
     ConstImageView source;          // RGBA premultiplied (channels >= 3; alpha = 1 if absent)
@@ -305,6 +318,12 @@ struct Inputs
     ConstImageView normal;          // xyz in channels normalChannel..+2
     int normalChannel = 0;
     SpaceEnum normalSpace = eSpaceWorld;
+    // Deep: when valid, every deep sample is scattered at its own blur (hidden layers are real,
+    // so they show behind blurred foreground without guessing; samples in one pixel composite
+    // front to back). `source` should then be the flattened deep image and `depth` its front depth
+    // (planar Z): they still give the silhouette, the slicing outlines and the colours of the
+    // background fill where the deep image has nothing behind.
+    DeepView deep;
 };
 
 struct Stats
