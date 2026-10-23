@@ -275,7 +275,7 @@ struct LensDefocusPrivate
     KnobFileWPtr lensFile;
     KnobDoubleWPtr lensCharacter;
     KnobBoolWPtr lensColour;
-    KnobDoubleWPtr lensDistortion, lensBreathing, lensLateralCA, lensVignetting;
+    KnobDoubleWPtr lensDistortion, lensBreathing, lensLateralCA, lensVignetting, lensVignettingSpread;
     KnobIntWPtr blades;
     KnobDoubleWPtr curvature, rotation, squeeze, catEye, catEyeStart, swirl, sphericalAberration;
     KnobDoubleWPtr onionAmount, onionFrequency, axialCA;
@@ -656,6 +656,7 @@ LensDefocus::refreshKnobVisibility()
     _imp->lensBreathing.lock()->setSecret(!traced);
     _imp->lensLateralCA.lock()->setSecret(!traced);
     _imp->lensVignetting.lock()->setSecret(!traced);
+    _imp->lensVignettingSpread.lock()->setSecret(!traced);
     _imp->catEye.lock()->setSecret(traced);
     _imp->catEyeStart.lock()->setSecret(traced);
     _imp->swirl.lock()->setSecret(traced);
@@ -910,6 +911,12 @@ LensDefocus::initializeKnobs()
                                  tr("Natural vignetting: the light the lens delivers across the frame (angle, the "
                                     "iris seen obliquely, element rims). Darkens colour, not alpha. 1 = as traced; it "
                                     "changes with F-Stop."));
+    _imp->lensVignettingSpread = dbl(bokeh, "Vignetting Spread", "lensVignettingSpread", 0., 0., 4.,
+                                     tr("Pulls the traced falloff in towards the centre of the frame (an artistic "
+                                        "control, not physical): 0 = as traced, where a real lens darkens mostly in "
+                                        "the far corners; higher values start the falloff closer to the middle. The "
+                                        "corner value is unchanged; use Vignetting for the depth."));
+    _imp->lensVignettingSpread.lock()->setMinimum(0.);
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Blades"));
         k->setName("blades");
@@ -1748,9 +1755,16 @@ LensDefocus::render(const RenderActionArgs& args)
                     }
                 }
                 if (aV != 0.) {
+                    // Spread samples the traced map at t^(1 / (1 + spread)) of the field radius,
+                    // so the falloff starts nearer the centre while the centre and corner hold.
+                    const double spread = std::max(0., _imp->lensVignettingSpread.lock()->getValueAtTime(time));
+                    const std::vector<double>& il = t->mapIllum();
                     s.stages.illum.resize(n);
                     for (int i = 0; i < n; ++i) {
-                        s.stages.illum[i] = (float)std::max(0., 1. + aV * (t->mapIllum()[i] - 1.));
+                        const double q = std::pow(i / (n - 1.), 1. / (1. + spread)) * (n - 1);
+                        const int j = std::min(n - 2, (int)q);
+                        const double v = il[j] + (il[j + 1] - il[j]) * (q - j);
+                        s.stages.illum[i] = (float)std::max(0., 1. + aV * (v - 1.));
                     }
                 }
             }
