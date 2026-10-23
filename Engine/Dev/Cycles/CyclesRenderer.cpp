@@ -994,7 +994,15 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     // Roughness map — sampled through Separate Color GREEN: glTF packs
     // roughness there in its metallicRoughness texture (grayscale maps carry
     // the same value in every channel, so they are unaffected).
+    // Packed MR semantics: when the SAME file is staged as both the roughness
+    // and the metallic map it is a glTF metallicRoughness texture, and the
+    // spec says the channel is MULTIPLIED by the factor (Blender exports
+    // non-metal assets with metallicFactor 0 but B=1 in the texture — a
+    // replacing binding would render them full metal). Standalone map files
+    // keep the Material3D knob's documented "overrides the slider" behavior.
     std::string roughFile = resolveTextureFrame(mat->getMaterialRoughnessMapFile(), frame);
+    std::string metalFile = resolveTextureFrame(mat->getMaterialMetallicMapFile(), frame);
+    const bool packedOrm = !roughFile.empty() && roughFile == metalFile;
     if (!roughFile.empty()) {
         ccl::ImageTextureNode* roughTex = graph->create_node<ccl::ImageTextureNode>();
         roughTex->set_filename(ccl::ustring(roughFile));
@@ -1002,7 +1010,15 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         graph->connect(texCoord->output("UV"), roughTex->input("Vector"));
         ccl::SeparateColorNode* roughSep = graph->create_node<ccl::SeparateColorNode>();
         graph->connect(roughTex->output("Color"), roughSep->input("Color"));
-        graph->connect(roughSep->output("Green"), principled->input("Roughness"));
+        if (packedOrm) {
+            ccl::MathNode* roughMul = graph->create_node<ccl::MathNode>();
+            roughMul->set_math_type(ccl::NODE_MATH_MULTIPLY);
+            roughMul->set_value2((float)mat->getMaterialRoughness(time));
+            graph->connect(roughSep->output("Green"), roughMul->input("Value1"));
+            graph->connect(roughMul->output("Value"), principled->input("Roughness"));
+        } else {
+            graph->connect(roughSep->output("Green"), principled->input("Roughness"));
+        }
     }
 
     // Specular map — drives Principled's "Specular IOR Level" per-pixel (0.5 is
@@ -1048,7 +1064,9 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
 
     // Metallic map — Separate Color BLUE: glTF's metallicRoughness texture
     // carries metallic there (grayscale maps are channel-equal, unaffected).
-    std::string metalFile = resolveTextureFrame(mat->getMaterialMetallicMapFile(), frame);
+    // glTF spec: metallic = metallicFactor × map.B — on a packed MR texture the
+    // channel multiplies the factor instead of replacing it (see the
+    // roughness block above for why the replacing binding was wrong).
     if (!metalFile.empty()) {
         ccl::ImageTextureNode* metalTex = graph->create_node<ccl::ImageTextureNode>();
         metalTex->set_filename(ccl::ustring(metalFile));
@@ -1056,7 +1074,15 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         graph->connect(texCoord->output("UV"), metalTex->input("Vector"));
         ccl::SeparateColorNode* metalSep = graph->create_node<ccl::SeparateColorNode>();
         graph->connect(metalTex->output("Color"), metalSep->input("Color"));
-        graph->connect(metalSep->output("Blue"), principled->input("Metallic"));
+        if (packedOrm) {
+            ccl::MathNode* metalMul = graph->create_node<ccl::MathNode>();
+            metalMul->set_math_type(ccl::NODE_MATH_MULTIPLY);
+            metalMul->set_value2((float)mat->getMaterialMetallic(time));
+            graph->connect(metalSep->output("Blue"), metalMul->input("Value1"));
+            graph->connect(metalMul->output("Value"), principled->input("Metallic"));
+        } else {
+            graph->connect(metalSep->output("Blue"), principled->input("Metallic"));
+        }
     }
 
     // Emission map
