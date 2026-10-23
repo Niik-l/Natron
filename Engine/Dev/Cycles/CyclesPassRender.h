@@ -117,7 +117,8 @@ struct CyclesPassRequest
  * full R,G,B,A,Z,ZBack. Returns null when data is empty/mis-sized.
  */
 DeepImagePtr deepImageFromCyclesDeepData(const CyclesRenderer::DeepPixelData& data,
-                                         int width, int height, bool alphaOnly);
+                                         int width, int height, bool alphaOnly,
+                                         int outWidth = 0, int outHeight = 0);
 
 // Resolved inputs ready for Cycles execution. Filled by
 // prepareCyclesPasses() so callers that need to inspect the resolved

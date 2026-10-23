@@ -401,13 +401,17 @@ enumerateSceneGeo(EffectInstance*            effect,
 
 DeepImagePtr
 deepImageFromCyclesDeepData(const CyclesRenderer::DeepPixelData& data,
-                            int width, int height, bool alphaOnly)
+                            int width, int height, bool alphaOnly,
+                            int outWidth, int outHeight)
 {
     if (width <= 0 || height <= 0 || (int)data.size() != width * height) {
         return DeepImagePtr();
     }
+    // A render smaller than the output (preview resolution) is scaled up to it, each pixel's
+    // samples repeated, so the deep image lines up with the (scaled) flat output.
+    const int OW = outWidth > 0 ? outWidth : width, OH = outHeight > 0 ? outHeight : height;
     RectI dw;
-    dw.x1 = 0; dw.y1 = 0; dw.x2 = width; dw.y2 = height;
+    dw.x1 = 0; dw.y1 = 0; dw.x2 = OW; dw.y2 = OH;
     std::vector<std::string> chans;
     if (alphaOnly) {
         chans.push_back("A"); chans.push_back("Z"); chans.push_back("ZBack");
@@ -417,18 +421,21 @@ deepImageFromCyclesDeepData(const CyclesRenderer::DeepPixelData& data,
     }
     const int nc = (int)chans.size();
     DeepImagePtr deep = std::make_shared<DeepImage>(dw, nc, chans);
-    for (int y = 0; y < height; ++y) {
-        const int srcRow = height - 1 - y;  // Cycles bottom-up -> DeepImage top-down
-        for (int x = 0; x < width; ++x) {
-            deep->setSampleCount(x, y, (int)data[srcRow * width + x].size());
+    auto srcIndex = [&](int x, int y) {
+        const int sx = std::min(width - 1, (int)((long long)x * width / OW));
+        const int sy = std::min(height - 1, (int)((long long)y * height / OH));
+        const int srcRow = height - 1 - sy;  // Cycles bottom-up -> DeepImage top-down
+        return (size_t)srcRow * width + sx;
+    };
+    for (int y = 0; y < OH; ++y) {
+        for (int x = 0; x < OW; ++x) {
+            deep->setSampleCount(x, y, (int)data[srcIndex(x, y)].size());
         }
     }
     deep->allocateFromSampleCounts();
-    for (int y = 0; y < height; ++y) {
-        const int srcRow = height - 1 - y;
-        for (int x = 0; x < width; ++x) {
-            const std::vector<CyclesRenderer::DeepPixelSample>& srcPix =
-                data[srcRow * width + x];
+    for (int y = 0; y < OH; ++y) {
+        for (int x = 0; x < OW; ++x) {
+            const std::vector<CyclesRenderer::DeepPixelSample>& srcPix = data[srcIndex(x, y)];
             if (srcPix.empty()) continue;
             float* dst = deep->getSampleData(x, y);
             for (std::size_t si = 0; si < srcPix.size(); ++si) {
