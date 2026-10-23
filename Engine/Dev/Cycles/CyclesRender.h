@@ -96,6 +96,9 @@ public:
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual void onInputChanged(int inputNo) OVERRIDE FINAL;
+    virtual void onKnobsLoaded() OVERRIDE FINAL;
+    // Lens File / Lens Colour / Lens Vignetting shown only for the lens choices that use them.
+    void refreshLensKnobs();
 
     // Multi-plane AOV support
     virtual bool isMultiPlanar() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }

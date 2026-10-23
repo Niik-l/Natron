@@ -29,6 +29,9 @@
 #include <vector>
 
 #include "CyclesRenderer.h"
+#include "../PostFX/LensTrace.h"
+#include <fstream>
+#include <sstream>
 #include "../Deep/DeepImage.h"
 #include "../Deep/DeepUtils.h"
 #include "../../KnobFile.h"
@@ -95,6 +98,12 @@ struct CyclesRenderPrivate
     KnobDoubleWPtr focusDistance;
     KnobIntWPtr bokehBlades;
     KnobDoubleWPtr bladeRotation;
+    // Real lens traced in the Cycles camera (the same lenses as LensDefocus)
+    KnobChoiceWPtr lensModel;
+    KnobFileWPtr lensFile;
+    KnobBoolWPtr lensColour;
+    KnobDoubleWPtr lensVignetting;
+    bool lensWarned = false;
 
     // Motion blur
     KnobBoolWPtr motionBlur;
@@ -429,6 +438,56 @@ CyclesRender::initializeKnobs()
         k->setHintToolTip(tr("Rotation of the aperture blades in degrees."));
         k->setAnimationEnabled(true);
         dofPage->addKnob(k); _imp->bladeRotation = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Lens"));
+        k->setName("cyclesLens");
+        std::vector<ChoiceOption> o;
+        o.push_back(ChoiceOption("thin", "Thin Lens", "An ideal lens: a disc (or blade polygon) of the "
+                                                     "camera's F-Stop, everything else pinhole."));
+        for (const std::string& id : defocus::builtinLensIds()) {
+            defocus::LensPrescription lp;
+            defocus::builtinLens(id, &lp);
+            o.push_back(ChoiceOption(id, lp.name, lp.source));
+        }
+        o.push_back(ChoiceOption("file", "From File", "A lens prescription file (pbrt / Kolb .dat format)."));
+        k->populateChoices(o);
+        k->setDefaultValue(0);
+        k->setHintToolTip(tr("Thin Lens, or a real lens design: every camera ray is traced through its "
+                             "glass, so the bokeh (cat's eye at the frame edges, aberrations), distortion, "
+                             "focus breathing and vignetting come from the lens, with true occlusion. The "
+                             "same lenses as LensDefocus. Scaled to the camera's focal length; F-Stop from "
+                             "Camera3D (clamped to the widest the design allows); focused at Focus "
+                             "Distance from the entrance pupil. Needs Enable DOF."));
+        dofPage->addKnob(k); _imp->lensModel = k;
+    }
+    {
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Lens File"));
+        k->setName("cyclesLensFile");
+        k->setHintToolTip(tr("Lens prescription, one surface per line from the front: radius, thickness, "
+                             "index, clear diameter (mm), optional Abbe number; radius 0 with index 0 = the "
+                             "aperture stop."));
+        k->setSecret(true);
+        dofPage->addKnob(k); _imp->lensFile = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Lens Colour"));
+        k->setName("cyclesLensColour");
+        k->setDefaultValue(false);
+        k->setHintToolTip(tr("Trace red, green and blue through the glass separately: axial and lateral "
+                             "chromatic aberration. Needs more samples (each sample carries one channel)."));
+        k->setSecret(true);
+        dofPage->addKnob(k); _imp->lensColour = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Lens Vignetting"));
+        k->setName("cyclesLensVignetting");
+        k->setDefaultValue(1.0);
+        k->setMinimum(0.0); k->setMaximum(1.0);
+        k->setHintToolTip(tr("1 = the lens's natural vignetting (the light that gets through, falling off "
+                             "towards the corners); 0 = even light across the frame (the bokeh shapes stay)."));
+        k->setSecret(true);
+        dofPage->addKnob(k); _imp->lensVignetting = k;
     }
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Focus Object"));
@@ -821,6 +880,41 @@ CyclesRender::render(const RenderActionArgs& args)
             dofParams.focusDistance = (float)focusDist;
             dofParams.blades        = blades;
             dofParams.bladeRotation = (float)(rotDeg * M_PI / 180.0);
+            // Real lens
+            const std::string lensId = _imp->lensModel.lock() ? _imp->lensModel.lock()->getActiveEntry().id
+                                                               : std::string();
+            if (!lensId.empty() && lensId != "thin") {
+                defocus::LensPrescription lp;
+                bool lensOk = false;
+                if (lensId == "file") {
+                    std::string path = _imp->lensFile.lock()->getValue();
+                    if (getApp() && getApp()->getProject()) {
+                        getApp()->getProject()->canonicalizePath(path);
+                    }
+                    std::ifstream f(path.c_str());
+                    if (f) {
+                        std::ostringstream text;
+                        text << f.rdbuf();
+                        std::string err;
+                        lensOk = defocus::parseLensFile(text.str(), &lp, &err);
+                    }
+                } else {
+                    lensOk = defocus::builtinLens(lensId, &lp);
+                }
+                if (lensOk) {
+                    for (const defocus::LensSurface& s : lp.surfaces) {
+                        dofParams.lensSurfaces.push_back(s.stop ? 0.f : (float)s.radius);
+                        dofParams.lensSurfaces.push_back((float)s.thickness);
+                        dofParams.lensSurfaces.push_back(s.stop ? 0.f : (float)s.ior);
+                        dofParams.lensSurfaces.push_back((float)(2. * s.semiAperture));
+                        dofParams.lensSurfaces.push_back((float)s.abbe);
+                    }
+                    dofParams.lensFocalLength = (float)camFL;
+                    dofParams.lensFStop = (float)fstop;
+                    dofParams.lensChromatic = _imp->lensColour.lock()->getValue();
+                    dofParams.lensVignetting = (float)_imp->lensVignetting.lock()->getValueAtTime(args.time);
+                }
+            }
         }
     }
 
@@ -1133,6 +1227,15 @@ CyclesRender::render(const RenderActionArgs& args)
             hashFloat(dofParams.focusDistance);
             sceneHash = hashCombine(sceneHash, (U64)dofParams.blades);
             hashFloat(dofParams.bladeRotation);
+            for (float v : dofParams.lensSurfaces) {
+                hashFloat(v);
+            }
+            if (!dofParams.lensSurfaces.empty()) {
+                hashFloat(dofParams.lensFocalLength);
+                hashFloat(dofParams.lensFStop);
+                sceneHash = hashCombine(sceneHash, (U64)dofParams.lensChromatic);
+                hashFloat(dofParams.lensVignetting);
+            }
         }
 
         // Hash motion blur params
@@ -1215,6 +1318,18 @@ CyclesRender::render(const RenderActionArgs& args)
         _imp->cachedHash = sceneHash;
         _imp->cachedWidth = renderW;
         _imp->cachedHeight = renderH;
+
+        // A real lens Cycles couldn't set up (it renders with the plain camera then).
+        {
+            const std::string lm = _imp->activeRenderer->lensMessage();
+            if (!lm.empty()) {
+                setPersistentMessage(eMessageTypeWarning, lm + " (rendering without it).");
+                _imp->lensWarned = true;
+            } else if (_imp->lensWarned) {
+                clearPersistentMessage(false);
+                _imp->lensWarned = false;
+            }
+        }
 
         // Convert the harvested deep samples into a DeepImage and publish it
         // for the deep suite (getDeepImage side channel). Cycles rows are
@@ -1411,6 +1526,9 @@ bool
 CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
                            ViewSpec /*view*/, double time, bool /*originatedFromMainThread*/)
 {
+    if (k && _imp->lensModel.lock() && k == _imp->lensModel.lock().get()) {
+        refreshLensKnobs();
+    }
     // Write Deep EXR button — writes the last render's published deep snapshot.
     if (k && _imp->deepWriteBtn.lock() && k == _imp->deepWriteBtn.lock().get()) {
         DeepImagePtr deepSnap;
@@ -1658,6 +1776,26 @@ CyclesRender::onInputChanged(int inputNo)
         settingsEffect &&
         dynamic_cast<const CyclesRenderSettings*>(settingsEffect.get()) != nullptr;
     setSettingsKnobsSecret(_imp.get(), connected);
+}
+
+void
+CyclesRender::refreshLensKnobs()
+{
+    const KnobChoicePtr m = _imp->lensModel.lock();
+    if (!m) {
+        return;
+    }
+    const std::string id = m->getActiveEntry().id;
+    const bool real = !id.empty() && id != "thin";
+    _imp->lensFile.lock()->setSecret(id != "file");
+    _imp->lensColour.lock()->setSecret(!real);
+    _imp->lensVignetting.lock()->setSecret(!real);
+}
+
+void
+CyclesRender::onKnobsLoaded()
+{
+    refreshLensKnobs();
 }
 
 NATRON_NAMESPACE_EXIT

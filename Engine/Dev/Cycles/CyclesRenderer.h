@@ -51,6 +51,9 @@ struct LightRayVis;
 class CyclesRenderer
 {
 public:
+    // Why the real lens is off after the last sync (empty when it is on or wasn't asked for).
+    std::string lensMessage() const;
+
     CyclesRenderer();
     ~CyclesRenderer();
 
@@ -77,6 +80,15 @@ public:
         float focusDistance = 10.0f;
         int blades = 0;             // 0=circular, 3+=polygonal
         float bladeRotation = 0.0f; // radians
+        // Real lens traced in the camera (empty = the thin lens above): 5 values per surface from
+        // the front, radius / thickness / n_d / clear diameter (mm) / Abbe (LensTrace's format;
+        // the stop has radius 0 and n_d 0). Focus at focusDistance from the entrance pupil.
+        std::vector<float> lensSurfaces;
+        float lensFocalLength = 50.0f;  // mm (the camera's)
+        float lensFStop = 2.8f;
+        float lensMmPerUnit = 1000.0f;  // world units are metres
+        bool lensChromatic = false;     // trace R, G, B separately (axial / lateral colour)
+        float lensVignetting = 1.0f;    // 1 = the lens's natural vignetting, 0 = even light
     };
 
     struct MotionBlurParams {

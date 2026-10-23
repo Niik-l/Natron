@@ -1111,6 +1111,15 @@ CyclesRenderer::CyclesRenderer()
     }
 }
 
+std::string
+CyclesRenderer::lensMessage() const
+{
+    if (_impl && _impl->session && _impl->session->scene && _impl->session->scene->camera) {
+        return _impl->session->scene->camera->lens_message;
+    }
+    return std::string();
+}
+
 CyclesRenderer::~CyclesRenderer()
 {
     // _impl (and the ccl::Session it owns) is freed after this body via ~Impl,
@@ -1658,13 +1667,26 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             cam->set_nearclip(0.1f);
             cam->set_farclip(10000.0f);
 
-            // Depth of Field
+            // Depth of Field: the thin lens, or a real lens traced in the camera
+            ccl::array<float> lensRows;
             if (dof && dof->enabled) {
-                cam->set_aperturesize(dof->apertureSize);
+                const bool real = !dof->lensSurfaces.empty();
+                cam->set_aperturesize(real ? 0.0f : dof->apertureSize);
                 cam->set_focaldistance(dof->focusDistance);
                 cam->set_blades(dof->blades);
                 cam->set_bladesrotation(dof->bladeRotation);
+                if (real) {
+                    for (float v : dof->lensSurfaces) {
+                        lensRows.push_back_slow(v);
+                    }
+                    cam->set_lens_focal_length(dof->lensFocalLength);
+                    cam->set_lens_fstop(dof->lensFStop);
+                    cam->set_lens_mm_per_unit(dof->lensMmPerUnit);
+                    cam->set_lens_chromatic(dof->lensChromatic);
+                    cam->set_lens_vignetting(dof->lensVignetting);
+                }
             }
+            cam->set_lens_surfaces(lensRows);
 
             // Motion blur camera shutter
             if (motionBlur && motionBlur->enabled) {
