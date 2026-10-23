@@ -965,6 +965,8 @@ struct Slice
     int index = 0;
     int level = 0;
     float maxAbsR = 0.f;
+    float reach = 0.f;          // largest kernel half-size (render px): a traced kernel can be many
+                                // times the slice's thin-lens radius near focus
     std::vector<Sample> cells;  // level-grid samples
     std::vector<Sample> fills;  // level-grid background filled in behind nearer slices
     std::vector<Sample> hi;     // full-res highlight samples
@@ -2451,6 +2453,7 @@ renderDefocus(const Inputs& in,
     slices.reserve(nSlices);
     std::vector<float> H(N, 0.f), Rocc(N, 0.f), Rfront(N, std::numeric_limits<float>::quiet_NaN());
     float maxRocc = 0.f;
+    float maxReachOcc = 0.f;   // the same as kernel reach (a traced lens: can be far larger)
     Rect holeBox;   // full-res domain-relative bbox of H > 0
     bool haveHole = false;
     const ConstImageView& clean = in.cleanBackground;
@@ -2465,8 +2468,26 @@ renderDefocus(const Inputs& in,
         }
         Slice sl;
         sl.index = si + kMin;
+        double rLo = 1e30, rHi = -1e30;
         for (int q = b; q < e; ++q) {
-            sl.maxAbsR = std::max(sl.maxAbsR, std::fabs(sampleR(order[q])));
+            const double r = sampleR(order[q]);
+            sl.maxAbsR = std::max(sl.maxAbsR, (float)std::fabs(r));
+            rLo = std::min(rLo, r);
+            rHi = std::max(rHi, r);
+        }
+        sl.reach = sl.maxAbsR;
+        if (s.lens.table && coc.rInf > 0.) {
+            // the traced kernel's size over the slice's radii and the whole field (a Petzval's
+            // field curvature makes kernels near focus tens of times the thin-lens disc)
+            for (int iu = 0; iu <= 4; ++iu) {
+                const double r = rLo + (rHi - rLo) * iu / 4.;
+                if (std::fabs(r) < 1e-6) {
+                    continue;
+                }
+                for (int ir = 0; ir <= 12; ++ir) {
+                    sl.reach = std::max(sl.reach, (float)(std::fabs(r) * lens.extentScale(r / coc.rInf, 0.1 * ir)));
+                }
+            }
         }
         int L = 0;
         while (L < 4 && sl.maxAbsR / (double)(1 << L) > fullR) {
@@ -2484,7 +2505,7 @@ renderDefocus(const Inputs& in,
             px1 = std::min(px1, ci); px2 = std::max(px2, ci);
             py1 = std::min(py1, cj); py2 = std::max(py2, cj);
         }
-        const int band = (int)std::ceil((maxRocc + sl.maxAbsR) / sc) + 2;
+        const int band = (int)std::ceil((std::max(maxRocc, maxReachOcc) + sl.reach) / sc) + 2;
         Rect region(std::max(0, px1 - band), std::max(0, py1 - band),
                     std::min(gw, px2 + 1 + band), std::min(gh, py2 + 1 + band));
         const int rw = region.width(), rh = region.height();
@@ -2748,6 +2769,7 @@ renderDefocus(const Inputs& in,
             H[p] += ps.w;
             Rocc[p] = std::max(Rocc[p], std::fabs(ps.r));
             maxRocc = std::max(maxRocc, std::fabs(ps.r));
+            maxReachOcc = std::max(maxReachOcc, sl.reach);
             const int pi = (int)(p % Dw), pj = (int)(p / Dw);
             if (!haveHole) {
                 holeBox = Rect(pi, pj, pi + 1, pj + 1);
@@ -2849,7 +2871,8 @@ renderDefocus(const Inputs& in,
                 const Slice& S = slices[k];
                 const int L = S.level;
                 const int sc = 1 << L;
-                const double maxR = S.maxAbsR * 4. + std::fabs(caPx) + 2.;  // generous: swirl / squeeze
+                // generous: swirl / squeeze; a traced kernel's own reach
+                const double maxR = std::max(S.maxAbsR * 4., S.reach * 1.25 + 1.) + std::fabs(caPx) + 2.;
                 auto lu = [&](double val, int origin) { return (val - origin + 0.5) / sc - 0.5; };
                 const int ilo = (int)std::floor(lu(O.x1, D.x1)), ihi = (int)std::floor(lu(O.x2 - 1, D.x1)) + 1;
                 const int jlo = (int)std::floor(lu(y0, D.y1)), jhi = (int)std::floor(lu(y1 - 1, D.y1)) + 1;
