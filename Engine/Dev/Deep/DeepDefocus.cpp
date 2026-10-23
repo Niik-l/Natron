@@ -120,7 +120,9 @@ DeepDefocus::initializeKnobs()
 
     KnobDoublePtr fd = AppManager::createKnob<KnobDouble>(this, tr("Focal Distance"));
     fd->setName("focalDistance");
-    fd->setHintToolTip(tr("Distance of the plane in focus, in the deep image's Z units."));
+    fd->setHintToolTip(tr("Distance of the plane in focus, in the deep image's Z units. Pick it in the viewer "
+                          "(Pick Focus, or Ctrl+middle-click). For a focus pull, set a key first (right-click > "
+                          "Set Key): then every pick or typed value on another frame adds a key."));
     fd->setDefaultValue(5.0);
     fd->setMinimum(1e-4);
     fd->setDisplayMinimum(0.1);
@@ -128,6 +130,52 @@ DeepDefocus::initializeKnobs()
     fd->setAnimationEnabled(true);
     page->addKnob(fd);
     _imp->focalDistance = fd;
+
+    // --- Focus (same controls as LensDefocus) ---
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Focus"));
+        k->setName("focusMode");
+        std::vector<ChoiceOption> o;
+        o.push_back(ChoiceOption("distance", "Distance", "Focus at Focal Distance. With Pick Focus on, click in the "
+                                                         "viewer to set it from the deep sample under the cursor."));
+        o.push_back(ChoiceOption("point", "Point (autofocus)", "Focus on whatever is under Focus Point, every frame. "
+                                                               "Link the point to a tracker for a follow-focus."));
+        k->populateChoices(o);
+        k->setDefaultValue(0);
+        page->addKnob(k);
+        _imp->focusMode = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Pick Focus"));
+        k->setName("pickFocusMode");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setIsPersistent(false);
+        k->setHintToolTip(tr("While on (with this panel open), clicking in the viewer picks focus from the nearest "
+                             "deep sample under the cursor, and dragging scrubs it: Distance sets Focal Distance, "
+                             "Point moves the Focus Point. Picks set keyframes when the knob is animated. Turn it "
+                             "off to use the viewer normally. Ctrl+middle-click picks without it."));
+        page->addKnob(k);
+        _imp->pickFocusMode = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Focus Point"), 2);
+        k->setName("focusPoint");
+        k->setDefaultValue(960., 0);
+        k->setDefaultValue(540., 1);
+        k->setDimensionName(0, "x");
+        k->setDimensionName(1, "y");
+        k->setDisplayMinimum(0., 0); k->setDisplayMaximum(4096., 0);
+        k->setDisplayMinimum(0., 1); k->setDisplayMaximum(4096., 1);
+        k->setAnimationEnabled(true);
+        k->setHasHostOverlayHandle(true);
+        k->setHintToolTip(tr("Autofocus point in pixels: drag the crosshair, or click anywhere with Pick Focus on (or "
+                             "Ctrl+middle-click). To animate it, set a key first (right-click > Set Key); then each "
+                             "drag or pick on another frame adds a key. The nearest deep sample in a small window "
+                             "around it is used, so it doesn't land on an anti-aliased edge."));
+        page->addKnob(k);
+        _imp->focusPoint = k;
+    }
 
     KnobDoublePtr fs = AppManager::createKnob<KnobDouble>(this, tr("F-Stop"));
     fs->setName("fStop");
@@ -214,73 +262,25 @@ DeepDefocus::initializeKnobs()
     page->addKnob(dbg);
     _imp->defocusBackground = dbg;
 
-    // --- Focus (same controls as LensDefocus) ---
-    {
-        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Focus"));
-        k->setName("focusMode");
-        std::vector<ChoiceOption> o;
-        o.push_back(ChoiceOption("distance", "Distance", "Focus at Focal Distance. With Pick Focus on, click in the "
-                                                         "viewer to set it from the deep sample under the cursor."));
-        o.push_back(ChoiceOption("point", "Point (autofocus)", "Focus on whatever is under Focus Point, every frame. "
-                                                               "Link the point to a tracker for a follow-focus."));
-        k->populateChoices(o);
-        k->setDefaultValue(0);
-        page->addKnob(k);
-        _imp->focusMode = k;
-    }
-    {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Pick Focus"));
-        k->setName("pickFocusMode");
-        k->setDefaultValue(false);
-        k->setAnimationEnabled(false);
-        k->setIsPersistent(false);
-        k->setHintToolTip(tr("While on (with this panel open), clicking in the viewer picks focus from the nearest "
-                             "deep sample under the cursor, and dragging scrubs it: Distance sets Focal Distance, "
-                             "Point moves the Focus Point. Picks set keyframes when the knob is animated. Turn it "
-                             "off to use the viewer normally. Ctrl+middle-click picks without it."));
-        page->addKnob(k);
-        _imp->pickFocusMode = k;
-    }
-    {
-        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Focus Point"), 2);
-        k->setName("focusPoint");
-        k->setDefaultValue(960., 0);
-        k->setDefaultValue(540., 1);
-        k->setDimensionName(0, "x");
-        k->setDimensionName(1, "y");
-        k->setDisplayMinimum(0., 0); k->setDisplayMaximum(4096., 0);
-        k->setDisplayMinimum(0., 1); k->setDisplayMaximum(4096., 1);
-        k->setAnimationEnabled(true);
-        k->setHasHostOverlayHandle(true);
-        k->setHintToolTip(tr("Autofocus point in pixels: drag the crosshair, or click anywhere with Pick Focus on (or "
-                             "Ctrl+middle-click). To animate it, set a key first (right-click > Set Key); then each "
-                             "drag or pick on another frame adds a key. The nearest deep sample in a small window "
-                             "around it is used, so it doesn't land on an anti-aliased edge."));
-        page->addKnob(k);
-        _imp->focusPoint = k;
-    }
-
-    // Old focus picker (integer point + button), kept so saved projects load.
-    KnobPagePtr pickPage = AppManager::createKnob<KnobPage>(this, tr("Focus Picker"));
+    // Old focus picker (integer point + button): hidden, kept so saved projects load.
 
     KnobIntPtr fpx = AppManager::createKnob<KnobInt>(this, tr("Focus Point X"));
     fpx->setName("focusPointX"); fpx->setDefaultValue(640);
     fpx->setSecret(true);
-    pickPage->addKnob(fpx);
+    page->addKnob(fpx);
     _imp->focusPointX = fpx;
 
     KnobIntPtr fpy = AppManager::createKnob<KnobInt>(this, tr("Focus Point Y"));
     fpy->setName("focusPointY"); fpy->setDefaultValue(360);
     fpy->setSecret(true);
-    pickPage->addKnob(fpy);
+    page->addKnob(fpy);
     _imp->focusPointY = fpy;
 
     KnobButtonPtr pickBtn = AppManager::createKnob<KnobButton>(this, tr("Set Focus From Point"));
     pickBtn->setName("pickFocus");
     pickBtn->setSecret(true);
-    pickPage->addKnob(pickBtn);
+    page->addKnob(pickBtn);
     _imp->pickFocusBtn = pickBtn;
-    pickPage->setSecret(true);
 
     // --- Bokeh ---
     KnobPagePtr bokehPage = AppManager::createKnob<KnobPage>(this, tr("Bokeh"));
