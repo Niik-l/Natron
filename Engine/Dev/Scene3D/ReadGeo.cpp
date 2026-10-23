@@ -1683,6 +1683,20 @@ ReadGeo::buildSceneMesh(double time) const
         for (std::size_t i = 0; i < mesh->faceIndices.size() && i < 6; ++i) {
             dbg << mesh->faceIndices[i] << ",";
         }
+        dbg << " uv0..u11=";
+        for (std::size_t i = 0; i < mesh->uvs.size() && i < 12; ++i) {
+            dbg << mesh->uvs[i] << ",";
+        }
+        if (mesh->uvs.size()) {
+            float umn = mesh->uvs[0], umx = umn, vmn = mesh->uvs[1], vmx = vmn;
+            for (std::size_t i = 0; i + 1 < mesh->uvs.size(); i += 2) {
+                umn = std::min(umn, mesh->uvs[i]);
+                umx = std::max(umx, mesh->uvs[i]);
+                vmn = std::min(vmn, mesh->uvs[i + 1]);
+                vmx = std::max(vmx, mesh->uvs[i + 1]);
+            }
+            dbg << " uvr=[u" << umn << ".." << umx << " v" << vmn << ".." << vmx << "]";
+        }
         dbg << " tr=";
         for (int i = 0; i < 16; ++i) {
             dbg << mesh->transform[i] << ",";
