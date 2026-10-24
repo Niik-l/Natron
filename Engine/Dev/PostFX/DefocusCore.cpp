@@ -2883,9 +2883,15 @@ renderDefocus(const Inputs& in,
                 sl.cells.push_back(o);
             }
         }
-        std::sort(sl.cells.begin(), sl.cells.end(), lessYX);
+        // The cells come out in (row, column) order and the fills nearly always do: checking is one
+        // pass, sorting millions of samples that are already in order was a third of the fill at 4K.
+        if (!std::is_sorted(sl.cells.begin(), sl.cells.end(), lessYX)) {
+            std::sort(sl.cells.begin(), sl.cells.end(), lessYX);
+        }
         sl.fills.swap(fills);
-        std::sort(sl.fills.begin(), sl.fills.end(), lessYX);
+        if (!std::is_sorted(sl.fills.begin(), sl.fills.end(), lessYX)) {
+            std::sort(sl.fills.begin(), sl.fills.end(), lessYX);
+        }
         std::sort(sl.hi.begin(), sl.hi.end(), lessYX);
 
         // This slice now occludes everything farther.
