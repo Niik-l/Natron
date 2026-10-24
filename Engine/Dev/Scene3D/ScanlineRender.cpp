@@ -2791,13 +2791,30 @@ ScanlineRender::render(const RenderActionArgs& args)
     GPUContextPool* pool = appPTR->getGPUContextPool();
     if (!pool) return eStatusFailed;
 
+    NodePtr reportNode = getNode();
     OSGLContextPtr glContext;
     try {
         glContext = pool->attachGLContextToRender(true);
+    } catch (const std::exception& e) {
+        if (reportNode) {
+            reportNode->setPersistentMessage(eMessageTypeError, std::string("ScanlineRender: failed to create an OpenGL context: ") + e.what());
+        }
+        return eStatusFailed;
     } catch (...) {
+        if (reportNode) {
+            reportNode->setPersistentMessage(eMessageTypeError, "ScanlineRender: failed to create an OpenGL context (unknown error).");
+        }
         return eStatusFailed;
     }
-    if (!glContext) return eStatusFailed;
+    if (!glContext) {
+        if (reportNode) {
+            reportNode->setPersistentMessage(eMessageTypeError,
+                                             "ScanlineRender cannot render: OpenGL rendering is disabled in "
+                                             "Preferences > General > GPU rendering (default is disabled in the "
+                                             "background renderer). Set it to Enabled, or use CyclesRender.");
+        }
+        return eStatusFailed;
+    }
 
     glContext->setContextCurrentNoRender();
 
