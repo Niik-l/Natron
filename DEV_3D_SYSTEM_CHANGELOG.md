@@ -17,6 +17,26 @@ a particle simulation pipeline to Natron. All on the `RB-2.6` branch.
 
 Recent milestones:
 
+- **LensDefocus stack merged (2026-10-23/24)** — another agent's work, merged by three fast-forwards
+  (RB-2.6 62d278bbb, b84b6d484, f13f6b4f8; Cycles fork feature/cycles-deep 3a20cc0b1). Per-commit
+  details, probes, the regression testbed and the known limitations live OUTSIDE the repo in
+  `complex_tools/zdefocus/HANDOFF.md`, `MERGE.md`, `MERGE_2.md` (the local tree only). In short:
+  **LensDefocus** (`Engine/Dev/PostFX/LensDefocus.cpp` + `DefocusCore` + `LensTrace`) replaces the
+  never-registered ZDefocus: physically based depth of field from image + depth, Position / Normal
+  passes, tilt-shift focus plane, viewer focus picking, real lens designs ray traced through their
+  glass (lens file or built-ins), lens image stages, **Use Deep Data** (deep Source defocused per
+  sample) and **Device = GPU** (wgpu scatter, `DefocusGpu.cpp`, compiled with NATRON_FASTVOLUME).
+  **DeepDefocus** is now LensDefocus with a deep input. **CyclesRender**: traced-lens camera
+  (Lens / Lens File / Lens Colour), Focus From Camera, **Deep Layers** (hidden layers via
+  `Film::deep_peel`), per-sample deep colour, kernel-side deep merge threshold (Deep Max Samples
+  default 32 -> 8), **Device** CPU / GPU (CUDA) with CPU fallback (also on CyclesRenderSettings and
+  RenderPass; render nodes show a connected settings node's values). **Camera3D** Focus Distance +
+  ReadAlembicCamera F-Stop / Focus Distance. **Node graph L** lays out the whole graph with nothing
+  selected. **Viewer** warning / error banners restyled (amber / red, readable). Windows packaging:
+  optional `WITH_CUDA=1` (BUILDING.md step 10, tools/win-build/README.md); the default build stays
+  CPU-only. Fixes on the way: DeepFromImage / DeepFromFrames row order, CyclesRender Preview Mode deep
+  output misaligned, Petzval alpha bands. All headless checks passed on the merged builds; the deep and
+  GPU parts still need the user's GUI pass (TODO.md).
 - **ScanlineRender: ParticleInstance inside a Scene3D rendered nothing (2026-10-21)** — user
   report (Scatter3D → ParticleInstance → Scene3D → ScanlineRender black, Cycles fine). The
   Scene3D loop adopted the instancer but never fetched its particle data, and since the

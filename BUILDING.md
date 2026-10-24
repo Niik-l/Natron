@@ -705,6 +705,37 @@ The **CyclesRender** node will now appear in the 3D menu group. Connect Scene3D 
 
 ---
 
+### Optional — NVIDIA GPU rendering in Cycles (CUDA)
+
+The Cycles build above is **CPU-only** (`WITH_CYCLES_DEVICE_CUDA=OFF`). CyclesRender,
+RenderPass and CyclesRenderSettings still show a **Device** knob; with a CPU-only Cycles,
+Device = GPU (CUDA) falls back to the CPU and shows a warning. (LensDefocus / DeepDefocus
+Device = GPU is unrelated: it uses wgpu like FastVolumeRender and needs nothing here.)
+
+To render on NVIDIA cards, build Cycles with the CUDA device and precompiled kernels:
+
+- **Build machine only:** the CUDA Toolkit 13.x and Visual Studio 2022's C++ tools. nvcc
+  compiles the GPU kernels with `cl.exe`; everything else stays MinGW. Users need no CUDA
+  install, only an **NVIDIA driver 580 or newer** (the driver is loaded at runtime via cuew).
+- **Cycles cmake flags**, replacing the `OFF` above:
+  ```bash
+  -DWITH_CYCLES_DEVICE_CUDA=ON -DWITH_CUDA_DYNLOAD=ON -DWITH_CYCLES_CUDA_BINARIES=ON   -DCYCLES_CUDA_BINARIES_ARCH="sm_75;sm_86;sm_89;sm_120;compute_75"
+  ```
+  That covers GTX 16 / RTX 20 (sm_75), RTX 30 (sm_86), RTX 40 (sm_89) and RTX 50 (sm_120),
+  about 21 minutes of kernel compiles. CUDA 13 cannot build `sm_50`..`sm_70` (GTX 900 / 1000,
+  Volta): those cards stay on the CPU. The `compute_75` PTX only helps cards newer than the
+  list, and only with a driver at least as new as the toolkit.
+- **Ship the kernels:** copy `kernel_*.zst` from the Cycles build into a `lib/` folder next to
+  BOTH executables (`build-qt6/App/lib/`, `build-qt6/Renderer/lib/`; `bin/lib/` in the
+  portable package). Cycles looks there at runtime.
+
+> **Automated builds:** `WITH_CUDA=1` in `tools/win-build/config.sh` does all of the above
+> (`03-cycles.sh` configures and compiles the kernels, `06-install.sh` stages them); `CUDA_DIR`,
+> `VCVARS` and `CUDA_ARCHS` are documented in `tools/win-build/README.md`. As of 2026-10-24
+> the pieces were verified by hand on an RTX 2080, but a full `build-all.sh` with `WITH_CUDA=1`
+> has not been run yet: rehearse it before cutting the first GPU-enabled release. The Linux CI
+> stays CPU-only (its build image has no CUDA toolkit).
+
 ## 11. Cleanup — what you can delete
 
 In this manual flow the app **lives in `build-qt6/`** — DLLs were bundled there in §9b, so `build-qt6/App/Natron.exe` *is* your runnable Natron. Do **not** delete `build-qt6/`.
