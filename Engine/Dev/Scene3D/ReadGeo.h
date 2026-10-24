@@ -37,6 +37,7 @@
 #include "MeshProvider.h"
 #include "SubdivisionProvider.h"
 #include "MeshData.h"
+#include "GeoSequence.h"
 #include "ReadGeoImport.h"
 
 NATRON_NAMESPACE_ENTER
@@ -185,6 +186,20 @@ private:
     // refresh metadata. Shared by knobChanged (file/reload/object change) and
     // onKnobsLoaded (project load).
     void loadGeoFromFile(const std::string& path);
+
+    // --- File sequence (one file per frame, "Gather Sequences") -----------
+    // Per-frame mesh fetch of a detected sequence (caller holds _meshMutex):
+    // clamps `time` into the sequence's file-frame range (holding the ends
+    // and gaps), serves the built mesh from/to the bounded LRU frame cache.
+    MeshDataPtr getMeshDataAtSeqFrame(double time) const;
+    // Frame builders: each parses ONE frame file into *out / returns the
+    // built mesh (caller holds _meshMutex). OBJ: via the shared group
+    // parser; Alembic: direct single-sample read of the reference's
+    // selected object; scene formats: one throwaway GeoArchiveRuntime per
+    // frame (frame-0 evaluation).
+    bool buildObjSeqFrame(int frame, MeshData* out, std::string* err) const;
+    bool buildAbcSeqFrame(int frame, MeshData* out, std::string* err) const;
+    MeshDataPtr buildSceneSeqFrame(int frame, std::string* err) const;
 
     std::unique_ptr<ReadGeoPrivate> _imp;
     // Guards _lastMeshData and the loaded animation-sample state: file (re)load

@@ -32,6 +32,7 @@
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
 #include "ArchiveProvider.h"
+#include "GeoSequence.h"
 #include "MaterialProvider.h"
 #include "MeshData.h"
 #include "ReadGeoImport.h"
@@ -177,6 +178,23 @@ private:
     void applyMorphOverrideAt(double time) const;
 
     void loadArchiveFile(const std::string& path);
+
+    // --- File sequence (one file per frame, "Gather Sequences") -----------
+    // The sequence's file frames map NATIVELY onto the timeline (frame N ->
+    // the file numbered N; held at the ends/gaps). The first frame file is
+    // loaded as the reference (hierarchy, materials, visibility all come
+    // from it); every requested frame gets its own throwaway
+    // GeoArchiveRuntime parse kept in a bounded LRU under archiveMutex, and
+    // the accessors sample transforms/meshes from that frame's runtime.
+    // Hierarchy consistency across frames is verified (node count); a
+    // mismatching frame reports a persistent error and falls back to the
+    // reference frame's data.
+    //
+    // Resolve the per-frame runtime for timeline `time` (caller holds
+    // archiveMutex). Returns the runtime to sample; when NULL or
+    // *outFallbackToReference is set, the caller samples the reference rt.
+    std::shared_ptr<GeoArchiveRuntime> ensureSequenceFrame(double time,
+                                                           bool* outFallbackToReference) const;
 
     // Re-build Materials button: analyze the visible entries and build a
     // standalone node set beside this archive that replicates the archive's

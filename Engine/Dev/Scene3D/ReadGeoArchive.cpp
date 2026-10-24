@@ -150,6 +150,19 @@ KnobBoolWPtr showBBox;
     KnobStringWPtr excludedPaths;
     KnobStringWPtr info;
 
+    // --- File sequence (one file per frame, "Gather Sequences") -----------
+    // When on and the file knob points into a padded sequence, the FIRST
+    // frame file is parsed as the reference (hierarchy/materials/visibility)
+    // and each timeline frame evaluates the file numbered like it through its
+    // own parse (frame-time content, native frame numbers on the timeline —
+    // frameOffset/fps interior-mapping knobs do not apply in sequence mode).
+    KnobBoolWPtr gatherSequences;
+    KnobIntPtr cacheFrames;
+    // Sequence state + per-frame parsed runtimes. Everything below is
+    // guarded by archiveMutex like rt/visible.
+    GeoSequenceInfo seq;
+    GeoSequenceLruCache<GeoArchiveRuntime> seqRt{72};
+
     // --- Morph Weights (glTF shape keys / FBX blend shapes) ---
     // Per-target user weights; same scheme as ReadGeo (see ReadGeo.cpp). The
     // morphW<i> knobs are created dynamically at load and removed when the
@@ -226,6 +239,13 @@ ReadGeoArchive::getPluginDescription() const
         "Bake Transforms — bakes every mesh entry's evaluated world transform "
         "into its vertices so the parts emit in world space (the assembled "
         "look, independent of the node chain).\n\n"
+        "File sequences: with Gather Sequences on, a one-file-per-frame series "
+        "(liquid_00002.fbx, liquid_00003.fbx, ...) plays on the timeline — the "
+        "first frame file defines the hierarchy/materials/visibility, each "
+        "timeline frame evaluates the file numbered like it, and the node is "
+        "frame-varying while the sequence is loaded. Frame numbers map "
+        "natively (Frame Offset / FPS do not apply); Max Cached Frames bounds "
+        "the per-frame runtime cache.\n\n"
         "The settings panel shows a checkable tree of the archive's entries; "
         "unchecked entries are excluded from the scene.\n\n"
         "Morph targets / blend shapes: file-animated weights play through; "
@@ -381,6 +401,40 @@ ReadGeoArchive::initializeKnobs()
                              "second of source animation."));
         page->addKnob(k);
         _imp->fps = k;
+    }
+
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Gather Sequences"));
+        k->setName("gatherSequences");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Load a one-file-per-frame scene sequence as animated "
+                             "content. When the file carries a sequence pattern "
+                             "(e.g. liquid_00002.fbx, liquid_00003.fbx, ...), each "
+                             "timeline frame evaluates the file numbered like it: "
+                             "files outside the range hold at the sequence ends, "
+                             "gaps hold the nearest earlier frame. The first frame "
+                             "file defines the hierarchy, materials and visibility "
+                             "tree; frame files must keep the same node layout "
+                             "(topology may change per frame). The file's frame "
+                             "numbers map natively to the timeline — Frame Offset "
+                             "and FPS do not apply in sequence mode."));
+        page->addKnob(k);
+        _imp->gatherSequences = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Cached Frames"));
+        k->setName("cacheFrames");
+        k->setDefaultValue(72);
+        k->setMinimum(1);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("How many sequence frames to keep parsed in memory "
+                             "(least-recently-used eviction). Scales with the per-"
+                             "frame file size; a scrub back re-parses evicted "
+                             "frames. Only used while a sequence is loaded under "
+                             "Gather Sequences."));
+        page->addKnob(k);
+        _imp->cacheFrames = k;
     }
 
     {
@@ -589,6 +643,25 @@ ReadGeoArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         // Re-read metadata so getPreferredMetadata picks up the new entries'
         // animation flags (ScanlineRender's cache would otherwise freeze).
         refreshMetadata_public(true);
+        return true;
+    }
+    // Gather Sequences: re-run the load (the sequence re-detects and the
+    // first frame file re-parses as the reference).
+    {
+        KnobIPtr gatherKnob = _imp->gatherSequences.lock();
+        if (gatherKnob && k == gatherKnob.get()) {
+            KnobFilePtr fp = _imp->filePath.lock();
+            if (fp) {
+                loadArchiveFile(fp->getValue());
+            }
+            refreshMetadata_public(true);
+            return true;
+        }
+    }
+    // Max Cached Frames: only re-caps the sequence runtime LRU.
+    if (_imp->cacheFrames.get() == k) {
+        std::lock_guard<std::mutex> lk(_imp->archiveMutex);
+        _imp->seqRt.setCapacity(_imp->cacheFrames->getValue());
         return true;
     }
     if (isFilter) {
@@ -1268,6 +1341,8 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
     _imp->visible.clear();
     _imp->entryMaterials.clear();
     _imp->rt.clear();
+    _imp->seq = GeoSequenceInfo();
+    _imp->seqRt.clear();
 
     if (path.empty()) {
         // No file — no morph targets either; drop any weight knobs from a
@@ -1307,10 +1382,28 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
         }
     }
 
+    // Reference file for the parse below: the picked file itself, or the
+    // sequence's first frame file when a file sequence is detected around it
+    // (the reference defines the hierarchy/materials/visibility; per-frame
+    // content comes from the sequence's files at request time).
+    std::string referencePath = path;
+    {
+        KnobBoolPtr gather = _imp->gatherSequences.lock();
+        if (gather && gather->getValue()) {
+            GeoSequenceInfo si = detectGeoSequence(path);
+            if (si.isSequence) {
+                _imp->seq = si;
+                referencePath = si.files.begin()->second;
+            }
+        }
+    }
+
     const bool reverse = _imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue();
     std::string err;
-    if (!_imp->rt.loadFile(path, reverse, err)) {
+    if (!_imp->rt.loadFile(referencePath, reverse, err)) {
         setPersistentMessage(eMessageTypeError, err);
+        _imp->seq = GeoSequenceInfo();
+        _imp->seqRt.clear();
         return;
     }
     _imp->rt.bakeMeshWorld = _imp->bakeTransforms.lock() &&
@@ -1396,6 +1489,10 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
     if (_imp->rt.bakeMeshWorld) {
         ss << " | baked";
     }
+    if (_imp->seq.isSequence) {
+        ss << " | seq frames " << _imp->seq.firstFrame << "-" << _imp->seq.lastFrame
+           << " (" << _imp->seq.files.size() << " files)";
+    }
     if (_imp->info.lock()) _imp->info.lock()->setValue(ss.str());
 
     _imp->loadedFilePath = path;
@@ -1422,6 +1519,62 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
     Q_EMIT archiveReloaded();
 }
 
+// --- file sequence (one file per frame) ---------------------------------------
+
+std::shared_ptr<GeoArchiveRuntime>
+ReadGeoArchive::ensureSequenceFrame(double time, bool* outFallbackToReference) const
+{
+    // Caller holds archiveMutex. On failure or time < 0 the caller falls back
+    // to the reference runtime's accessors (single-file behavior for that
+    // query); a parsed frame is kept in the bounded LRU.
+    *outFallbackToReference = true;
+    if (time < 0.0 || _imp->seq.files.empty()) {
+        return std::shared_ptr<GeoArchiveRuntime>();
+    }
+    // Sequence wins over the frameOffset knob: file frame numbers are NATIVE
+    // to the timeline.
+    const int frame = _imp->seq.clampFrame((int)std::floor(time));
+    std::shared_ptr<GeoArchiveRuntime> frt = _imp->seqRt.get(frame);
+    if (frt) {
+        *outFallbackToReference = false;
+        return frt;
+    }
+
+    std::map<int, std::string>::const_iterator it = _imp->seq.files.find(frame);
+    if (it == _imp->seq.files.end()) {
+        return std::shared_ptr<GeoArchiveRuntime>();
+    }
+    frt.reset(new GeoArchiveRuntime);
+    const bool reverse = _imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue();
+    std::string err;
+    if (!frt->loadFile(it->second, reverse, err)) {
+        NodePtr n(getNode());
+        if (n) n->setPersistentMessage(eMessageTypeError,
+                                       "Sequence frame " + std::to_string(frame) + ": " + err);
+        return std::shared_ptr<GeoArchiveRuntime>();
+    }
+    const bool bake = _imp->bakeTransforms.lock() && _imp->bakeTransforms.lock()->getValue();
+    frt->bakeMeshWorld = bake;
+
+    // Hierarchy consistency: the frame file must carry the reference's node
+    // layout (same count; names/hierarchy verified by count only — exporters
+    // keep the layout stable). A mismatching frame cannot be sampled safely.
+    if (frt->data.nodes.size() != _imp->rt.data.nodes.size()) {
+        NodePtr n(getNode());
+        if (n) n->setPersistentMessage(eMessageTypeError,
+                                       "Sequence frame " + std::to_string(frame) +
+                                           ": hierarchy mismatch (" +
+                                           std::to_string(frt->data.nodes.size()) + " nodes, reference has " +
+                                           std::to_string(_imp->rt.data.nodes.size()) +
+                                           ") — holding the reference frame's data.");
+        return std::shared_ptr<GeoArchiveRuntime>();
+    }
+
+    _imp->seqRt.put(frame, frt);
+    *outFallbackToReference = false;
+    return frt;
+}
+
 // --- ArchiveProvider interface -----------------------------------------------
 
 int
@@ -1445,7 +1598,8 @@ ReadGeoArchive::getEntryTree() const
         te.name = nd.name;
         te.parentLocalIdx = nd.parentIndex;
         te.isMesh = nd.isMesh;
-        te.sampleCount = (nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) ? 1 : 0;
+        te.sampleCount = (_imp->seq.isSequence ||
+                          nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) ? 1 : 0;
         te.numVertices = (nd.isMesh && nd.meshIndex >= 0 &&
                           nd.meshIndex < (int)data.meshes.size() &&
                           data.meshes[nd.meshIndex].mesh)
@@ -1470,10 +1624,28 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
     outName = nd.fullPath;
     outIsMesh = nd.isMesh;
 
+    // File-sequence mode (Gather Sequences): sample the frame file's runtime.
+    // The sequence owns the frame timing — its native frame-zero state is
+    // evaluated (the frame file's own animated channels do not apply) and
+    // the frameOffset knob does not remap anything.
+    GeoArchiveRuntime* actRt = &_imp->rt;
+    std::shared_ptr<GeoArchiveRuntime> frameRt;
+    if (_imp->seq.isSequence) {
+        bool fallback = true;
+        frameRt = ensureSequenceFrame(time, &fallback);
+        if (frameRt && !fallback) {
+            actRt = frameRt.get();
+        } else {
+            frameRt.reset();
+        }
+    }
+    // frame-zero evaluation time (nodeLocalAt f = time - 1 - offset = 0)
+    const double seqSampleTime = 1.0;
+
     // Baked mesh entries emit in world space attached to the archive root —
     // the world transform went into the vertices (the baked payload), so the
     // chain must not apply again.
-    if (_imp->rt.bakeMeshWorld && nd.isMesh) {
+    if (actRt->bakeMeshWorld && nd.isMesh) {
         outParentLocalIndex = -1;
         geoArchiveMatIdentity(outLocalMatrix);
         return true;
@@ -1484,14 +1656,19 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
     // Morph-weight override: the node-local walk below triggers
     // ensureFrameState through nodeLocalAt — fill the override store first
     // (frame time the key maps to) so a lazily-built frame embeds the user's
-    // weights, not the file's. Caller holds archiveMutex.
-    {
+    // weights, not the file's. Caller holds archiveMutex. Skipped in
+    // sequence mode: the per-frame files' own weights win (no override).
+    if (!frameRt) {
         const int key = (int)std::floor(time - 1.0 - (double)frameOffset);
         applyMorphOverrideAt((double)(key > 0 ? key : 0) + 1.0 + (double)frameOffset);
     }
 
     // The entry's own local matrix.
-    _imp->rt.nodeLocalAt(srcIdx, time, fps, frameOffset, outLocalMatrix);
+    if (frameRt) {
+        actRt->nodeLocalAt(srcIdx, seqSampleTime, fps, 0, outLocalMatrix);
+    } else {
+        actRt->nodeLocalAt(srcIdx, time, fps, frameOffset, outLocalMatrix);
+    }
 
     // Parent mapping + root normalization. The result must satisfy:
     // SceneGraph compose (root SceneNode identity × this local) ==
@@ -1512,7 +1689,7 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
     outParentLocalIndex = -1;
     bool attachRoot = (nd.parentIndex < 0);
     int p = nd.parentIndex;
-    while (p >= 0 && p < (int)_imp->rt.data.nodes.size()) {
+    while (p >= 0 && p < (int)actRt->data.nodes.size()) {
         int pv = -1;
         for (int v = 0; v < (int)_imp->visible.size(); ++v) {
             if (_imp->visible[v] == p) { pv = v; break; }
@@ -1522,16 +1699,20 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
             break;
         }
         float pl[16];
-        _imp->rt.nodeLocalAt(p, time, fps, frameOffset, pl);
+        if (frameRt) {
+            actRt->nodeLocalAt(p, seqSampleTime, fps, 0, pl);
+        } else {
+            actRt->nodeLocalAt(p, time, fps, frameOffset, pl);
+        }
         float folded[16];
         geoArchiveMatMul(pl, outLocalMatrix, folded);
         std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
         attachRoot = true;
-        p = _imp->rt.data.nodes[p].parentIndex;
+        p = actRt->data.nodes[p].parentIndex;
     }
-    if (attachRoot && _imp->rt.data.rootMatrix.size() == 16) {
+    if (attachRoot && actRt->data.rootMatrix.size() == 16) {
         float folded[16];
-        geoArchiveMatMul(_imp->rt.data.rootMatrix.data(), outLocalMatrix, folded);
+        geoArchiveMatMul(actRt->data.rootMatrix.data(), outLocalMatrix, folded);
         std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
     }
     return true;
@@ -1557,10 +1738,34 @@ ReadGeoArchive::getMeshDataAt(int idx, double time) const
     // on the most common rig (no skeleton); the evaluators always build the
     // morph-applied payload, so route through the frame cache like the
     // skinned ones.
+    // File-sequence mode gates every entry through its frame file's parse
+    // instead (topology and positions may both change per frame); rest
+    // queries (time < 0) still serve the reference file's data.
+    if (_imp->seq.isSequence && time < 0.0) {
+        return md.mesh;
+    }
     const bool needsFrame = (md.skinIndex >= 0) || _imp->rt.bakeMeshWorld ||
                             (md.morphs && !md.morphs->targets.empty());
-    if (!needsFrame || time < 0.0) {
+    if (!_imp->seq.isSequence && (!needsFrame || time < 0.0)) {
         return md.mesh;
+    }
+    if (_imp->seq.isSequence) {
+        bool fallback = true;
+        std::shared_ptr<GeoArchiveRuntime> frameRt = ensureSequenceFrame(time, &fallback);
+        if (frameRt && !fallback) {
+            std::shared_ptr<const GeoArchiveFrameEval> st =
+                frameRt->ensureFrameState(archiveFps(), 0);
+            if (nd.meshIndex < (int)st->deformed.size() && st->deformed[nd.meshIndex]) {
+                return st->deformed[nd.meshIndex];
+            }
+            // Frame payload missing for this entry: serve the frame file's
+            // rest mesh (same file, static content).
+            if (nd.meshIndex >= 0 && nd.meshIndex < (int)frameRt->data.meshes.size() &&
+                frameRt->data.meshes[nd.meshIndex].mesh) {
+                return frameRt->data.meshes[nd.meshIndex].mesh;
+            }
+        }
+        return md.mesh; // frame unavailable — hold the reference frame
     }
 
     // Skinned: per-frame CPU skinning via the frame cache. Snaps per frame
@@ -1586,10 +1791,27 @@ ReadGeoArchive::getEntryWorldMatrix(int idx, double time, float outWorld[16]) co
 {
     std::lock_guard<std::mutex> lk(_imp->archiveMutex);
     if (idx < 0 || idx >= (int)_imp->visible.size()) return false;
+    const int srcIdx = _imp->visible[idx];
+
+    // File-sequence mode: the world matrix comes from the frame file's
+    // runtime (its frame-zero state); the sequence owns the timing.
+    if (_imp->seq.isSequence && time >= 0.0) {
+        bool fallback = true;
+        std::shared_ptr<GeoArchiveRuntime> frameRt = ensureSequenceFrame(time, &fallback);
+        if (frameRt && !fallback) {
+            if (frameRt->bakeMeshWorld && frameRt->data.nodes[srcIdx].isMesh) {
+                geoArchiveMatIdentity(outWorld);
+                return true;
+            }
+            frameRt->worldMatrixAt(srcIdx, 1.0, archiveFps(), 0, outWorld);
+            return true;
+        }
+        // Frame unavailable: hold the reference file's state below.
+    }
 
     // Baked mesh entries are world-space payloads parented to the root —
     // their entry world matrix is identity by construction.
-    if (_imp->rt.bakeMeshWorld && _imp->rt.data.nodes[_imp->visible[idx]].isMesh) {
+    if (_imp->rt.bakeMeshWorld && _imp->rt.data.nodes[srcIdx].isMesh) {
         geoArchiveMatIdentity(outWorld);
         return true;
     }
@@ -1676,10 +1898,12 @@ StatusEnum
 ReadGeoArchive::getPreferredMetadata(NodeMetadata& metadata)
 {
     // Declare frame-varying when any entry carries animation (node channels,
-    // skinned payload, or an FBX animation stack). Required so Scene3D +
-    // ScanlineRender hashes change per frame — same reason as ReadGeo /
-    // ReadAlembicArchive.
-    if (_imp && _imp->rt.hasAnimation) {
+    // skinned payload, or an FBX animation stack) — or, in file-sequence mode
+    // (Gather Sequences), whenever a sequence is loaded: the frame files are
+    // independent evaluations, so the content varies anyway. Required so
+    // Scene3D + ScanlineRender hashes change per frame — same reason as
+    // ReadGeo / ReadAlembicArchive.
+    if (_imp && (_imp->seq.isSequence || _imp->rt.hasAnimation)) {
         metadata.setIsFrameVarying(true);
     }
     // Animated user morph weights (Use File Morph Weights off) also make the

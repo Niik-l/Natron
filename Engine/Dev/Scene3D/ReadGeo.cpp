@@ -190,6 +190,25 @@ readXformMatrix(const Alembic::AbcGeom::IXformSchema& xSchema,
         }
     }
 }
+
+/**
+ * @brief Copy a mesh schema's UV param (PolyMesh/SubD) into out->uvs when
+ * present (per u,v pair). Shares the raw-float policy of readMeshArrays.
+ */
+static void
+readAlembicUvParam(const Alembic::AbcGeom::IV2fGeomParam& uvParam, MeshData* mesh)
+{
+    Alembic::AbcGeom::IV2fGeomParam::Sample uvSample;
+    uvParam.getExpanded(uvSample);
+    const Alembic::Abc::V2fArraySamplePtr& uvVals = uvSample.getVals();
+    if (uvVals && uvVals->size() > 0) {
+        size_t numUVs = uvVals->size();
+        const float* rawUV = reinterpret_cast<const float*>(uvVals->get());
+        mesh->uvs.resize(numUVs * 2);
+        std::memcpy(mesh->uvs.data(), rawUV, numUVs * 2 * sizeof(float));
+        mesh->hasUVs = true;
+    }
+}
 #endif // NATRON_HAVE_ALEMBIC
 
 
@@ -229,6 +248,19 @@ struct ReadGeoPrivate
     // Single-part selection: bake the part's evaluated world matrix into the
     // vertices instead of carrying it in MeshData::transform.
     KnobBoolWPtr bakeTransforms;
+
+    // --- File sequence (one file per frame) ---
+    // Gather Sequences: when on and the file knob points into a padded file
+    // sequence (liquid_00002.abc, ...), each timeline frame evaluates the
+    // file numbered like it; Max Cached Frames bounds the per-frame mesh LRU.
+    KnobBoolWPtr gatherSequences;
+    KnobIntPtr cacheFramesKnob;
+    // Sequence state (valid when isSequence). Frames keep the FILES' numbers
+    // on the timeline (frame N -> the file numbered N; held at ends/gaps).
+    GeoSequenceInfo seq;
+    // Built meshes of the visited sequence frames, LRU-bounded. Consulted and
+    // filled under _meshMutex (loads are GUI-thread, getMeshData serialises).
+    mutable GeoSequenceLruCache<MeshData> frameCache{72};
 
     // --- Morph Weights (glTF shape keys / FBX blend shapes) ---
     // Per-target user weights. The morphW<i> knobs are created dynamically at
@@ -315,6 +347,11 @@ ReadGeo::getPluginDescription() const
        "â€” the static-snapshot mode. The file's PBR material (base color, "
        "roughness, metallic, emission, transmission, IOR, diffuse texture) is "
        "applied to the node's Material and Texture Maps pages.\n\n"
+       "File sequences: with Gather Sequences on, a one-file-per-frame series "
+       "(liquid_00002.abc, liquid_00003.abc, ...) plays on the timeline — the "
+       "file numbered like each frame provides its content and topology may "
+       "change per frame (Realflow mesh caches). Source frame numbers map "
+       "natively (frame N = file N); Max Cached Frames bounds the mesh cache."
        "OBJ: positions, texture coords, and n-gon faces are honored. Group/"
        "object directives populate the Object dropdown when present; "
        "otherwise the file loads as a single mesh."
@@ -419,6 +456,37 @@ ReadGeo::initializeKnobs()
                              "Changing it re-evaluates the snapshot immediately."));
         page->addKnob(k);
         _imp->freezeFrame = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Gather Sequences"));
+        k->setName("gatherSequences");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Load a one-file-per-frame geometry sequence as animated content. "
+                             "When the file carries a sequence pattern (e.g. liquid_00002.abc, "
+                             "liquid_00003.abc, ...), each timeline frame evaluates the file "
+                             "numbered like it: frames outside the range hold at the sequence "
+                             "ends, gaps hold the nearest earlier frame. Every frame is parsed "
+                             "independently, so topology may change per frame (Realflow mesh "
+                             "caches and friends). Off = load the picked file alone (static). "
+                             "Frame-1-based re-timing or FPS mapping does not apply: source "
+                             "frame numbers are native to the timeline."));
+        page->addKnob(k);
+        _imp->gatherSequences = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Cached Frames"));
+        k->setName("cacheFrames");
+        k->setDefaultValue(72);
+        k->setMinimum(1);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("How many sequence frames to keep built in memory (least-recently-"
+                             "used eviction). Sequence meshes can be large, so the cap bounds "
+                             "memory over long sequences; a scrub back re-parses evicted "
+                             "frames. Only used while a sequence is loaded under "
+                             "Gather Sequences."));
+        page->addKnob(k);
+        _imp->cacheFramesKnob = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Bake Transforms"));
@@ -671,11 +739,25 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         return true;
     }
 
+    // Gather Sequences: re-run the load (frame cache re-keys with it). The
+    // load re-detects the sequence and single-file fallback applies otherwise.
+    if (_imp->gatherSequences.lock().get() == k) {
+        loadGeoFromFile(_imp->filePath.lock()->getValue());
+        return true;
+    }
+
+    // Max Cached Frames: only re-caps the sequence frame LRU.
+    if (_imp->cacheFramesKnob.get() == k) {
+        _imp->frameCache.setCapacity(_imp->cacheFramesKnob->getValue());
+        return true;
+    }
+
     // Bake Transforms: only re-keys the single-part build (no timing change),
     // so drop the built meshes but leave the metadata alone.
     if (_imp->bakeTransforms.lock().get() == k) {
         std::lock_guard<std::mutex> lk(_meshMutex);
         _imp->builtCache.clear();
+        _imp->frameCache.clear();
         return true;
     }
 
@@ -722,9 +804,12 @@ ReadGeo::loadGeoFromFile(const std::string& path)
 
     // Any non-scene load below clears the scene-format state; a scene load
     // re-populates it (loadSceneGeo). Clearing also covers the built-mesh
-    // cache (keyed by frame/selection/bake â€” meaningless across files).
+    // cache (keyed by frame/selection/bake â€” meaningless across files) and
+    // the sequence frame cache + detection state.
     _imp->sceneLoaded = false;
     _imp->builtCache.clear();
+    _imp->seq = GeoSequenceInfo();
+    _imp->frameCache.clear();
 
     if (path.empty()) {
         // No file â€” no morph targets either; drop any weight knobs from a
@@ -749,6 +834,14 @@ ReadGeo::loadGeoFromFile(const std::string& path)
 
     // Re-entrancy guard: loading modifies knobs which would re-trigger knobChanged.
     _imp->isLoading = true;
+
+    // Detect the sequence around the picked file before loading: the picked
+    // file still loads below as the REFERENCE (its dropdown, materials and
+    // rest metadata all come from it), while getMeshData evaluates the
+    // sequence's per-frame files when a sequence is found.
+    if (_imp->gatherSequences.lock() && _imp->gatherSequences.lock()->getValue()) {
+        _imp->seq = detectGeoSequence(path);
+    }
 
     const std::string e = extOf(path);
     if (e == ".obj") {
@@ -775,6 +868,18 @@ ReadGeo::loadGeoFromFile(const std::string& path)
         std::vector<GeoMorphTargetRef> none;
         if (syncMorphWeightKnobs(none)) {
             recreateKnobs(true);
+        }
+    }
+
+    // Sequence loaded: annotate the info line the loader just wrote.
+    if (_imp->seq.isSequence) {
+        KnobStringPtr infoK = _imp->info.lock();
+        if (infoK) {
+            std::ostringstream seqInfo;
+            seqInfo << infoK->getValue()
+                    << " | seq frames " << _imp->seq.firstFrame << "-" << _imp->seq.lastFrame
+                    << " (" << _imp->seq.files.size() << " files)";
+            infoK->setValue(seqInfo.str());
         }
     }
 
@@ -1111,24 +1216,26 @@ struct ObjGroup
     bool hasUVs = false;
 };
 
-} // anon
-
-void
-ReadGeo::loadObjGeo(const std::string& path)
+// Line-parse an OBJ file into positions / texCoords / groups (the parse core
+// of ReadGeo::loadObjGeo). Returns false with *err filled when the file
+// cannot be opened or holds no geometry. Used both by the single-file load
+// and by the file-sequence frame builder (see buildObjSeqFrame).
+bool
+parseObjGroups(const std::string& path,
+               std::vector<float>* positions,
+               std::vector<float>* texCoords,
+               std::vector<ObjGroup>* groups,
+               std::string* err)
 {
     std::ifstream in(path.c_str());
     if (!in.is_open()) {
-        setPersistentMessage(eMessageTypeError, "Cannot open file: " + path);
-        return;
+        *err = "Cannot open file: " + path;
+        return false;
     }
 
-    std::vector<float> positions;  // x,y,z
-    std::vector<float> texCoords;  // u,v
-
-    std::vector<ObjGroup> groups;
-    groups.reserve(4);
-    groups.push_back(ObjGroup{}); // implicit default group
-    groups[0].name = "default";
+    groups->reserve(4);
+    groups->push_back(ObjGroup{}); // implicit default group
+    groups->back().name = "default";
 
     bool firstLine = true;
     std::string line;
@@ -1146,37 +1253,37 @@ ReadGeo::loadObjGeo(const std::string& path)
         if (tag == "v") {
             float x = 0, y = 0, z = 0;
             ls >> x >> y >> z;
-            positions.push_back(x);
-            positions.push_back(y);
-            positions.push_back(z);
+            positions->push_back(x);
+            positions->push_back(y);
+            positions->push_back(z);
         } else if (tag == "vt") {
             float u = 0, v = 0;
             ls >> u >> v;
-            texCoords.push_back(u);
-            texCoords.push_back(v);
+            texCoords->push_back(u);
+            texCoords->push_back(v);
         } else if (tag == "vn") {
             // Normals: ignored in v1 (MeshData has no normals field).
         } else if (tag == "g" || tag == "o") {
             std::string name;
             ls >> name;
             // Start a new group if the current one has already received faces.
-            if (!groups.back().faceCounts.empty()) {
-                groups.push_back(ObjGroup{});
+            if (!groups->back().faceCounts.empty()) {
+                groups->push_back(ObjGroup{});
             }
-            groups.back().name = name.empty() ? "unnamed" : name;
+            groups->back().name = name.empty() ? "unnamed" : name;
         } else if (tag == "f") {
-            ObjGroup& g = groups.back();
+            ObjGroup& g = groups->back();
             int faceVerts = 0;
             std::string tok;
-            const int posCount = (int)(positions.size() / 3);
-            const int vtCount  = (int)(texCoords.size() / 2);
+            const int posCount = (int)(positions->size() / 3);
+            const int vtCount  = (int)(texCoords->size() / 2);
             while (ls >> tok) {
                 int v = -1, vt = -1, vn = -1;
                 if (!parseObjFaceToken(tok, posCount, vtCount, /*vnCount*/0, v, vt, vn)) continue;
                 g.faceIndicesV.push_back(v);
                 if (vt >= 0 && vt < vtCount) {
-                    g.uvs.push_back(texCoords[vt * 2 + 0]);
-                    g.uvs.push_back(texCoords[vt * 2 + 1]);
+                    g.uvs.push_back((*texCoords)[vt * 2 + 0]);
+                    g.uvs.push_back((*texCoords)[vt * 2 + 1]);
                     g.hasUVs = true;
                 } else {
                     g.uvs.push_back(0.0f);
@@ -1190,12 +1297,73 @@ ReadGeo::loadObjGeo(const std::string& path)
     }
 
     // Drop empty groups (e.g. the implicit "default" if all faces went into a named group).
-    groups.erase(std::remove_if(groups.begin(), groups.end(),
-                                [](const ObjGroup& g){ return g.faceCounts.empty(); }),
-                 groups.end());
+    groups->erase(std::remove_if(groups->begin(), groups->end(),
+                                 [](const ObjGroup& g){ return g.faceCounts.empty(); }),
+                  groups->end());
 
-    if (groups.empty() || positions.empty()) {
-        setPersistentMessage(eMessageTypeError, "No geometry found in " + path);
+    if (groups->empty() || positions->empty()) {
+        *err = "No geometry found in " + path;
+        return false;
+    }
+
+    return true;
+}
+
+// Build the MeshData payload for one parsed group (the mesh core of
+// ReadGeo::loadObjGeo): global vertex positions, the group's faces, per
+// face-vertex uvs, the wireframe edge list and an identity transform (the
+// node's own T/R/S knobs handle placement downstream).
+void
+buildObjGroupMeshData(const std::vector<float>& positions,
+                      const ObjGroup& chosen,
+                      MeshData* mesh)
+{
+    mesh->vertices = positions; // global vertex positions
+    mesh->numVertices = positions.size() / 3;
+    mesh->faceIndices = chosen.faceIndicesV;
+    mesh->faceCounts  = chosen.faceCounts;
+    mesh->numFaces    = chosen.faceCounts.size();
+    if (chosen.hasUVs) {
+        mesh->uvs = chosen.uvs;
+        mesh->hasUVs = true;
+        mesh->texCoordComponents = 2;
+    }
+
+    // --- Edge list for wireframe drawing ---
+    // For each face emit boundary edges (vi, vi+1) and closing (last, first).
+    size_t off = 0;
+    const int nv = (int)mesh->numVertices;
+    for (size_t f = 0; f < mesh->faceCounts.size(); ++f) {
+        const int c = mesh->faceCounts[f];
+        if (c < 2 || off + (size_t)c > mesh->faceIndices.size()) {
+            off += (size_t)std::max(0, c);
+            continue;
+        }
+        for (int i = 0; i < c; ++i) {
+            const int a = mesh->faceIndices[off + i];
+            const int b = mesh->faceIndices[off + ((i + 1) % c)];
+            if (a >= 0 && a < nv && b >= 0 && b < nv) {
+                mesh->edgeIndices.push_back(a);
+                mesh->edgeIndices.push_back(b);
+            }
+        }
+        off += (size_t)c;
+    }
+
+    for (int i = 0; i < 16; ++i) mesh->transform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+}
+
+} // anon
+
+void
+ReadGeo::loadObjGeo(const std::string& path)
+{
+    std::vector<float> positions;
+    std::vector<float> texCoords;
+    std::vector<ObjGroup> groups;
+    std::string err;
+    if (!parseObjGroups(path, &positions, &texCoords, &groups, &err)) {
+        setPersistentMessage(eMessageTypeError, err);
         return;
     }
 
@@ -1222,43 +1390,7 @@ ReadGeo::loadObjGeo(const std::string& path)
 
     // --- Build MeshData for the chosen group ---
     MeshDataPtr mesh(new MeshData);
-    mesh->vertices = positions; // global vertex positions
-    mesh->numVertices = positions.size() / 3;
-    mesh->faceIndices = chosen.faceIndicesV;
-    mesh->faceCounts  = chosen.faceCounts;
-    mesh->numFaces    = chosen.faceCounts.size();
-    if (chosen.hasUVs) {
-        mesh->uvs = chosen.uvs;
-        mesh->hasUVs = true;
-        mesh->texCoordComponents = 2;
-    }
-
-    // --- Edge list for wireframe drawing ---
-    // For each face emit boundary edges (vi, vi+1) and closing (last, first).
-    {
-        size_t off = 0;
-        const int nv = (int)mesh->numVertices;
-        for (size_t f = 0; f < mesh->faceCounts.size(); ++f) {
-            const int c = mesh->faceCounts[f];
-            if (c < 2 || off + (size_t)c > mesh->faceIndices.size()) {
-                off += (size_t)std::max(0, c);
-                continue;
-            }
-            for (int i = 0; i < c; ++i) {
-                const int a = mesh->faceIndices[off + i];
-                const int b = mesh->faceIndices[off + ((i + 1) % c)];
-                if (a >= 0 && a < nv && b >= 0 && b < nv) {
-                    mesh->edgeIndices.push_back(a);
-                    mesh->edgeIndices.push_back(b);
-                }
-            }
-            off += (size_t)c;
-        }
-    }
-
-    // Identity transform â€” the node's own Translate/Rotate/Scale knobs handle
-    // user-controlled placement downstream.
-    for (int i = 0; i < 16; ++i) mesh->transform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+    buildObjGroupMeshData(positions, chosen, mesh.get());
 
     if (_imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue()) {
         reverseMeshWinding(*mesh);
@@ -1279,6 +1411,171 @@ ReadGeo::loadObjGeo(const std::string& path)
     _imp->info.lock()->setValue(ss.str());
 
     clearPersistentMessage(false);
+}
+
+// ---------------------------------------------------------------------------
+// File-sequence frame builders (one file per frame, Gather Sequences)
+// ---------------------------------------------------------------------------
+
+bool
+ReadGeo::buildObjSeqFrame(int frame, MeshData* out, std::string* err) const
+{
+    if (!out || !err) {
+        return false;
+    }
+    std::map<int, std::string>::const_iterator pit = _imp->seq.files.find(frame);
+    if (pit == _imp->seq.files.end()) {
+        *err = "no file for frame " + std::to_string(frame);
+        return false;
+    }
+
+    std::vector<float> positions;
+    std::vector<float> texCoords;
+    std::vector<ObjGroup> groups;
+    if (!parseObjGroups(pit->second, &positions, &texCoords, &groups, err)) {
+        return false;
+    }
+
+    // The frame file shares the reference's group layout: re-resolve the
+    // dropdown's group by NAME and fall back to the first group on a
+    // mismatch (renames between frames stay readable).
+    KnobChoicePtr objKnob = _imp->objectPath.lock();
+    int chosenIdx = objKnob ? objKnob->getValue() : 0;
+    const std::string want = (chosenIdx >= 0 && chosenIdx < (int)_imp->geoPaths.size())
+        ? _imp->geoPaths[chosenIdx] : std::string();
+    int gi = 0;
+    for (std::size_t i = 0; i < groups.size(); ++i) {
+        if (groups[i].name == want) {
+            gi = (int)i;
+            break;
+        }
+    }
+
+    buildObjGroupMeshData(positions, groups[gi], out);
+    if (_imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue()) {
+        reverseMeshWinding(*out);
+    }
+    return true;
+}
+
+bool
+ReadGeo::buildAbcSeqFrame(int frame, MeshData* out, std::string* err) const
+{
+#ifdef NATRON_HAVE_ALEMBIC
+    if (!out || !err) {
+        return false;
+    }
+    std::map<int, std::string>::const_iterator pit = _imp->seq.files.find(frame);
+    if (pit == _imp->seq.files.end()) {
+        *err = "no file for frame " + std::to_string(frame);
+        return false;
+    }
+    const std::string& path = pit->second;
+
+    try {
+        FILE* testF = fopen(path.c_str(), "rb");
+        if (!testF) {
+            *err = "Cannot open file: " + path;
+            return false;
+        }
+        fclose(testF);
+
+        Alembic::AbcCoreOgawa::ReadArchive reader;
+        Alembic::AbcGeom::IArchive archive(reader, path);
+        Alembic::AbcGeom::IObject top = archive.getTop();
+
+        // Same object layout as the reference file: re-resolve the dropdown's
+        // selection path and fall back to the first geo entry when missing.
+        KnobChoicePtr objKnob = _imp->objectPath.lock();
+        int selectedIdx = objKnob ? objKnob->getValue() : 0;
+        if (selectedIdx < 0 || selectedIdx >= (int)_imp->geoPaths.size()) {
+            selectedIdx = 0;
+        }
+        std::string selectedPath = _imp->geoPaths.empty() ? std::string()
+                                                          : _imp->geoPaths[selectedIdx];
+        // Fallback: find any poly/subd object in the frame file.
+        if (selectedPath.empty()) {
+            std::vector<std::string> found;
+            for (size_t i = 0; i < top.getNumChildren(); ++i) {
+                findGeoRecursive(top.getChild(i), std::string(), found);
+            }
+            if (found.empty()) {
+                *err = "No geometry found in " + path;
+                return false;
+            }
+            selectedPath = found.front();
+        }
+
+        Alembic::AbcGeom::IObject obj;
+        if (!navigateToObject(top, selectedPath, obj)) {
+            *err = "Object not found in sequence frame: " + selectedPath;
+            return false;
+        }
+
+        // One sample per frame file: read the FIRST sample (schema.get() with
+        // no selector). Topology is whatever this frame carries — nothing
+        // shared with the reference.
+        using namespace Alembic::AbcGeom;
+        if (IPolyMesh::matches(obj.getHeader())) {
+            IPolyMesh polyMesh(obj);
+            IPolyMeshSchema schema = polyMesh.getSchema();
+            IPolyMeshSchema::Sample sample;
+            schema.get(sample);
+            readMeshArrays(sample.getPositions()->get(), sample.getPositions()->size(),
+                           sample.getFaceIndices()->get(), sample.getFaceIndices()->size(),
+                           sample.getFaceCounts()->get(), sample.getFaceCounts()->size(),
+                           out);
+            IV2fGeomParam uvParam = schema.getUVsParam();
+            if (uvParam.valid()) {
+                readAlembicUvParam(uvParam, out);
+            }
+        } else if (ISubD::matches(obj.getHeader())) {
+            ISubD subdMesh(obj);
+            ISubDSchema schema = subdMesh.getSchema();
+            ISubDSchema::Sample sample;
+            schema.get(sample);
+            readMeshArrays(sample.getPositions()->get(), sample.getPositions()->size(),
+                           sample.getFaceIndices()->get(), sample.getFaceIndices()->size(),
+                           sample.getFaceCounts()->get(), sample.getFaceCounts()->size(),
+                           out);
+            IV2fGeomParam uvParam = schema.getUVsParam();
+            if (uvParam.valid()) {
+                readAlembicUvParam(uvParam, out);
+            }
+        } else {
+            *err = "Object is not a supported mesh type: " + selectedPath;
+            return false;
+        }
+
+        // Frame transform: parent IXform's first sample.
+        IObject parent = obj.getParent();
+        if (parent.valid() && IXform::matches(parent.getHeader())) {
+            IXformSchema xSchema = IXform(parent).getSchema();
+            if (xSchema.getNumSamples() > 0) {
+                readXformMatrix(xSchema, 0, out->transform);
+            }
+        }
+
+        if (_imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue()) {
+            reverseMeshWinding(*out);
+        }
+        return true;
+
+    } catch (const std::exception& e) {
+        *err = std::string("Alembic error: ") + e.what();
+        return false;
+    } catch (...) {
+        *err = "Unknown Alembic error.";
+        return false;
+    }
+#else
+    (void)frame;
+    (void)out;
+    if (err) {
+        *err = "Alembic support not built into this Natron binary.";
+    }
+    return false;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -1350,6 +1647,189 @@ appendArchiveMesh(const MeshData& src, const float world[16], MeshData* dst,
             dst->uvs.resize(faceIdxBegin * 2 + src.faceIndices.size() * 2, 0.0f);
         }
     }
+}
+
+// Core of ReadGeo::buildSceneMesh: build the merged / single-part mesh from
+// an ALREADY-EVALUATED frame state. Shared verbatim by the single-file path
+// (the node's own runtime + built cache) and the file-sequence path (a
+// throwaway per-frame GeoArchiveRuntime evaluated at key 0). Caller provides
+// the frame state; the caller is responsible for any cache insert.
+MeshDataPtr
+geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
+                      const std::shared_ptr<const GeoArchiveFrameEval>& st,
+                      const std::vector<int>& meshEntries,
+                      const std::string& chosenLabel,
+                      int chosenIdx,
+                      bool bake,
+                      double fps, double timeEff, int key)
+{
+    const GeoArchiveResult& data = rt.data;
+    MeshDataPtr mesh(new MeshData);
+
+    if (chosenIdx == 0) {
+        // Merged: every mesh entry's evaluated vertices baked through its
+        // world matrix, concatenated â€” the whole asset as one mesh. Each
+        // part's file material color bakes onto its face corners (the merged
+        // mesh has no per-part material slots; multi-material files keep
+        // their per-part colors as face colors).
+        for (std::size_t e = 0; e < meshEntries.size(); ++e) {
+            const int nodeIdx = meshEntries[e];
+            if (nodeIdx >= (int)data.nodes.size()) continue;
+            const GeoArchiveNodeData& nd = data.nodes[nodeIdx];
+            if (nd.meshIndex < 0 || nd.meshIndex >= (int)st->deformed.size() ||
+                !st->deformed[nd.meshIndex]) {
+                continue;
+            }
+            float partColor[3] = { -1.f, 0.f, 0.f };
+            const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
+            if (md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
+                data.materials[md.materialIndex].present) {
+                const GeoImportMaterial& m = data.materials[md.materialIndex];
+                partColor[0] = (float)m.baseColor[0];
+                partColor[1] = (float)m.baseColor[1];
+                partColor[2] = (float)m.baseColor[2];
+            }
+            float world[16];
+            rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, world);
+            if (std::getenv("NATRON_DEBUG_GEOIO")) {
+                std::fprintf(stderr,
+                             "[GEOIO] merged part %d node %d worldDiag=(%.4f,%.4f,%.4f) tr=(%.4f,%.4f,%.4f)\n",
+                             (int)e, nodeIdx, world[0], world[5], world[10],
+                             world[12], world[13], world[14]);
+                const MeshData& srcM = *st->deformed[nd.meshIndex];
+                if (srcM.vertices.size() >= 3) {
+                    std::fprintf(stderr,
+                                 "[GEOIO]   src v0=(%.4f,%.4f,%.4f) srcNumVerts=%d\n",
+                                 srcM.vertices[0], srcM.vertices[1],
+                                 srcM.vertices[2], (int)srcM.numVertices);
+                }
+            }
+            appendArchiveMesh(*st->deformed[nd.meshIndex], world, mesh.get(),
+                              partColor[0] >= 0.f ? partColor : nullptr);
+            if (std::getenv("NATRON_DEBUG_GEOIO") && mesh->vertices.size() >= 3) {
+                std::fprintf(stderr,
+                             "[GEOIO]   baked v0=(%.4f,%.4f,%.4f)\n",
+                             mesh->vertices[0], mesh->vertices[1],
+                             mesh->vertices[2]);
+            }
+        }
+    } else if (chosenIdx - 1 < (int)meshEntries.size()) {
+        // Single part.
+        const int nodeIdx = meshEntries[chosenIdx - 1];
+        if (nodeIdx < (int)data.nodes.size()) {
+            const GeoArchiveNodeData& nd = data.nodes[nodeIdx];
+            MeshDataPtr src;
+            if (nd.meshIndex >= 0 && nd.meshIndex < (int)st->deformed.size()) {
+                src = st->deformed[nd.meshIndex];
+            }
+            if (src) {
+                // Single part: bake the part's material color on its faces
+                // (the merged-style face-color consumption applies 1:1).
+                float partColor[3] = { -1.f, 0.f, 0.f };
+                const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
+                if (md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
+                    data.materials[md.materialIndex].present) {
+                    const GeoImportMaterial& m = data.materials[md.materialIndex];
+                    partColor[0] = (float)m.baseColor[0];
+                    partColor[1] = (float)m.baseColor[1];
+                    partColor[2] = (float)m.baseColor[2];
+                }
+                const float* pc = partColor[0] >= 0.f ? partColor : nullptr;
+                if (bake) {
+                    // Baked: the part's evaluated world matrix goes into the
+                    // vertices; MeshData::transform stays identity.
+                    float world[16];
+                    rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, world);
+                    appendArchiveMesh(*src, world, mesh.get(), pc);
+                } else {
+                    // Non-baked: the part keeps its node-local vertices and
+                    // the part's world matrix rides in MeshData::transform â€”
+                    // the animation keeps flowing through it and the user
+                    // T/R/S composes on top in every consumer.
+                    float identity[16];
+                    geoArchiveMatIdentity(identity);
+                    appendArchiveMesh(*src, identity, mesh.get(), pc);
+                    rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, mesh->transform);
+                }
+            }
+        }
+    }
+    // Edge indices for the viewport wireframe. Skipped for very dense meshes:
+    // the array alone is ~2x the corner count (8.9M ints for a 1.5M-triangle
+    // scan) and the viewport wire pass would push millions of immediate-mode
+    // lines every paint, drowning the shaded fill in a uniform grey — the
+    // archive path never builds edges, so big assets shaded clean there while
+    // a rebuilt ReadGeo of the same file turned into a grey blob.
+    if (mesh->faceIndices.size() <= 4000000) {
+        importBuildEdgeIndices(mesh.get());
+    }
+
+    // Geometry-loader diagnostics gate (same pattern as NATRON_DEBUG_SC):
+    // set env NATRON_DEBUG_GEOIO=1 to dump the raw built geometry (vertex
+    // values, not just counts) so headless tests can verify what the loader
+    // actually produced â€” a degenerate all-zero vertex array renders as an
+    // empty scene and is invisible in the counts alone.
+    if (std::getenv("NATRON_DEBUG_GEOIO")) {
+        std::ostringstream dbg;
+        dbg << "[GEOIO] fmt=" << (rt.isFbx ? "FBX" : "glTF")
+            << " frame=" << (key + 1) << " sel=" << chosenLabel
+            << " bake=" << (bake ? 1 : 0)
+            << " verts=" << mesh->numVertices
+            << " faces=" << mesh->numFaces
+            << " uvslots=" << (mesh->uvs.size() / 2)
+            << " vcolors=" << (mesh->hasVertexColors ? (int)(mesh->vertexColors.size() / 3) : -1)
+            << " c0..c5=";
+        for (std::size_t i = 0; i < mesh->vertexColors.size() && i < 6; ++i) {
+            dbg << mesh->vertexColors[i] << ",";
+        }
+        dbg << " v0..v5=";
+        for (std::size_t i = 0; i < mesh->vertices.size() && i < 6; ++i) {
+            dbg << mesh->vertices[i] << ",";
+        }
+        dbg << " faceCounts0..3=";
+        for (std::size_t i = 0; i < mesh->faceCounts.size() && i < 4; ++i) {
+            dbg << mesh->faceCounts[i] << ",";
+        }
+        dbg << " faceIdx0..5=";
+        for (std::size_t i = 0; i < mesh->faceIndices.size() && i < 6; ++i) {
+            dbg << mesh->faceIndices[i] << ",";
+        }
+        dbg << " uv0..u11=";
+        for (std::size_t i = 0; i < mesh->uvs.size() && i < 12; ++i) {
+            dbg << mesh->uvs[i] << ",";
+        }
+        if (mesh->uvs.size()) {
+            float umn = mesh->uvs[0], umx = umn, vmn = mesh->uvs[1], vmx = vmn;
+            for (std::size_t i = 0; i + 1 < mesh->uvs.size(); i += 2) {
+                umn = std::min(umn, mesh->uvs[i]);
+                umx = std::max(umx, mesh->uvs[i]);
+                vmn = std::min(vmn, mesh->uvs[i + 1]);
+                vmx = std::max(vmx, mesh->uvs[i + 1]);
+            }
+            dbg << " uvr=[u" << umn << ".." << umx << " v" << vmn << ".." << vmx << "]";
+        }
+        dbg << " tr=";
+        for (int i = 0; i < 16; ++i) {
+            dbg << mesh->transform[i] << ",";
+        }
+        // Vertex bbox: direct deformation evidence (morph weights move the
+        // bbox even when v0..v5 happen to be unmoved corners).
+        if (!mesh->vertices.empty()) {
+            float bmn[3] = { mesh->vertices[0], mesh->vertices[1], mesh->vertices[2] };
+            float bmx[3] = { bmn[0], bmn[1], bmn[2] };
+            for (std::size_t i = 0; i + 2 < mesh->vertices.size(); i += 3) {
+                for (int a = 0; a < 3; ++a) {
+                    bmn[a] = std::min(bmn[a], mesh->vertices[i + a]);
+                    bmx[a] = std::max(bmx[a], mesh->vertices[i + a]);
+                }
+            }
+            dbg << " bbox=[" << bmn[0] << "," << bmn[1] << "," << bmn[2]
+                << " .. " << bmx[0] << "," << bmx[1] << "," << bmx[2] << "]";
+        }
+        fprintf(stderr, "%s\n", dbg.str().c_str());
+    }
+
+    return mesh;
 }
 
 } // anon
@@ -1545,181 +2025,63 @@ ReadGeo::buildSceneMesh(double time) const
 
     // Morph-weight override: fill the runtime store from the user's weight
     // knobs at the frame time the key maps to (matching the frame-cache
-    // granularity â€” the same snap the file's animated weights get through
+    // granularity — the same snap the file's animated weights get through
     // ensureFrameState). Must run before ensureFrameState: the evaluators
     // read the store. Caller holds _meshMutex.
     applyMorphOverrideAt((double)(key + 1));
 
     const std::shared_ptr<const GeoArchiveFrameEval> st = imp->rt.ensureFrameState(fps, key);
 
-    MeshDataPtr mesh(new MeshData);
-    const GeoArchiveResult& data = imp->rt.data;
-
-    if (chosenIdx == 0) {
-        // Merged: every mesh entry's evaluated vertices baked through its
-        // world matrix, concatenated â€” the whole asset as one mesh. Each
-        // part's file material color bakes onto its face corners (the merged
-        // mesh has no per-part material slots; multi-material files keep
-        // their per-part colors as face colors).
-        for (std::size_t e = 0; e < imp->meshEntries.size(); ++e) {
-            const int nodeIdx = imp->meshEntries[e];
-            if (nodeIdx >= (int)data.nodes.size()) continue;
-            const GeoArchiveNodeData& nd = data.nodes[nodeIdx];
-            if (nd.meshIndex < 0 || nd.meshIndex >= (int)st->deformed.size() ||
-                !st->deformed[nd.meshIndex]) {
-                continue;
-            }
-            float partColor[3] = { -1.f, 0.f, 0.f };
-            const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
-            if (md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
-                data.materials[md.materialIndex].present) {
-                const GeoImportMaterial& m = data.materials[md.materialIndex];
-                partColor[0] = (float)m.baseColor[0];
-                partColor[1] = (float)m.baseColor[1];
-                partColor[2] = (float)m.baseColor[2];
-            }
-            float world[16];
-            imp->rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, world);
-            if (std::getenv("NATRON_DEBUG_GEOIO")) {
-                std::fprintf(stderr,
-                             "[GEOIO] merged part %d node %d worldDiag=(%.4f,%.4f,%.4f) tr=(%.4f,%.4f,%.4f)\n",
-                             (int)e, nodeIdx, world[0], world[5], world[10],
-                             world[12], world[13], world[14]);
-                const MeshData& srcM = *st->deformed[nd.meshIndex];
-                if (srcM.vertices.size() >= 3) {
-                    std::fprintf(stderr,
-                                 "[GEOIO]   src v0=(%.4f,%.4f,%.4f) srcNumVerts=%d\n",
-                                 srcM.vertices[0], srcM.vertices[1],
-                                 srcM.vertices[2], (int)srcM.numVertices);
-                }
-            }
-            appendArchiveMesh(*st->deformed[nd.meshIndex], world, mesh.get(),
-                              partColor[0] >= 0.f ? partColor : nullptr);
-            if (std::getenv("NATRON_DEBUG_GEOIO") && mesh->vertices.size() >= 3) {
-                std::fprintf(stderr,
-                             "[GEOIO]   baked v0=(%.4f,%.4f,%.4f)\n",
-                             mesh->vertices[0], mesh->vertices[1],
-                             mesh->vertices[2]);
-            }
-        }
-    } else if (chosenIdx - 1 < (int)imp->meshEntries.size()) {
-        // Single part.
-        const int nodeIdx = imp->meshEntries[chosenIdx - 1];
-        if (nodeIdx < (int)data.nodes.size()) {
-            const GeoArchiveNodeData& nd = data.nodes[nodeIdx];
-            MeshDataPtr src;
-            if (nd.meshIndex >= 0 && nd.meshIndex < (int)st->deformed.size()) {
-                src = st->deformed[nd.meshIndex];
-            }
-            if (src) {
-                // Single part: bake the part's material color on its faces
-                // (the merged-style face-color consumption applies 1:1).
-                float partColor[3] = { -1.f, 0.f, 0.f };
-                const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
-                if (md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
-                    data.materials[md.materialIndex].present) {
-                    const GeoImportMaterial& m = data.materials[md.materialIndex];
-                    partColor[0] = (float)m.baseColor[0];
-                    partColor[1] = (float)m.baseColor[1];
-                    partColor[2] = (float)m.baseColor[2];
-                }
-                const float* pc = partColor[0] >= 0.f ? partColor : nullptr;
-                if (bake) {
-                    // Baked: the part's evaluated world matrix goes into the
-                    // vertices; MeshData::transform stays identity.
-                    float world[16];
-                    imp->rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, world);
-                    appendArchiveMesh(*src, world, mesh.get(), pc);
-                } else {
-                    // Non-baked: the part keeps its node-local vertices and
-                    // the part's world matrix rides in MeshData::transform â€”
-                    // the animation keeps flowing through it and the user
-                    // T/R/S composes on top in every consumer.
-                    float identity[16];
-                    geoArchiveMatIdentity(identity);
-                    appendArchiveMesh(*src, identity, mesh.get(), pc);
-                    imp->rt.worldMatrixAt(nodeIdx, timeEff, fps, 0, mesh->transform);
-                }
-            }
-        }
-    }
-    // Edge indices for the viewport wireframe. Skipped for very dense meshes:
-    // the array alone is ~2x the corner count (8.9M ints for a 1.5M-triangle
-    // scan) and the viewport wire pass would push millions of immediate-mode
-    // lines every paint, drowning the shaded fill in a uniform grey — the
-    // archive path never builds edges, so big assets shaded clean there while
-    // a rebuilt ReadGeo of the same file turned into a grey blob.
-    if (mesh->faceIndices.size() <= 4000000) {
-        importBuildEdgeIndices(mesh.get());
-    }
-
-    // Geometry-loader diagnostics gate (same pattern as NATRON_DEBUG_SC):
-    // set env NATRON_DEBUG_GEOIO=1 to dump the raw built geometry (vertex
-    // values, not just counts) so headless tests can verify what the loader
-    // actually produced â€” a degenerate all-zero vertex array renders as an
-    // empty scene and is invisible in the counts alone.
-    if (std::getenv("NATRON_DEBUG_GEOIO")) {
-        std::ostringstream dbg;
-        dbg << "[GEOIO] fmt=" << (imp->rt.isFbx ? "FBX" : "glTF")
-            << " frame=" << (key + 1) << " sel=" << imp->partLabels[chosenIdx]
-            << " bake=" << (bake ? 1 : 0)
-            << " verts=" << mesh->numVertices
-            << " faces=" << mesh->numFaces
-            << " uvslots=" << (mesh->uvs.size() / 2)
-            << " vcolors=" << (mesh->hasVertexColors ? (int)(mesh->vertexColors.size() / 3) : -1)
-            << " c0..c5=";
-        for (std::size_t i = 0; i < mesh->vertexColors.size() && i < 6; ++i) {
-            dbg << mesh->vertexColors[i] << ",";
-        }
-        dbg << " v0..v5=";
-        for (std::size_t i = 0; i < mesh->vertices.size() && i < 6; ++i) {
-            dbg << mesh->vertices[i] << ",";
-        }
-        dbg << " faceCounts0..3=";
-        for (std::size_t i = 0; i < mesh->faceCounts.size() && i < 4; ++i) {
-            dbg << mesh->faceCounts[i] << ",";
-        }
-        dbg << " faceIdx0..5=";
-        for (std::size_t i = 0; i < mesh->faceIndices.size() && i < 6; ++i) {
-            dbg << mesh->faceIndices[i] << ",";
-        }
-        dbg << " uv0..u11=";
-        for (std::size_t i = 0; i < mesh->uvs.size() && i < 12; ++i) {
-            dbg << mesh->uvs[i] << ",";
-        }
-        if (mesh->uvs.size()) {
-            float umn = mesh->uvs[0], umx = umn, vmn = mesh->uvs[1], vmx = vmn;
-            for (std::size_t i = 0; i + 1 < mesh->uvs.size(); i += 2) {
-                umn = std::min(umn, mesh->uvs[i]);
-                umx = std::max(umx, mesh->uvs[i]);
-                vmn = std::min(vmn, mesh->uvs[i + 1]);
-                vmx = std::max(vmx, mesh->uvs[i + 1]);
-            }
-            dbg << " uvr=[u" << umn << ".." << umx << " v" << vmn << ".." << vmx << "]";
-        }
-        dbg << " tr=";
-        for (int i = 0; i < 16; ++i) {
-            dbg << mesh->transform[i] << ",";
-        }
-        // Vertex bbox: direct deformation evidence (morph weights move the
-        // bbox even when v0..v5 happen to be unmoved corners).
-        if (!mesh->vertices.empty()) {
-            float bmn[3] = { mesh->vertices[0], mesh->vertices[1], mesh->vertices[2] };
-            float bmx[3] = { bmn[0], bmn[1], bmn[2] };
-            for (std::size_t i = 0; i + 2 < mesh->vertices.size(); i += 3) {
-                for (int a = 0; a < 3; ++a) {
-                    bmn[a] = std::min(bmn[a], mesh->vertices[i + a]);
-                    bmx[a] = std::max(bmx[a], mesh->vertices[i + a]);
-                }
-            }
-            dbg << " bbox=[" << bmn[0] << "," << bmn[1] << "," << bmn[2]
-                << " .. " << bmx[0] << "," << bmx[1] << "," << bmx[2] << "]";
-        }
-        fprintf(stderr, "%s\n", dbg.str().c_str());
-    }
+    const std::string chosenLabel =
+        (chosenIdx >= 0 && chosenIdx < (int)imp->partLabels.size())
+            ? imp->partLabels[chosenIdx] : std::string();
+    MeshDataPtr mesh = geoBuildSceneMeshCore(imp->rt, st, imp->meshEntries, chosenLabel,
+                                             chosenIdx, bake, fps, timeEff, key);
 
     imp->builtCache.insert(std::make_pair(cacheKey, mesh));
     return mesh;
+}
+
+// One glTF/FBX sequence frame: a throwaway runtime parses the frame file and
+// evaluates its frame-0 state; the shared scene-builder output is what gets
+// cached as the frame's mesh. Materials already rode in with the reference
+// load; sequence content strictly wins over the frame's own animated
+// channels (only its frame-zero state is evaluated).
+MeshDataPtr
+ReadGeo::buildSceneSeqFrame(int frame, std::string* err) const
+{
+    if (!err) {
+        return MeshDataPtr();
+    }
+    std::map<int, std::string>::const_iterator pit = _imp->seq.files.find(frame);
+    if (pit == _imp->seq.files.end()) {
+        *err = "no file for frame " + std::to_string(frame);
+        return MeshDataPtr();
+    }
+
+    std::unique_ptr<GeoArchiveRuntime> frt(new GeoArchiveRuntime);
+    const bool reverse = _imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue();
+    if (!frt->loadFile(pit->second, reverse, *err)) {
+        return MeshDataPtr();
+    }
+    const bool bake = _imp->bakeTransforms.lock() && _imp->bakeTransforms.lock()->getValue();
+    frt->bakeMeshWorld = bake;
+    const double fps = getApp() ? getApp()->getProjectFrameRate() : 24.0;
+    const std::shared_ptr<const GeoArchiveFrameEval> st = frt->ensureFrameState(fps, 0);
+
+    // Object selection rides the reference file's dropdown index (parts come
+    // in the same order across frames; out-of-range indices build what the
+    // frame file has).
+    KnobChoicePtr objKnob = _imp->objectPath.lock();
+    int chosenIdx = objKnob ? objKnob->getValue() : 0;
+    if (chosenIdx < 0) {
+        chosenIdx = 0;
+    }
+    const std::string chosenLabel =
+        (chosenIdx >= 0 && chosenIdx < (int)_imp->partLabels.size())
+            ? _imp->partLabels[chosenIdx] : std::string();
+    return geoBuildSceneMeshCore(*frt, st, _imp->meshEntries, chosenLabel,
+                                 chosenIdx, bake, fps, 1.0, 0);
 }
 
 void
@@ -1969,11 +2331,73 @@ ReadGeo::onKnobsAboutToBeLoaded(const NodeSerializationPtr& serialization)
 // Mesh data access
 // ---------------------------------------------------------------------------
 
+// One built sequence frame (caller holds _meshMutex): the timeline frame maps
+// to the sequence's FILE frame numbers — frozen evaluation substitutes the
+// frozen frame, out-of-range/gap times hold at the nearest present file.
+// Built meshes are served from the bounded LRU; misses parse + build the
+// frame file through the format dispatch.
+MeshDataPtr
+ReadGeo::getMeshDataAtSeqFrame(double time) const
+{
+    double tEff = time;
+    if (_imp->freezeAtFrame.lock() && _imp->freezeAtFrame.lock()->getValue()) {
+        tEff = (double)(_imp->freezeFrame.lock()
+                            ? _imp->freezeFrame.lock()->getValue() : 1);
+    }
+    int frame = (int)std::floor(tEff < 0.0 ? 0.0 : tEff);
+    frame = _imp->seq.clampFrame(frame);
+
+    std::shared_ptr<MeshData> cached = _imp->frameCache.get(frame);
+    if (cached) {
+        return MeshDataPtr(new MeshData(*cached));   // G1 copy-on-read
+    }
+
+    std::string err;
+    MeshDataPtr mesh;
+    if (_imp->seq.extension == ".obj") {
+        mesh = MeshDataPtr(new MeshData);
+        if (!buildObjSeqFrame(frame, mesh.get(), &err)) {
+            mesh.reset();
+        }
+    } else if (_imp->seq.extension == ".abc") {
+        mesh = MeshDataPtr(new MeshData);
+        if (!buildAbcSeqFrame(frame, mesh.get(), &err)) {
+            mesh.reset();
+        }
+    } else if (_imp->seq.extension == ".gltf" || _imp->seq.extension == ".glb" ||
+               _imp->seq.extension == ".fbx") {
+        mesh = buildSceneSeqFrame(frame, &err);
+    } else {
+        err = "format not handled: " + _imp->seq.extension;
+    }
+
+    if (!mesh) {
+        NodePtr n(getNode());
+        if (n) n->setPersistentMessage(eMessageTypeError,
+                                       "Sequence frame " + std::to_string(frame) + ": " + err);
+        return MeshDataPtr();
+    }
+    if (std::getenv("GSEQ_DEBUG")) {
+        std::fprintf(stderr, "[GSEQ] built frame %d ext=%s verts=%d faces=%d\n",
+                     frame, _imp->seq.extension.c_str(), mesh->numVertices,
+                     mesh->numFaces);
+        std::fflush(stderr);
+    }
+    _imp->frameCache.put(frame, mesh);
+    return MeshDataPtr(new MeshData(*mesh));
+}
+
 MeshDataPtr
 ReadGeo::getMeshData(double time) const
 {
     // Serialise against a concurrent reload swapping/clearing _lastMeshData.
     std::lock_guard<std::mutex> lk(_meshMutex);
+
+    // File-sequence mode (Gather Sequences): every frame comes from its own
+    // file — nothing can ride the single-file machinery below.
+    if (_imp && _imp->seq.isSequence) {
+        return getMeshDataAtSeqFrame(time);
+    }
 
     // Scene formats (glTF/FBX) always go through the per-frame builder, which
     // caches its builds - frozen files evaluate at the frozen frame, animated
@@ -2146,6 +2570,13 @@ ReadGeo::getPreferredMetadata(NodeMetadata& metadata)
     const bool frozen = _imp->freezeAtFrame.lock() &&
                         _imp->freezeAtFrame.lock()->getValue();
     if (frozen) {
+        return eStatusOK;
+    }
+    // A loaded file sequence is frame-varying by construction (the frame
+    // files are independent), regardless of the file format or its own
+    // animation flags.
+    if (_imp->seq.isSequence) {
+        metadata.setIsFrameVarying(true);
         return eStatusOK;
     }
     if (_imp->sceneLoaded) {
