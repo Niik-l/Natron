@@ -158,6 +158,124 @@ fn clip_line(sc: f32, sh: ptr<function, Shape>, ax: f32, ay: f32, bx: f32, by: f
 }
 )WGSL";
 
+// Pass S, one thread per sample (procedural lens): its shape(s), ProceduralLens::shape in f32, and
+// the value per channel group with axial colour (scatterWithCA). Field position from the target
+// the sample is in (binary search over the targets' first samples).
+const char* kShapeWgsl = R"WGSL(
+struct Sample { kx: i32, ky: i32, r: f32, c: array<f32, 5> };
+struct TInfo { fx0: f32, fy0: f32, fstep: f32, gs: f32, first: u32, count: u32, shapeOff: u32, p1: u32 };
+struct LensU {
+  sqX: f32, sqY: f32, swirl: f32, catEye: f32,
+  catEyeStart: f32, cx0: f32, cy0: f32, invField: f32,
+  caPx: f32, farOff: u32, farN: u32, nearOff: u32,
+  nearN: u32, nCh: u32, nSamples: u32, nTargets: u32,
+};
+@group(0) @binding(0) var<storage, read_write> shapes: array<Shape>;
+@group(0) @binding(1) var<storage, read> samples: array<Sample>;
+@group(0) @binding(2) var<storage, read> tinfo: array<TInfo>;
+@group(0) @binding(3) var<uniform> L: LensU;
+
+const PI: f32 = 3.14159265358979;
+
+fn make(r: f32, fx: f32, fy: f32, kx: i32, ky: i32, v: ptr<function, array<f32, 7>>) -> Shape {
+  var sh: Shape;
+  let rad = abs(r);
+  var m0 = rad * L.sqX;
+  var m1 = 0.0;
+  var m2 = 0.0;
+  var m3 = rad * L.sqY;
+  let rho = sqrt(fx * fx + fy * fy);
+  var c = 1.0;
+  var s = 0.0;
+  if (rho > 1e-9) { c = fx / rho; s = fy / rho; }
+  let sgn = select(1.0, -1.0, r < 0.0);
+  if (L.swirl != 0.0 && rho > 1e-6) {
+    // stretch along the tangential direction: R(phi) diag(1, t) R(-phi)
+    let t = clamp(1.0 + L.swirl * rho * rho * sgn, 0.25, 4.0);
+    let a00 = c * c + t * s * s;
+    let a01 = (1.0 - t) * c * s;
+    let a11 = s * s + t * c * c;
+    let n0 = a00 * m0 + a01 * m2;
+    let n1 = a00 * m1 + a01 * m3;
+    let n2 = a01 * m0 + a11 * m2;
+    let n3 = a01 * m1 + a11 * m3;
+    m0 = n0; m1 = n1; m2 = n2; m3 = n3;
+  }
+  if (r < 0.0) { m0 = -m0; m1 = -m1; m2 = -m2; m3 = -m3; }
+  let det = m0 * m3 - m1 * m2;
+  var flags = 0u;
+  if (sqrt(abs(det)) < 0.1) {
+    flags = 1u;
+  } else {
+    sh.inv[0] = m3 / det;
+    sh.inv[1] = -m1 / det;
+    sh.inv[2] = -m2 / det;
+    sh.inv[3] = m0 / det;
+  }
+  sh.ext = sqrt(m2 * m2 + m3 * m3);
+  sh.energy = 1.0;
+  if (L.catEye > 0.0 && rho > L.catEyeStart) {
+    let o = min(1.9, L.catEye * (rho - L.catEyeStart) / max(1e-6, 1.0 - L.catEyeStart));
+    if (o > 1e-4) {
+      flags = flags | (1u << 1u);
+      sh.clip[0] = o * c;
+      sh.clip[1] = o * s;
+      sh.clip[2] = 1.0;
+      // two unit discs offset by o: the light kept
+      sh.energy = (2.0 * acos(o / 2.0) - (o / 2.0) * sqrt(4.0 - o * o)) / PI;
+    }
+  }
+  if (r < 0.0) {
+    sh.ringOff = L.nearOff;
+    sh.nRings = L.nearN;
+  } else {
+    sh.ringOff = L.farOff;
+    sh.nRings = L.farN;
+  }
+  sh.bx = f32(kx);
+  sh.by = f32(ky);
+  sh.kx = kx;
+  sh.flags = flags;
+  for (var i = 0u; i < 7u; i++) { sh.v[i] = (*v)[i]; }
+  return sh;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+  let i = gid.x + gid.y * nw.x * 64u;
+  if (i >= L.nSamples) { return; }
+  var lo = 0u;
+  var hi = L.nTargets;
+  while (lo + 1u < hi) {
+    let mid = (lo + hi) / 2u;
+    if (tinfo[mid].first <= i) { lo = mid; } else { hi = mid; }
+  }
+  let T = tinfo[lo];
+  let smp = samples[i];
+  let fx = (T.fx0 + f32(smp.kx) * T.fstep - L.cx0) * L.invField;
+  let fy = (T.fy0 + f32(smp.ky) * T.fstep - L.cy0) * L.invField;
+  let out = T.shapeOff + (i - T.first) * L.nCh;
+  var v: array<f32, 7>;
+  if (L.nCh == 1u) {
+    for (var k = 0u; k < 5u; k++) { v[k] = smp.c[k]; }
+    v[5] = smp.c[3];
+    v[6] = smp.c[3];
+    shapes[out] = make(smp.r / T.gs, fx, fy, smp.kx, smp.ky, &v);
+    return;
+  }
+  // axial colour: red with its own radius and alpha, green with the rest, blue with its own
+  for (var ch = 0u; ch < 3u; ch++) {
+    for (var k = 0u; k < 7u; k++) { v[k] = 0.0; }
+    v[ch] = smp.c[ch];
+    if (ch == 0u) { v[5] = smp.c[3]; }
+    if (ch == 1u) { v[3] = smp.c[3]; v[4] = smp.c[4]; }
+    if (ch == 2u) { v[6] = smp.c[3]; }
+    let rr = smp.r + L.caPx * (1.0 - f32(ch));
+    shapes[out + ch] = make(rr / T.gs, fx, fy, smp.kx, smp.ky, &v);
+  }
+}
+)WGSL";
+
 // Pass A, one thread per shape: the kernel's area over all its sub-rows and rings -> norm.
 const char* kAreaWgsl = R"WGSL(
 @group(0) @binding(0) var<storage, read_write> shapes: array<Shape>;
@@ -389,8 +507,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nw: vec3<
   }
   workgroupBarrier();
   let rowBase = P.outOff + (u32(y) * u32(P.w) + u32(tx0)) * 7u;
+  let add = (P.flags & 1u) != 0u;   // a second target into the same buffer (cells after highlights)
   for (var i = li; i < tw * 7u; i += 64u) {
-    outb[rowBase + i] = bitcast<f32>(atomicLoad(&cells[i]));
+    let v = bitcast<f32>(atomicLoad(&cells[i]));
+    if (add) { outb[rowBase + i] += v; } else { outb[rowBase + i] = v; }
   }
 }
 )WGSL";
@@ -505,7 +625,7 @@ struct Context
     std::string adapterName;
     std::string initError;
     std::string error;                  // validation / out-of-memory errors since the last check
-    WGPUComputePipeline area = nullptr, spans = nullptr, composite = nullptr;
+    WGPUComputePipeline shapeGen = nullptr, area = nullptr, spans = nullptr, composite = nullptr;
 
     static void onError(WGPUDevice const*, WGPUErrorType, WGPUStringView message, void* u, void*)
     {
@@ -585,11 +705,12 @@ struct Context
                            info.device.length == WGPU_STRLEN ? std::strlen(info.device.data) : info.device.length);
 
         const std::string common = std::string(kCommonWgsl);
+        shapeGen = pipeline(common + kShapeWgsl);
         area = pipeline(common + kAreaWgsl + kClipWgsl);
         spans = pipeline(common + kSpanWgsl + kClipWgsl);
         composite = pipeline(common + kCompositeWgsl);
         wait();
-        if ( !area || !spans || !composite || !error.empty() ) {
+        if ( !shapeGen || !area || !spans || !composite || !error.empty() ) {
             initError = "GPU shaders failed: " + error;
             error.clear();
             device = nullptr;
@@ -715,33 +836,54 @@ bool scatter(const Job& job, std::vector<float>& acc, std::string& err,
     };
     double tUpload = 0., tArea = 0., tSlices = 0.;
 
-    // ---- gather the targets: shapes and row starts into one buffer each
+    // ---- gather the targets: shapes (or samples, built into shapes on the GPU) and row starts
+    // into one buffer each. Shape offsets count lens.nCh shapes per sample.
+    const bool gen = job.lens.onGpu;
+    const std::uint32_t nCh = gen ? (std::uint32_t)std::max(1, job.lens.nCh) : 1u;
     struct TargetRef { const Target* t; std::uint32_t shapeOff, rowOff; };
+    struct TInfo { float fx0, fy0, fstep, gs; std::uint32_t first, count, shapeOff, p1; };
     std::vector<Shape> shapes;
+    std::vector<Sample> samples;
+    std::vector<TInfo> tinfo;
     std::vector<std::uint32_t> rows;
     std::vector<float> levelInside;
     std::vector<std::uint32_t> mlOff(job.slices.size(), 0);
-    std::vector<TargetRef> refs;          // 4 per slice: full, fullFill, lvl, lvlFill
+    std::vector<TargetRef> refs;          // eTargetCount per slice
     std::uint64_t maxLevelCells = 1;
+    std::uint64_t nShapes = 0;
     for (size_t si = 0; si < job.slices.size(); ++si) {
         const Slice& s = job.slices[si];
-        const Target* ts[4] = {&s.full, &s.fullFill, &s.lvl, &s.lvlFill};
-        for (const Target* t : ts) {
-            TargetRef r = {t, (std::uint32_t)shapes.size(), (std::uint32_t)rows.size()};
-            shapes.insert( shapes.end(), t->shapes.begin(), t->shapes.end() );
-            rows.insert( rows.end(), t->rowStart.begin(), t->rowStart.end() );
+        for (int k = 0; k < eTargetCount; ++k) {
+            const Target& t = s.t[k];
+            TargetRef r = {&t, (std::uint32_t)nShapes, (std::uint32_t)rows.size()};
+            if (gen) {
+                if ( !t.samples.empty() ) {
+                    TInfo ti = {t.fx0, t.fy0, t.fstep, t.gridScale, (std::uint32_t)samples.size(),
+                                (std::uint32_t)t.samples.size(), (std::uint32_t)nShapes, 0};
+                    tinfo.push_back(ti);
+                    samples.insert( samples.end(), t.samples.begin(), t.samples.end() );
+                }
+                nShapes += (std::uint64_t)t.samples.size() * nCh;
+                for (std::uint32_t v : t.rowStart) {
+                    rows.push_back(v * nCh);
+                }
+            } else {
+                shapes.insert( shapes.end(), t.shapes.begin(), t.shapes.end() );
+                nShapes += t.shapes.size();
+                rows.insert( rows.end(), t.rowStart.begin(), t.rowStart.end() );
+            }
             refs.push_back(r);
         }
         mlOff[si] = (std::uint32_t)levelInside.size();
         levelInside.insert( levelInside.end(), s.lvlInside.begin(), s.lvlInside.end() );
         if (s.level > 0) {
-            maxLevelCells = std::max<std::uint64_t>(maxLevelCells, (std::uint64_t)s.lvl.w * s.lvl.h);
+            maxLevelCells = std::max<std::uint64_t>(maxLevelCells, (std::uint64_t)s.t[eTargetLevel].w * s.t[eTargetLevel].h);
         }
     }
 
     const std::uint64_t frameBytes = (std::uint64_t)job.ow * job.oh * kNumCh * sizeof(float);
     const std::uint64_t levelBytes = maxLevelCells * kNumCh * sizeof(float);
-    const std::uint64_t shapeBytes = (std::uint64_t)shapes.size() * sizeof(Shape);
+    const std::uint64_t shapeBytes = nShapes * sizeof(Shape);
     const std::uint64_t maxBind = g.limits.maxStorageBufferBindingSize;
     if (frameBytes > maxBind || shapeBytes > maxBind || levelBytes > maxBind) {
         err = "the frame needs larger GPU buffers than this GPU allows";
@@ -749,7 +891,9 @@ bool scatter(const Job& job, std::vector<float>& acc, std::string& err,
     }
 
     Buffers B;
-    WGPUBuffer dShapes = B.keep( storage(g, shapes.data(), shapeBytes) );
+    WGPUBuffer dShapes = B.keep( storage(g, gen ? nullptr : shapes.data(), shapeBytes) );
+    WGPUBuffer dSamples = B.keep( storage(g, samples.data(), samples.size() * sizeof(Sample)) );
+    WGPUBuffer dTInfo = B.keep( storage(g, tinfo.data(), tinfo.size() * sizeof(TInfo)) );
     WGPUBuffer dRows = B.keep( storage(g, rows.data(), rows.size() * sizeof(std::uint32_t)) );
     WGPUBuffer dCons = B.keep( storage(g, job.constraints.data(), job.constraints.size() * sizeof(float)) );
     WGPUBuffer dRings = B.keep( storage(g, job.rings.data(), job.rings.size() * sizeof(float)) );
@@ -765,21 +909,37 @@ bool scatter(const Job& job, std::vector<float>& acc, std::string& err,
     rd.size = frameBytes;
     WGPUBuffer dRead = B.keep( wgpuDeviceCreateBuffer(g.device, &rd) );
 
-    // ---- per-dispatch parameters: pass A, then per slice 4 x pass B + pass C
+    // the procedural lens for pass S (struct LensU in the WGSL)
+    struct LensU {
+        float sqX, sqY, swirl, catEye, catEyeStart, cx0, cy0, invField, caPx;
+        std::uint32_t farOff, farN, nearOff, nearN, nCh, nSamples, nTargets;
+    } lu = {job.lens.sqX, job.lens.sqY, job.lens.swirl, job.lens.catEye, job.lens.catEyeStart, job.lens.cx0,
+            job.lens.cy0, job.lens.invField, job.lens.caPx, job.lens.farOff, job.lens.farN, job.lens.nearOff,
+            job.lens.nearN, nCh, (std::uint32_t)samples.size(), (std::uint32_t)tinfo.size()};
+    static_assert(sizeof(LensU) == 64, "LensU must match the WGSL struct");
+    WGPUBufferDescriptor lud = {};
+    lud.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+    lud.size = sizeof(LensU);
+    WGPUBuffer dLens = B.keep( wgpuDeviceCreateBuffer(g.device, &lud) );
+    wgpuQueueWriteBuffer(g.queue, dLens, 0, &lu, sizeof(LensU));
+
+    // ---- per-dispatch parameters: pass A, then per slice eTargetCount x pass B + pass C
     const std::uint32_t nCons = (std::uint32_t)(job.constraints.size() / 8);
+    const size_t perSlice = eTargetCount + 1;
     std::vector<Params> params;
     {
         Params p = {};
-        p.nShapes = (std::uint32_t)shapes.size();
+        p.nShapes = (std::uint32_t)nShapes;
         p.nCons = nCons;
         params.push_back(p);
     }
     for (size_t si = 0; si < job.slices.size(); ++si) {
         const Slice& s = job.slices[si];
-        std::uint32_t flags = 0;
-        for (int k = 0; k < 4; ++k) {
-            const TargetRef& r = refs[si * 4 + k];
+        bool has[eTargetCount];
+        for (int k = 0; k < eTargetCount; ++k) {
+            const TargetRef& r = refs[si * eTargetCount + k];
             const Target& t = *r.t;
+            has[k] = !t.empty() && t.w > 0 && t.h > 0;
             Params p = {};
             p.w = t.w;
             p.h = t.h;
@@ -791,23 +951,24 @@ bool scatter(const Job& job, std::vector<float>& acc, std::string& err,
             p.shapeOff = r.shapeOff;
             p.rowOff = r.rowOff;
             p.nCons = nCons;
+            // level-0 cells add to the highlights already in the full-res buffer
+            p.flags = (k == eTargetCells && has[eTargetHighlights]) ? 1u : 0u;
             params.push_back(p);
-            if (!t.empty() && t.w > 0 && t.h > 0) {
-                flags |= (1u << k);
-            }
         }
         Params p = {};
         p.ow = job.ow;
         p.oh = job.oh;
         p.level = s.level;
         p.sc = 1 << s.level;
-        p.lw = s.lvl.w;
-        p.lh = s.lvl.h;
+        p.lw = s.t[eTargetLevel].w;
+        p.lh = s.t[eTargetLevel].h;
         p.ilo = s.ilo;
         p.jlo = s.jlo;
         p.oxD = job.oxD;
         p.oyD = job.oyD;
-        p.flags = flags;
+        p.flags = ( (has[eTargetHighlights] || has[eTargetCells]) ? eHasFull : 0u ) |
+                  ( has[eTargetFills] ? eHasFullFill : 0u ) | ( has[eTargetLevel] ? eHasLvl : 0u ) |
+                  ( has[eTargetLevelFills] ? eHasLvlFill : 0u );
         p.mlOff = mlOff[si];
         params.push_back(p);
     }
@@ -850,7 +1011,7 @@ bool scatter(const Job& job, std::vector<float>& acc, std::string& err,
         g.wait();   // one submission per slice keeps each under the OS GPU timeout
     };
 
-    // ---- clear the accumulator, pass A
+    // ---- clear the accumulator; pass S (shapes from samples), pass A (areas)
     g.wait();
     tUpload = since();
     {
@@ -861,13 +1022,23 @@ bool scatter(const Job& job, std::vector<float>& acc, std::string& err,
         wgpuCommandBufferRelease(cmd);
         wgpuCommandEncoderRelease(enc);
     }
-    if ( !shapes.empty() ) {
+    if (nShapes > 0) {
+        WGPUBindGroup sg = nullptr;
+        if (gen) {
+            WGPUBindGroupEntry e[4] = {entry(0, dShapes), entry(1, dSamples), entry(2, dTInfo), entry(3, dLens)};
+            sg = group(g.shapeGen, e, 4);
+        }
         WGPUBindGroupEntry e[4] = {entry(0, dShapes), entry(1, dCons), entry(2, dRings), paramEntry(3, 0)};
         WGPUBindGroup bg = group(g.area, e, 4);
         submit([&](WGPUComputePassEncoder pass) {
+            if (sg) {
+                wgpuComputePassEncoderSetPipeline(pass, g.shapeGen);
+                wgpuComputePassEncoderSetBindGroup(pass, 0, sg, 0, nullptr);
+                dispatch1D( pass, samples.size() );
+            }
             wgpuComputePassEncoderSetPipeline(pass, g.area);
             wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, nullptr);
-            dispatch1D( pass, shapes.size() );
+            dispatch1D(pass, nShapes);
         }, false);
     }
     if ( !g.error.empty() ) {
@@ -877,28 +1048,29 @@ bool scatter(const Job& job, std::vector<float>& acc, std::string& err,
     tArea = since();
 
     // ---- slices back to front
-    WGPUBuffer outs[4] = {dFull, dFullF, dLvl, dLvlF};
+    WGPUBuffer outs[eTargetCount] = {dFull, dFull, dFullF, dLvl, dLvlF};
     for (int si = (int)job.slices.size() - 1; si >= 0; --si) {
         if ( aborted && aborted() ) {
             err = "aborted";
             return false;
         }
-        const size_t pBase = 1 + (size_t)si * 5;
-        const std::uint32_t flags = params[pBase + 4].flags;
-        WGPUBindGroup spanGroups[4] = {nullptr, nullptr, nullptr, nullptr};
-        for (int k = 0; k < 4; ++k) {
-            if ( flags & (1u << k) ) {
+        const size_t pBase = 1 + (size_t)si * perSlice;
+        WGPUBindGroup spanGroups[eTargetCount];
+        for (int k = 0; k < eTargetCount; ++k) {
+            spanGroups[k] = nullptr;
+            const Target& t = job.slices[si].t[k];
+            if ( !t.empty() && t.w > 0 && t.h > 0 ) {
                 WGPUBindGroupEntry e[6] = {entry(0, dShapes), entry(1, dCons), entry(2, dRings),
                                            paramEntry(3, pBase + k), entry(4, dRows), entry(5, outs[k])};
                 spanGroups[k] = group(g.spans, e, 6);
             }
         }
         WGPUBindGroupEntry ce[8] = {entry(0, dFull), entry(1, dFullF), entry(2, dLvl), entry(3, dLvlF),
-                                    entry(4, dInside), entry(5, dML), entry(6, dAcc), paramEntry(7, pBase + 4)};
+                                    entry(4, dInside), entry(5, dML), entry(6, dAcc), paramEntry(7, pBase + eTargetCount)};
         WGPUBindGroup compGroup = group(g.composite, ce, 8);
         const bool last = si == 0;
         submit([&](WGPUComputePassEncoder pass) {
-            for (int k = 0; k < 4; ++k) {
+            for (int k = 0; k < eTargetCount; ++k) {
                 if (!spanGroups[k]) {
                     continue;
                 }
@@ -919,23 +1091,7 @@ bool scatter(const Job& job, std::vector<float>& acc, std::string& err,
     if ( job.slices.empty() ) {
         submit([](WGPUComputePassEncoder) {}, true);
     }
-
     tSlices = since();
-    if (times) {
-        for (size_t si = 0; si < job.slices.size() && si < 16; ++si) {
-            const Slice& s = job.slices[si];
-            std::fprintf(stderr, "[DefocusGpu]   slice %zu level %d:", si, s.level);
-            const Target* ts[4] = {&s.full, &s.fullFill, &s.lvl, &s.lvlFill};
-            const char* names[4] = {"full", "fill", "lvl", "lvlFill"};
-            for (int k = 0; k < 4; ++k) {
-                if (!ts[k]->empty()) {
-                    std::fprintf(stderr, " %s %dx%d %zu shapes reach %d,%d;", names[k], ts[k]->w, ts[k]->h,
-                                 ts[k]->shapes.size(), ts[k]->reachX, ts[k]->reachY);
-                }
-            }
-            std::fprintf(stderr, "\n");
-        }
-    }
 
     // ---- read back
     bool mapped = false;
@@ -955,9 +1111,11 @@ bool scatter(const Job& job, std::vector<float>& acc, std::string& err,
     acc.assign(px, px + (size_t)job.ow * job.oh * kNumCh);
     wgpuBufferUnmap(dRead);
     if (times) {
-        std::fprintf(stderr, "[DefocusGpu]   upload %.3f, area %.3f, slices %.3f, read back %.3f s (%zu shapes, %.0f MB)\n",
-                     tUpload, tArea - tUpload, tSlices - tArea, since() - tSlices, shapes.size(),
-                     (double)(shapeBytes + 5 * frameBytes) / (1024. * 1024.));
+        const std::uint64_t upBytes = gen ? samples.size() * sizeof(Sample) : shapeBytes;
+        std::fprintf(stderr, "[DefocusGpu]   upload %.3f, shapes+area %.3f, slices %.3f, read back %.3f s "
+                     "(%llu shapes%s, %.0f MB uploaded)\n", tUpload, tArea - tUpload, tSlices - tArea,
+                     since() - tSlices, (unsigned long long)nShapes, gen ? " built on the GPU" : "",
+                     (double)upBytes / (1024. * 1024.));
     }
     return true;
 }

@@ -3024,21 +3024,59 @@ renderDefocus(const Inputs& in,
         // traced lens's per-sample rings go into the chunk's own list (flagged, offset at the merge).
         const std::uint32_t kLocalRing = 0x80000000u;
         std::vector<std::pair<const double*, std::uint32_t> > sharedRings;
+        // The procedural lens's shapes are built on the GPU from 32-byte samples; a traced lens's
+        // (table lookups) here.
+        const bool genOnGpu = !s.lens.table;
+        job.lens.onGpu = genOnGpu;
+        job.lens.nCh = (caPx == 0. && !lens.perChannel()) ? 1 : 3;
+        {
+            const double q = std::max(0.05, s.lens.squeeze);
+            job.lens.sqX = (float)(1. / std::sqrt(q));
+            job.lens.sqY = (float)std::sqrt(q);
+            job.lens.swirl = (float)s.lens.swirl;
+            job.lens.catEye = (float)s.lens.catEye;
+            job.lens.catEyeStart = (float)s.lens.catEyeStart;
+            job.lens.cx0 = (float)cx0;
+            job.lens.cy0 = (float)cy0;
+            job.lens.invField = (float)invField;
+            job.lens.caPx = (float)caPx;
+        }
         if (!s.lens.table) {
             for (double r : {1., -1.}) {
                 KernelShape k;
                 lens.shape(r * 4., 0., 0., k, 0., 1);
                 if (k.ringScale != k.ringS) {
-                    sharedRings.push_back(std::make_pair(k.ringScale, (std::uint32_t)(job.rings.size() / 2)));
+                    const std::uint32_t off = (std::uint32_t)(job.rings.size() / 2);
+                    sharedRings.push_back(std::make_pair(k.ringScale, off));
                     for (int i = 0; i < k.nRings; ++i) {
                         job.rings.push_back((float)k.ringScale[i]);
                         job.rings.push_back((float)k.ringWeight[i]);
                     }
+                    if (r > 0.) {
+                        job.lens.farOff = off;
+                        job.lens.farN = (std::uint32_t)k.nRings;
+                    } else {
+                        job.lens.nearOff = off;
+                        job.lens.nearN = (std::uint32_t)k.nRings;
+                    }
                 }
             }
         }
+        // How far a procedural kernel can reach, over its radius in cells: the squeeze, and the swirl
+        // stretch at the frame corner furthest from the optical centre.
+        double stretch = std::max(job.lens.sqX, job.lens.sqY);
+        if (s.lens.swirl != 0.) {
+            double rhoMax = 0.;
+            for (int cx : {O.x1, O.x2}) {
+                for (int cy : {O.y1, O.y2}) {
+                    rhoMax = std::max(rhoMax, std::hypot(cx - cx0, cy - cy0) * invField);
+                }
+            }
+            stretch *= std::max(1., std::min(4., 1. + std::fabs(s.lens.swirl) * rhoMax * rhoMax));
+        }
+
         struct Keyed { int ky, kx; gpu::Shape sh; };
-        struct Building { std::vector<Keyed> v; std::vector<float> rings; double reachX = 1., reachY = 1.; };
+        struct Building { std::vector<Keyed> v; std::vector<float> rings; double reachX = 1., reachY = 1.; float maxR = 0.f; };
         // One sample -> its shape(s) (three with axial colour): scatterWithCA's channel split.
         auto addSample = [&](Building& T, const Sample& smp, double gx, double gy, double fullX, double fullY,
                              double gridScale, int kx, int ky) {
@@ -3122,9 +3160,9 @@ renderDefocus(const Inputs& in,
             }
         };
 
-        // Work: per slice up to four targets (0 full: highlights + level-0 cells, 1 full fills,
-        // 2 level cells, 3 level fills), each fed by sample sets cut into chunks built in parallel.
-        enum { eFull = 0, eFullFill, eLvl, eLvlFill };
+        // Per slice, five targets each fed by one sample set (already in (row, column) order):
+        // highlights, level-0 cells (same buffer), level-0 fills, level cells, level fills. The sets
+        // are cut into chunks built in parallel.
         struct Chunk { int slice, target, set, b, e; };   // set: 0 hi, 1 cells, 2 fills
         const int kChunk = 16384;
         std::vector<Chunk> chunks;
@@ -3135,16 +3173,31 @@ renderDefocus(const Inputs& in,
             gpu::Slice& G = job.slices[si];
             const int L = S.level;
             G.level = L;
+            const int sc = 1 << L;
+            auto lu = [&](double val, int origin) { return (val - origin + 0.5) / sc - 0.5; };
             if (L > 0) {
-                const int sc = 1 << L;
-                auto lu = [&](double val, int origin) { return (val - origin + 0.5) / sc - 0.5; };
                 G.ilo = (int)std::floor(lu(O.x1, D.x1));
                 G.jlo = (int)std::floor(lu(O.y1, D.y1));
             }
+            const int lw = L > 0 ? (int)std::floor(lu(O.x2 - 1, D.x1)) + 1 - G.ilo + 1 : 0;
+            const int lh = L > 0 ? (int)std::floor(lu(O.y2 - 1, D.y1)) + 1 - G.jlo + 1 : 0;
             const std::vector<Sample>* sets[3] = {&S.hi, &S.cells, &S.fills};
             for (int set = 0; set < 3; ++set) {
-                const int target = set == 0 ? eFull : set == 1 ? (L == 0 ? eFull : eLvl) : (L == 0 ? eFullFill : eLvlFill);
+                const int target = set == 0 ? gpu::eTargetHighlights
+                                 : set == 1 ? (L == 0 ? gpu::eTargetCells : gpu::eTargetLevel)
+                                            : (L == 0 ? gpu::eTargetFills : gpu::eTargetLevelFills);
+                gpu::Target& T = G.t[target];
+                const bool lvlT = target == gpu::eTargetLevel || target == gpu::eTargetLevelFills;
+                T.w = lvlT ? lw : Ow;
+                T.h = lvlT ? lh : Oh;
+                T.fx0 = lvlT ? (float)(D.x1 + (G.ilo + 0.5) * sc - 0.5) : (float)O.x1;
+                T.fy0 = lvlT ? (float)(D.y1 + (G.jlo + 0.5) * sc - 0.5) : (float)O.y1;
+                T.fstep = lvlT ? (float)sc : 1.f;
+                T.gridScale = T.fstep;
                 const int n = (int)sets[set]->size();
+                if (genOnGpu) {
+                    T.samples.resize(n);
+                }
                 for (int b = 0; b < n; b += kChunk) {
                     Chunk c = {(int)si, target, set, b, std::min(n, b + kChunk)};
                     chunks.push_back(c);
@@ -3156,29 +3209,81 @@ renderDefocus(const Inputs& in,
             for (int ci = b; ci < e; ++ci) {
                 const Chunk& C = chunks[ci];
                 const Slice& S = slices[C.slice];
-                const gpu::Slice& G = job.slices[C.slice];
+                gpu::Slice& G = job.slices[C.slice];
                 const int sc = 1 << S.level;
                 const std::vector<Sample>& v = C.set == 0 ? S.hi : C.set == 1 ? S.cells : S.fills;
                 Building& T = built[ci];
-                T.v.reserve(C.e - C.b);
                 for (int i = C.b; i < C.e; ++i) {
                     const Sample& smp = v[i];
+                    // the sample's cell in its target, and its full-res position
+                    int kx, ky;
+                    double fullX, fullY, gs = 1.;
                     if (C.set == 0) {   // highlights: full-res pixels
-                        addSample(T, smp, smp.x - O.x1, smp.y - O.y1, smp.x, smp.y, 1., smp.x - O.x1, smp.y - O.y1);
+                        kx = smp.x - O.x1;
+                        ky = smp.y - O.y1;
+                        fullX = smp.x;
+                        fullY = smp.y;
                     } else if (S.level == 0) {
-                        const int sx = smp.x + D.x1, sy = smp.y + D.y1;
-                        addSample(T, smp, sx - O.x1, sy - O.y1, sx, sy, 1., sx - O.x1, sy - O.y1);
+                        kx = smp.x + D.x1 - O.x1;
+                        ky = smp.y + D.y1 - O.y1;
+                        fullX = smp.x + D.x1;
+                        fullY = smp.y + D.y1;
                     } else {
-                        addSample(T, smp, smp.x - G.ilo, smp.y - G.jlo, D.x1 + (smp.x + 0.5) * sc - 0.5,
-                                  D.y1 + (smp.y + 0.5) * sc - 0.5, sc, smp.x - G.ilo, smp.y - G.jlo);
+                        kx = smp.x - G.ilo;
+                        ky = smp.y - G.jlo;
+                        fullX = D.x1 + (smp.x + 0.5) * sc - 0.5;
+                        fullY = D.y1 + (smp.y + 0.5) * sc - 0.5;
+                        gs = sc;
+                    }
+                    if (genOnGpu) {
+                        gpu::Sample& g = G.t[C.target].samples[i];
+                        g.kx = kx;
+                        g.ky = ky;
+                        g.r = smp.r;
+                        for (int c = 0; c < kSampleCh; ++c) {
+                            g.c[c] = smp.c[c];
+                        }
+                        T.maxR = std::max(T.maxR, std::fabs(smp.r));
+                    } else {
+                        addSample(T, smp, kx, ky, fullX, fullY, gs, kx, ky);
                     }
                 }
             }
         });
-        // Merge the chunks per target (sorted by row key, then column), fixing local ring offsets.
-        auto finish = [&](size_t si, int target, gpu::Target& t, int w, int h) {
-            t.w = w;
-            t.h = h;
+        // Finish each target: row starts (shapes: merged chunks, local ring offsets fixed) and reach.
+        auto finish = [&](size_t si, int target) {
+            gpu::Target& t = job.slices[si].t[target];
+            if (genOnGpu) {
+                float maxR = 0.f;
+                for (size_t ci = 0; ci < chunks.size(); ++ci) {
+                    if (chunks[ci].slice == (int)si && chunks[ci].target == target) {
+                        maxR = std::max(maxR, built[ci].maxR);
+                    }
+                }
+                if (t.samples.empty()) {
+                    return;
+                }
+                const bool sorted = std::is_sorted(t.samples.begin(), t.samples.end(), [](const gpu::Sample& a, const gpu::Sample& c) {
+                    return a.ky != c.ky ? a.ky < c.ky : a.kx < c.kx;
+                });
+                if (!sorted) {
+                    std::stable_sort(t.samples.begin(), t.samples.end(), [](const gpu::Sample& a, const gpu::Sample& c) {
+                        return a.ky != c.ky ? a.ky < c.ky : a.kx < c.kx;
+                    });
+                }
+                t.keyY0 = t.samples.front().ky;
+                const int nRows = t.samples.back().ky - t.keyY0 + 1;
+                t.rowStart.assign((size_t)nRows + 1, 0);
+                for (const gpu::Sample& g : t.samples) {
+                    ++t.rowStart[(size_t)(g.ky - t.keyY0) + 1];
+                }
+                for (int r = 0; r < nRows; ++r) {
+                    t.rowStart[(size_t)r + 1] += t.rowStart[(size_t)r];
+                }
+                // the kernel's half size in cells, squeezed / swirled, plus a cell for points
+                t.reachX = t.reachY = (int)std::ceil((maxR + std::fabs(caPx)) / t.gridScale * stretch) + 2;
+                return;
+            }
             std::vector<Keyed> all;
             double reachX = 1., reachY = 1.;
             for (size_t ci = 0; ci < chunks.size(); ++ci) {
@@ -3201,8 +3306,8 @@ renderDefocus(const Inputs& in,
             if (all.empty()) {
                 return;
             }
-            // Each sample set is already in (row, column) order; only highlights + cells in one
-            // target need merging. Order indices, not the 136-byte entries.
+            // One set per target, already in (row, column) order; order indices, not the 136-byte
+            // entries, if it ever isn't.
             auto before = [&all](std::uint32_t a, std::uint32_t c) {
                 return all[a].ky != all[c].ky ? all[a].ky < all[c].ky : all[a].kx < all[c].kx;
             };
@@ -3229,41 +3334,36 @@ renderDefocus(const Inputs& in,
             t.reachY = (int)std::ceil(reachY) + 1;
         };
         for (size_t si = 0; si < slices.size(); ++si) {
+            for (int k = 0; k < gpu::eTargetCount; ++k) {
+                finish(si, k);
+            }
             gpu::Slice& G = job.slices[si];
+            const gpu::Target& lf = G.t[gpu::eTargetLevelFills];
             const int L = G.level;
-            finish(si, eFull, G.full, Ow, Oh);
-            finish(si, eFullFill, G.fullFill, Ow, Oh);
-            if (L > 0) {
+            if (L > 0 && !lf.empty() && L < (int)levelInside.size()) {
+                // Level-grid silhouette: mean source alpha per cell (the CPU's mL).
                 const int sc = 1 << L;
-                auto lu = [&](double val, int origin) { return (val - origin + 0.5) / sc - 0.5; };
-                const int ihi = (int)std::floor(lu(O.x2 - 1, D.x1)) + 1;
-                const int jhi = (int)std::floor(lu(O.y2 - 1, D.y1)) + 1;
-                const int lw = ihi - G.ilo + 1, lh = jhi - G.jlo + 1;
-                finish(si, eLvl, G.lvl, lw, lh);
-                finish(si, eLvlFill, G.lvlFill, lw, lh);
-                if (!G.lvlFill.empty() && L < (int)levelInside.size()) {
-                    // Level-grid silhouette: mean source alpha per cell (the CPU's mL).
-                    std::vector<float>& mL = levelInside[L];
-                    if (mL.empty()) {
-                        mL.assign((size_t)lw * lh, 0.f);
-                        for (int j = 0; j < lh; ++j) {
-                            for (int i = 0; i < lw; ++i) {
-                                double sum = 0.;
-                                int n = 0;
-                                for (int yy = D.y1 + (G.jlo + j) * sc; yy < D.y1 + (G.jlo + j + 1) * sc; ++yy) {
-                                    for (int xx = D.x1 + (G.ilo + i) * sc; xx < D.x1 + (G.ilo + i + 1) * sc; ++xx) {
-                                        float c[4];
-                                        srcAt(xx, yy, c);
-                                        sum += std::max(0.f, std::min(1.f, c[3]));
-                                        ++n;
-                                    }
+                const int lw = lf.w, lh = lf.h;
+                std::vector<float>& mL = levelInside[L];
+                if (mL.empty()) {
+                    mL.assign((size_t)lw * lh, 0.f);
+                    for (int j = 0; j < lh; ++j) {
+                        for (int i = 0; i < lw; ++i) {
+                            double sum = 0.;
+                            int n = 0;
+                            for (int yy = D.y1 + (G.jlo + j) * sc; yy < D.y1 + (G.jlo + j + 1) * sc; ++yy) {
+                                for (int xx = D.x1 + (G.ilo + i) * sc; xx < D.x1 + (G.ilo + i + 1) * sc; ++xx) {
+                                    float c[4];
+                                    srcAt(xx, yy, c);
+                                    sum += std::max(0.f, std::min(1.f, c[3]));
+                                    ++n;
                                 }
-                                mL[(size_t)j * lw + i] = (float)(sum / std::max(1, n));
                             }
+                            mL[(size_t)j * lw + i] = (float)(sum / std::max(1, n));
                         }
                     }
-                    G.lvlInside = mL;
                 }
+                G.lvlInside = mL;
             }
         }
         std::vector<float> accFull;
@@ -3273,9 +3373,11 @@ renderDefocus(const Inputs& in,
         if (std::getenv("DEFOCUS_GPU_TIMES")) {
             size_t n = 0;
             for (const gpu::Slice& g : job.slices) {
-                n += g.full.shapes.size() + g.fullFill.shapes.size() + g.lvl.shapes.size() + g.lvlFill.shapes.size();
+                for (const gpu::Target& t : g.t) {
+                    n += t.shapes.size() + t.samples.size();
+                }
             }
-            std::fprintf(stderr, "[DefocusGpu] build %.3f s (%zu shapes, %zu slices), gpu %.3f s\n", buildSeconds, n,
+            std::fprintf(stderr, "[DefocusGpu] build %.3f s (%zu shapes or samples, %zu slices), gpu %.3f s\n", buildSeconds, n,
                          job.slices.size(), secondsSince(tScatter) - buildSeconds);
         }
         if (gpuOk) {

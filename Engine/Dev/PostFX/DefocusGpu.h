@@ -24,9 +24,10 @@
  * DX12 / Metal), the same way FastVolumeRender uses it. Design: complex_tools/zdefocus/plan/
  * 03_gpu_defocus.md.
  *
- * The CPU engine still decodes, slices and fills, and builds every sample's kernel shape
- * (ProceduralLens::shape covers every lens type); this module draws the shapes and composites the
- * slices, and returns the accumulator DefocusCore's last step mixes into the output. Only compiled
+ * The CPU engine still decodes, slices and fills. With the procedural lens the GPU also builds the
+ * kernel shapes from compact samples (a port of ProceduralLens::shape); a traced lens's shapes
+ * (table lookups) are built on the CPU and uploaded. The GPU draws the shapes, composites the
+ * slices and returns the accumulator DefocusCore's last step mixes into the output. Only compiled
  * with wgpu (DEFOCUS_HAVE_WGPU); otherwise available() says so and scatter() returns false.
  *
  * Pure C++17 without Natron or Qt, like DefocusCore (the testbed compiles both).
@@ -64,25 +65,60 @@ enum ShapeFlags : std::uint32_t
     eShapeOffset = 16u
 };
 
-// The shapes scattered into one buffer (full resolution or a level grid) for one slice.
+// A sample whose shape the GPU builds (procedural lens). 32 bytes, `struct Sample` in the WGSL.
+struct Sample
+{
+    std::int32_t kx, ky;    // cell in the target
+    float r;                // signed blur radius, full-res px
+    float c[5];             // premultiplied RGBA, guess
+};
+static_assert(sizeof(Sample) == 32, "gpu::Sample must match the WGSL struct");
+
+// The shapes scattered into one buffer (full resolution or a level grid) for one slice: either
+// ready shapes, or samples (Job::lens.onGpu) the GPU turns into Job::lens.nCh shapes each.
 struct Target
 {
     int w = 0, h = 0;                   // cells
     int keyY0 = 0;                      // row key of rowStart[0]
     int reachX = 0, reachY = 0;         // furthest any shape here reaches from its cell
     std::vector<Shape> shapes;          // sorted by (row key, kx)
+    std::vector<Sample> samples;        // or these, sorted the same way
     std::vector<std::uint32_t> rowStart; // per row key: first shape; one extra entry at the end
+    // where cell (i, j) is in full-res pixels (field position): fx0 + i * fstep; the blur radius in
+    // cells is r / gridScale
+    float fx0 = 0.f, fy0 = 0.f, fstep = 1.f, gridScale = 1.f;
 
-    bool empty() const { return shapes.empty(); }
+    bool empty() const { return shapes.empty() && samples.empty(); }
+};
+
+enum TargetKind
+{
+    eTargetHighlights = 0,              // full-res highlights
+    eTargetCells,                       // level-0 cells (same buffer as the highlights)
+    eTargetFills,                       // level-0 fills
+    eTargetLevel,                       // level-grid cells
+    eTargetLevelFills,                  // level-grid fills
+    eTargetCount
 };
 
 struct Slice
 {
     int level = 0;                      // 2^level downsample of the level grid
-    Target full, fullFill;              // full-res samples (level 0 cells, highlights), fills
-    Target lvl, lvlFill;                // level-grid cells and fills (level > 0)
+    Target t[eTargetCount];
     int ilo = 0, jlo = 0;               // the level grid's first cell
-    std::vector<float> lvlInside;       // mean source alpha per level cell (fills), lvl.w x lvl.h
+    std::vector<float> lvlInside;       // mean source alpha per level cell (fills)
+};
+
+// The procedural lens, for building shapes on the GPU (ProceduralLens::shape).
+struct Lens
+{
+    bool onGpu = false;                 // targets hold samples, not shapes
+    int nCh = 1;                        // shapes per sample: 3 with axial colour
+    float sqX = 1.f, sqY = 1.f;         // squeeze
+    float swirl = 0.f, catEye = 0.f, catEyeStart = 0.f;
+    float cx0 = 0.f, cy0 = 0.f, invField = 1.f;   // optical centre, 1 / field radius (px)
+    float caPx = 0.f;                   // axial colour, full-res px
+    std::uint32_t farOff = 0, farN = 0, nearOff = 0, nearN = 0;   // rings in Job::rings
 };
 
 struct Job
@@ -92,6 +128,7 @@ struct Job
     std::vector<float> inside;          // source alpha (0..1) per output pixel, ow x oh
     std::vector<float> constraints;     // the aperture: 8 floats each (nx, ny, h, disc, cx, cy, R, 0)
     std::vector<float> rings;           // (scale, weight) pairs
+    Lens lens;
     std::vector<Slice> slices;          // nearest first, as DefocusCore's slices
 };
 
