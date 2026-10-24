@@ -32,17 +32,19 @@ NATRON_NAMESPACE_ENTER
 /**
  * @brief One-file-per-frame geometry sequence support (ReadGeo/ReadGeoArchive).
  *
- * A sequence is a directory of mesh files whose names differ only by a padded
- * frame number — e.g. liquid_00002.abc, liquid_00003.abc, ... Each file holds
- * the complete geometry of one timeline frame (topology may change per frame,
- * unlike a single-file animated format such as Alembic, so every frame is
- * parsed independently and the built mesh is cached).
+ * A sequence comes from the file dialog's Sequence: mode (the Read-node
+ * practice): the filename value is a '#' hash pattern over a directory of
+ * mesh files whose names differ only by a padded frame number — e.g.
+ * liquid_#####.abc standing for liquid_00002.abc, liquid_00003.abc, ...
+ * Each file holds the complete geometry of one timeline frame (topology may
+ * change per frame, unlike a single-file animated format such as Alembic, so
+ * every frame is parsed independently and the built mesh is cached).
  *
- * Detection (detectGeoSequence) reuses the image-Reader machinery
- * (libs/SequenceParsing): the file's rightmost digit run becomes a '#' hash
- * pattern, the containing directory is scanned for matching files, and the
- * result counts as a sequence only when at least 2 files share the pattern
- * and the extension. A single file (no run, or no matches) is not a sequence.
+ * Detection (detectGeoSequence) takes the stored value: a value with a '#'
+ * run is expanded through the same library the image Reader uses
+ * (libs/SequenceParsing), scanning the pattern's directory for matching
+ * files; a literal path (the dialog's File: mode) is not a sequence and is
+ * used as a single static file.
  *
  * Frame mapping: the FILE's frame numbers are kept on the Natron timeline —
  * timeline frame N evaluates the file numbered N, held (clamped) at the
@@ -68,9 +70,11 @@ struct GeoSequenceInfo
 };
 
 /**
- * @brief Detect the sequence around `path`. Returns a non-sequence info (with
- *   the extension filled) when the file has no digit run or at most one file
- *   matches the pattern, so callers can fall back to single-file loading.
+ * @brief Detect the sequence from the stored filename value. A value with a
+ *   '#' run (the file dialog's Sequence: mode) is expanded and returns the
+ *   per-frame file map; a literal path (File: mode) or a pattern matching no
+ *   file returns a non-sequence info (with the extension filled) so callers
+ *   fall back to single-file loading.
  */
 GeoSequenceInfo detectGeoSequence(const std::string& path);
 

@@ -18,15 +18,13 @@
 
 // GeoSequence implementation. See GeoSequence.h for the design.
 //
-// Detection delegates the directory scan to the same library the image
-// Reader uses (libs/SequenceParsing): FileNameContent identifies the digit
-// runs of the file name, generatePatternWithFrameNumberAtIndex turns the
-// rightmost run into a '#' hash pattern (padding = the run's digit count),
-// and filesListFromPattern_slow collects the matching files of its directory.
-// One subtlety: files whose number is the run adjacent to the extension are
-// the canonical per-frame export convention (liquid_00002.abc), and the
-// rightmost run is the safest frame-number slot for multi-number names
-// (Circle01_00002.bin) — FileNameContent's own matchesPattern doc agrees.
+// The stored filename value decides: the file dialog's Sequence: mode returns
+// a '#' hash pattern (".../liquid_#####.abc") exactly like the image Reader's
+// File value, File: mode returns a literal single path. Detection expands the
+// pattern with the same library the image Reader uses (libs/SequenceParsing):
+// filesListFromPattern_slow scans the pattern's directory and maps each
+// present frame number to its file. A value without a hash run (or one that
+// matches no file) is used as-is — single static file.
 
 #include "GeoSequence.h"
 
@@ -83,36 +81,16 @@ detectGeoSequence(const std::string& path)
         return out;
     }
 
-    // SequenceParsing needs the absolute file name with path separators it
-    // understands; paths already arrive forward-slashed from the knobs, but
-    // be tolerant of Windows separators (FileNameContent/removePath accept
-    // both, tinydir on Windows accepts '/').
-    std::string abs = path;
-    SequenceParsing::FileNameContent fc(abs);
-
-    const int numRuns = fc.getPotentialFrameNumbersCount();
-    if (numRuns <= 0) {
-        return out; // no digit run — single static file
-    }
-
-    // The rightmost run is the frame-number candidate.
-    const int runIdx = numRuns - 1;
-    std::string numberStr;
-    if (!fc.getNumberByIndex(runIdx, &numberStr) || numberStr.empty()) {
-        return out;
-    }
-    // Padding: '#' matches exactly numHashes digits with leading zero
-    // padding, so the hash count is the digit count of the run as written.
-    const int numHashes = (int)numberStr.size();
-
-    std::string pattern;
-    fc.generatePatternWithFrameNumberAtIndex(runIdx, numHashes, &pattern);
-    if (pattern.empty()) {
+    // Gathering is an explicit choice made in the file dialog (the Read-node
+    // practice): the returned value carries a '#' run only when the Sequence:
+    // mode grouped files. A literal path (File: mode) is a single static file
+    // — no silent sibling scan around it.
+    if (path.find('#') == std::string::npos) {
         return out;
     }
 
     SequenceParsing::SequenceFromPattern matches;
-    if (!SequenceParsing::filesListFromPattern_slow(pattern, &matches) || matches.empty()) {
+    if (!SequenceParsing::filesListFromPattern_slow(path, &matches) || matches.empty()) {
         return out;
     }
 
@@ -125,13 +103,11 @@ detectGeoSequence(const std::string& path)
         }
         files[it->first] = it->second.begin()->second;
     }
-
-    // A sequence needs at least 2 files; one match is just the file itself.
-    if (files.size() < 2) {
+    if (files.empty()) {
         return out;
     }
 
-    out.pattern = pattern;
+    out.pattern = path;
     out.files.swap(files);
     out.firstFrame = out.files.begin()->first;
     out.lastFrame = out.files.rbegin()->first;

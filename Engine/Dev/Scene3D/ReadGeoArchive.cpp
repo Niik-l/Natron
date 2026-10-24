@@ -150,13 +150,14 @@ KnobBoolWPtr showBBox;
     KnobStringWPtr excludedPaths;
     KnobStringWPtr info;
 
-    // --- File sequence (one file per frame, "Gather Sequences") -----------
-    // When on and the file knob points into a padded sequence, the FIRST
+    // --- File sequence (one file per frame) --------------------------------
+    // Driven by the file dialog's Sequence:/File: combo (Read-node practice):
+    // Sequence: stores a '#' pattern (".../liquid_#####.fbx") — the FIRST
     // frame file is parsed as the reference (hierarchy/materials/visibility)
     // and each timeline frame evaluates the file numbered like it through its
     // own parse (frame-time content, native frame numbers on the timeline —
-    // frameOffset/fps interior-mapping knobs do not apply in sequence mode).
-    KnobBoolWPtr gatherSequences;
+    // frameOffset/fps interior-mapping knobs do not apply in sequence mode);
+    // File: stores a literal path and the file parses alone (static).
     KnobIntPtr cacheFrames;
     // Sequence state + per-frame parsed runtimes. Everything below is
     // guarded by archiveMutex like rt/visible.
@@ -239,9 +240,10 @@ ReadGeoArchive::getPluginDescription() const
         "Bake Transforms — bakes every mesh entry's evaluated world transform "
         "into its vertices so the parts emit in world space (the assembled "
         "look, independent of the node chain).\n\n"
-        "File sequences: with Gather Sequences on, a one-file-per-frame series "
-        "(liquid_00002.fbx, liquid_00003.fbx, ...) plays on the timeline — the "
-        "first frame file defines the hierarchy/materials/visibility, each "
+        "File sequences: pick the series with the file picker's Sequence: mode "
+        "(like the image Reader) — a one-file-per-frame series "
+        "(liquid_#####.fbx) plays on the timeline — "
+        "the first frame file defines the hierarchy/materials/visibility, each "
         "timeline frame evaluates the file numbered like it, and the node is "
         "frame-varying while the sequence is loaded. Frame numbers map "
         "natively (Frame Offset / FPS do not apply); Max Cached Frames bounds "
@@ -286,7 +288,18 @@ ReadGeoArchive::initializeKnobs()
     {
         KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("File"));
         k->setName("filename");
-        k->setHintToolTip(tr("Path to a .glb/.gltf (glTF) or .fbx scene file."));
+        k->setAsInputImage(); // file dialog: the Sequence:/File: combo groups one-file-per-frame geo caches
+        k->setHintToolTip(tr("Path to a .glb/.gltf (glTF) or .fbx scene file.\n\n"
+                             "In the file picker, Sequence: mode gathers a one-file-per-frame "
+                             "series (e.g. liquid_00002.fbx, liquid_00003.fbx, ...) — each "
+                             "timeline frame evaluates the file numbered like it: files "
+                             "outside the range hold at the sequence ends, gaps hold the "
+                             "nearest earlier frame. The first frame file defines the "
+                             "hierarchy, materials and visibility tree; frame files must "
+                             "keep the same node layout (topology may change per frame). "
+                             "The file's frame numbers map natively to the timeline — "
+                             "Frame Offset and FPS do not apply in sequence mode. File: "
+                             "mode loads the picked file alone (static)."));
         k->setAnimationEnabled(false);
         page->addKnob(k);
         _imp->filePath = k;
@@ -404,25 +417,6 @@ ReadGeoArchive::initializeKnobs()
     }
 
     {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Gather Sequences"));
-        k->setName("gatherSequences");
-        k->setDefaultValue(false);
-        k->setAnimationEnabled(false);
-        k->setHintToolTip(tr("Load a one-file-per-frame scene sequence as animated "
-                             "content. When the file carries a sequence pattern "
-                             "(e.g. liquid_00002.fbx, liquid_00003.fbx, ...), each "
-                             "timeline frame evaluates the file numbered like it: "
-                             "files outside the range hold at the sequence ends, "
-                             "gaps hold the nearest earlier frame. The first frame "
-                             "file defines the hierarchy, materials and visibility "
-                             "tree; frame files must keep the same node layout "
-                             "(topology may change per frame). The file's frame "
-                             "numbers map natively to the timeline — Frame Offset "
-                             "and FPS do not apply in sequence mode."));
-        page->addKnob(k);
-        _imp->gatherSequences = k;
-    }
-    {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Cached Frames"));
         k->setName("cacheFrames");
         k->setDefaultValue(72);
@@ -431,8 +425,7 @@ ReadGeoArchive::initializeKnobs()
         k->setHintToolTip(tr("How many sequence frames to keep parsed in memory "
                              "(least-recently-used eviction). Scales with the per-"
                              "frame file size; a scrub back re-parses evicted "
-                             "frames. Only used while a sequence is loaded under "
-                             "Gather Sequences."));
+                             "frames. Only used while a file sequence is loaded."));
         page->addKnob(k);
         _imp->cacheFrames = k;
     }
@@ -644,19 +637,6 @@ ReadGeoArchive::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         // animation flags (ScanlineRender's cache would otherwise freeze).
         refreshMetadata_public(true);
         return true;
-    }
-    // Gather Sequences: re-run the load (the sequence re-detects and the
-    // first frame file re-parses as the reference).
-    {
-        KnobIPtr gatherKnob = _imp->gatherSequences.lock();
-        if (gatherKnob && k == gatherKnob.get()) {
-            KnobFilePtr fp = _imp->filePath.lock();
-            if (fp) {
-                loadArchiveFile(fp->getValue());
-            }
-            refreshMetadata_public(true);
-            return true;
-        }
     }
     // Max Cached Frames: only re-caps the sequence runtime LRU.
     if (_imp->cacheFrames.get() == k) {
@@ -1382,19 +1362,17 @@ ReadGeoArchive::loadArchiveFile(const std::string& path)
         }
     }
 
-    // Reference file for the parse below: the picked file itself, or the
-    // sequence's first frame file when a file sequence is detected around it
-    // (the reference defines the hierarchy/materials/visibility; per-frame
-    // content comes from the sequence's files at request time).
+    // Reference file for the parse below: the stored value itself, or the
+    // sequence's first frame file when it is a '#' pattern (the Read-node
+    // dialog's Sequence: mode) — the reference defines the
+    // hierarchy/materials/visibility; per-frame content comes from the
+    // sequence's files at request time.
     std::string referencePath = path;
     {
-        KnobBoolPtr gather = _imp->gatherSequences.lock();
-        if (gather && gather->getValue()) {
-            GeoSequenceInfo si = detectGeoSequence(path);
-            if (si.isSequence) {
-                _imp->seq = si;
-                referencePath = si.files.begin()->second;
-            }
+        GeoSequenceInfo si = detectGeoSequence(path);
+        if (si.isSequence) {
+            _imp->seq = si;
+            referencePath = si.files.begin()->second;
         }
     }
 
@@ -1624,7 +1602,7 @@ ReadGeoArchive::getSceneNodeAt(int idx, double time,
     outName = nd.fullPath;
     outIsMesh = nd.isMesh;
 
-    // File-sequence mode (Gather Sequences): sample the frame file's runtime.
+    // File-sequence mode: sample the frame file's runtime.
     // The sequence owns the frame timing — its native frame-zero state is
     // evaluated (the frame file's own animated channels do not apply) and
     // the frameOffset knob does not remap anything.
@@ -1898,9 +1876,9 @@ StatusEnum
 ReadGeoArchive::getPreferredMetadata(NodeMetadata& metadata)
 {
     // Declare frame-varying when any entry carries animation (node channels,
-    // skinned payload, or an FBX animation stack) — or, in file-sequence mode
-    // (Gather Sequences), whenever a sequence is loaded: the frame files are
-    // independent evaluations, so the content varies anyway. Required so
+    // skinned payload, or an FBX animation stack) — or, in file-sequence mode,
+    // whenever a sequence is loaded: the frame files are independent
+    // evaluations, so the content varies anyway. Required so
     // Scene3D + ScanlineRender hashes change per frame — same reason as
     // ReadGeo / ReadAlembicArchive.
     if (_imp && (_imp->seq.isSequence || _imp->rt.hasAnimation)) {

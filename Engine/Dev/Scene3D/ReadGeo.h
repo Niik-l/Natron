@@ -187,7 +187,7 @@ private:
     // onKnobsLoaded (project load).
     void loadGeoFromFile(const std::string& path);
 
-    // --- File sequence (one file per frame, "Gather Sequences") -----------
+    // --- File sequence (one file per frame, '#' pattern from the file dialog)
     // Per-frame mesh fetch of a detected sequence (caller holds _meshMutex):
     // clamps `time` into the sequence's file-frame range (holding the ends
     // and gaps), serves the built mesh from/to the bounded LRU frame cache.

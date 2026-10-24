@@ -1,10 +1,12 @@
 # Gather Sequences (one-file-per-frame geo) end-to-end check.
 # For each format (abc/fbx/obj) x node class (ReadGeoArchive, ReadGeo):
-#   - Gather Sequences ON: renders at frames 5 / 20 / 40 must DIFFER (the
-#     sequence plays), out-of-range frames 1 / 100 must MATCH frames 2 / 50
-#     (native clamp); Gather OFF: frames 5 vs 40 must MATCH (static file).
+#   - filename = '#' pattern (the file dialog's Sequence: mode result): renders
+#     at frames 5 / 20 / 40 must DIFFER (the sequence plays), out-of-range
+#     frames 1 / 100 must MATCH frames 2 / 50 (native clamp)
+#   - filename = literal single file (File: mode): frames 5 vs 40 must MATCH
+#     (static file), even though the file has one-file-per-frame siblings
 # Prints GSEQ PASS/FAIL lines and "GSEQ RESULT DONE_OK" on success.
-import os, sys, time
+import os, re, sys, time
 
 T0 = [time.time()]
 def emit(m):
@@ -22,6 +24,14 @@ def check(label, cond):
     if not cond:
         FAILS.append(label)
 
+def seq_pattern_of(literal_path):
+    """Dialog practice: '#' per digit of the padded frame number
+    (liquid_00010.abc -> liquid_#####.abc)."""
+    name = re.search(r'(\d+)(\.[^.]+)$', literal_path)
+    if not name:
+        raise RuntimeError("no digit run: " + literal_path)
+    return literal_path[:name.start(1)] + "#" * len(name.group(1)) + name.group(2)
+
 SEQUENCES = [
     ("abc", BASE + r"\abc_seq\liquid_00010.abc", ["geo"]),
     ("fbx", BASE + r"\fbx_seq\liquid_00010.fbx", ["geo", "arch"]),
@@ -35,16 +45,18 @@ NODES = {
 FR_SEQ = [5, 20, 40]        # inside the file range 2..50
 FR_CLAMPS = [(1, 2), (100, 50)]  # (render frame, expected-equals frame)
 
-def rig(tag, nodeclass, seqpath):
+def rig(tag, nodeclass, literal_path, use_pattern):
     """Build ReadGeo(X)Archive -> Scene3D -> CyclesRender(+light+camera)."""
     geo = app.createNode(nodeclass)
-    geo.getParam("gatherSequences").set(True)
-    geo.getParam("filename").set(seqpath)
+    # Dialog practice: Sequence: mode stores the '#' pattern; File: mode the
+    # literal single path.
+    geo.getParam("filename").set(seq_pattern_of(literal_path) if use_pattern
+                                 else literal_path)
     try:
         emit("%s info: %s" % (tag, str(geo.getParam("info").get())))
     except Exception as e:
         emit("%s info read failed: %r" % (tag, e))
-    emit("%s file set (gather on)" % tag)
+    emit("%s file set (%s)" % (tag, "pattern" if use_pattern else "literal"))
     scene = app.createNode("fr.inria.built-in.Scene3D")
     scene.connectInput(0, geo)
     light = app.createNode("fr.inria.built-in.Light3D")
@@ -110,12 +122,12 @@ def img_diff_mean(p1, p2):
 IDENT_MAX = 0.006   # <= ~1.5/255 mean difference == same content (render noise)
 DIFF_MIN = 0.01     # >= mean difference == visually different content
 
-for ext, seqpath, which in SEQUENCES:
+for ext, litpath, which in SEQUENCES:
     for nshort in which:
         nodeclass = NODES[nshort]
         tag = nshort + "_" + ext
         try:
-            geo, scan = rig(tag + "_seq", nodeclass, seqpath)
+            geo, scan = rig(tag + "_seq", nodeclass, litpath, True)
             hs = render_frames(tag + "_seq", scan, FR_SEQ)
             if not all(hs):
                 check(tag + " seq animates", False)
@@ -141,15 +153,15 @@ for ext, seqpath, which in SEQUENCES:
                 check(tag + " clamp low (frame 1 == 2)", False)
                 check(tag + " clamp high (frame 100 == 50)", False)
                 FAILS.append(tag + " missing clamp/base frames")
-            # Gather OFF -> single-file static hold.
-            geo.getParam("gatherSequences").set(False)
+            # File: mode on the same data (literal single file) -> static.
+            geo.getParam("filename").set(litpath)
             hstat = render_frames(tag + "_static", scan, [FR_SEQ[0], 40])
             if all(hstat):
                 dstat = img_diff_mean(hstat[0], hstat[1])
                 emit("%s static diff: 5v40=%.4f" % (tag, dstat))
-                check(tag + " static (gather off: 5 == 40)", dstat < IDENT_MAX)
+                check(tag + " static (File: mode: 5 == 40)", dstat < IDENT_MAX)
             else:
-                check(tag + " static (gather off: 5 == 40)", False)
+                check(tag + " static (File: mode: 5 == 40)", False)
                 FAILS.append(tag + " missing static frames")
             emit(tag + " done")
         except Exception as e:

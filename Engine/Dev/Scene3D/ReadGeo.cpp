@@ -250,10 +250,11 @@ struct ReadGeoPrivate
     KnobBoolWPtr bakeTransforms;
 
     // --- File sequence (one file per frame) ---
-    // Gather Sequences: when on and the file knob points into a padded file
-    // sequence (liquid_00002.abc, ...), each timeline frame evaluates the
-    // file numbered like it; Max Cached Frames bounds the per-frame mesh LRU.
-    KnobBoolWPtr gatherSequences;
+    // Driven by the file dialog's Sequence:/File: combo (Read-node practice):
+    // Sequence: stores a '#' pattern (".../liquid_#####.abc") and each
+    // timeline frame evaluates the file numbered like it; File: stores a
+    // literal path and the file loads alone (static). Max Cached Frames
+    // bounds the per-frame mesh LRU.
     KnobIntPtr cacheFramesKnob;
     // Sequence state (valid when isSequence). Frames keep the FILES' numbers
     // on the timeline (frame N -> the file numbered N; held at ends/gaps).
@@ -347,9 +348,10 @@ ReadGeo::getPluginDescription() const
        "â€” the static-snapshot mode. The file's PBR material (base color, "
        "roughness, metallic, emission, transmission, IOR, diffuse texture) is "
        "applied to the node's Material and Texture Maps pages.\n\n"
-       "File sequences: with Gather Sequences on, a one-file-per-frame series "
-       "(liquid_00002.abc, liquid_00003.abc, ...) plays on the timeline — the "
-       "file numbered like each frame provides its content and topology may "
+       "File sequences: pick the series with the file picker's Sequence: mode "
+       "(like the image Reader) — a one-file-per-frame series "
+       "(liquid_#####.abc) plays on the timeline: "
+       "the file numbered like each frame provides its content and topology may "
        "change per frame (Realflow mesh caches). Source frame numbers map "
        "natively (frame N = file N); Max Cached Frames bounds the mesh cache."
        "OBJ: positions, texture coords, and n-gon faces are honored. Group/"
@@ -401,7 +403,17 @@ ReadGeo::initializeKnobs()
     {
         KnobFilePtr fp = AppManager::createKnob<KnobFile>(this, tr("File"));
         fp->setName("filename");
-        fp->setHintToolTip(tr("Path to a .glb/.gltf (glTF), .fbx, .abc (Alembic) or .obj (Wavefront) geometry file."));
+        fp->setAsInputImage(); // file dialog: the Sequence:/File: combo groups one-file-per-frame geo caches
+        fp->setHintToolTip(tr("Path to a .glb/.gltf (glTF), .fbx, .abc (Alembic) or .obj (Wavefront) geometry file.\n\n"
+                              "In the file picker, Sequence: mode gathers a one-file-per-frame "
+                              "series (e.g. liquid_00002.abc, liquid_00003.abc, ...) — the node "
+                              "then plays it on the timeline: frame N evaluates the file numbered "
+                              "N, frames outside the range hold at the sequence ends, gaps hold "
+                              "the nearest earlier frame. Every frame is parsed independently, "
+                              "so topology may change per frame (Realflow mesh caches and "
+                              "friends). File: mode loads the picked file alone (static). "
+                              "Frame-1-based re-timing or FPS mapping does not apply: source "
+                              "frame numbers are native to the timeline."));
         fp->setAnimationEnabled(false);
         page->addKnob(fp);
         _imp->filePath = fp;
@@ -458,23 +470,6 @@ ReadGeo::initializeKnobs()
         _imp->freezeFrame = k;
     }
     {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Gather Sequences"));
-        k->setName("gatherSequences");
-        k->setDefaultValue(false);
-        k->setAnimationEnabled(false);
-        k->setHintToolTip(tr("Load a one-file-per-frame geometry sequence as animated content. "
-                             "When the file carries a sequence pattern (e.g. liquid_00002.abc, "
-                             "liquid_00003.abc, ...), each timeline frame evaluates the file "
-                             "numbered like it: frames outside the range hold at the sequence "
-                             "ends, gaps hold the nearest earlier frame. Every frame is parsed "
-                             "independently, so topology may change per frame (Realflow mesh "
-                             "caches and friends). Off = load the picked file alone (static). "
-                             "Frame-1-based re-timing or FPS mapping does not apply: source "
-                             "frame numbers are native to the timeline."));
-        page->addKnob(k);
-        _imp->gatherSequences = k;
-    }
-    {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Cached Frames"));
         k->setName("cacheFrames");
         k->setDefaultValue(72);
@@ -483,8 +478,7 @@ ReadGeo::initializeKnobs()
         k->setHintToolTip(tr("How many sequence frames to keep built in memory (least-recently-"
                              "used eviction). Sequence meshes can be large, so the cap bounds "
                              "memory over long sequences; a scrub back re-parses evicted "
-                             "frames. Only used while a sequence is loaded under "
-                             "Gather Sequences."));
+                             "frames. Only used while a file sequence is loaded."));
         page->addKnob(k);
         _imp->cacheFramesKnob = k;
     }
@@ -739,13 +733,6 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         return true;
     }
 
-    // Gather Sequences: re-run the load (frame cache re-keys with it). The
-    // load re-detects the sequence and single-file fallback applies otherwise.
-    if (_imp->gatherSequences.lock().get() == k) {
-        loadGeoFromFile(_imp->filePath.lock()->getValue());
-        return true;
-    }
-
     // Max Cached Frames: only re-caps the sequence frame LRU.
     if (_imp->cacheFramesKnob.get() == k) {
         _imp->frameCache.setCapacity(_imp->cacheFramesKnob->getValue());
@@ -835,27 +822,39 @@ ReadGeo::loadGeoFromFile(const std::string& path)
     // Re-entrancy guard: loading modifies knobs which would re-trigger knobChanged.
     _imp->isLoading = true;
 
-    // Detect the sequence around the picked file before loading: the picked
-    // file still loads below as the REFERENCE (its dropdown, materials and
-    // rest metadata all come from it), while getMeshData evaluates the
-    // sequence's per-frame files when a sequence is found.
-    if (_imp->gatherSequences.lock() && _imp->gatherSequences.lock()->getValue()) {
-        _imp->seq = detectGeoSequence(path);
+    // Detect the sequence from the stored value BEFORE loading. With the
+    // Read-node dialog practice the value is either a '#' pattern (the
+    // dialog's Sequence: mode) or a literal path (File: mode); detection
+    // falls back to static single-file semantics when the pattern matches
+    // nothing.
+    std::string loadPath = path;
+    _imp->seq = detectGeoSequence(path);
+    if (_imp->seq.isSequence) {
+        // The stored value is a '#' pattern — the per-frame files are the
+        // sequence's frames: load the first frame file as the REFERENCE (its
+        // dropdown, materials and rest metadata all come from it), while
+        // getMeshData evaluates the sequence's per-frame files.
+        std::map<int, std::string>::const_iterator f0 = _imp->seq.files.begin();
+        if (f0 != _imp->seq.files.end()) {
+            loadPath = f0->second;
+        } else {
+            _imp->seq = GeoSequenceInfo();
+        }
     }
 
-    const std::string e = extOf(path);
+    const std::string e = extOf(loadPath);
     if (e == ".obj") {
-        loadObjGeo(path);
+        loadObjGeo(loadPath);
     } else if (e == ".abc") {
 #ifdef NATRON_HAVE_ALEMBIC
-        loadAlembicGeo(path);
+        loadAlembicGeo(loadPath);
 #else
         setPersistentMessage(eMessageTypeError,
             "Alembic support not built into this Natron binary. "
             "Use a .obj file, or rebuild Natron with Alembic.");
 #endif
     } else if (e == ".gltf" || e == ".glb" || e == ".fbx") {
-        loadSceneGeo(path);
+        loadSceneGeo(loadPath);
     } else {
         setPersistentMessage(eMessageTypeError,
             "Unsupported file extension. Use .glb/.gltf, .fbx, .abc (Alembic) or .obj (Wavefront).");
@@ -1414,7 +1413,7 @@ ReadGeo::loadObjGeo(const std::string& path)
 }
 
 // ---------------------------------------------------------------------------
-// File-sequence frame builders (one file per frame, Gather Sequences)
+// File-sequence frame builders (one file per frame, '#' pattern)
 // ---------------------------------------------------------------------------
 
 bool
@@ -2393,7 +2392,7 @@ ReadGeo::getMeshData(double time) const
     // Serialise against a concurrent reload swapping/clearing _lastMeshData.
     std::lock_guard<std::mutex> lk(_meshMutex);
 
-    // File-sequence mode (Gather Sequences): every frame comes from its own
+    // File-sequence mode: every frame comes from its own
     // file — nothing can ride the single-file machinery below.
     if (_imp && _imp->seq.isSequence) {
         return getMeshDataAtSeqFrame(time);

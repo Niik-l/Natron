@@ -179,7 +179,7 @@ private:
 
     void loadArchiveFile(const std::string& path);
 
-    // --- File sequence (one file per frame, "Gather Sequences") -----------
+    // --- File sequence (one file per frame, '#' pattern from the file dialog)
     // The sequence's file frames map NATIVELY onto the timeline (frame N ->
     // the file numbered N; held at the ends/gaps). The first frame file is
     // loaded as the reference (hierarchy, materials, visibility all come
