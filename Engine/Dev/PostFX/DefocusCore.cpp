@@ -2611,67 +2611,94 @@ renderDefocus(const Inputs& in,
         P.assign(RN * 4, 0.f);
         Rs.assign(RN, 0.f);
         const double inv = 1. / ((double)sc * sc);
-        // A deep pixel's layers in this slice (adjacent in `order`, front first) composite over
-        // each other before they join the cell; the radius is weighted by what each layer shows.
-        size_t layP = std::numeric_limits<size_t>::max(), layC = 0;
-        double layCol[4] = {0., 0., 0., 0.}, layRW = 0., layVis = 0., layR0 = 0.;
-        auto flushLayers = [&]() {
-            if (layP == std::numeric_limits<size_t>::max()) {
-                return;
-            }
-            W[layC] += (float)inv;
-            for (int k = 0; k < 4; ++k) {
-                P[layC * 4 + k] += (float)(layCol[k] * inv);
-            }
-            Rs[layC] += (float)(layVis > 0. ? layRW / layVis : layR0);
-            layP = std::numeric_limits<size_t>::max();
-        };
-        for (int q = b; q < e; ++q) {
-            PixSample ps;
-            ps.r = sampleR(order[q]);
-            ps.w = sampleW(order[q]);
-            sampleColour(order[q], ps.c);
-            ps.hi = hiFlag[order[q]] != 0;
-            const size_t p = pixelOf(order[q]);
-            const int pi = (int)(p % Dw), pj = (int)(p / Dw);
-            if (!ps.hi && sampleLayer(order[q])) {
-                const size_t c = (size_t)(pj / sc - region.y1) * rw + (pi / sc - region.x1);
-                if (p != layP) {
-                    flushLayers();
-                    layP = p;
-                    layC = c;
-                    layCol[0] = layCol[1] = layCol[2] = layCol[3] = 0.;
-                    layRW = layVis = 0.;
-                    layR0 = ps.r;
+        // The slice's samples are in pixel scan order, so a range of cell rows is a contiguous range
+        // of samples and no two ranges touch the same cell: aggregate them in parallel.
+        auto cellRowOf = [&](int q) { return (int)(pixelOf(order[q]) / Dw) / sc - region.y1; };
+        const int nGroups = std::max(1, std::min(rh, nThreads * 4));
+        std::vector<int> qStart(nGroups + 1, e);
+        for (int g = 0; g < nGroups; ++g) {
+            const int row = (int)((long long)rh * g / nGroups);
+            int lo = b, hi = e;
+            while (lo < hi) {
+                const int mid = lo + (hi - lo) / 2;
+                if (cellRowOf(mid) < row) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
                 }
-                const double t = std::max(0., 1. - layCol[3]);
-                const double vis = t * std::max(1e-6f, ps.c[3]);
-                for (int k = 0; k < 4; ++k) {
-                    layCol[k] += t * ps.c[k];
-                }
-                layRW += vis * ps.r;
-                layVis += vis;
-                continue;
             }
-            flushLayers();
-            if (ps.hi) {
-                Sample hs;
-                hs.x = D.x1 + pi;
-                hs.y = D.y1 + pj;
-                hs.r = ps.r;
-                std::memcpy(hs.c, ps.c, sizeof(ps.c));
-                hs.c[4] = 0.f;
-                sl.hi.push_back(hs);
-                continue;
-            }
-            const size_t c = (size_t)(pj / sc - region.y1) * rw + (pi / sc - region.x1);
-            W[c] += (float)(ps.w * inv);
-            for (int k = 0; k < 4; ++k) {
-                P[c * 4 + k] += (float)(ps.c[k] * inv);
-            }
-            Rs[c] += ps.w * ps.r;
+            qStart[g] = lo;
         }
-        flushLayers();
+        std::vector<std::vector<Sample> > hiParts(nGroups);
+        parallelFor(nGroups, 1, nThreads, aborted, [&](int gb, int ge) {
+            for (int g = gb; g < ge; ++g) {
+                // A deep pixel's layers in this slice (adjacent in `order`, front first) composite
+                // over each other before they join the cell; the radius is weighted by what each
+                // layer shows.
+                size_t layP = std::numeric_limits<size_t>::max(), layC = 0;
+                double layCol[4] = {0., 0., 0., 0.}, layRW = 0., layVis = 0., layR0 = 0.;
+                auto flushLayers = [&]() {
+                    if (layP == std::numeric_limits<size_t>::max()) {
+                        return;
+                    }
+                    W[layC] += (float)inv;
+                    for (int k = 0; k < 4; ++k) {
+                        P[layC * 4 + k] += (float)(layCol[k] * inv);
+                    }
+                    Rs[layC] += (float)(layVis > 0. ? layRW / layVis : layR0);
+                    layP = std::numeric_limits<size_t>::max();
+                };
+                for (int q = qStart[g]; q < qStart[g + 1]; ++q) {
+                    PixSample ps;
+                    ps.r = sampleR(order[q]);
+                    ps.w = sampleW(order[q]);
+                    sampleColour(order[q], ps.c);
+                    ps.hi = hiFlag[order[q]] != 0;
+                    const size_t p = pixelOf(order[q]);
+                    const int pi = (int)(p % Dw), pj = (int)(p / Dw);
+                    if (!ps.hi && sampleLayer(order[q])) {
+                        const size_t c = (size_t)(pj / sc - region.y1) * rw + (pi / sc - region.x1);
+                        if (p != layP) {
+                            flushLayers();
+                            layP = p;
+                            layC = c;
+                            layCol[0] = layCol[1] = layCol[2] = layCol[3] = 0.;
+                            layRW = layVis = 0.;
+                            layR0 = ps.r;
+                        }
+                        const double t = std::max(0., 1. - layCol[3]);
+                        const double vis = t * std::max(1e-6f, ps.c[3]);
+                        for (int k = 0; k < 4; ++k) {
+                            layCol[k] += t * ps.c[k];
+                        }
+                        layRW += vis * ps.r;
+                        layVis += vis;
+                        continue;
+                    }
+                    flushLayers();
+                    if (ps.hi) {
+                        Sample hs;
+                        hs.x = D.x1 + pi;
+                        hs.y = D.y1 + pj;
+                        hs.r = ps.r;
+                        std::memcpy(hs.c, ps.c, sizeof(ps.c));
+                        hs.c[4] = 0.f;
+                        hiParts[g].push_back(hs);
+                        continue;
+                    }
+                    const size_t c = (size_t)(pj / sc - region.y1) * rw + (pi / sc - region.x1);
+                    W[c] += (float)(ps.w * inv);
+                    for (int k = 0; k < 4; ++k) {
+                        P[c * 4 + k] += (float)(ps.c[k] * inv);
+                    }
+                    Rs[c] += ps.w * ps.r;
+                }
+                flushLayers();
+            }
+        });
+        for (std::vector<Sample>& h : hiParts) {
+            sl.hi.insert(sl.hi.end(), h.begin(), h.end());
+        }
 
         // Background fill behind nearer slices.
         std::vector<Sample> fills;
