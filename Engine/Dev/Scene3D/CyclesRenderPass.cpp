@@ -647,9 +647,14 @@ CyclesRenderPass::initializeKnobs()
         }
         {
             KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Deep Max Samples"));
-            k->setName("deepMaxSamples"); k->setDefaultValue(32);
-            k->setMinimum(1); k->setDisplayMinimum(1); k->setDisplayMaximum(100);
-            k->setHintToolTip(tr("Kernel-side cap on deep samples per pixel."));
+            k->setName("deepMaxSamples"); k->setDefaultValue(8);
+            k->setMinimum(1); k->setDisplayMinimum(1); k->setDisplayMaximum(64);
+            k->setHintToolTip(tr("Distinct depths kept per pixel (a surface, or a volume segment, each). Camera paths "
+                                 "hitting the same depth (within Deep Merge Threshold) add into one sample "
+                                 "while rendering, and when a pixel is full the extra paths join the nearest "
+                                 "depth, so nothing is lost; 8 holds most shots exactly. Memory is reserved "
+                                 "for this many per pixel (32 bytes each: 1920x1080 at 8 = 0.5 GB, on the GPU "
+                                 "too); raise it for dense volumes or many overlapping surfaces."));
             outPage->addKnob(k); _imp->deepMaxSamples = k;
         }
         {
@@ -1320,7 +1325,7 @@ CyclesRenderPass::render(const RenderActionArgs& args)
     if (deepEnabled) {
         req.outDeep = &deepRaw;
         req.deepMaxSamples = _imp->deepMaxSamples.lock()
-                             ? std::max(1, _imp->deepMaxSamples.lock()->getValue()) : 32;
+                             ? std::max(1, _imp->deepMaxSamples.lock()->getValue()) : 8;
         req.deepMergeThreshold = _imp->deepMergeThreshold.lock()
                              ? (float)_imp->deepMergeThreshold.lock()->getValue() : 0.001f;
         req.deepAlphaMergeThreshold = _imp->deepAlphaMergeThreshold.lock()

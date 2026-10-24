@@ -3114,6 +3114,7 @@ CyclesRenderer::renderToBufferWithCamera(const SceneGraph& sg,
         _impl->session->scene->film->set_use_deep_output(true);
         _impl->session->scene->film->set_deep_max_samples(deepMaxSamples);
         _impl->session->scene->film->set_deep_peel(_impl->deepPeel);
+        _impl->session->scene->film->set_deep_merge_threshold(deepMergeThreshold);
         _impl->session->scene->film->tag_modified();
         if (_impl->deepPeel > 0) {
             // a hidden layer's alpha must be its coverage, not the background's
@@ -3337,6 +3338,7 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
         _impl->session->scene->film->set_use_deep_output(true);
         _impl->session->scene->film->set_deep_max_samples(deepMaxSamples);
         _impl->session->scene->film->set_deep_peel(_impl->deepPeel);
+        _impl->session->scene->film->set_deep_merge_threshold(deepMergeThreshold);
         _impl->session->scene->film->tag_modified();
         if (_impl->deepPeel > 0) {
             // a hidden layer's alpha must be its coverage, not the background's
