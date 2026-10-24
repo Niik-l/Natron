@@ -53,6 +53,13 @@ class ArchiveProvider
 public:
     virtual ~ArchiveProvider() {}
 
+    /** @brief Mode flag for nodes that implement BOTH MeshProvider and
+     *  ArchiveProvider (the unified ReadGeo). true = multi-emit hierarchy
+     *  (the ArchiveProvider accessors below carry the geometry);
+     *  false = single-mesh mode (getMeshData carries it — consumers must
+     *  NOT walk this interface). Default true = plain archives. */
+    virtual bool isMultiEmit() const { return true; }
+
     /** @brief How many entries this archive currently exposes (after filtering). */
     virtual int getSceneNodeCount() const = 0;
 

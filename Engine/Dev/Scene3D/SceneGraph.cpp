@@ -305,6 +305,15 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
 
         // --- Any mesh source (ReadGeo, GeoBuilder, ...) ---
         MeshProvider* meshProv = dynamic_cast<MeshProvider*>(effect.get());
+        // Dual-interface node (the unified ReadGeo) in multi-emit mode: the
+        // archive accessors own the geometry there — fall through to the
+        // archive branch below (this branch would otherwise continue the
+        // loop on the empty single-mesh query and emit nothing).
+        if (meshProv) {
+            if (ArchiveProvider* apDual = dynamic_cast<ArchiveProvider*>(effect.get())) {
+                if (apDual->isMultiEmit()) meshProv = nullptr;
+            }
+        }
         if (meshProv) {
             MeshDataPtr mesh = meshProv->getMeshData(time);
             if (!mesh || mesh->numVertices == 0) continue;
@@ -424,6 +433,12 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
 
         // --- ReadAlembicArchive (multi-emit: one Natron node → many SceneNodes) ---
         ArchiveProvider* abcArchive = dynamic_cast<ArchiveProvider*>(effect.get());
+        // Dual-interface node (the unified ReadGeo): in single-mesh mode it
+        // emits through the MeshProvider branch above — the archive walk must
+        // not fire even when that mesh came back empty.
+        if (abcArchive && !abcArchive->isMultiEmit()) {
+            abcArchive = nullptr;
+        }
         if (abcArchive) {
             const int count = abcArchive->getSceneNodeCount();
             // Rotation pivot. The archive-wide pivot drives the root handle; each

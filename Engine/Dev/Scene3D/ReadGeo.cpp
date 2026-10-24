@@ -46,11 +46,13 @@
 
 #include "../../AppInstance.h"
 #include "../../ChoiceOption.h"
+#include "../../CreateNodeArgs.h"
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobFile.h"
 #include "../../KnobTypes.h"
 #include "../../Node.h"
+#include "../../Project.h"
 #include "../../ViewIdx.h"
 
 #ifdef NATRON_HAVE_ALEMBIC
@@ -211,6 +213,175 @@ readAlembicUvParam(const Alembic::AbcGeom::IV2fGeomParam& uvParam, MeshData* mes
 }
 #endif // NATRON_HAVE_ALEMBIC
 
+// --- Object-hierarchy (multi-emit) helpers -----------------------------------
+// Ported from ReadGeoArchive.cpp; the per-entry material ADAPTER type is
+// deliberately distinct from ReadGeoArchive's EntryMaterialProvider (each
+// node's TU owns its own adapter; consumers only ever hold MaterialProvider*).
+
+namespace {
+
+// One entry's FILE material snapshot exposed as a MaterialProvider (identical
+// field mapping to ReadGeoArchive's EntryMaterialProvider).
+struct RGEntryMaterialAdapter : public MaterialProvider
+{
+    std::shared_ptr<const GeoImportMaterial> mat;
+
+    explicit RGEntryMaterialAdapter(const GeoImportMaterial& m)
+        : mat(std::make_shared<const GeoImportMaterial>(m)) {}
+
+    void getMaterialBaseColor(double, double& r, double& g, double& b) const OVERRIDE
+    { r = mat->baseColor[0]; g = mat->baseColor[1]; b = mat->baseColor[2]; }
+    double getMaterialRoughness(double) const OVERRIDE { return mat->roughness; }
+    double getMaterialMetallic(double) const OVERRIDE { return mat->metallic; }
+    double getMaterialSpecular(double) const OVERRIDE { return mat->specular; }
+    void getMaterialEmission(double, double& r, double& g, double& b, double& strength) const OVERRIDE
+    { r = mat->emission[0]; g = mat->emission[1]; b = mat->emission[2]; strength = mat->emissionStrength; }
+    double getMaterialTransmission(double) const OVERRIDE { return mat->transmission; }
+    double getMaterialIOR(double) const OVERRIDE { return mat->ior; }
+    std::string getMaterialTextureFile() const OVERRIDE { return mat->diffuseMapPath; }
+    std::string getMaterialRoughnessMapFile() const OVERRIDE { return mat->metallicRoughnessMapPath; }
+    std::string getMaterialMetallicMapFile() const OVERRIDE
+    { return mat->ormMetallicEnabled ? mat->metallicRoughnessMapPath : std::string(); }
+    std::string getMaterialNormalMapFile() const OVERRIDE { return mat->normalMapPath; }
+    std::string getMaterialOpacityMapFile() const OVERRIDE { return mat->opacityMapPath; }
+    double getMaterialOpacity(double) const OVERRIDE { return mat->opacity; }
+    bool getMaterialTextureUsesAlpha() const OVERRIDE { return mat->textureUsesAlpha; }
+    std::string getMaterialDiffuseColorspace() const OVERRIDE { return "sRGB"; }
+};
+
+// Simple glob match: '*' matches any substring (mirror of ReadGeoArchive's
+// arcGlobMatch — internal linkage in each TU's anonymous namespace).
+bool
+rgGlobMatch(const std::string& pattern, const std::string& text)
+{
+    if (pattern.empty()) return true;
+    const int m = (int)pattern.size();
+    const int n = (int)text.size();
+    std::vector<std::vector<char>> dp(m + 1, std::vector<char>(n + 1, 0));
+    dp[0][0] = 1;
+    for (int i = 1; i <= m; ++i) {
+        if (pattern[i - 1] == '*') dp[i][0] = dp[i - 1][0];
+    }
+    for (int i = 1; i <= m; ++i) {
+        for (int j = 1; j <= n; ++j) {
+            if (pattern[i - 1] == '*') {
+                dp[i][j] = (char)(dp[i - 1][j] || dp[i][j - 1]);
+            } else {
+                dp[i][j] = (char)(pattern[i - 1] == text[j - 1] && dp[i - 1][j - 1]);
+            }
+        }
+    }
+    return dp[m][n] != 0;
+}
+
+// Copy a file material's fields onto a fresh Material3D's knobs (ported from
+// ReadGeoArchive: the knob script names are identical on both nodes).
+// Includes the glTF PBR maps the file carries (metallicRoughness →
+// roughness+metallic, normal).
+void
+setRebuildMaterialKnobs(NodePtr matNode, const GeoImportMaterial& m)
+{
+    if (KnobIPtr k = matNode->getKnobByName("baseColor")) {
+        if (KnobColorPtr c = std::dynamic_pointer_cast<KnobColor>(k)) {
+            c->setValue(m.baseColor[0], ViewSpec::all(), 0);
+            c->setValue(m.baseColor[1], ViewSpec::all(), 1);
+            c->setValue(m.baseColor[2], ViewSpec::all(), 2);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("roughness")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.roughness);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("metallic")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.metallic);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("specular")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.specular);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("emissionColor")) {
+        if (KnobColorPtr c = std::dynamic_pointer_cast<KnobColor>(k)) {
+            c->setValue(m.emission[0], ViewSpec::all(), 0);
+            c->setValue(m.emission[1], ViewSpec::all(), 1);
+            c->setValue(m.emission[2], ViewSpec::all(), 2);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("emissionStrength")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.emissionStrength);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("transmission")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.transmission);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("ior")) {
+        if (KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k)) {
+            d->setValue(m.ior);
+        }
+    }
+    if (KnobIPtr k = matNode->getKnobByName("textureFile")) {
+        if (KnobFilePtr f = std::dynamic_pointer_cast<KnobFile>(k)) {
+            f->setValue(m.diffuseMapPath);
+        }
+    }
+    auto setFileKnob = [&matNode](const char* name, const std::string& path) {
+        if (path.empty() || !matNode) {
+            return;
+        }
+        if (KnobIPtr k = matNode->getKnobByName(name)) {
+            if (KnobFilePtr f = std::dynamic_pointer_cast<KnobFile>(k)) {
+                f->setValue(path);
+            }
+        }
+    };
+    setFileKnob("roughnessMapFile", m.metallicRoughnessMapPath);
+    setFileKnob("metallicMapFile",
+                m.ormMetallicEnabled ? m.metallicRoughnessMapPath : std::string());
+    setFileKnob("normalMapFile", m.normalMapPath);
+    setFileKnob("opacityMapFile", m.opacityMapPath);
+    // glTF BLEND/MASK materials: tick the albedo's own alpha so the rebuilt
+    // Material3D keeps the cutout 1:1.
+    if (m.textureUsesAlpha && matNode) {
+        if (KnobIPtr k = matNode->getKnobByName("textureUsesAlpha")) {
+            if (KnobBoolPtr b = std::dynamic_pointer_cast<KnobBool>(k)) {
+                b->setValue(true);
+            }
+        }
+    }
+    // Texture colorspaces: the entry adapters hardcode "sRGB" for both (a
+    // fresh Material3D's defaults are the first sRGB-ish entry of the OCIO
+    // config, which Cycles decodes differently) — select the exact "sRGB"
+    // entry when it exists.
+    auto setSpace = [](const KnobIPtr& k) -> bool {
+        KnobChoicePtr c = std::dynamic_pointer_cast<KnobChoice>(k);
+        if (!c) {
+            return false;
+        }
+        const std::vector<ChoiceOption> entries = c->getEntries_mt_safe();
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].id == "sRGB") {
+                c->setValue((int)i);
+                return true;
+            }
+        }
+        return false;
+    };
+    if (KnobIPtr k = matNode->getKnobByName("diffuseColorspace")) {
+        setSpace(k);
+    }
+    if (KnobIPtr k = matNode->getKnobByName("emissionColorspace")) {
+        setSpace(k);
+    }
+}
+
+} // anonymous namespace
+
 
 struct ReadGeoPrivate
 {
@@ -221,6 +392,32 @@ struct ReadGeoPrivate
     KnobButtonWPtr reloadBtn;
     KnobBoolWPtr reverseNormals;
     KnobStringWPtr info;
+
+    // --- Object-hierarchy mode ("Output Single Mesh" OFF) ---
+    // The mode switch itself. ON (default) = the classic single-mesh ReadGeo;
+    // OFF = multi-emit hierarchy through the ArchiveProvider accessors (the
+    // ReadGeoArchive behavior). Both modes share File-page machinery below.
+    KnobBoolWPtr outputSingleMesh;
+    // Multi-only knobs (ported from ReadGeoArchive::initializeKnobs):
+    KnobButtonWPtr rebuildMaterialsBtn;
+    KnobStringWPtr objectFilter;
+    KnobBoolWPtr includeMeshes;
+    KnobBoolWPtr showBBox;
+    KnobIntWPtr frameOffset;
+    KnobDoubleWPtr fpsKnob;
+    KnobStringWPtr excludedPaths;
+    KnobChoiceWPtr rotationPivot;
+    // Display page (multi-only; Viewport3D::drawTransformNode reads by name):
+    KnobBoolWPtr showLocators;
+    KnobDoubleWPtr locatorSize;
+    // Per-frame parsed sequence runtimes (sequence mode). Guarded by
+    // _meshMutex like rt.
+    GeoSequenceLruCache<GeoArchiveRuntime> seqRt{72};
+    // Entry indices exposed to SceneGraph (full-node indices into
+    // rt.data.nodes), and the per-entry material adapters keyed by FULL node
+    // index. Guarded by _meshMutex (loaded under it; read on render threads).
+    std::vector<int> visible;
+    mutable std::map<int, std::shared_ptr<RGEntryMaterialAdapter>> entryMaterials;
 
     // Transform
     KnobDoubleWPtr translateX, translateY, translateZ;
@@ -280,6 +477,10 @@ struct ReadGeoPrivate
     // Re-entrancy guard: prevents recursive knobChanged calls
     // when we programmatically update knobs during loading.
     bool isLoading = false;
+
+    // Re-entrancy guard for the Re-build Materials button (a second trigger
+    // while the batch is on the stack must not double-build).
+    bool rebuildBusy = false;
 
     // Scene formats (glTF/FBX) read through the shared archive runtime â€” the
     // same parse + per-frame evaluation machinery ReadGeoArchive uses. Guarded
@@ -420,6 +621,24 @@ ReadGeo::initializeKnobs()
     }
 
     {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Output Single Mesh"));
+        k->setName("outputSingleMesh");
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("ON (default): this node is the classic single-mesh import — one "
+                             "merged or selected mesh on its output.\n\n"
+                             "OFF: the file's full node hierarchy is exposed to the SceneGraph, "
+                             "one entry per node/mesh with parent-child relationships preserved "
+                             "(the archive/emitter behavior). Only glTF (.gltf/.glb) and FBX "
+                             "files support the hierarchy mode; .obj and .abc files keep the "
+                             "single-mesh pipeline. Turning the knob off reveals the archive "
+                             "controls and hides the single-mesh ones (Object dropdown, Freeze "
+                             "at Frame, Material/Texture pages)."));
+        page->addKnob(k);
+        _imp->outputSingleMesh = k;
+    }
+
+    {
         KnobChoicePtr obj = AppManager::createKnob<KnobChoice>(this, tr("Object"));
         obj->setName("objectPath");
         obj->setHintToolTip(tr("Select which geometry object to load. "
@@ -433,8 +652,47 @@ ReadGeo::initializeKnobs()
     {
         KnobButtonPtr reload = AppManager::createKnob<KnobButton>(this, tr("Reload"));
         reload->setName("reload");
+        reload->setHintToolTip(tr("Re-read the file and refresh the hierarchy."));
         page->addKnob(reload);
         _imp->reloadBtn = reload;
+    }
+
+    // --- Object-hierarchy (multi-emit) controls — hidden while Output Single
+    // Mesh is on (see applyModeVisibility) ---
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Re-build Materials"));
+        k->setName("rebuildMaterials");
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Analyze the imported object's structure and build a standalone "
+                             "material composition in the node editor beside this node: "
+                             "per material-bearing part, one ReadGeo scoped to that part via "
+                             "its Object dropdown and a Material3D wired into the ReadGeo's "
+                             "Material input (diffuse map / PBR values carried over from the "
+                             "file), all assembled under a Group3D. The rebuilt set "
+                             "replicates this node's hierarchy output 100% — nothing "
+                             "connects back to it."));
+        page->addKnob(k);
+        _imp->rebuildMaterialsBtn = k;
+    }
+
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Object Filter"));
+        k->setName("objectFilter");
+        k->setDefaultValue(std::string());
+        k->setHintToolTip(tr("Glob pattern matched against each entry's full path. "
+                             "Use '*' for any substring. Empty = import everything."));
+        page->addKnob(k);
+        _imp->objectFilter = k;
+    }
+
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Include Meshes"));
+        k->setName("includeMeshes");
+        k->setDefaultValue(true);
+        k->setHintToolTip(tr("If unchecked, mesh entries are skipped — useful for "
+                             "locator/animation-only imports."));
+        page->addKnob(k);
+        _imp->includeMeshes = k;
     }
 
     {
@@ -499,6 +757,52 @@ ReadGeo::initializeKnobs()
                              "the baked path reproduces the archive look exactly."));
         page->addKnob(k);
         _imp->bakeTransforms = k;
+    }
+
+    // --- Object-hierarchy (multi-emit) controls, continued ---
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Show Bounding Box"));
+        k->setName("showBBox");
+        k->setDefaultValue(true);
+        k->setHintToolTip(tr("Draw a dashed box in the 3D viewport enclosing all "
+                             "mesh entries (their union at the current frame). "
+                             "Uncheck to hide it."));
+        page->addKnob(k);
+        _imp->showBBox = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Frame Offset"));
+        k->setName("frameOffset");
+        k->setDefaultValue(0);
+        k->setHintToolTip(tr("Offset the file's animation relative to the Natron timeline. "
+                             "Object-hierarchy mode only."));
+        page->addKnob(k);
+        _imp->frameOffset = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("FPS"));
+        k->setName("fps");
+        k->setDefaultValue(0.0);
+        k->setMinimum(0.0);
+        k->setDisplayMinimum(0.0); k->setDisplayMaximum(120.0);
+        k->setHintToolTip(tr("Frames per second used to map the file's animation "
+                             "time onto the Natron timeline. 0 = use the project "
+                             "frame rate. glTF/FBX animation time is continuous "
+                             "seconds; this sets how many timeline frames span one "
+                             "second of source animation. Object-hierarchy mode only."));
+        page->addKnob(k);
+        _imp->fpsKnob = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Excluded Paths"));
+        k->setName("excludedPaths");
+        k->setAsMultiLine();
+        k->setDefaultValue(std::string());
+        k->setSecret(true);
+        k->setHintToolTip(tr("Newline-separated entry paths to exclude from import. "
+                             "Empty = nothing excluded."));
+        page->addKnob(k);
+        _imp->excludedPaths = k;
     }
 
     {
@@ -610,6 +914,20 @@ ReadGeo::initializeKnobs()
                              "0.01 (cm to m) or 0.001 (mm to m) is the usual correction."));
         xformPage->addKnob(k); _imp->uniformScale = k;
     }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Rotation Pivot"));
+        k->setName("rotationPivot");
+        std::vector<ChoiceOption> opts;
+        opts.push_back(ChoiceOption("Bounding-Box Center", "", ""));
+        opts.push_back(ChoiceOption("Authored Origin", "", ""));
+        opts.push_back(ChoiceOption("World Origin", "", ""));
+        k->populateChoices(opts);
+        k->setDefaultValue(0);  // Bounding-Box Center
+        k->setHintToolTip(tr("Point the Translate/Rotate/Scale knobs pivot around. "
+                             "Object-hierarchy mode only."));
+        xformPage->addKnob(k);
+        _imp->rotationPivot = k;
+    }
 
     // Material page
     createSubdivisionKnobs(this, page, _imp->subdKnobs);
@@ -691,6 +1009,40 @@ ReadGeo::initializeKnobs()
         k->setHintToolTip(tr("Color space of the diffuse texture file."));
         texPage->addKnob(k); _imp->diffuseColorspace = k;
     }
+
+    // --- Display page: viewport-only controls for the archive's locator
+    // gizmos (multi-emit mode; Viewport3D::drawTransformNode reads by name).
+    // Ported from ReadGeoArchive::initializeKnobs.
+    KnobPagePtr dispPage = AppManager::createKnob<KnobPage>(this, tr("Display"));
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Show Locators"));
+        k->setName("showLocators");
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("Draw a small locator at each transform node in the 3D "
+                             "viewport. Turn off to declutter archives with many "
+                             "transform nodes."));
+        dispPage->addKnob(k);
+        _imp->showLocators = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Locator Size"));
+        k->setName("locatorSize");
+        k->setDefaultValue(0.8);
+        k->setMinimum(0.0);
+        k->setDisplayMinimum(0.0);
+        k->setDisplayMaximum(5.0);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("World-space size of the locator gizmos in the 3D viewport."));
+        dispPage->addKnob(k);
+        _imp->locatorSize = k;
+    }
+
+    // Initial per-mode knob visibility follows the default knob value
+    // (single mesh ON).
+    applyModeVisibility();
 }
 
 bool
@@ -700,6 +1052,61 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     // Re-entrancy guard: loadAlembicGeo modifies knobs which would trigger knobChanged again
     if (_imp->isLoading) {
         return false;
+    }
+
+    // --- Output Single Mesh: the universal node's mode switch -------------
+    // Flip the knob visibility, drop BOTH modes' caches (a doorway from one
+    // mode must never serve the other's data) and re-load the current file
+    // under the new semantics.
+    if (_imp->outputSingleMesh.lock().get() == k) {
+        applyModeVisibility();
+        {
+            std::lock_guard<std::mutex> lk(_meshMutex);
+            _lastMeshData.reset();
+            _imp->sceneLoaded = false;
+            _imp->builtCache.clear();
+            _imp->frameCache.clear();
+            _imp->seq = GeoSequenceInfo();
+            _imp->visible.clear();
+            _imp->entryMaterials.clear();
+            _imp->seqRt.clear();
+            _imp->rt.clear();
+        }
+        KnobFilePtr fp = _imp->filePath.lock();
+        loadGeoFromFile(fp ? fp->getValue() : std::string());
+        return true;
+    }
+
+    // --- Object-hierarchy (multi-emit) knobs -------------------------------
+    // Filter knobs re-run the archive loader (cheap relative to a file read;
+    // keeps applied state == knob state — ReadGeoArchive's isFilter pattern).
+    const bool isMultiFilter =
+        _imp->objectFilter.lock().get() == k ||
+        _imp->includeMeshes.lock().get() == k ||
+        _imp->excludedPaths.lock().get() == k;
+    if (isMultiFilter) {
+        KnobFilePtr fp = _imp->filePath.lock();
+        loadGeoFromFile(fp ? fp->getValue() : std::string());
+        return true;
+    }
+    // Re-build Materials (multi-emit only).
+    if (_imp->rebuildMaterialsBtn.lock().get() == k) {
+        if (isMultiEmit()) {
+            rebuildMaterialsSet();
+        }
+        return true;
+    }
+    // Frame Offset / FPS: re-map the animation timing — the frame cache keys
+    // shift meaning, so drop the caches (no re-parse needed).
+    if (_imp->frameOffset.lock().get() == k || _imp->fpsKnob.lock().get() == k) {
+        {
+            std::lock_guard<std::mutex> lk(_meshMutex);
+            _imp->builtCache.clear();
+            _imp->frameCache.clear();
+            _imp->rt.clearFrameCache();
+            _imp->seqRt.clear();
+        }
+        return true;
     }
 
     if (_imp->filePath.lock().get() == k || _imp->reloadBtn.lock().get() == k) {
@@ -733,18 +1140,31 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
         return true;
     }
 
-    // Max Cached Frames: only re-caps the sequence frame LRU.
+    // Max Cached Frames: re-caps the sequence frame LRUs (the single-mode
+    // mesh cache and the multi-mode per-frame runtime cache).
     if (_imp->cacheFramesKnob.get() == k) {
         _imp->frameCache.setCapacity(_imp->cacheFramesKnob->getValue());
+        _imp->seqRt.setCapacity(_imp->cacheFramesKnob->getValue());
         return true;
     }
 
     // Bake Transforms: only re-keys the single-part build (no timing change),
-    // so drop the built meshes but leave the metadata alone.
+    // so drop the built meshes but leave the metadata alone. In multi-emit
+    // mode the flag IS the firing mechanism (ReadGeoArchive semantics):
+    // flip the runtime flag and drop its frame evaluations + the per-frame
+    // pre-baked runtimes (they bake at parse time).
     if (_imp->bakeTransforms.lock().get() == k) {
-        std::lock_guard<std::mutex> lk(_meshMutex);
-        _imp->builtCache.clear();
-        _imp->frameCache.clear();
+        {
+            std::lock_guard<std::mutex> lk(_meshMutex);
+            _imp->builtCache.clear();
+            _imp->frameCache.clear();
+            if (isMultiEmit()) {
+                KnobBoolPtr bk = _imp->bakeTransforms.lock();
+                _imp->rt.bakeMeshWorld = bk ? bk->getValue() : false;
+                _imp->rt.clearFrameCache();
+                _imp->seqRt.clear();
+            }
+        }
         return true;
     }
 
@@ -785,25 +1205,34 @@ ReadGeo::loadGeoFromFile(const std::string& path)
     // Serialise (re)loads against getMeshData readers on render threads.
     std::lock_guard<std::mutex> lk(_meshMutex);
 
-    // Drop the previous geometry FIRST â€” clearing the path or a failed load
+    // Drop the previous geometry FIRST — clearing the path or a failed load
     // must not keep serving the old mesh (stale-render class).
     _lastMeshData.reset();
 
     // Any non-scene load below clears the scene-format state; a scene load
     // re-populates it (loadSceneGeo). Clearing also covers the built-mesh
-    // cache (keyed by frame/selection/bake â€” meaningless across files) and
-    // the sequence frame cache + detection state.
+    // cache (keyed by frame/selection/bake — meaningless across files) and
+    // the sequence frame cache + detection state. The multi-emit (archive)
+    // state is cleared the same way so a mode or extension switch never
+    // serves stale entries.
     _imp->sceneLoaded = false;
     _imp->builtCache.clear();
     _imp->seq = GeoSequenceInfo();
     _imp->frameCache.clear();
+    _imp->visible.clear();
+    _imp->entryMaterials.clear();
+    _imp->seqRt.clear();
+    _imp->rt.clear();
 
     if (path.empty()) {
-        // No file â€” no morph targets either; drop any weight knobs from a
+        // No file — no morph targets either; drop any weight knobs from a
         // previously loaded file.
         std::vector<GeoMorphTargetRef> none;
         if (syncMorphWeightKnobs(none)) {
             recreateKnobs(true);
+        }
+        if (KnobStringPtr infoK = _imp->info.lock()) {
+            infoK->setValue(std::string("No file selected."));
         }
         refreshMetadata_public(true);
         return;
@@ -843,7 +1272,21 @@ ReadGeo::loadGeoFromFile(const std::string& path)
     }
 
     const std::string e = extOf(loadPath);
-    if (e == ".obj") {
+    const bool multiEmit = isMultiEmit();
+    if (multiEmit) {
+        // Object-hierarchy mode shipped for glTF/FBX (Phase 1); obj/abc
+        // hierarchy support lands later — keep the message explicit.
+        if (e == ".gltf" || e == ".glb" || e == ".fbx") {
+            loadArchiveGeo(path);
+        } else {
+            setPersistentMessage(eMessageTypeError,
+                e == ".abc"
+                    ? "Alembic (.abc) hierarchy import is not implemented yet in this node — "
+                      "switch Output Single Mesh on, or use the ReadAlembicArchive node."
+                    : "OBJ hierarchy import is not implemented yet in this node — "
+                      "switch Output Single Mesh on (single-mesh OBJ always works).");
+        }
+    } else if (e == ".obj") {
         loadObjGeo(loadPath);
     } else if (e == ".abc") {
 #ifdef NATRON_HAVE_ALEMBIC
@@ -870,8 +1313,9 @@ ReadGeo::loadGeoFromFile(const std::string& path)
         }
     }
 
-    // Sequence loaded: annotate the info line the loader just wrote.
-    if (_imp->seq.isSequence) {
+    // Sequence loaded: annotate the info line the loader just wrote. The
+    // archive (multi-emit) loader composes its own info line, including seq.
+    if (!multiEmit && _imp->seq.isSequence) {
         KnobStringPtr infoK = _imp->info.lock();
         if (infoK) {
             std::ostringstream seqInfo;
@@ -892,8 +1336,12 @@ ReadGeo::loadGeoFromFile(const std::string& path)
 void
 ReadGeo::onKnobsLoaded()
 {
+    // A project saved with the knob toggled does not fire knobChanged on the
+    // restore — re-derive the per-mode knob visibility from the restored
+    // value before the load path runs.
+    applyModeVisibility();
     // After a project load the file-path knob is restored, but no knobChanged
-    // fires for it, so the geometry is never read into memory â€” the user used to
+    // fires for it, so the geometry is never read into memory — the user used to
     // have to hit "Reload" manually. Load it here so the saved scene appears
     // immediately. (loadGeoFromFile is a no-op for an empty path.)
     KnobFilePtr fileKnob = _imp->filePath.lock();
@@ -2202,26 +2650,318 @@ ReadGeo::applyImportedMaterialKnobs(const GeoImportMaterial& m)
 }
 
 // ---------------------------------------------------------------------------
+// Object-hierarchy (multi-emit) mode — ported from ReadGeoArchive.cpp.
+// Locking discipline: instead of the archive node's archiveMutex every
+// accessor below takes _meshMutex (the same guard the single-mesh path
+// uses), so a mode flip (which clears both sides) can never interleave with
+// a render-thread walk of the other side's accessors.
+// ---------------------------------------------------------------------------
+
+bool
+ReadGeo::isMultiEmit() const
+{
+    KnobBoolPtr k = _imp ? _imp->outputSingleMesh.lock() : KnobBoolPtr();
+    // Knob missing (older project): single-mesh default (ON semantics).
+    return k ? !k->getValue() : false;
+}
+
+double
+ReadGeo::archiveFps() const
+{
+    KnobDoublePtr k = _imp->fpsKnob.lock();
+    const double fpsKnob = k ? k->getValue() : 0.0;
+    return fpsKnob > 0.0 ? fpsKnob : (getApp() ? getApp()->getProjectFrameRate() : 24.0);
+}
+
+void
+ReadGeo::applyModeVisibility()
+{
+    if (!_imp) return;
+    KnobBoolPtr mode = _imp->outputSingleMesh.lock();
+    // ON = single mesh (classic); OFF = multi-emit hierarchy.
+    const bool multi = mode ? !mode->getValue() : false;
+
+    // --- Single-mesh-only knobs ---
+    if (KnobChoicePtr k = _imp->objectPath.lock()) k->setSecret(multi);
+    if (KnobBoolPtr k = _imp->freezeAtFrame.lock()) k->setSecret(multi);
+    if (KnobIntPtr k = _imp->freezeFrame.lock()) k->setSecret(multi);
+    if (KnobColorPtr k = _imp->baseColor.lock()) k->setSecret(multi);
+    if (KnobDoublePtr k = _imp->roughness.lock()) k->setSecret(multi);
+    if (KnobDoublePtr k = _imp->metallic.lock()) k->setSecret(multi);
+    if (KnobDoublePtr k = _imp->specular.lock()) k->setSecret(multi);
+    if (KnobColorPtr k = _imp->emissionColor.lock()) k->setSecret(multi);
+    if (KnobDoublePtr k = _imp->emissionStrength.lock()) k->setSecret(multi);
+    if (KnobDoublePtr k = _imp->transmission.lock()) k->setSecret(multi);
+    if (KnobDoublePtr k = _imp->ior.lock()) k->setSecret(multi);
+    if (KnobFilePtr k = _imp->textureFile.lock()) k->setSecret(multi);
+    if (KnobChoicePtr k = _imp->diffuseColorspace.lock()) k->setSecret(multi);
+
+    // --- Object-hierarchy-only knobs ---
+    if (KnobButtonPtr k = _imp->rebuildMaterialsBtn.lock()) k->setSecret(!multi);
+    if (KnobStringPtr k = _imp->objectFilter.lock()) k->setSecret(!multi);
+    if (KnobBoolPtr k = _imp->includeMeshes.lock()) k->setSecret(!multi);
+    if (KnobBoolPtr k = _imp->showBBox.lock()) k->setSecret(!multi);
+    if (KnobIntPtr k = _imp->frameOffset.lock()) k->setSecret(!multi);
+    if (KnobDoublePtr k = _imp->fpsKnob.lock()) k->setSecret(!multi);
+    if (KnobStringPtr k = _imp->excludedPaths.lock()) k->setSecret(!multi);
+    if (KnobChoicePtr k = _imp->rotationPivot.lock()) k->setSecret(!multi);
+    if (KnobBoolPtr k = _imp->showLocators.lock()) k->setSecret(!multi);
+    if (KnobDoublePtr k = _imp->locatorSize.lock()) k->setSecret(!multi);
+}
+
+void
+ReadGeo::loadArchiveGeo(const std::string& path)
+{
+    // Caller (loadGeoFromFile) holds _meshMutex and the isLoading guard; the
+    // multi state was already cleared there.
+
+    if (path.empty()) {
+        if (KnobStringPtr infoK = _imp->info.lock()) {
+            infoK->setValue(std::string("No file selected."));
+        }
+        return;
+    }
+
+    // Reference file for the parse: the stored value itself, or the
+    // sequence's first frame file when the knob holds a '#' pattern
+    // (detectGeoSequence already stored the sequence in _imp->seq).
+    std::string referencePath = path;
+    if (_imp->seq.isSequence) {
+        std::map<int, std::string>::const_iterator f0 = _imp->seq.files.begin();
+        if (f0 == _imp->seq.files.end()) {
+            _imp->seq = GeoSequenceInfo();
+        } else {
+            referencePath = f0->second;
+        }
+    }
+
+    const bool reverse = _imp->reverseNormals.lock() &&
+                         _imp->reverseNormals.lock()->getValue();
+    std::string err;
+    if (!_imp->rt.loadFile(referencePath, reverse, err)) {
+        setPersistentMessage(eMessageTypeError, err);
+        _imp->seq = GeoSequenceInfo();
+        _imp->seqRt.clear();
+        return;
+    }
+    _imp->rt.bakeMeshWorld = _imp->bakeTransforms.lock() &&
+                             _imp->bakeTransforms.lock()->getValue();
+    const GeoArchiveResult& data = _imp->rt.data;
+
+    // Apply objectFilter + includeMeshes + excludedPaths with SUBTREE
+    // semantics (the ReadGeoArchive rule): an entry is visible only if it
+    // passes the filter AND its parent entry is visible — parents come
+    // before children in data.nodes, so one pass suffices.
+    const std::string pattern = _imp->objectFilter.lock() ?
+                                    _imp->objectFilter.lock()->getValue() : std::string();
+    const bool includeMeshes = _imp->includeMeshes.lock() ?
+                                   _imp->includeMeshes.lock()->getValue() : true;
+    const std::string excludedRaw = _imp->excludedPaths.lock() ?
+                                        _imp->excludedPaths.lock()->getValue() : std::string();
+    std::set<std::string> excluded;
+    {
+        std::size_t pos = 0;
+        while (pos <= excludedRaw.size()) {
+            std::size_t nl = excludedRaw.find('\n', pos);
+            if (nl == std::string::npos) nl = excludedRaw.size();
+            std::string line = excludedRaw.substr(pos, nl - pos);
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' ||
+                                     line.back() == '\t')) {
+                line.pop_back();
+            }
+            std::size_t lead = 0;
+            while (lead < line.size() && (line[lead] == ' ' || line[lead] == '\t')) ++lead;
+            if (lead) line.erase(0, lead);
+            if (!line.empty()) excluded.insert(line);
+            if (nl == excludedRaw.size()) break;
+            pos = nl + 1;
+        }
+    }
+
+    std::vector<char> entryVisible(data.nodes.size(), 0);
+    for (int i = 0; i < (int)data.nodes.size(); ++i) {
+        const GeoArchiveNodeData& nd = data.nodes[i];
+        bool pass = true;
+        if (!includeMeshes && nd.isMesh) pass = false;
+        if (pass && !rgGlobMatch(pattern, nd.fullPath)) pass = false;
+        if (pass && excluded.count(nd.fullPath)) pass = false;
+        if (pass && nd.parentIndex >= 0) pass = entryVisible[nd.parentIndex] != 0;
+        entryVisible[i] = pass ? 1 : 0;
+        if (pass) _imp->visible.push_back(i);
+    }
+
+    // Info string — compact single line (label-column display), the
+    // ReadGeoArchive format including sequence coverage.
+    std::size_t numXforms = 0, numMeshes = 0;
+    for (std::size_t i = 0; i < data.nodes.size(); ++i) {
+        if (data.nodes[i].isMesh) ++numMeshes; else ++numXforms;
+    }
+    std::ostringstream ss;
+    ss << data.nodes.size() << " entries (" << numXforms << " xform + " << numMeshes
+       << " mesh), " << _imp->visible.size() << " shown";
+    if (_imp->rt.isFbx) {
+        ss << " | FBX";
+    }
+    {
+        std::set<const GeoMorphSet*> seen;
+        std::size_t numMorphs = 0;
+        for (std::size_t i = 0; i < data.meshes.size(); ++i) {
+            const GeoArchiveMeshData& md = data.meshes[i];
+            if (md.morphs && seen.insert(md.morphs.get()).second) {
+                numMorphs += md.morphs->targets.size();
+            }
+        }
+        if (numMorphs > 0) {
+            ss << " | " << numMorphs << " morphs";
+        }
+    }
+    if (_imp->rt.hasAnimation) {
+        const double dur = _imp->rt.animTimeEnd - _imp->rt.animTimeBegin;
+        if (dur > 0.0) {
+            const double fps = archiveFps();
+            ss << " | ~" << (int)(dur * fps) << "f anim";
+        } else {
+            ss << " | anim";
+        }
+    }
+    if (_imp->rt.bakeMeshWorld) {
+        ss << " | baked";
+    }
+    if (_imp->seq.isSequence) {
+        ss << " | seq frames " << _imp->seq.firstFrame << "-" << _imp->seq.lastFrame
+           << " (" << _imp->seq.files.size() << " files)";
+    }
+    if (KnobStringPtr infoK = _imp->info.lock()) {
+        infoK->setValue(ss.str());
+    }
+
+    _imp->loadedFilePath = path;
+    _imp->sceneLoaded = true;
+    clearPersistentMessage(false);
+
+    // Morph Weight knobs: sync to the file's distinct morph sets (over ALL
+    // meshes — collectMorphTargets); recreateKnobs can run under _meshMutex
+    // (the loadSceneGeo precedent: the panel refresh does not re-enter it).
+    {
+        std::vector<GeoMorphTargetRef> targets;
+        collectMorphTargets(&targets);
+        if (syncMorphWeightKnobs(targets)) {
+            recreateKnobs(true);
+        }
+    }
+}
+
+// One file per frame (multi-emit): each timeline frame samples its own
+// throwaway parse kept in the bounded LRU (ReadGeoArchive policy — the
+// caller holds _meshMutex).
+std::shared_ptr<GeoArchiveRuntime>
+ReadGeo::ensureSequenceFrameArch(double time, bool* outFallbackToReference) const
+{
+    *outFallbackToReference = true;
+    if (time < 0.0 || _imp->seq.files.empty()) {
+        return std::shared_ptr<GeoArchiveRuntime>();
+    }
+    // Sequence wins over the frameOffset knob: file frame numbers are NATIVE
+    // to the timeline.
+    const int frame = _imp->seq.clampFrame((int)std::floor(time));
+    std::shared_ptr<GeoArchiveRuntime> frt = _imp->seqRt.get(frame);
+    if (frt) {
+        *outFallbackToReference = false;
+        return frt;
+    }
+
+    std::map<int, std::string>::const_iterator it = _imp->seq.files.find(frame);
+    if (it == _imp->seq.files.end()) {
+        return std::shared_ptr<GeoArchiveRuntime>();
+    }
+    frt.reset(new GeoArchiveRuntime);
+    const bool reverse = _imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue();
+    std::string err;
+    if (!frt->loadFile(it->second, reverse, err)) {
+        NodePtr n(getNode());
+        if (n) n->setPersistentMessage(eMessageTypeError,
+                                       "Sequence frame " + std::to_string(frame) + ": " + err);
+        return std::shared_ptr<GeoArchiveRuntime>();
+    }
+    frt->bakeMeshWorld = _imp->bakeTransforms.lock() &&
+                         _imp->bakeTransforms.lock()->getValue();
+
+    // Hierarchy consistency: the frame file must carry the reference's node
+    // layout; a mismatching frame cannot be sampled safely (hold the
+    // reference frame's data instead).
+    if (frt->data.nodes.size() != _imp->rt.data.nodes.size()) {
+        NodePtr n(getNode());
+        if (n) n->setPersistentMessage(eMessageTypeError,
+                                       "Sequence frame " + std::to_string(frame) +
+                                           ": hierarchy mismatch (" +
+                                           std::to_string(frt->data.nodes.size()) +
+                                           " nodes, reference has " +
+                                           std::to_string(_imp->rt.data.nodes.size()) +
+                                           ") — holding the reference frame's data.");
+        return std::shared_ptr<GeoArchiveRuntime>();
+    }
+
+    _imp->seqRt.put(frame, frt);
+    *outFallbackToReference = false;
+    return frt;
+}
+
+// --- ArchiveProvider interface (multi-emit; active when Output Single Mesh
+// is OFF). Ported from ReadGeoArchive; the idx space is the VISIBLE entry
+// index (the same space SceneNode::archiveEntryIdx stores).
+
+int
+ReadGeo::getSceneNodeCount() const
+{
+    std::lock_guard<std::mutex> lk(_meshMutex);
+    return (int)_imp->visible.size();
+}
+
+std::vector<ArchiveTreeEntry>
+ReadGeo::getEntryTree() const
+{
+    std::lock_guard<std::mutex> lk(_meshMutex);
+    const GeoArchiveResult& data = _imp->rt.data;
+    std::vector<ArchiveTreeEntry> out;
+    out.reserve(data.nodes.size());
+    for (std::size_t i = 0; i < data.nodes.size(); ++i) {
+        const GeoArchiveNodeData& nd = data.nodes[i];
+        ArchiveTreeEntry te;
+        te.fullPath = nd.fullPath;
+        te.name = nd.name;
+        te.parentLocalIdx = nd.parentIndex;
+        te.isMesh = nd.isMesh;
+        te.sampleCount = (_imp->seq.isSequence ||
+                          nd.chanTr >= 0 || nd.chanRot >= 0 || nd.chanSc >= 0) ? 1 : 0;
+        te.numVertices = (nd.isMesh && nd.meshIndex >= 0 &&
+                          nd.meshIndex < (int)data.meshes.size() &&
+                          data.meshes[nd.meshIndex].mesh)
+                             ? (int)data.meshes[nd.meshIndex].mesh->numVertices : 0;
+        out.push_back(te);
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Morph Weights (glTF shape keys / FBX blend shapes)
 // ---------------------------------------------------------------------------
 
 void
 ReadGeo::collectMorphTargets(std::vector<GeoMorphTargetRef>* out) const
 {
-    // Caller holds _meshMutex (guards rt.data).
+    // Caller holds _meshMutex (guards rt.data). Distinct sets over ALL meshes
+    // of the parsed file (both emission modes need this — the multi-emit
+    // mode's filtered-out meshes must keep their shapes addressable, and in
+    // single mode meshEntries lists the full isMesh set identically).
     if (!out) return;
     out->clear();
     if (!_imp->sceneLoaded) return;
     const GeoArchiveResult& data = _imp->rt.data;
 
-    // Distinct sets only: the material pieces of one FBX node mesh share one
-    // GeoMorphSet (same pointer); glTF sets are per-primitive. The target
-    // order here defines the morphW<i> knob indices â€” keep it stable.
     std::set<const GeoMorphSet*> seen;
-    for (std::size_t i = 0; i < _imp->meshEntries.size(); ++i) {
-        const int nodeIdx = _imp->meshEntries[i];
-        if (nodeIdx < 0 || nodeIdx >= (int)data.nodes.size()) continue;
-        const GeoArchiveNodeData& nd = data.nodes[nodeIdx];
+    for (std::size_t i = 0; i < data.nodes.size(); ++i) {
+        const GeoArchiveNodeData& nd = data.nodes[i];
+        if (!nd.isMesh) continue;
         if (nd.meshIndex < 0 || nd.meshIndex >= (int)data.meshes.size()) continue;
         const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
         if (!md.morphs || md.morphs->targets.empty()) continue;
@@ -2359,6 +3099,540 @@ ReadGeo::applyMorphOverrideAt(double time) const
     }
 }
 
+bool
+ReadGeo::getSceneNodeAt(int idx, double time,
+                        std::string& outName,
+                        int& outParentLocalIndex,
+                        bool& outIsMesh,
+                        float outLocalMatrix[16]) const
+{
+    std::lock_guard<std::mutex> lk(_meshMutex);
+    if (!_imp->sceneLoaded || idx < 0 || idx >= (int)_imp->visible.size()) return false;
+    const int srcIdx = _imp->visible[idx];
+    const GeoArchiveNodeData& nd = _imp->rt.data.nodes[srcIdx];
+
+    outName = nd.fullPath;
+    outIsMesh = nd.isMesh;
+
+    // File-sequence mode: sample the frame file's runtime (frame-zero
+    // evaluation; the frameOffset knob does not remap — ReadGeoArchive).
+    GeoArchiveRuntime* actRt = &_imp->rt;
+    std::shared_ptr<GeoArchiveRuntime> frameRt;
+    if (_imp->seq.isSequence) {
+        bool fallback = true;
+        frameRt = ensureSequenceFrameArch(time, &fallback);
+        if (frameRt && !fallback) {
+            actRt = frameRt.get();
+        } else {
+            frameRt.reset();
+        }
+    }
+    // frame-zero evaluation time (nodeLocalAt f = time - 1 - offset = 0)
+    const double seqSampleTime = 1.0;
+
+    // Baked mesh entries emit in world space attached to the archive root —
+    // the world transform went into the vertices, so the chain must not
+    // apply again.
+    if (actRt->bakeMeshWorld && nd.isMesh) {
+        outParentLocalIndex = -1;
+        geoArchiveMatIdentity(outLocalMatrix);
+        return true;
+    }
+    const double fps = archiveFps();
+    const int frameOffset = _imp->frameOffset.lock() ? _imp->frameOffset.lock()->getValue() : 0;
+
+    // Morph-weight override: fill the override store BEFORE nodeLocalAt
+    // triggers ensureFrameState so a lazily-built frame embeds the user's
+    // weights. Skipped in sequence mode: the per-frame files' own weights win.
+    if (!frameRt) {
+        const int key = (int)std::floor(time - 1.0 - (double)frameOffset);
+        applyMorphOverrideAt((double)(key > 0 ? key : 0) + 1.0 + (double)frameOffset);
+    }
+
+    // The entry's own local matrix.
+    if (frameRt) {
+        actRt->nodeLocalAt(srcIdx, seqSampleTime, fps, 0, outLocalMatrix);
+    } else {
+        actRt->nodeLocalAt(srcIdx, time, fps, frameOffset, outLocalMatrix);
+    }
+
+    // Parent mapping + root normalization (ReadGeoArchive policy: fold
+    // filtered-out intermediates into the entry's local and attach to the
+    // nearest VISIBLE ancestor; root-level entries fold the format-level
+    // root normalization so every chain composes it exactly once at the top).
+    outParentLocalIndex = -1;
+    bool attachRoot = (nd.parentIndex < 0);
+    int p = nd.parentIndex;
+    while (p >= 0 && p < (int)actRt->data.nodes.size()) {
+        int pv = -1;
+        for (int v = 0; v < (int)_imp->visible.size(); ++v) {
+            if (_imp->visible[v] == p) { pv = v; break; }
+        }
+        if (pv >= 0) {
+            outParentLocalIndex = pv;
+            break;
+        }
+        float pl[16];
+        if (frameRt) {
+            actRt->nodeLocalAt(p, seqSampleTime, fps, 0, pl);
+        } else {
+            actRt->nodeLocalAt(p, time, fps, frameOffset, pl);
+        }
+        float folded[16];
+        geoArchiveMatMul(pl, outLocalMatrix, folded);
+        std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
+        attachRoot = true;
+        p = actRt->data.nodes[p].parentIndex;
+    }
+    if (attachRoot && actRt->data.rootMatrix.size() == 16) {
+        float folded[16];
+        geoArchiveMatMul(actRt->data.rootMatrix.data(), outLocalMatrix, folded);
+        std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
+    }
+    return true;
+}
+
+MeshDataPtr
+ReadGeo::getMeshDataAt(int idx, double time) const
+{
+    std::lock_guard<std::mutex> lk(_meshMutex);
+    if (!_imp->sceneLoaded || idx < 0 || idx >= (int)_imp->visible.size()) return MeshDataPtr();
+    const int srcIdx = _imp->visible[idx];
+    const GeoArchiveNodeData& nd = _imp->rt.data.nodes[srcIdx];
+    if (!nd.isMesh || nd.meshIndex < 0 || nd.meshIndex >= (int)_imp->rt.data.meshes.size()) {
+        return MeshDataPtr();
+    }
+    const GeoArchiveMeshData& md = _imp->rt.data.meshes[nd.meshIndex];
+    if (!md.mesh) return MeshDataPtr();
+
+    // File-sequence mode gates every entry through its frame file's parse
+    // (topology/positions may change per frame); rest queries (time < 0)
+    // serve the reference file's data.
+    if (_imp->seq.isSequence && time < 0.0) {
+        return md.mesh;
+    }
+    // Entries whose payload depends on the frame evaluation: skinned
+    // (CPU skinning), baked (world bake), and morph-carrying RIGID meshes.
+    const bool bakeOn = _imp->bakeTransforms.lock() &&
+                        _imp->bakeTransforms.lock()->getValue();
+    const bool needsFrame = (md.skinIndex >= 0) || bakeOn ||
+                            (md.morphs && !md.morphs->targets.empty());
+    if (!_imp->seq.isSequence && (!needsFrame || time < 0.0)) {
+        return md.mesh;
+    }
+    if (_imp->seq.isSequence) {
+        bool fallback = true;
+        std::shared_ptr<GeoArchiveRuntime> frameRt = ensureSequenceFrameArch(time, &fallback);
+        if (frameRt && !fallback) {
+            std::shared_ptr<const GeoArchiveFrameEval> st =
+                frameRt->ensureFrameState(archiveFps(), 0);
+            if (nd.meshIndex < (int)st->deformed.size() && st->deformed[nd.meshIndex]) {
+                return st->deformed[nd.meshIndex];
+            }
+            // Frame payload missing for this entry: serve the frame file's
+            // rest mesh (same file, static content).
+            if (nd.meshIndex >= 0 && nd.meshIndex < (int)frameRt->data.meshes.size() &&
+                frameRt->data.meshes[nd.meshIndex].mesh) {
+                return frameRt->data.meshes[nd.meshIndex].mesh;
+            }
+        }
+        return md.mesh; // frame unavailable — hold the reference frame
+    }
+
+    // Skinned/morph/baked: per-frame evaluation via the frame cache.
+    const int frameOffset = _imp->frameOffset.lock() ? _imp->frameOffset.lock()->getValue() : 0;
+    int key = (int)std::floor(time - 1.0 - (double)frameOffset);
+    if (key < 0) key = 0;
+    applyMorphOverrideAt((double)(key + 1) + (double)frameOffset);
+    std::shared_ptr<const GeoArchiveFrameEval> st =
+        _imp->rt.ensureFrameState(archiveFps(), key);
+    if (nd.meshIndex < (int)st->deformed.size() && st->deformed[nd.meshIndex]) {
+        return st->deformed[nd.meshIndex];
+    }
+    return md.mesh;
+}
+
+bool
+ReadGeo::getEntryWorldMatrix(int idx, double time, float outWorld[16]) const
+{
+    std::lock_guard<std::mutex> lk(_meshMutex);
+    if (!_imp->sceneLoaded || idx < 0 || idx >= (int)_imp->visible.size()) return false;
+    const int srcIdx = _imp->visible[idx];
+
+    // File-sequence mode: the world matrix comes from the frame file's
+    // runtime (its frame-zero state); the sequence owns the timing.
+    if (_imp->seq.isSequence && time >= 0.0) {
+        bool fallback = true;
+        std::shared_ptr<GeoArchiveRuntime> frameRt = ensureSequenceFrameArch(time, &fallback);
+        if (frameRt && !fallback) {
+            const bool bakeF = _imp->bakeTransforms.lock() &&
+                               _imp->bakeTransforms.lock()->getValue();
+            if (bakeF && frameRt->data.nodes[srcIdx].isMesh) {
+                geoArchiveMatIdentity(outWorld);
+                return true;
+            }
+            frameRt->worldMatrixAt(srcIdx, 1.0, archiveFps(), 0, outWorld);
+            return true;
+        }
+        // Frame unavailable: hold the reference file's state below.
+    }
+
+    // Baked mesh entries are world-space payloads parented to the root —
+    // their entry world matrix is identity by construction.
+    const bool bakeOn = _imp->bakeTransforms.lock() &&
+                        _imp->bakeTransforms.lock()->getValue();
+    if (bakeOn && _imp->rt.data.nodes[srcIdx].isMesh) {
+        geoArchiveMatIdentity(outWorld);
+        return true;
+    }
+
+    // Morph-weight override: fill the store before worldMatrixAt's potential
+    // ensureFrameState (same key mapping as getSceneNodeAt).
+    {
+        const int frameOffset = _imp->frameOffset.lock() ? _imp->frameOffset.lock()->getValue() : 0;
+        const int key = (int)std::floor(time - 1.0 - (double)frameOffset);
+        applyMorphOverrideAt((double)(key > 0 ? key : 0) + 1.0 + (double)frameOffset);
+    }
+
+    const int frameOffset = _imp->frameOffset.lock() ? _imp->frameOffset.lock()->getValue() : 0;
+    _imp->rt.worldMatrixAt(_imp->visible[idx], time, archiveFps(), frameOffset, outWorld);
+    return true;
+}
+
+bool
+ReadGeo::getRootMatrix(float outRoot[16]) const
+{
+    std::lock_guard<std::mutex> lk(_meshMutex);
+    if (!_imp->sceneLoaded || _imp->rt.data.rootMatrix.size() != 16) {
+        geoArchiveMatIdentity(outRoot);
+        return false;
+    }
+    std::memcpy(outRoot, _imp->rt.data.rootMatrix.data(), 16 * sizeof(float));
+    return true;
+}
+
+MaterialProvider*
+ReadGeo::getEntryMaterialProvider(int idx) const
+{
+    std::lock_guard<std::mutex> lk(_meshMutex);
+    // idx is the VISIBLE entry index — remap to the full-archive node index
+    // before touching rt.data (ReadGeoArchive: resolving the visible index
+    // directly re-shuffled materials when subtrees were filtered out).
+    if (!_imp->sceneLoaded || idx < 0 || idx >= (int)_imp->visible.size()) return nullptr;
+    const int srcIdx = _imp->visible[idx];
+    if (srcIdx < 0 || srcIdx >= (int)_imp->rt.data.nodes.size()) return nullptr;
+    const GeoArchiveNodeData& nd = _imp->rt.data.nodes[srcIdx];
+    if (!nd.isMesh || nd.meshIndex < 0 || nd.meshIndex >= (int)_imp->rt.data.meshes.size()) {
+        return nullptr;
+    }
+
+    // Cached adapter? Keyed by the FULL node index so the cache survives
+    // visibility changes.
+    std::map<int, std::shared_ptr<RGEntryMaterialAdapter>>::const_iterator it =
+        _imp->entryMaterials.find(srcIdx);
+    if (it != _imp->entryMaterials.end()) return it->second.get();
+
+    const GeoArchiveMeshData& md = _imp->rt.data.meshes[nd.meshIndex];
+    if (md.materialIndex < 0 ||
+        md.materialIndex >= (int)_imp->rt.data.materials.size() ||
+        !_imp->rt.data.materials[md.materialIndex].present) {
+        return nullptr;
+    }
+
+    std::shared_ptr<RGEntryMaterialAdapter> adapter =
+        std::make_shared<RGEntryMaterialAdapter>(_imp->rt.data.materials[md.materialIndex]);
+    _imp->entryMaterials[srcIdx] = adapter;
+    return adapter.get();
+}
+
+// --- Re-build Materials (multi-emit) -----------------------------------------
+// Standalone ReadGeo + Material3D node set under Group3D, replicating this
+// node's archive-mode output; the port of ReadGeoArchive::rebuildMaterialsSet
+// (same layout, naming and semantics — only the mutex differs).
+
+void
+ReadGeo::rebuildMaterialsSet()
+{
+    AppInstancePtr app = getApp();
+    NodePtr thisNode = getNode();
+    if (!app || !thisNode) {
+        return;
+    }
+    if (_imp->rebuildBusy) {
+        return;
+    }
+
+    KnobFilePtr fp = _imp->filePath.lock();
+    const std::string filePath = fp ? fp->getValue() : std::string();
+
+    // Snapshot the visible mesh entries + their file materials under the
+    // lock. objectPathIdx = the part's 1-based rank among ALL mesh entries of
+    // the file (ReadGeo's Object dropdown counts the unfiltered file).
+    struct RebuildPart
+    {
+        std::string path;
+        int objectPathIdx;
+        bool hasMaterial;
+        GeoImportMaterial material; // read only when hasMaterial
+    };
+    std::vector<RebuildPart> parts;
+    {
+        std::lock_guard<std::mutex> lk(_meshMutex);
+        if (_imp->loadedFilePath.empty() || filePath.empty() || _imp->rt.data.nodes.empty()) {
+            setPersistentMessage(eMessageTypeError,
+                "Re-build Materials: no file loaded on the node.");
+            return;
+        }
+        std::vector<char> visFlag(_imp->rt.data.nodes.size(), 0);
+        for (std::size_t v = 0; v < _imp->visible.size(); ++v) {
+            if (_imp->visible[v] >= 0 && _imp->visible[v] < (int)visFlag.size()) {
+                visFlag[_imp->visible[v]] = 1;
+            }
+        }
+        int meshRank = 0;
+        for (std::size_t i = 0; i < _imp->rt.data.nodes.size(); ++i) {
+            const GeoArchiveNodeData& nd = _imp->rt.data.nodes[i];
+            if (!nd.isMesh) continue;
+            ++meshRank;
+            if (!visFlag[i]) continue;
+            RebuildPart p;
+            p.path = nd.fullPath;
+            p.objectPathIdx = meshRank;
+            p.hasMaterial = false;
+            if (nd.meshIndex >= 0 && nd.meshIndex < (int)_imp->rt.data.meshes.size()) {
+                const GeoArchiveMeshData& md = _imp->rt.data.meshes[nd.meshIndex];
+                if (md.materialIndex >= 0 &&
+                    md.materialIndex < (int)_imp->rt.data.materials.size() &&
+                    _imp->rt.data.materials[md.materialIndex].present) {
+                    p.hasMaterial = true;
+                    p.material = _imp->rt.data.materials[md.materialIndex];
+                }
+            }
+            parts.push_back(p);
+        }
+    }
+    if (parts.empty()) {
+        setPersistentMessage(eMessageTypeError,
+            "Re-build Materials: no mesh entries are currently visible "
+            "(check Object Filter / Excluded Paths).");
+        return;
+    }
+
+    // Mirror selected archive-wide knobs onto the copies (bake is forced
+    // instead — see the ReadGeo creation below).
+    const bool archiveReverse = _imp->reverseNormals.lock() &&
+                             _imp->reverseNormals.lock()->getValue();
+    const bool archiveUseFileMorphs = _imp->useFileMorphWeights.lock() &&
+                                      _imp->useFileMorphWeights.lock()->getValue();
+
+    NodeCollectionPtr grp = thisNode->getGroup();
+    _imp->rebuildBusy = true;
+    struct BusyReset
+    {
+        bool* flag;
+        explicit BusyReset(bool* f) : flag(f) {}
+        ~BusyReset() { *flag = false; }
+    } busyReset(&_imp->rebuildBusy);
+
+    // Root group: assembles the per-part pairs (8 inputs each — more parts
+    // nest additional Group3Ds at the root's spare slots). Name:
+    // Group3d_RebuiltMaterials_NN — NN counts previous rebuilds in the
+    // project (scan existing nodes for the highest suffix).
+    std::string rootName = "Group3d_RebuiltMaterials_1";
+    {
+        static const std::string prefix = "Group3d_RebuiltMaterials";
+        int maxN = 0;
+        NodesList nodes = app->getProject()->getNodes();
+        for (const NodePtr& n : nodes) {
+            const std::string lbl = n->getLabel();
+            if (lbl.compare(0, prefix.size(), prefix) != 0) continue;
+            const std::string rem = lbl.substr(prefix.size());
+            if (!rem.empty() && rem[0] == '_') {
+                const int v = std::atoi(rem.c_str() + 1);
+                if (v > maxN && v < 100000) maxN = v;
+            }
+        }
+        rootName = prefix + "_" + std::to_string(maxN + 1);
+    }
+    CreateNodeArgs gArgs(PLUGINID_NATRON_GROUP3D, grp);
+    gArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+    gArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+    gArgs.setProperty<bool>(kCreateNodeArgsPropSettingsOpened, false);
+    gArgs.setProperty<std::string>(kCreateNodeArgsPropNodeInitialName, rootName);
+    NodePtr rootGroup = app->createNode(gArgs);
+    if (!rootGroup) {
+        setPersistentMessage(eMessageTypeError,
+            "Re-build Materials: failed to create the Group3D node.");
+        return;
+    }
+    rootGroup->setLabel(rootName);
+
+    // Mirror this node's user TRS onto the group (Uniform Scale folds into
+    // the per-axis scales; Group3D has no uniform-scale knob).
+    {
+        KnobBoolPtr enable = std::dynamic_pointer_cast<KnobBool>(
+            rootGroup->getKnobByName("enableTransform"));
+        static const char* trsNames[9] = { "translateX", "translateY", "translateZ",
+                                           "rotateX", "rotateY", "rotateZ",
+                                           "scaleX", "scaleY", "scaleZ" };
+        double trsVals[9] = { 0, 0, 0, 0, 0, 0, 1, 1, 1 };
+        double uniformScale = 1.0;
+        bool anyNonDefault = false;
+        for (int i = 0; i < 9; ++i) {
+            KnobIPtr k = thisNode->getKnobByName(trsNames[i]);
+            KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k);
+            if (d) {
+                trsVals[i] = d->getValue();
+                if (i < 6 && trsVals[i] != 0.0) anyNonDefault = true;
+            }
+        }
+        {
+            KnobIPtr k = thisNode->getKnobByName("uniformScale");
+            KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k);
+            if (d) {
+                uniformScale = d->getValue();
+                if (uniformScale != 1.0) anyNonDefault = true;
+            }
+        }
+        if (enable) {
+            enable->setValue(anyNonDefault);
+        }
+        if (anyNonDefault) {
+            for (int i = 0; i < 9; ++i) {
+                KnobIPtr k = rootGroup->getKnobByName(trsNames[i]);
+                KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k);
+                if (d) {
+                    d->setValue(trsVals[i]);
+                }
+            }
+            for (int i = 6; i < 9; ++i) {
+                KnobIPtr k = rootGroup->getKnobByName(trsNames[i]);
+                KnobDoublePtr d = std::dynamic_pointer_cast<KnobDouble>(k);
+                if (d) {
+                    d->setValue(trsVals[i] * uniformScale);
+                }
+            }
+        }
+    }
+
+    // Layout anchor: this node's graph position. Data reads left to right —
+    // Material3D -> part ReadGeo -> sub Group3D -> root Group3D.
+    double px = 0, py = 0;
+    thisNode->getPosition(&px, &py);
+    const double rowHeight = 150.0;
+
+    const int kGroupInputs = 8;
+    NodePtr curGroup = rootGroup;
+    int curSlot = 0;
+    int rootSlot = 0;
+
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        const RebuildPart& part = parts[i];
+        if (curSlot >= kGroupInputs) {
+            CreateNodeArgs sArgs(PLUGINID_NATRON_GROUP3D, grp);
+            sArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+            sArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+            sArgs.setProperty<bool>(kCreateNodeArgsPropSettingsOpened, false);
+            NodePtr sub = app->createNode(sArgs);
+            if (!sub) {
+                setPersistentMessage(eMessageTypeError,
+                    "Re-build Materials: failed to create a sub-Group3D.");
+                return;
+            }
+            sub->setLabel(rootName);
+            // Only the root group draws the bounding box (parity with the
+            // archive's single box); nested sub-groups stay unboxed.
+            if (KnobIPtr sbk = sub->getKnobByName("showBBox")) {
+                if (KnobBoolPtr sb = std::dynamic_pointer_cast<KnobBool>(sbk)) {
+                    sb->setValue(false);
+                }
+            }
+            rootGroup->connectInput(sub, rootSlot++);
+            sub->setPosition(px + 780, py + rowHeight * (double)(i + 1));
+            curGroup = sub;
+            curSlot = 0;
+        }
+
+        // Per-part ReadGeo: file set first (fires the synchronous parse +
+        // dropdown build), then the Object dropdown scopes it to the part.
+        CreateNodeArgs rArgs(PLUGINID_NATRON_READGEO, grp);
+        rArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+        rArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+        rArgs.setProperty<bool>(kCreateNodeArgsPropSettingsOpened, false);
+        NodePtr geo = app->createNode(rArgs);
+        if (!geo) {
+            setPersistentMessage(eMessageTypeError,
+                "Re-build Materials: failed to create the ReadGeo node for '" + part.path + "'.");
+            return;
+        }
+        geo->setLabel(part.path.empty()
+                          ? ("part_" + std::to_string(i + 1))
+                          : part.path);
+        if (KnobIPtr fk = geo->getKnobByName("filename")) {
+            if (KnobFilePtr ff = std::dynamic_pointer_cast<KnobFile>(fk)) {
+                ff->setValue(filePath);
+            }
+        }
+        if (KnobIPtr ok = geo->getKnobByName("objectPath")) {
+            if (KnobChoicePtr oc = std::dynamic_pointer_cast<KnobChoice>(ok)) {
+                oc->setValue(part.objectPathIdx);
+            }
+        }
+        if (KnobIPtr rk = geo->getKnobByName("reverseNormals")) {
+            if (KnobBoolPtr rb = std::dynamic_pointer_cast<KnobBool>(rk)) {
+                rb->setValue(archiveReverse);
+            }
+        }
+        if (KnobIPtr mk = geo->getKnobByName("useFileMorphWeights")) {
+            if (KnobBoolPtr mb = std::dynamic_pointer_cast<KnobBool>(mk)) {
+                mb->setValue(archiveUseFileMorphs);
+            }
+        }
+
+        // Material3D carrying the part's file material.
+        NodePtr mat;
+        if (part.hasMaterial) {
+            CreateNodeArgs mArgs(PLUGINID_NATRON_MATERIAL3D, grp);
+            mArgs.setProperty<bool>(kCreateNodeArgsPropAutoConnect, false);
+            mArgs.setProperty<bool>(kCreateNodeArgsPropAddUndoRedoCommand, true);
+            mArgs.setProperty<bool>(kCreateNodeArgsPropSettingsOpened, false);
+            mat = app->createNode(mArgs);
+            if (!mat) {
+                setPersistentMessage(eMessageTypeError,
+                    "Re-build Materials: failed to create the Material3D node for '" + part.path + "'.");
+                return;
+            }
+            mat->setLabel(part.path.empty()
+                              ? ("part_" + std::to_string(i + 1) + "_mat")
+                              : (part.path + "_mat"));
+            setRebuildMaterialKnobs(mat, part.material);
+        }
+
+        // Wire: material feeds the part's Material input; part feeds group.
+        if (mat) {
+            geo->connectInput(mat, 0);
+        }
+        curGroup->connectInput(geo, curSlot++);
+
+        // Bake Transforms is forced ON: the baked path is the consumer-verified
+        // one (probe-verified pixel-identical to the archive output).
+        if (KnobIPtr bk = geo->getKnobByName("bakeTransforms")) {
+            if (KnobBoolPtr bb = std::dynamic_pointer_cast<KnobBool>(bk)) {
+                bb->setValue(true);
+            }
+        }
+        geo->setPosition(px + 620, py + rowHeight * (double)(i + 1));
+        if (mat) {
+            mat->setPosition(px + 460, py + rowHeight * (double)(i + 1));
+        }
+    }
+
+    rootGroup->setPosition(px + 940, py);
+    // No info PersistentMessage here: in the GUI an info PersistentMessage
+    // pops a modal OK dialog after every rebuild (wedges scripted/bridge
+    // sessions). Error paths above still report via setPersistentMessage.
+}
+
 void
 ReadGeo::onKnobsAboutToBeLoaded(const NodeSerializationPtr& serialization)
 {
@@ -2482,6 +3756,13 @@ ReadGeo::getMeshData(double time) const
 {
     // Serialise against a concurrent reload swapping/clearing _lastMeshData.
     std::lock_guard<std::mutex> lk(_meshMutex);
+
+    // Object-hierarchy mode: the geometry lives in the ArchiveProvider
+    // accessors; the consumers route there (their MeshProvider branches skip
+    // this node when isMultiEmit() is true).
+    if (_imp && isMultiEmit()) {
+        return MeshDataPtr();
+    }
 
     // File-sequence mode: every frame comes from its own
     // file — nothing can ride the single-file machinery below.
@@ -2657,6 +3938,27 @@ ReadGeo::getPreferredMetadata(NodeMetadata& metadata)
     if (!_imp) {
         return eStatusOK;
     }
+    // Object-hierarchy mode: freeze knobs are not visible there — the mode is
+    // frame-varying whenever the archive has animation or a sequence is
+    // loaded (the ReadGeoArchive metadata rule).
+    if (isMultiEmit()) {
+        if (_imp->seq.isSequence || (_imp->sceneLoaded && _imp->rt.hasAnimation)) {
+            metadata.setIsFrameVarying(true);
+            return eStatusOK;
+        }
+        // Animated user morph weights still make the node time-varying.
+        KnobBoolPtr uf = _imp->useFileMorphWeights.lock();
+        if (uf && !uf->getValue()) {
+            for (std::size_t i = 0; i < _imp->morphWeightKnobs.size(); ++i) {
+                KnobDoublePtr k = _imp->morphWeightKnobs[i].lock();
+                if (k && k->isAnimated(0, ViewSpec(0))) {
+                    metadata.setIsFrameVarying(true);
+                    break;
+                }
+            }
+        }
+        return eStatusOK;
+    }
     const bool frozen = _imp->freezeAtFrame.lock() &&
                         _imp->freezeAtFrame.lock()->getValue();
     if (frozen) {
@@ -2707,23 +4009,79 @@ ReadGeo::render(const RenderActionArgs& /*args*/)
 void
 ReadGeo::getMaterialBaseColor(double time, double& r, double& g, double& b) const
 {
+    if (isMultiEmit()) {
+        if (MaterialProvider* mat = getConnectedMaterial()) {
+            mat->getMaterialBaseColor(time, r, g, b);
+            return;
+        }
+        if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+            r = _imp->rt.data.materials[0].baseColor[0];
+            g = _imp->rt.data.materials[0].baseColor[1];
+            b = _imp->rt.data.materials[0].baseColor[2];
+            return;
+        }
+        r = 0.7; g = 0.7; b = 0.7;
+        return;
+    }
     KnobColorPtr c = _imp->baseColor.lock();
     if (c) { r = c->getValueAtTime(time, 0); g = c->getValueAtTime(time, 1); b = c->getValueAtTime(time, 2); }
     else { r = 0.8; g = 0.8; b = 0.8; }
 }
 
 double ReadGeo::getMaterialRoughness(double time) const
-{ KnobDoublePtr k = _imp->roughness.lock(); return k ? k->getValueAtTime(time) : 0.5; }
+{
+    if (isMultiEmit()) {
+        if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialRoughness(time);
+        if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+            return _imp->rt.data.materials[0].roughness;
+        }
+        return 0.5;
+    }
+    KnobDoublePtr k = _imp->roughness.lock(); return k ? k->getValueAtTime(time) : 0.5;
+}
 
 double ReadGeo::getMaterialMetallic(double time) const
-{ KnobDoublePtr k = _imp->metallic.lock(); return k ? k->getValueAtTime(time) : 0.0; }
+{
+    if (isMultiEmit()) {
+        if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialMetallic(time);
+        if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+            return _imp->rt.data.materials[0].metallic;
+        }
+        return 0.0;
+    }
+    KnobDoublePtr k = _imp->metallic.lock(); return k ? k->getValueAtTime(time) : 0.0;
+}
 
 double ReadGeo::getMaterialSpecular(double time) const
-{ KnobDoublePtr k = _imp->specular.lock(); return k ? k->getValueAtTime(time) : 0.5; }
+{
+    if (isMultiEmit()) {
+        if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialSpecular(time);
+        if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+            return _imp->rt.data.materials[0].specular;
+        }
+        return 0.5;
+    }
+    KnobDoublePtr k = _imp->specular.lock(); return k ? k->getValueAtTime(time) : 0.5;
+}
 
 void
 ReadGeo::getMaterialEmission(double time, double& r, double& g, double& b, double& strength) const
 {
+    if (isMultiEmit()) {
+        if (MaterialProvider* mat = getConnectedMaterial()) {
+            mat->getMaterialEmission(time, r, g, b, strength);
+            return;
+        }
+        if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+            r = _imp->rt.data.materials[0].emission[0];
+            g = _imp->rt.data.materials[0].emission[1];
+            b = _imp->rt.data.materials[0].emission[2];
+            strength = _imp->rt.data.materials[0].emissionStrength;
+            return;
+        }
+        r = 1.0; g = 1.0; b = 1.0; strength = 0.0;
+        return;
+    }
     KnobColorPtr c = _imp->emissionColor.lock();
     if (c) { r = c->getValueAtTime(time, 0); g = c->getValueAtTime(time, 1); b = c->getValueAtTime(time, 2); }
     else { r = 1.0; g = 1.0; b = 1.0; }
@@ -2732,13 +4090,39 @@ ReadGeo::getMaterialEmission(double time, double& r, double& g, double& b, doubl
 }
 
 double ReadGeo::getMaterialTransmission(double time) const
-{ KnobDoublePtr k = _imp->transmission.lock(); return k ? k->getValueAtTime(time) : 0.0; }
+{
+    if (isMultiEmit()) {
+        if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialTransmission(time);
+        if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+            return _imp->rt.data.materials[0].transmission;
+        }
+        return 0.0;
+    }
+    KnobDoublePtr k = _imp->transmission.lock(); return k ? k->getValueAtTime(time) : 0.0;
+}
 
 double ReadGeo::getMaterialIOR(double time) const
-{ KnobDoublePtr k = _imp->ior.lock(); return k ? k->getValueAtTime(time) : 1.45; }
+{
+    if (isMultiEmit()) {
+        if (MaterialProvider* mat = getConnectedMaterial()) return mat->getMaterialIOR(time);
+        if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+            return _imp->rt.data.materials[0].ior;
+        }
+        return 1.45;
+    }
+    KnobDoublePtr k = _imp->ior.lock(); return k ? k->getValueAtTime(time) : 1.45;
+}
 
 std::string ReadGeo::getMaterialDiffuseColorspace() const
 {
+    if (isMultiEmit()) {
+        // Multi-emit: the entry adapters pin file textures to sRGB (the
+        // ReadGeoArchive contract); node-level diffuse coloring is unused.
+        if (MaterialProvider* mat = getConnectedMaterial()) {
+            return mat->getMaterialDiffuseColorspace();
+        }
+        return "sRGB";
+    }
     KnobChoicePtr k = _imp->diffuseColorspace.lock();
     int idx = k ? k->getValue() : 0;
     const char* names[] = {"sRGB", "Linear", "ACEScg", "Raw"};
@@ -2746,7 +4130,20 @@ std::string ReadGeo::getMaterialDiffuseColorspace() const
 }
 
 std::string ReadGeo::getMaterialTextureFile() const
-{ KnobFilePtr k = _imp->textureFile.lock(); return k ? k->getValue() : std::string(); }
+{
+    if (isMultiEmit()) {
+        // The first material-bearing part's diffuse map — single-mesh
+        // texture-albedo semantics on the archive-mode node level.
+        if (MaterialProvider* mat = getConnectedMaterial()) {
+            return mat->getMaterialTextureFile();
+        }
+        if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
+            return _imp->rt.data.materials[0].diffuseMapPath;
+        }
+        return std::string();
+    }
+    KnobFilePtr k = _imp->textureFile.lock(); return k ? k->getValue() : std::string();
+}
 
 bool ReadGeo::hasMaterialInput() const
 {

@@ -1938,6 +1938,12 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
 
     MeshProvider* meshProv = dynamic_cast<MeshProvider*>(effect.get());   // ReadGeo, GeoBuilder, ...
     if (meshProv) {
+        // Dual-interface node (the unified ReadGeo) in multi-emit mode: the
+        // archive accessors carry the geometry — this single-GeoData walker
+        // has no archive support, so nothing to extract here.
+        if (ArchiveProvider* apDual = dynamic_cast<ArchiveProvider*>(effect.get())) {
+            if (apDual->isMultiEmit()) return false;
+        }
         MeshDataPtr mesh = meshProv->getMeshData(time);
         if (!mesh || mesh->numVertices == 0) return false;
         out.verts = mesh->vertices;
@@ -2214,6 +2220,11 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
     }
 
     ArchiveProvider* abcArchive = dynamic_cast<ArchiveProvider*>(effect.get());
+    // Dual-interface node (the unified ReadGeo) in single-mesh mode: skip the
+    // archive emission and fall through to the single-result path below.
+    if (abcArchive && !abcArchive->isMultiEmit()) {
+        abcArchive = nullptr;
+    }
     if (abcArchive) {
         ImagePtr sharedTex;
         if (effect->getInput(1)) {

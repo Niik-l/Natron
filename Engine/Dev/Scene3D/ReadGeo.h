@@ -33,6 +33,7 @@
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
 #include "../../EngineFwd.h"
+#include "ArchiveProvider.h"
 #include "MaterialProvider.h"
 #include "MeshProvider.h"
 #include "SubdivisionProvider.h"
@@ -48,12 +49,21 @@ struct ReadGeoPrivate;
  * @brief Import geometry from .glb/.gltf (glTF), .fbx, .abc (Alembic) or
  * .obj (Wavefront) files.
  * Parser dispatches on file extension. Displays meshes in the 3D viewport.
+ *
+ * Universal double-interface node: the "Output Single Mesh" knob switches
+ * between the two consumes modes below.
+ * - Single mesh (default): the classic ReadGeo — one merged/selected mesh
+ *   through MeshProvider::getMeshData.
+ * - Object hierarchy (multi-emit): the file's full node tree is exposed as
+ *   many SceneNodes through the ArchiveProvider accessors (the
+ *   ReadGeoArchive behavior; glTF/FBX files in Phase 1).
  */
 class ReadGeo
     : public EffectInstance
     , public MaterialProvider
     , public SubdivisionProvider
     , public MeshProvider
+    , public ArchiveProvider
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -131,6 +141,26 @@ public:
     virtual bool hasMaterialInput() const OVERRIDE;
     virtual MaterialProvider* getConnectedMaterial() const OVERRIDE;
 
+    // --- ArchiveProvider interface (active when Output Single Mesh is OFF) ---
+    // Ported from ReadGeoArchive — the consumers (SceneGraph::rebuild,
+    // ScanlineRender, CyclesRenderer) route through whichever interface
+    // isMultiEmit() points at.
+    int getSceneNodeCount() const OVERRIDE;
+    bool getSceneNodeAt(int idx, double time,
+                        std::string& outName,
+                        int& outParentLocalIndex,
+                        bool& outIsMesh,
+                        float outLocalMatrix[16]) const OVERRIDE;
+    MeshDataPtr getMeshDataAt(int idx, double time = -1.0) const OVERRIDE;
+    std::vector<ArchiveTreeEntry> getEntryTree() const OVERRIDE;
+    bool getEntryWorldMatrix(int idx, double time, float outWorld[16]) const OVERRIDE;
+    bool getRootMatrix(float outRoot[16]) const OVERRIDE;
+    MaterialProvider* getEntryMaterialProvider(int idx) const OVERRIDE;
+    /** @brief Mode flag: false = single mesh (getMeshData path), true = the
+     *  multi-emit hierarchy above. The knob's missing-from-project fallback
+     *  is single-mesh (the default knob value is ON). */
+    bool isMultiEmit() const OVERRIDE;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
@@ -172,6 +202,15 @@ private:
     // per mesh part) and publishes the initial mesh; per-frame fetches go
     // through buildSceneMesh().
     void loadSceneGeo(const std::string& path);
+    // Object-hierarchy (multi-emit) loader: the ReadGeoArchive::loadArchiveFile
+    // behavior onto ReadGeo's own state (rt / visible / entryMaterials /
+    // seqRt under _meshMutex — the caller holds it). The knob-visibility
+    // switch, filter application and info line mirror the archive node.
+    void loadArchiveGeo(const std::string& path);
+    // Re-build Materials: standalone ReadGeo + Material3D node set beside this
+    // node that replicates the archive-mode output (ported from
+    // ReadGeoArchive::rebuildMaterialsSet). Multi-emit mode only.
+    void rebuildMaterialsSet();
     // Build the MeshData for the current selection at `time` (caller holds
     // _meshMutex): merged = every mesh entry's evaluated vertices baked
     // through its world matrix, concatenated; single part = that part's
@@ -200,6 +239,19 @@ private:
     bool buildObjSeqFrame(int frame, MeshData* out, std::string* err) const;
     bool buildAbcSeqFrame(int frame, MeshData* out, std::string* err) const;
     MeshDataPtr buildSceneSeqFrame(int frame, std::string* err) const;
+
+    // --- Object-hierarchy (multi-emit) helpers — ported from ReadGeoArchive ---
+    // FPS for the file-animation time mapping (fps knob when set, else the
+    // project frame rate).
+    double archiveFps() const;
+    // Resolve the per-frame runtime for timeline `time` in sequence mode
+    // (caller holds _meshMutex). NULL / *outFallbackToReference = sample the
+    // reference rt (agent comment in ReadGeoArchive::ensureSequenceFrame).
+    std::shared_ptr<GeoArchiveRuntime> ensureSequenceFrameArch(double time,
+                                                               bool* outFallbackToReference) const;
+    // Show/hide the per-mode knob groups (setSecret) to match the current
+    // Output Single Mesh value. Also called from initializeKnobs.
+    void applyModeVisibility();
 
     std::unique_ptr<ReadGeoPrivate> _imp;
     // Guards _lastMeshData and the loaded animation-sample state: file (re)load

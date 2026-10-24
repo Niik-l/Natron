@@ -2850,6 +2850,16 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     NodePtr meshSrcNode = sn.sourceNode.lock();
                     if (!meshSrcNode) continue;
                     MeshProvider* meshProv = dynamic_cast<MeshProvider*>(meshSrcNode->getEffectInstance().get());
+                    // Dual-interface node (the unified ReadGeo) in multi-emit
+                    // mode: fallback queries must not return the stale
+                    // single-mesh payload — the archive accessors own the
+                    // geometry there.
+                    if (meshProv) {
+                        if (ArchiveProvider* apDual =
+                                dynamic_cast<ArchiveProvider*>(meshSrcNode->getEffectInstance().get())) {
+                            if (apDual->isMultiEmit()) meshProv = nullptr;
+                        }
+                    }
                     if (!meshProv) continue;
                     meshData = meshProv->getMeshData(time);
                 }
