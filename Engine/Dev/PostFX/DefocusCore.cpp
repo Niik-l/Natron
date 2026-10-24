@@ -17,6 +17,7 @@
  * ***** END LICENSE BLOCK ***** */
 
 #include "DefocusCore.h"
+#include "DefocusGpu.h"
 #include "LensTrace.h"
 
 #include <algorithm>
@@ -2963,6 +2964,339 @@ renderDefocus(const Inputs& in,
         return std::lower_bound(v.begin(), v.end(), y, [](const Sample& a, int yy) { return a.y < yy; });
     };
 
+    // Write: mix / mask against the source, error map. a: the accumulator's kNumCh channels.
+    auto writePixel = [&](int x, int y, const float* a) {
+        float res[4] = {a[0], a[1], a[2], a[3]};
+        double amount = s.mix;
+        if (in.mask.valid()) {
+            amount *= in.mask.bounds.contains(x, y)
+                      ? std::max(0.f, std::min(1.f, in.mask.pixel(x, y)[in.maskChannel])) : 0.f;
+        }
+        if (amount < 1.) {
+            float c[4] = {0.f, 0.f, 0.f, 0.f};
+            if (src.bounds.contains(x, y)) {
+                srcAt(x, y, c);
+            }
+            for (int k = 0; k < 4; ++k) {
+                res[k] = (float)(c[k] + (res[k] - c[k]) * amount);
+            }
+        }
+        float* o = output.pixel(x, y);
+        const int oc = std::min(4, output.channels);
+        for (int k = 0; k < oc; ++k) {
+            o[k] = res[k];
+        }
+        if (errorMap && errorMap->valid() && errorMap->bounds.contains(x, y)) {
+            float* em = errorMap->pixel(x, y);
+            em[0] = std::max(0.f, std::min(1.f, a[4]));
+            em[1] = (D.contains(x, y) && clampedPix[(size_t)(y - D.y1) * Dw + (x - D.x1)]) ? 1.f : 0.f;
+            if (errorMap->channels > 2) {
+                em[2] = 0.f;
+            }
+            if (errorMap->channels > 3) {
+                em[3] = 1.f;
+            }
+        }
+    };
+
+    // GPU: the same shapes, drawn and composited by DefocusGpu (plan/03_gpu_defocus.md). The
+    // CPU scatter below runs instead when it can't (no GPU, too large, an error).
+    if (s.useGpu) {
+        gpu::Job job;
+        job.ow = Ow;
+        job.oh = Oh;
+        job.oxD = O.x1 - D.x1;
+        job.oyD = O.y1 - D.y1;
+        job.inside.resize((size_t)Ow * Oh);
+        for (int y = O.y1; y < O.y2; ++y) {
+            for (int x = O.x1; x < O.x2; ++x) {
+                float c[4];
+                srcAt(x, y, c);
+                job.inside[(size_t)(y - O.y1) * Ow + (x - O.x1)] = std::max(0.f, std::min(1.f, c[3]));
+            }
+        }
+        for (const Constraint& c : lens.constraints()) {
+            const float e[8] = {(float)c.nx, (float)c.ny, (float)c.h, c.disc ? 1.f : 0.f,
+                                (float)c.cx, (float)c.cy, (float)c.R, 0.f};
+            job.constraints.insert(job.constraints.end(), e, e + 8);
+        }
+        // Rings shared by many shapes (the procedural lens's far / near profiles) go up once; a
+        // traced lens's per-sample rings go into the chunk's own list (flagged, offset at the merge).
+        const std::uint32_t kLocalRing = 0x80000000u;
+        std::vector<std::pair<const double*, std::uint32_t> > sharedRings;
+        if (!s.lens.table) {
+            for (double r : {1., -1.}) {
+                KernelShape k;
+                lens.shape(r * 4., 0., 0., k, 0., 1);
+                if (k.ringScale != k.ringS) {
+                    sharedRings.push_back(std::make_pair(k.ringScale, (std::uint32_t)(job.rings.size() / 2)));
+                    for (int i = 0; i < k.nRings; ++i) {
+                        job.rings.push_back((float)k.ringScale[i]);
+                        job.rings.push_back((float)k.ringWeight[i]);
+                    }
+                }
+            }
+        }
+        struct Keyed { int ky, kx; gpu::Shape sh; };
+        struct Building { std::vector<Keyed> v; std::vector<float> rings; double reachX = 1., reachY = 1.; };
+        // One sample -> its shape(s) (three with axial colour): scatterWithCA's channel split.
+        auto addSample = [&](Building& T, const Sample& smp, double gx, double gy, double fullX, double fullY,
+                             double gridScale, int kx, int ky) {
+            const double fx = (fullX - cx0) * invField, fy = (fullY - cy0) * invField;
+            const double u = coc.rInf != 0. ? smp.r / coc.rInf : 0.;
+            auto emit = [&](const KernelShape& k, const float* v) {
+                Keyed e;
+                e.ky = ky;
+                e.kx = kx;
+                gpu::Shape& sh = e.sh;
+                std::memset(&sh, 0, sizeof(sh));
+                sh.bx = (float)(gx + k.offX);
+                sh.by = (float)(gy + k.offY);
+                sh.ext = (float)k.yExtent;
+                for (int i = 0; i < 4; ++i) {
+                    sh.inv[i] = k.point ? 0.f : (float)k.inv[i];
+                }
+                for (int c = 0; c < kNumCh; ++c) {
+                    sh.v[c] = v[c];
+                }
+                sh.kx = kx;
+                for (int i = 0; i < k.nClip && i < 4; ++i) {
+                    sh.clip[3 * i] = (float)k.clipX[i];
+                    sh.clip[3 * i + 1] = (float)k.clipY[i];
+                    sh.clip[3 * i + 2] = (float)k.clipR[i];
+                }
+                sh.energy = (float)k.energy;
+                sh.flags = (k.point ? gpu::eShapePoint : 0u) | ((std::uint32_t)std::min(4, k.nClip) << 1) |
+                           ((k.offX != 0. || k.offY != 0.) ? gpu::eShapeOffset : 0u);
+                if (!k.point) {
+                    bool found = false;
+                    for (const auto& sr : sharedRings) {
+                        if (sr.first == k.ringScale) {
+                            sh.ringOff = sr.second;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        sh.ringOff = kLocalRing | (std::uint32_t)(T.rings.size() / 2);
+                        for (int i = 0; i < k.nRings; ++i) {
+                            T.rings.push_back((float)k.ringScale[i]);
+                            T.rings.push_back((float)k.ringWeight[i]);
+                        }
+                    }
+                    sh.nRings = (std::uint32_t)k.nRings;
+                }
+                const double xExt = k.point ? 1. : std::sqrt(k.m[0] * k.m[0] + k.m[1] * k.m[1]);
+                const double yExt = k.point ? 1. : k.yExtent;
+                T.reachX = std::max(T.reachX, std::fabs(sh.bx - kx) + xExt);
+                T.reachY = std::max(T.reachY, std::fabs(sh.by - ky) + yExt);
+                T.v.push_back(e);
+            };
+            KernelShape k;
+            float v[kNumCh];
+            if (caPx == 0. && !lens.perChannel()) {
+                for (int c = 0; c < kSampleCh; ++c) {
+                    v[c] = smp.c[c];
+                }
+                v[kAlphaR] = v[kAlphaB] = smp.c[3];
+                lens.shape(smp.r / gridScale, fx, fy, k, u, 1);
+                emit(k, v);
+                return;
+            }
+            const double rr[3] = {smp.r + caPx, smp.r, smp.r - caPx};
+            for (int ch = 0; ch < 3; ++ch) {
+                for (int c = 0; c < kNumCh; ++c) {
+                    v[c] = 0.f;
+                }
+                v[ch] = smp.c[ch];
+                if (ch == 0) {
+                    v[kAlphaR] = smp.c[3];
+                } else if (ch == 1) {
+                    v[3] = smp.c[3];
+                    v[4] = smp.c[4];
+                } else {
+                    v[kAlphaB] = smp.c[3];
+                }
+                lens.shape(rr[ch] / gridScale, fx, fy, k, u, ch);
+                emit(k, v);
+            }
+        };
+
+        // Work: per slice up to four targets (0 full: highlights + level-0 cells, 1 full fills,
+        // 2 level cells, 3 level fills), each fed by sample sets cut into chunks built in parallel.
+        enum { eFull = 0, eFullFill, eLvl, eLvlFill };
+        struct Chunk { int slice, target, set, b, e; };   // set: 0 hi, 1 cells, 2 fills
+        const int kChunk = 16384;
+        std::vector<Chunk> chunks;
+        job.slices.resize(slices.size());
+        std::vector<std::vector<float> > levelInside(8);
+        for (size_t si = 0; si < slices.size(); ++si) {
+            const Slice& S = slices[si];
+            gpu::Slice& G = job.slices[si];
+            const int L = S.level;
+            G.level = L;
+            if (L > 0) {
+                const int sc = 1 << L;
+                auto lu = [&](double val, int origin) { return (val - origin + 0.5) / sc - 0.5; };
+                G.ilo = (int)std::floor(lu(O.x1, D.x1));
+                G.jlo = (int)std::floor(lu(O.y1, D.y1));
+            }
+            const std::vector<Sample>* sets[3] = {&S.hi, &S.cells, &S.fills};
+            for (int set = 0; set < 3; ++set) {
+                const int target = set == 0 ? eFull : set == 1 ? (L == 0 ? eFull : eLvl) : (L == 0 ? eFullFill : eLvlFill);
+                const int n = (int)sets[set]->size();
+                for (int b = 0; b < n; b += kChunk) {
+                    Chunk c = {(int)si, target, set, b, std::min(n, b + kChunk)};
+                    chunks.push_back(c);
+                }
+            }
+        }
+        std::vector<Building> built(chunks.size());
+        parallelFor((int)chunks.size(), 1, nThreads, aborted, [&](int b, int e) {
+            for (int ci = b; ci < e; ++ci) {
+                const Chunk& C = chunks[ci];
+                const Slice& S = slices[C.slice];
+                const gpu::Slice& G = job.slices[C.slice];
+                const int sc = 1 << S.level;
+                const std::vector<Sample>& v = C.set == 0 ? S.hi : C.set == 1 ? S.cells : S.fills;
+                Building& T = built[ci];
+                T.v.reserve(C.e - C.b);
+                for (int i = C.b; i < C.e; ++i) {
+                    const Sample& smp = v[i];
+                    if (C.set == 0) {   // highlights: full-res pixels
+                        addSample(T, smp, smp.x - O.x1, smp.y - O.y1, smp.x, smp.y, 1., smp.x - O.x1, smp.y - O.y1);
+                    } else if (S.level == 0) {
+                        const int sx = smp.x + D.x1, sy = smp.y + D.y1;
+                        addSample(T, smp, sx - O.x1, sy - O.y1, sx, sy, 1., sx - O.x1, sy - O.y1);
+                    } else {
+                        addSample(T, smp, smp.x - G.ilo, smp.y - G.jlo, D.x1 + (smp.x + 0.5) * sc - 0.5,
+                                  D.y1 + (smp.y + 0.5) * sc - 0.5, sc, smp.x - G.ilo, smp.y - G.jlo);
+                    }
+                }
+            }
+        });
+        // Merge the chunks per target (sorted by row key, then column), fixing local ring offsets.
+        auto finish = [&](size_t si, int target, gpu::Target& t, int w, int h) {
+            t.w = w;
+            t.h = h;
+            std::vector<Keyed> all;
+            double reachX = 1., reachY = 1.;
+            for (size_t ci = 0; ci < chunks.size(); ++ci) {
+                if (chunks[ci].slice != (int)si || chunks[ci].target != target) {
+                    continue;
+                }
+                Building& T = built[ci];
+                const std::uint32_t base = (std::uint32_t)(job.rings.size() / 2);
+                job.rings.insert(job.rings.end(), T.rings.begin(), T.rings.end());
+                for (Keyed& k : T.v) {
+                    if (k.sh.ringOff & kLocalRing) {
+                        k.sh.ringOff = base + (k.sh.ringOff & ~kLocalRing);
+                    }
+                }
+                all.insert(all.end(), T.v.begin(), T.v.end());
+                reachX = std::max(reachX, T.reachX);
+                reachY = std::max(reachY, T.reachY);
+                std::vector<Keyed>().swap(T.v);
+            }
+            if (all.empty()) {
+                return;
+            }
+            // Each sample set is already in (row, column) order; only highlights + cells in one
+            // target need merging. Order indices, not the 136-byte entries.
+            auto before = [&all](std::uint32_t a, std::uint32_t c) {
+                return all[a].ky != all[c].ky ? all[a].ky < all[c].ky : all[a].kx < all[c].kx;
+            };
+            std::vector<std::uint32_t> order(all.size());
+            for (size_t i = 0; i < all.size(); ++i) {
+                order[i] = (std::uint32_t)i;
+            }
+            if (!std::is_sorted(order.begin(), order.end(), before)) {
+                std::stable_sort(order.begin(), order.end(), before);
+            }
+            t.keyY0 = all[order.front()].ky;
+            const int nRows = all[order.back()].ky - t.keyY0 + 1;
+            t.rowStart.assign((size_t)nRows + 1, 0);
+            t.shapes.resize(all.size());
+            for (size_t i = 0; i < all.size(); ++i) {
+                const Keyed& k = all[order[i]];
+                t.shapes[i] = k.sh;
+                ++t.rowStart[(size_t)(k.ky - t.keyY0) + 1];
+            }
+            for (int r = 0; r < nRows; ++r) {
+                t.rowStart[(size_t)r + 1] += t.rowStart[(size_t)r];
+            }
+            t.reachX = (int)std::ceil(reachX) + 1;
+            t.reachY = (int)std::ceil(reachY) + 1;
+        };
+        for (size_t si = 0; si < slices.size(); ++si) {
+            gpu::Slice& G = job.slices[si];
+            const int L = G.level;
+            finish(si, eFull, G.full, Ow, Oh);
+            finish(si, eFullFill, G.fullFill, Ow, Oh);
+            if (L > 0) {
+                const int sc = 1 << L;
+                auto lu = [&](double val, int origin) { return (val - origin + 0.5) / sc - 0.5; };
+                const int ihi = (int)std::floor(lu(O.x2 - 1, D.x1)) + 1;
+                const int jhi = (int)std::floor(lu(O.y2 - 1, D.y1)) + 1;
+                const int lw = ihi - G.ilo + 1, lh = jhi - G.jlo + 1;
+                finish(si, eLvl, G.lvl, lw, lh);
+                finish(si, eLvlFill, G.lvlFill, lw, lh);
+                if (!G.lvlFill.empty() && L < (int)levelInside.size()) {
+                    // Level-grid silhouette: mean source alpha per cell (the CPU's mL).
+                    std::vector<float>& mL = levelInside[L];
+                    if (mL.empty()) {
+                        mL.assign((size_t)lw * lh, 0.f);
+                        for (int j = 0; j < lh; ++j) {
+                            for (int i = 0; i < lw; ++i) {
+                                double sum = 0.;
+                                int n = 0;
+                                for (int yy = D.y1 + (G.jlo + j) * sc; yy < D.y1 + (G.jlo + j + 1) * sc; ++yy) {
+                                    for (int xx = D.x1 + (G.ilo + i) * sc; xx < D.x1 + (G.ilo + i + 1) * sc; ++xx) {
+                                        float c[4];
+                                        srcAt(xx, yy, c);
+                                        sum += std::max(0.f, std::min(1.f, c[3]));
+                                        ++n;
+                                    }
+                                }
+                                mL[(size_t)j * lw + i] = (float)(sum / std::max(1, n));
+                            }
+                        }
+                    }
+                    G.lvlInside = mL;
+                }
+            }
+        }
+        std::vector<float> accFull;
+        std::string why;
+        const double buildSeconds = secondsSince(tScatter);
+        const bool gpuOk = gpu::scatter(job, accFull, why, aborted);
+        if (std::getenv("DEFOCUS_GPU_TIMES")) {
+            size_t n = 0;
+            for (const gpu::Slice& g : job.slices) {
+                n += g.full.shapes.size() + g.fullFill.shapes.size() + g.lvl.shapes.size() + g.lvlFill.shapes.size();
+            }
+            std::fprintf(stderr, "[DefocusGpu] build %.3f s (%zu shapes, %zu slices), gpu %.3f s\n", buildSeconds, n,
+                         job.slices.size(), secondsSince(tScatter) - buildSeconds);
+        }
+        if (gpuOk) {
+            for (int y = O.y1; y < O.y2; ++y) {
+                for (int x = O.x1; x < O.x2; ++x) {
+                    writePixel(x, y, accFull.data() + ((size_t)(y - O.y1) * Ow + (x - O.x1)) * kNumCh);
+                }
+            }
+            stats.gpu = true;
+            stats.secondsScatter = secondsSince(tScatter);
+            if (statsOut) {
+                *statsOut = stats;
+            }
+            return true;
+        }
+        if (aborted && aborted()) {
+            return false;
+        }
+        stats.gpuMessage = why;
+    }
+
     // A traced lens's kernels near a line focus can reach much further than Slice::reach (sampled at
     // a few radii) says; a strip only draws the samples within its margin, so a longer kernel was
     // cut at strip boundaries (alpha bands across a Petzval's floor, found by the GPU path, which
@@ -3240,38 +3574,7 @@ renderDefocus(const Inputs& in,
             // Write: mix / mask against the source, error map.
             for (int y = y0; y < y1; ++y) {
                 for (int x = O.x1; x < O.x2; ++x) {
-                    const float* a = acc.data() + ((size_t)(y - y0) * Ow + (x - O.x1)) * kNumCh;
-                    float res[4] = {a[0], a[1], a[2], a[3]};
-                    double amount = s.mix;
-                    if (in.mask.valid()) {
-                        amount *= in.mask.bounds.contains(x, y)
-                                  ? std::max(0.f, std::min(1.f, in.mask.pixel(x, y)[in.maskChannel])) : 0.f;
-                    }
-                    if (amount < 1.) {
-                        float c[4] = {0.f, 0.f, 0.f, 0.f};
-                        if (src.bounds.contains(x, y)) {
-                            srcAt(x, y, c);
-                        }
-                        for (int k = 0; k < 4; ++k) {
-                            res[k] = (float)(c[k] + (res[k] - c[k]) * amount);
-                        }
-                    }
-                    float* o = output.pixel(x, y);
-                    const int oc = std::min(4, output.channels);
-                    for (int k = 0; k < oc; ++k) {
-                        o[k] = res[k];
-                    }
-                    if (errorMap && errorMap->valid() && errorMap->bounds.contains(x, y)) {
-                        float* em = errorMap->pixel(x, y);
-                        em[0] = std::max(0.f, std::min(1.f, a[4]));
-                        em[1] = (D.contains(x, y) && clampedPix[(size_t)(y - D.y1) * Dw + (x - D.x1)]) ? 1.f : 0.f;
-                        if (errorMap->channels > 2) {
-                            em[2] = 0.f;
-                        }
-                        if (errorMap->channels > 3) {
-                            em[3] = 1.f;
-                        }
-                    }
+                    writePixel(x, y, acc.data() + ((size_t)(y - y0) * Ow + (x - O.x1)) * kNumCh);
                 }
             }
         }

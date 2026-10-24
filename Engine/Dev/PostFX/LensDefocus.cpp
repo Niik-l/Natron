@@ -286,7 +286,7 @@ struct LensDefocusPrivate
     // Quality
     KnobDoubleWPtr sliceStep, fullResRadius, highlightThreshold, edgeThreshold;
     KnobIntWPtr maxHighlights;
-    KnobChoiceWPtr edgeMode, border, occlusionEdges;
+    KnobChoiceWPtr edgeMode, border, occlusionEdges, device;
     KnobBoolWPtr fillBehind;
     // Output
     KnobChoiceWPtr output;
@@ -1192,6 +1192,21 @@ LensDefocus::initializeKnobs()
         k->setDefaultValue(defocus::eBorderRepeat);
         quality->addKnob(k); _imp->border = k;
     }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Device"));
+        k->setName("device");
+        std::vector<ChoiceOption> o;
+        o.push_back(ChoiceOption("cpu", "CPU", "Blur on the processor."));
+        o.push_back(ChoiceOption("gpu", "GPU", "Draw the bokeh on the graphics card (Vulkan / DirectX 12 / Metal: "
+                                               "NVIDIA, AMD or Intel). Same result as the CPU up to rounding."));
+        k->populateChoices(o);
+        k->setDefaultValue(0);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Where the bokeh is drawn (the most expensive step, more so for large blurs). Depth "
+                             "decoding and the background fill stay on the CPU. Falls back to the CPU, with a "
+                             "warning, when there is no usable GPU or the frame needs more GPU memory than it has."));
+        quality->addKnob(k); _imp->device = k;
+    }
 
     // ---------------------------------------------------------------- Output
     KnobPagePtr out = AppManager::createKnob<KnobPage>(this, tr("Output"));
@@ -1977,6 +1992,7 @@ LensDefocus::render(const RenderActionArgs& args)
     s.highlightThreshold = _imp->highlightThreshold.lock()->getValueAtTime(time);
     s.maxHighlights = _imp->maxHighlights.lock()->getValue();
     s.edgeMode = (defocus::EdgeModeEnum)_imp->edgeMode.lock()->getValue();
+    s.useGpu = _imp->device.lock() && _imp->device.lock()->getValue() == 1;
     s.edgeThresholdPx = _imp->edgeThreshold.lock()->getValue();
     s.fillBehind = _imp->fillBehind.lock()->getValue();
     s.border = (defocus::BorderModeEnum)_imp->border.lock()->getValue();
@@ -2271,6 +2287,9 @@ LensDefocus::render(const RenderActionArgs& args)
         return eStatusOK;   // aborted
     }
 
+    if ( s.useGpu && !stats.gpu && !stats.gpuMessage.empty() ) {
+        warnings.push_back("GPU: " + stats.gpuMessage + "; rendered on the CPU.");
+    }
     if (stats.clamped > 0) {
         std::ostringstream m;
         m << stats.clamped << " pixels hit Max Radius (" << s.maxRadiusPx << " px) and were clamped.";

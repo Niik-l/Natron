@@ -217,6 +217,8 @@ if(NATRON_FASTVOLUME)
     # data the node consumes). When Cycles is off this block is the only thing
     # enabling OpenVDB; CMake dedupes the define if Cycles also set it.
     target_compile_definitions(NatronEngine PRIVATE NATRON_FASTVOLUME NATRON_HAVE_OPENVDB)
+    # LensDefocus / DeepDefocus GPU scatter (Engine/Dev/PostFX/DefocusGpu.cpp) uses the same wgpu
+    target_compile_definitions(NatronEngine PRIVATE DEFOCUS_HAVE_WGPU)
     if(WIN32)
         target_compile_definitions(NatronEngine PRIVATE _USE_MATH_DEFINES)
     endif()

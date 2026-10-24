@@ -286,6 +286,8 @@ struct Settings
     LensStages stages;
     double mix = 1.;
     int threads = 0;                // 0 = hardware concurrency
+    // Scatter (step 5) on the GPU (DefocusGpu, wgpu); the CPU scatters when it can't (Stats::gpuMessage)
+    bool useGpu = false;
 };
 
 // Deep samples: a list per pixel, each sample `stride` floats with RGBA premultiplied by its own
@@ -338,6 +340,8 @@ struct Stats
     double secondsDecode = 0.;
     double secondsFill = 0.;
     double secondsScatter = 0.;
+    bool gpu = false;               // the scatter ran on the GPU
+    std::string gpuMessage;         // Settings::useGpu but the CPU scattered: why
 };
 
 // Signed CoC radius in full-res pixels (before gains and clamp) for a depth in scene units.
