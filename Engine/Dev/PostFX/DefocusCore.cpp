@@ -2963,6 +2963,40 @@ renderDefocus(const Inputs& in,
         return std::lower_bound(v.begin(), v.end(), y, [](const Sample& a, int yy) { return a.y < yy; });
     };
 
+    // A traced lens's kernels near a line focus can reach much further than Slice::reach (sampled at
+    // a few radii) says; a strip only draws the samples within its margin, so a longer kernel was
+    // cut at strip boundaries (alpha bands across a Petzval's floor, found by the GPU path, which
+    // measures every shape). The margin now comes from the samples' actual shapes (full-res px).
+    std::vector<double> shapeReach(slices.size(), 0.);
+    if (s.lens.table) {
+        parallelFor((int)slices.size(), 1, nThreads, aborted, [&](int b, int e) {
+            for (int si = b; si < e; ++si) {
+                const Slice& S = slices[si];
+                const double sc = (double)(1 << S.level);
+                double reach = 0.;
+                auto measure = [&](const std::vector<Sample>& v, bool fullRes) {
+                    for (const Sample& smp : v) {
+                        const double fullX = fullRes ? smp.x : (S.level == 0 ? smp.x + D.x1 : D.x1 + (smp.x + 0.5) * sc - 0.5);
+                        const double fullY = fullRes ? smp.y : (S.level == 0 ? smp.y + D.y1 : D.y1 + (smp.y + 0.5) * sc - 0.5);
+                        const double g = (fullRes || S.level == 0) ? 1. : sc;
+                        const double fx = (fullX - cx0) * invField, fy = (fullY - cy0) * invField;
+                        const double u = coc.rInf != 0. ? smp.r / coc.rInf : 0.;
+                        for (int ch = 0; ch < 3; ch += lens.perChannel() ? 1 : 3) {
+                            KernelShape k;
+                            lens.shape(smp.r / g, fx, fy, k, u, lens.perChannel() ? ch : 1);
+                            const double ext = k.point ? 1. : std::max(k.yExtent, std::sqrt(k.m[0] * k.m[0] + k.m[1] * k.m[1]));
+                            reach = std::max(reach, (ext + std::max(std::fabs(k.offX), std::fabs(k.offY))) * g);
+                        }
+                    }
+                };
+                measure(S.hi, true);
+                measure(S.cells, false);
+                measure(S.fills, false);
+                shapeReach[si] = reach;
+            }
+        });
+    }
+
     const bool okScatter = parallelFor(nStrips, 1, nThreads, aborted, [&](int b, int e) {
         SpanBuffer full, fullF;
         SpanBuffer lvl[5], lvlF[5];
@@ -3002,7 +3036,8 @@ renderDefocus(const Inputs& in,
                 const int L = S.level;
                 const int sc = 1 << L;
                 // generous: swirl / squeeze; a traced kernel's own reach
-                const double maxR = std::max(S.maxAbsR * 4., S.reach * 1.25 + 1.) + std::fabs(caPx) + 2.;
+                const double maxR = std::max(std::max(S.maxAbsR * 4., S.reach * 1.25 + 1.), shapeReach[k] + 1.) +
+                                    std::fabs(caPx) + 2.;
                 auto lu = [&](double val, int origin) { return (val - origin + 0.5) / sc - 0.5; };
                 const int ilo = (int)std::floor(lu(O.x1, D.x1)), ihi = (int)std::floor(lu(O.x2 - 1, D.x1)) + 1;
                 const int jlo = (int)std::floor(lu(y0, D.y1)), jhi = (int)std::floor(lu(y1 - 1, D.y1)) + 1;
