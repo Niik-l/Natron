@@ -2867,6 +2867,20 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 triVerts.clear();
                 std::vector<ccl::float2> triUVs; // per-corner UVs for triangulated mesh
                 bool hasUV = meshData->hasUVs && !meshData->uvs.empty();
+                // MeshData UV layout is format-dependent: per-corner (one
+                // slot per face-vertex, parallel to faceIndices) or
+                // per-vertex (one slot per vertex — Alembic files with
+                // vertex-interpolated UVs, e.g. RealFlow exports). Indexing
+                // a per-vertex buffer with face-corner offsets used to read
+                // past the end (crash on large meshes — heap-layout
+                // dependent, crashed bumps every few frames).
+                const bool uvsPerCorner = hasUV &&
+                    meshData->uvs.size() >= meshData->faceIndices.size() * 2;
+                const bool uvsPerVertex = hasUV && !uvsPerCorner &&
+                    meshData->uvs.size() >= meshData->numVertices * 2;
+                if (hasUV && !uvsPerCorner && !uvsPerVertex) {
+                    hasUV = false; // nothing sane to index into
+                }
                 const float* uvData = hasUV ? meshData->uvs.data() : nullptr;
 
                 size_t idxOffset = 0;
@@ -2878,15 +2892,36 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                         triVerts.push_back(meshData->faceIndices[idxOffset + t + 1]);
 
                         if (hasUV) {
-                            // UVs are per face-vertex (indexed same as faceIndices)
-                            size_t uv0 = (idxOffset) * 2;
-                            size_t uv1 = (idxOffset + t) * 2;
-                            size_t uv2 = (idxOffset + t + 1) * 2;
-                            triUVs.push_back(ccl::make_float2(uvData[uv0], uvData[uv0+1]));
-                            triUVs.push_back(ccl::make_float2(uvData[uv1], uvData[uv1+1]));
-                            triUVs.push_back(ccl::make_float2(uvData[uv2], uvData[uv2+1]));
+                            if (uvsPerCorner) {
+                                // UVs are per face-vertex (indexed same as faceIndices)
+                                size_t uv0 = (idxOffset) * 2;
+                                size_t uv1 = (idxOffset + t) * 2;
+                                size_t uv2 = (idxOffset + t + 1) * 2;
+                                triUVs.push_back(ccl::make_float2(uvData[uv0], uvData[uv0+1]));
+                                triUVs.push_back(ccl::make_float2(uvData[uv1], uvData[uv1+1]));
+                                triUVs.push_back(ccl::make_float2(uvData[uv2], uvData[uv2+1]));
+                            } else {
+                                // Per-vertex UVs: index by the corner's vertex id.
+                                size_t v0 = (size_t)meshData->faceIndices[idxOffset];
+                                size_t v1 = (size_t)meshData->faceIndices[idxOffset + t];
+                                size_t v2 = (size_t)meshData->faceIndices[idxOffset + t + 1];
+                                if (v0 < meshData->numVertices &&
+                                    v1 < meshData->numVertices &&
+                                    v2 < meshData->numVertices) {
+                                    triUVs.push_back(ccl::make_float2(uvData[v0*2], uvData[v0*2+1]));
+                                    triUVs.push_back(ccl::make_float2(uvData[v1*2], uvData[v1*2+1]));
+                                    triUVs.push_back(ccl::make_float2(uvData[v2*2], uvData[v2*2+1]));
+                                } else if (!triUVs.empty()) {
+                                    // Malformed indices — drop the UV set rather
+                                    // than misalign per-corner slots.
+                                    triUVs.clear();
+                                    hasUV = false;
+                                    break;
+                                }
+                            }
                         }
                     }
+                    if (!hasUV) break; // malformed per-vertex UVs: no more face UVs
                     idxOffset += count;
                 }
 
