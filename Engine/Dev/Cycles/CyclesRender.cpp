@@ -20,6 +20,8 @@
 #include <Python.h>
 // ***** END PYTHON BLOCK *****
 
+#include <QtCore/QThread>
+#include <QtCore/QCoreApplication>
 #include "CyclesRender.h"
 
 #include <cmath>
@@ -70,6 +72,7 @@ struct CyclesRenderPrivate
 {
     KnobIntWPtr samples;
     KnobChoiceWPtr device;
+    KnobStringWPtr settingsInfo;
     bool deviceWarned = false;
     KnobIntWPtr maxBounces;
     KnobIntWPtr diffuseBounces;
@@ -207,6 +210,17 @@ void
 CyclesRender::initializeKnobs()
 {
     KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Settings"));
+    {
+        // what a connected CyclesRenderSettings sets (refreshSettingsInfo); hidden otherwise
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Render Settings"));
+        k->setName("settingsInfo"); k->setAsLabel();
+        k->setEvaluateOnChange(false);
+        k->setIsPersistent(false);
+        k->setSecret(true);
+        k->setHintToolTip(tr("A CyclesRenderSettings node is connected: these come from it, and this "
+                             "node's own Samples / Device / Denoise, Integrator, Depth of Field and Motion Blur are hidden."));
+        page->addKnob(k); _imp->settingsInfo = k;
+    }
 
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Samples"));
@@ -1845,6 +1859,7 @@ setSettingsKnobsSecret(CyclesRenderPrivate* p, bool secret)
     // Render tab
     hide(p->samples);
     hide(p->denoise);
+    hide(p->device);
     // Integrator
     hide(p->maxBounces);
     hide(p->diffuseBounces);
@@ -1868,11 +1883,23 @@ void
 CyclesRender::onInputChanged(int inputNo)
 {
     if (inputNo != 3) return;
-    EffectInstancePtr settingsEffect = skipDots(getInput(3));
-    const bool connected =
-        settingsEffect &&
-        dynamic_cast<const CyclesRenderSettings*>(settingsEffect.get()) != nullptr;
-    setSettingsKnobsSecret(_imp.get(), connected);
+    refreshSettingsInfo();      // hides the overridden knobs, shows what the settings node sets
+}
+
+void
+CyclesRender::refreshSettingsInfo()
+{
+    KnobStringPtr k = _imp->settingsInfo.lock();
+    if (!k) {
+        return;
+    }
+    EffectInstancePtr se = skipDots( getInput(3) );
+    const CyclesRenderSettings* settings = dynamic_cast<const CyclesRenderSettings*>( se.get() );
+    setSettingsKnobsSecret(_imp.get(), settings != nullptr);
+    if (settings) {
+        k->setValue( "From " + se->getNode()->getLabel() + ": " + settings->describe( getCurrentTime() ) );
+    }
+    k->setSecret(!settings);
 }
 
 void
@@ -1893,6 +1920,17 @@ void
 CyclesRender::onKnobsLoaded()
 {
     refreshLensKnobs();
+    refreshSettingsInfo();
+}
+
+// Inputs reconnected while a project loads don't call onInputChanged; metadata is refreshed once the
+// graph is complete, so the settings line (and hidden knobs) are set up here too.
+void
+CyclesRender::onMetadataRefreshed(const NodeMetadata& /*metadata*/)
+{
+    if ( QThread::currentThread() == qApp->thread() ) {
+        refreshSettingsInfo();
+    }
 }
 
 NATRON_NAMESPACE_EXIT

@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "../../EffectInstance.h"
+#include "../Cycles/CyclesSettingsConsumer.h"
 #include "../../ViewIdx.h"
 #include <mutex>
 
@@ -86,6 +87,7 @@ struct LightRayVis
  */
 class CyclesRenderPass
     : public EffectInstance
+    , public CyclesSettingsConsumer
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -174,6 +176,15 @@ private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
+    virtual void onInputChanged(int inputNo) OVERRIDE FINAL;
+    virtual void onKnobsLoaded() OVERRIDE FINAL;
+    virtual void onMetadataRefreshed(const NodeMetadata& metadata) OVERRIDE FINAL;
+
+public:
+    // A connected CyclesRenderSettings (input 2): hide Samples / Denoise / Device, show what it sets.
+    virtual void refreshSettingsInfo() OVERRIDE FINAL;
+
+private:
 
 public:
     /**

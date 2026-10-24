@@ -21,12 +21,14 @@
 // ***** END PYTHON BLOCK *****
 
 #include "CyclesRenderSettings.h"
+#include "CyclesSettingsConsumer.h"
 
 #include "../../AppManager.h"
 #include "../../AppInstance.h"
 #include "../../Project.h"
 #include "../../Image.h"
 #include "../../KnobTypes.h"
+#include "../../Node.h"
 #include "../../OCIOColorSpaceUtils.h"
 
 NATRON_NAMESPACE_ENTER
@@ -298,6 +300,48 @@ bool   CyclesRenderSettings::getUseGpu(double /*time*/) const
 {
     KnobChoicePtr k = _imp->device.lock();
     return k && k->getValue() == 1;
+}
+
+std::string
+CyclesRenderSettings::describe(double time) const
+{
+    const int samples = getSamples(time);
+    return std::string(getUseGpu(time) ? "GPU (CUDA)" : "CPU") + ", " + std::to_string(samples) +
+           (samples == 1 ? " sample" : " samples") + ", denoise " + (getDenoise(time) ? "on" : "off");
+}
+
+bool
+CyclesRenderSettings::knobChanged(KnobI* /*k*/, ValueChangedReasonEnum /*reason*/, ViewSpec /*view*/,
+                                  double /*time*/, bool originatedFromMainThread)
+{
+    if ( !originatedFromMainThread || !getNode() ) {
+        return false;
+    }
+    // the render nodes downstream (through Dots) show what this node sets
+    std::list<NodePtr> todo;
+    std::set<Node*> seen;
+    const NodesWList& outs = getNode()->getOutputs();
+    for (NodesWList::const_iterator it = outs.begin(); it != outs.end(); ++it) {
+        todo.push_back( it->lock() );
+    }
+    while ( !todo.empty() ) {
+        NodePtr n = todo.front();
+        todo.pop_front();
+        if ( !n || !seen.insert( n.get() ).second ) {
+            continue;
+        }
+        EffectInstancePtr effect = n->getEffectInstance();
+        if ( CyclesSettingsConsumer* c = dynamic_cast<CyclesSettingsConsumer*>( effect.get() ) ) {
+            c->refreshSettingsInfo();
+        } else if (n->getPluginID() == PLUGINID_NATRON_DOT) {
+            const NodesWList& next = n->getOutputs();
+            for (NodesWList::const_iterator it = next.begin(); it != next.end(); ++it) {
+                todo.push_back( it->lock() );
+            }
+        }
+    }
+
+    return false;
 }
 
 int    CyclesRenderSettings::getMaxBounces(double /*time*/) const

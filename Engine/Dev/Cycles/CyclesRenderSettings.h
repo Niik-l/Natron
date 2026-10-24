@@ -96,6 +96,7 @@ public:
     virtual bool supportsMultiResolution() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
     virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
+    virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
 
     // Shared-settings getters — see CyclesSettingsProvider.h for the
     // intended contract (the abstract interface isn't inherited; see
@@ -103,6 +104,8 @@ public:
     int    getSamples(double time) const;
     bool   getDenoise(double time) const;
     bool   getUseGpu(double time) const;      // Device = GPU (CUDA)
+    // "GPU (CUDA), 64 samples, denoise off": shown on the render nodes it drives
+    std::string describe(double time) const;
     int    getMaxBounces(double time) const;
     int    getDiffuseBounces(double time) const;
     int    getGlossyBounces(double time) const;

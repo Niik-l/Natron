@@ -26,6 +26,7 @@
 #include "../../../Global/Macros.h"
 
 #include "../../EffectInstance.h"
+#include "CyclesSettingsConsumer.h"
 #include "../../ViewIdx.h"
 #include <mutex>
 
@@ -52,6 +53,7 @@ struct CyclesRenderPrivate;
  */
 class CyclesRender
     : public EffectInstance
+    , public CyclesSettingsConsumer
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -97,6 +99,8 @@ public:
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time, bool originatedFromMainThread) OVERRIDE FINAL;
     virtual void onInputChanged(int inputNo) OVERRIDE FINAL;
     virtual void onKnobsLoaded() OVERRIDE FINAL;
+    virtual void refreshSettingsInfo() OVERRIDE FINAL;
+    virtual void onMetadataRefreshed(const NodeMetadata& metadata) OVERRIDE FINAL;
     // Lens File / Lens Colour / Lens Vignetting shown only for the lens choices that use them.
     void refreshLensKnobs();
 

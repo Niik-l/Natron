@@ -21,6 +21,8 @@
 #include <Python.h>
 // ***** END PYTHON BLOCK *****
 
+#include <QtCore/QThread>
+#include <QtCore/QCoreApplication>
 #include "CyclesRenderPass.h"
 
 #include "../../AppInstance.h"
@@ -130,6 +132,7 @@ struct RenderPassPrivate
     KnobBoolWPtr previewMode;   // render at half res, upscale
     KnobBoolWPtr denoise;       // OpenImageDenoise toggle
     KnobChoiceWPtr device;      // CPU / GPU (CUDA)
+    KnobStringWPtr settingsInfo; // what a connected CyclesRenderSettings sets
 
     // AOV enable knobs (mirror CyclesRender's AOV Passes tab)
     KnobButtonWPtr refreshPassesBtn;
@@ -476,6 +479,17 @@ CyclesRenderPass::initializeKnobs()
     // light selection.
     KnobPagePtr previewPage = AppManager::createKnob<KnobPage>(this, tr("Preview"));
     {
+        // what a connected CyclesRenderSettings sets (refreshSettingsInfo); hidden otherwise
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Render Settings"));
+        k->setName("settingsInfo"); k->setAsLabel();
+        k->setEvaluateOnChange(false);
+        k->setIsPersistent(false);
+        k->setSecret(true);
+        k->setHintToolTip(tr("A CyclesRenderSettings node is connected: these come from it, and this "
+                             "node's own Samples / Device / Denoise are hidden."));
+        previewPage->addKnob(k); _imp->settingsInfo = k;
+    }
+    {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Output Width"));
         k->setName("outputWidth"); k->setDefaultValue(1920);
         k->setMinimum(1); k->setDisplayMinimum(1); k->setDisplayMaximum(8192);
@@ -766,6 +780,51 @@ CyclesRenderPass::initializeKnobs()
             outPage->addKnob(k); _imp->linkedReadName = k;
         }
     }
+}
+
+void
+CyclesRenderPass::onInputChanged(int inputNo)
+{
+    if (inputNo == 2) {
+        refreshSettingsInfo();
+    }
+}
+
+void
+CyclesRenderPass::onKnobsLoaded()
+{
+    refreshSettingsInfo();
+}
+
+// Inputs reconnected while a project loads don't call onInputChanged; metadata is refreshed once the
+// graph is complete, so the settings line (and hidden knobs) are set up here too.
+void
+CyclesRenderPass::onMetadataRefreshed(const NodeMetadata& /*metadata*/)
+{
+    if ( QThread::currentThread() == qApp->thread() ) {
+        refreshSettingsInfo();
+    }
+}
+
+void
+CyclesRenderPass::refreshSettingsInfo()
+{
+    EffectInstancePtr se = skipDots( getInput(2) );
+    const CyclesRenderSettings* settings = dynamic_cast<const CyclesRenderSettings*>( se.get() );
+    for (KnobIPtr k : { KnobIPtr( _imp->samples.lock() ), KnobIPtr( _imp->denoise.lock() ),
+                        KnobIPtr( _imp->device.lock() ) }) {
+        if (k) {
+            k->setSecret(settings != nullptr);
+        }
+    }
+    KnobStringPtr info = _imp->settingsInfo.lock();
+    if (!info) {
+        return;
+    }
+    if (settings) {
+        info->setValue( "From " + se->getNode()->getLabel() + ": " + settings->describe( getCurrentTime() ) );
+    }
+    info->setSecret(!settings);
 }
 
 bool
