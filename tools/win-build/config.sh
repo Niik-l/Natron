@@ -15,6 +15,18 @@ INSTALL_DIR="$NATRON_ROOT/Natron-install"
 # 1 = build Cycles path tracer + CyclesRender node;  0 = skip Cycles entirely.
 WITH_CYCLES=1
 
+# 1 = Cycles can also render on NVIDIA GPUs (CyclesRender Device = GPU (CUDA)); 0 = CPU only (the
+# GPU choice then falls back to the CPU with a warning). Needs the CUDA Toolkit (13.x) and Visual
+# Studio 2022's C++ tools on the build machine (nvcc uses cl.exe for the GPU kernels only); users
+# need nothing but an NVIDIA driver, 580 or newer. Adds ~20 min to the Cycles build, ~35 MB.
+WITH_CUDA=0
+# GPU kernels: sm_75 GTX 16 / RTX 20, sm_86 RTX 30, sm_89 RTX 40, sm_120 RTX 50; compute_75 = PTX that
+# newer cards compile on first use (needs a driver at least as new as the toolkit). CUDA 13 can't
+# build sm_50..sm_70 (GTX 900 / 1000, Volta): those cards render on the CPU.
+CUDA_ARCHS="sm_75;sm_86;sm_89;sm_120;compute_75"
+CUDA_DIR="/c/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.4"
+VCVARS='C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
+
 # 1 = also stage a standalone NatronRenderer.exe;  0 = GUI only.
 STAGE_RENDERER=1
 

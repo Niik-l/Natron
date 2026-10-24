@@ -61,6 +61,17 @@ if [ -f "$NATRON_ROOT/wgpu/wgpu_native.dll" ]; then
   ok "staged wgpu_native.dll (FastVolumeRender)"
 fi
 
+# Cycles GPU kernels (WITH_CUDA=1): Cycles loads them from lib/ next to the exe.
+KDIR="$NATRON_ROOT/cycles/build/src/kernel"
+if [ "${WITH_CUDA:-0}" = "1" ] && ls "$KDIR"/kernel_*.zst >/dev/null 2>&1; then
+  for d in App Renderer; do
+    [ -d "$I/$d" ] || continue   # Renderer/ only with STAGE_RENDERER=1
+    mkdir -p "$I/$d/lib"
+    cp "$KDIR"/kernel_*.zst "$I/$d/lib/"
+  done
+  ok "staged $(ls "$KDIR"/kernel_*.zst | wc -l) Cycles GPU kernels (App/lib, Renderer/lib)"
+fi
+
 # --- Python standard library (+ PySide6, qtpy live in its site-packages) ---
 log "Python stdlib (lib/python$PYV)"
 rm -rf "$I/lib/python$PYV"

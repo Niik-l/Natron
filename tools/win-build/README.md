@@ -113,6 +113,16 @@ with `cmake .. -G "MinGW Makefiles"` (the first rebuild is then a full one).
 - `NATRON_ROOT` — parent dir for sources + builds
 - `INSTALL_DIR` — clean deployable output (default `$NATRON_ROOT/Natron-install`)
 - `WITH_CYCLES` — `1` full Cycles build / `0` skip (faster, no CyclesRender node)
+- `WITH_CUDA` — `1` Cycles also renders on NVIDIA GPUs (CyclesRender / RenderPass /
+  CyclesRenderSettings Device = GPU (CUDA)); `0` (default) CPU only, where Device = GPU falls back
+  with a warning. Needs, on the build machine only: the CUDA Toolkit 13.x (`CUDA_DIR`) and Visual
+  Studio 2022's C++ tools (`VCVARS`; nvcc compiles the GPU kernels with cl.exe, everything else stays
+  MinGW). `CUDA_ARCHS` picks the card generations (default GTX 16 / RTX 20, RTX 30, 40, 50, plus PTX
+  for newer cards); ~20 min more Cycles build, ~35 MB of kernels staged in `App/lib/` and
+  `Renderer/lib/`. Users need only an NVIDIA driver **580 or newer**; the PTX fallback (cards newer
+  than the list) needs a driver at least as new as the toolkit. CUDA 13 can't build GTX 900 / 1000
+  kernels: those cards stay on the CPU. LensDefocus / DeepDefocus Device = GPU needs none of this
+  (wgpu, staged with FastVolumeRender's `wgpu_native.dll`).
 - `STAGE_RENDERER` — `1` also stage standalone `NatronRenderer.exe`
 - `JOBS` / `NATRON_JOBS` — parallelism (`auto`=nproc; Natron capped at 8 for moc safety)
 - Pinned dep refs (`CYCLES_REF`, `OPENFX_*_REF`) — keep the patches applying

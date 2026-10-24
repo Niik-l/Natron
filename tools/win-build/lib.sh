@@ -22,3 +22,18 @@ natron_jobs_n() { local j; j="$(jobs_n)"
 
 # Detect the mingw64 python X.Y (the stdlib dir name changes across MSYS2 updates).
 py_ver() { "$MINGW/bin/python3.exe" -c 'import sys;print("%d.%d"%sys.version_info[:2])'; }
+
+# WITH_CUDA=1: nvcc compiles the Cycles GPU kernels with Visual Studio's cl.exe (everything else
+# stays MinGW). Exports INCLUDE / LIB from vcvars64.bat and sets CL_EXE to the matching cl.exe.
+msvc_env() {
+  local bat out
+  bat="$(mktemp -u).bat"
+  printf '@echo off\r\ncall "%s" >nul\r\necho INCLUDE=%%INCLUDE%%\r\necho LIB=%%LIB%%\r\nwhere cl\r\n' "$VCVARS" > "$bat"
+  out="$(cmd //c "$(cygpath -w "$bat")" 2>/dev/null | tr -d '\r')" || true
+  rm -f "$bat"
+  export INCLUDE="$(printf '%s\n' "$out" | grep '^INCLUDE=' | cut -d= -f2-)"
+  export LIB="$(printf '%s\n' "$out" | grep '^LIB=' | cut -d= -f2-)"
+  CL_EXE="$(printf '%s\n' "$out" | grep -i 'cl\.exe$' | head -1)"
+  [ -n "$CL_EXE" ] && [ -n "$INCLUDE" ] || die "Visual Studio's C++ compiler not found (VCVARS=$VCVARS): WITH_CUDA=1 needs it for nvcc"
+  CL_EXE="$(cygpath -m "$CL_EXE")"
+}
