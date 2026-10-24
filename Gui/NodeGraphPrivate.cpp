@@ -148,6 +148,22 @@ NodeGraphPrivate::rearrangeSelectedNodes()
         return true;
     }
 
+    // nothing selected: the whole graph
+    NodesGuiList all;
+    {
+        QMutexLocker l(&_nodesMutex);
+        for (NodesGuiList::iterator it = _nodes.begin(); it != _nodes.end(); ++it) {
+            if ( (*it)->isVisible() ) {
+                all.push_back(*it);
+            }
+        }
+    }
+    if ( !all.empty() ) {
+        _publicInterface->pushUndoCommand( new RearrangeNodesCommand(all) );
+
+        return true;
+    }
+
     return false;
 }
 

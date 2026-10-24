@@ -27,6 +27,9 @@
 
 #include <algorithm> // min, max
 #include <limits>
+#include <map>
+#include <set>
+#include <vector>
 #include <stdexcept>
 
 CLANG_DIAG_OFF(deprecated)
@@ -45,6 +48,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/TimeLine.h"
 #include "Engine/ViewerInstance.h"
 
+#include "Gui/BackdropGui.h"
 #include "Gui/NodeClipBoard.h"
 #include "Gui/NodeGui.h"
 #include "Gui/NodeGraph.h"
@@ -54,7 +58,6 @@ CLANG_DIAG_ON(uninitialized)
 #include "Gui/GuiApplicationManager.h"
 #include "Gui/MultiInstancePanel.h"
 
-#define MINIMUM_VERTICAL_SPACE_BETWEEN_NODES 10
 
 NATRON_NAMESPACE_ENTER
 
@@ -733,204 +736,703 @@ DecloneMultipleNodesCommand::redo()
 
 NATRON_NAMESPACE_ANONYMOUS_ENTER
 
-typedef std::pair<NodeGuiPtr, QPointF> TreeNode; ///< all points are expressed as being the CENTER of the node!
+// Rearrange Nodes: a layered layout in the style of a clean Nuke script. Inputs above, outputs below;
+// each node's main input chain (its "B pipe") is a straight vertical column, other inputs come in
+// from the left and masks from the right, and a source sits just above the first node using it.
+// Dots are elbows: on their input's row (a horizontal wire out of it), over the node they feed.
+// Steps: rows by depth, invisible placeholders on links spanning rows, rows ordered to cross as few
+// links as possible, main chains aligned into columns, columns spaced by the real node widths.
 
-class Tree
+struct LayoutNode
 {
-    std::list<TreeNode> nodes;
-    QPointF topLevelNodeCenter; //< in scene coords
-
-public:
-
-    Tree()
-        : nodes()
-        , topLevelNodeCenter(0, std::numeric_limits<int>::max())
-    {
-    }
-
-    void buildTree(const NodeGuiPtr & output,
-                   const NodesGuiList& selectedNodes,
-                   std::list<NodeGui*> & usedNodes)
-    {
-        QPointF outputPos = output->pos();
-        QSize nodeSize = output->getSize();
-
-        outputPos += QPointF(nodeSize.width() / 2., nodeSize.height() / 2.);
-        addNode(output, outputPos);
-
-        buildTreeInternal(selectedNodes, output.get(), output->mapToScene( output->mapFromParent(outputPos) ), usedNodes);
-    }
-
-    const std::list<TreeNode> & getNodes() const
-    {
-        return nodes;
-    }
-
-    const QPointF & getTopLevelNodeCenter() const
-    {
-        return topLevelNodeCenter;
-    }
-
-    void moveAllTree(const QPointF & delta)
-    {
-        for (std::list<TreeNode>::iterator it = nodes.begin(); it != nodes.end(); ++it) {
-            it->second += delta;
-        }
-    }
-
-private:
-
-    void addNode(const NodeGuiPtr & node,
-                 const QPointF & point)
-    {
-        nodes.push_back( std::make_pair(node, point) );
-    }
-
-    void buildTreeInternal(const NodesGuiList& selectedNodes,
-                           NodeGui* currentNode, const QPointF & currentNodeScenePos, std::list<NodeGui*> & usedNodes);
+    NodeGuiPtr gui;           // null for a placeholder on a link spanning several rows
+    double w, h;
+    double oldX;              // centre before the layout
+    int rank;                 // row, 0 = top
+    int comp;
+    double x;                 // centre
+    std::vector<int> up, down;        // neighbours on the row above (inputs) / below (outputs)
+    std::vector<double> upW, downW;   // link weights
+    int mainUp;               // index in up of the main input, -1 if none
+    int root;                 // the column (top node of the aligned main chain) it belongs to
+    bool dot;
+    int sideIn;                       // a Dot on its input's row: that input
+    std::vector<int> side;            // linked nodes on the same row (a Dot and its input)
+    std::vector<double> sideW;
 };
 
-typedef std::shared_ptr<Tree> TreePtr;
-typedef std::list<TreePtr> TreePtrList;
-
-void
-Tree::buildTreeInternal(const NodesGuiList& selectedNodes,
-                        NodeGui* currentNode,
-                        const QPointF & currentNodeScenePos,
-                        std::list<NodeGui*> & usedNodes)
+struct LayoutLink
 {
-    QSize nodeSize = currentNode->getSize();
-    NodePtr internalNode = currentNode->getNode();
-    const std::vector<Edge*> & inputs = currentNode->getInputsArrows();
-    NodeGuiPtr firstNonMaskInput;
-    NodesGuiList otherNonMaskInputs;
-    NodesGuiList maskInputs;
+    int src, dst;
+    double w;      // 2 = main input (the column), 1 = other input, 0.5 = mask, out of a Dot 3, into one 0.1
+    int slot;      // left-to-right order of a node's inputs: other inputs, main input, masks
+    bool main;     // the node's main input: they share a column
+};
 
-    for (U32 i = 0; i < inputs.size(); ++i) {
-        NodeGuiPtr source = inputs[i]->getSource();
+const double kLayoutHGap = 50.;
+const double kLayoutVGap = 140.;
+const double kLayoutCompGap = 120.;
 
-        ///Check if the source is selected
-        NodesGuiList::const_iterator foundSelected = std::find(selectedNodes.begin(), selectedNodes.end(), source);
-        if ( foundSelected == selectedNodes.end() ) {
-            continue;
+static int
+layoutFind(std::vector<int>& parent, int i)
+{
+    while (parent[i] != i) {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+    }
+
+    return i;
+}
+
+static int
+countCrossings(const std::vector<LayoutNode>& n,
+               const std::vector<int>& lower,
+               const std::vector<int>& pos)
+{
+    // links between a row and the one above, as (position below, position above)
+    std::vector<std::pair<int, int> > l;
+    for (std::size_t i = 0; i < lower.size(); ++i) {
+        const std::vector<int>& up = n[lower[i]].up;
+        for (std::size_t k = 0; k < up.size(); ++k) {
+            l.push_back( std::make_pair( (int)i, pos[up[k]] ) );
         }
-
-        if (source) {
-            bool isMask = internalNode->getEffectInstance()->isInputMask(i);
-            if (!firstNonMaskInput && !isMask) {
-                firstNonMaskInput = source;
-                for (std::list<TreeNode>::iterator it2 = nodes.begin(); it2 != nodes.end(); ++it2) {
-                    if (it2->first == firstNonMaskInput) {
-                        firstNonMaskInput.reset();
-                        break;
-                    }
-                }
-            } else if (!isMask) {
-                bool found = false;
-                for (std::list<TreeNode>::iterator it2 = nodes.begin(); it2 != nodes.end(); ++it2) {
-                    if (it2->first == source) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    otherNonMaskInputs.push_back(source);
-                }
-            } else if (isMask) {
-                bool found = false;
-                for (std::list<TreeNode>::iterator it2 = nodes.begin(); it2 != nodes.end(); ++it2) {
-                    if (it2->first == source) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    maskInputs.push_back(source);
-                }
-            } else {
-                ///this can't be happening
-                assert(false);
+    }
+    int c = 0;
+    for (std::size_t a = 0; a < l.size(); ++a) {
+        for (std::size_t b = a + 1; b < l.size(); ++b) {
+            if ( ( (l[a].first < l[b].first) && (l[a].second > l[b].second) ) ||
+                 ( (l[a].first > l[b].first) && (l[a].second < l[b].second) ) ) {
+                ++c;
             }
         }
     }
 
+    return c;
+}
 
-    ///The node has already been processed in another tree, skip it.
-    if ( std::find(usedNodes.begin(), usedNodes.end(), currentNode) == usedNodes.end() ) {
-        ///mark it
-        usedNodes.push_back(currentNode);
+static double
+layoutGap(const LayoutNode& a,
+          const LayoutNode& b)
+{
+    return (a.w + b.w) / 2. + ( (a.gui && b.gui) ? kLayoutHGap : kLayoutHGap / 2. );
+}
 
-
-        QPointF firstNonMaskInputPos;
-        std::list<QPointF> otherNonMaskInputsPos;
-        std::list<QPointF> maskInputsPos;
-
-        ///Position the first non mask input
-        if (firstNonMaskInput) {
-            firstNonMaskInputPos = firstNonMaskInput->mapToParent( firstNonMaskInput->mapFromScene(currentNodeScenePos) );
-            firstNonMaskInputPos.ry() -= ( (nodeSize.height() / 2.) +
-                                           MINIMUM_VERTICAL_SPACE_BETWEEN_NODES +
-                                           (firstNonMaskInput->getSize().height() / 2.) );
-
-            ///and add it to the tree, with parent relative coordinates
-            addNode(firstNonMaskInput, firstNonMaskInputPos);
-
-            firstNonMaskInputPos = firstNonMaskInput->mapToScene( firstNonMaskInput->mapFromParent(firstNonMaskInputPos) );
-        }
-
-        ///Position all other non mask inputs
-        int index = 0;
-        for (NodesGuiList::iterator it = otherNonMaskInputs.begin(); it != otherNonMaskInputs.end(); ++it, ++index) {
-            QPointF p = (*it)->mapToParent( (*it)->mapFromScene(currentNodeScenePos) );
-
-            p.rx() -= ( (nodeSize.width() + (*it)->getSize().width() / 2.) ) * (index + 1);
-
-            ///and add it to the tree
-            addNode(*it, p);
-
-
-            p = (*it)->mapToScene( (*it)->mapFromParent(p) );
-            otherNonMaskInputsPos.push_back(p);
-        }
-
-        ///Position all mask inputs
-        index = 0;
-        for (NodesGuiList::iterator it = maskInputs.begin(); it != maskInputs.end(); ++it, ++index) {
-            QPointF p = (*it)->mapToParent( (*it)->mapFromScene(currentNodeScenePos) );
-            ///Note that here we subsctract nodeSize.width(): Actually we subtract twice nodeSize.width() / 2: once to get to the left of the node
-            ///and another time to add the space of half a node
-            p.rx() += ( (nodeSize.width() + (*it)->getSize().width() / 2.) ) * (index + 1);
-
-            ///and add it to the tree
-            addNode(*it, p);
-
-            p = (*it)->mapToScene( (*it)->mapFromParent(p) );
-            maskInputsPos.push_back(p);
-        }
-
-        ///Now that we built the tree at this level, call this function again on the inputs that we just processed
-        if (firstNonMaskInput) {
-            buildTreeInternal(selectedNodes, firstNonMaskInput.get(), firstNonMaskInputPos, usedNodes);
-        }
-
-        std::list<QPointF>::iterator pointsIt = otherNonMaskInputsPos.begin();
-        for (NodesGuiList::iterator it = otherNonMaskInputs.begin(); it != otherNonMaskInputs.end(); ++it, ++pointsIt) {
-            buildTreeInternal(selectedNodes, it->get(), *pointsIt, usedNodes);
-        }
-
-        pointsIt = maskInputsPos.begin();
-        for (NodesGuiList::iterator it = maskInputs.begin(); it != maskInputs.end(); ++it, ++pointsIt) {
-            buildTreeInternal(selectedNodes, it->get(), *pointsIt, usedNodes);
+// Moves a row's nodes as close as possible to where they want to be (least squares) while keeping
+// their order and the gaps between them: isotonic regression (pool adjacent violators).
+static void
+placeRow(std::vector<LayoutNode>& n,
+         const std::vector<int>& row,
+         const std::vector<double>& desired)
+{
+    const std::size_t k = row.size();
+    std::vector<double> offset(k, 0.);
+    for (std::size_t i = 1; i < k; ++i) {
+        offset[i] = offset[i - 1] + layoutGap(n[row[i - 1]], n[row[i]]);
+    }
+    std::vector<double> blockVal;
+    std::vector<int> blockLen;
+    for (std::size_t i = 0; i < k; ++i) {
+        blockVal.push_back(desired[i] - offset[i]);
+        blockLen.push_back(1);
+        while (blockVal.size() > 1 && blockVal[blockVal.size() - 2] > blockVal.back()) {
+            const double v = blockVal.back();
+            const int len = blockLen.back();
+            blockVal.pop_back();
+            blockLen.pop_back();
+            blockVal.back() = (blockVal.back() * blockLen.back() + v * len) / (blockLen.back() + len);
+            blockLen.back() += len;
         }
     }
-    ///update the top level node center if the node doesn't have any input
-    if ( !firstNonMaskInput && otherNonMaskInputs.empty() && maskInputs.empty() ) {
-        ///QGraphicsView Y axis is top-->down oriented
-        if ( currentNodeScenePos.y() < topLevelNodeCenter.y() ) {
-            topLevelNodeCenter = currentNodeScenePos;
+    std::size_t i = 0;
+    for (std::size_t b = 0; b < blockVal.size(); ++b) {
+        for (int j = 0; j < blockLen[b]; ++j, ++i) {
+            n[row[i]].x = blockVal[b] + offset[i];
         }
     }
-} // buildTreeInternal
+}
+
+// New top-left positions (parent coordinates) for the selected nodes; backdrops stay put.
+static void
+layeredLayout(const NodesGuiList& selection,
+              std::list<std::pair<NodeGuiPtr, QPointF> >& result)
+{
+    std::vector<LayoutNode> n;
+    std::map<NodeGui*, int> index;
+    double oldLeft = std::numeric_limits<double>::max();
+    double oldTop = std::numeric_limits<double>::max();
+
+    for (NodesGuiList::const_iterator it = selection.begin(); it != selection.end(); ++it) {
+        if ( !*it || dynamic_cast<BackdropGui*>( it->get() ) || index.count( it->get() ) ) {
+            continue;
+        }
+        const QSize s = (*it)->getSize();
+        const QPointF p = (*it)->pos();
+        LayoutNode ln;
+        ln.gui = *it;
+        ln.w = s.width();
+        ln.h = s.height();
+        ln.oldX = p.x() + ln.w / 2.;
+        ln.rank = 0;
+        ln.comp = 0;
+        ln.x = 0.;
+        ln.mainUp = -1;
+        ln.root = 0;
+        ln.dot = (*it)->getNode() && (*it)->getNode()->getPluginID() == PLUGINID_NATRON_DOT;
+        ln.sideIn = -1;
+        index[it->get()] = (int)n.size();
+        n.push_back(ln);
+        oldLeft = std::min( oldLeft, p.x() );
+        oldTop = std::min( oldTop, p.y() );
+    }
+    const int numReal = (int)n.size();
+    if (numReal == 0) {
+        return;
+    }
+
+    // links between selected nodes, one per pair
+    std::vector<LayoutLink> links;
+    for (int v = 0; v < numReal; ++v) {
+        const std::vector<Edge*>& inputs = n[v].gui->getInputsArrows();
+        NodePtr node = n[v].gui->getNode();
+        EffectInstancePtr effect = node ? node->getEffectInstance() : EffectInstancePtr();
+        bool mainSeen = false;
+        for (std::size_t i = 0; i < inputs.size(); ++i) {
+            NodeGuiPtr source = inputs[i] ? inputs[i]->getSource() : NodeGuiPtr();
+            std::map<NodeGui*, int>::const_iterator found = source ? index.find( source.get() ) : index.end();
+            if ( ( found == index.end() ) || (found->second == v) ) {
+                continue;
+            }
+            const bool mask = effect && effect->isInputMask( (int)i );
+            LayoutLink l;
+            l.src = found->second;
+            l.dst = v;
+            l.main = false;
+            if (mask) {
+                l.w = 0.5;
+                l.slot = 1000 + (int)i;
+            } else if (!mainSeen) {
+                mainSeen = true;
+                l.w = 2.;
+                l.slot = 0;
+                l.main = true;
+            } else {
+                l.w = 1.;
+                l.slot = -(int)i;
+            }
+            if (n[v].dot) {
+                l.w = 0.1;      // a Dot follows the node it feeds, not its input
+            } else if (n[l.src].dot) {
+                l.w = std::max(l.w, 3.);
+            }
+            bool dup = false;
+            for (std::size_t k = 0; k < links.size(); ++k) {
+                if ( (links[k].src == l.src) && (links[k].dst == l.dst) ) {
+                    if (l.w > links[k].w) {
+                        links[k].w = l.w;
+                        links[k].slot = l.slot;
+                    }
+                    links[k].main = links[k].main || l.main;
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                links.push_back(l);
+            }
+        }
+    }
+
+    // rows: the longest path from a source (a link closing a cycle is ignored)
+    std::vector<std::vector<int> > ins(numReal), outs(numReal);
+    for (std::size_t k = 0; k < links.size(); ++k) {
+        ins[links[k].dst].push_back( (int)k );
+    }
+    std::vector<char> dropped(links.size(), 0);
+    std::vector<int> state(numReal, 0);
+    std::vector<int> topo;      // inputs before the nodes they feed
+    for (int s = 0; s < numReal; ++s) {
+        if (state[s]) {
+            continue;
+        }
+        // iterative depth first search (a long chain must not overflow the stack)
+        std::vector<std::pair<int, std::size_t> > stack;
+        stack.push_back( std::make_pair(s, (std::size_t)0) );
+        state[s] = 1;
+        while ( !stack.empty() ) {
+            const int v = stack.back().first;
+            if ( stack.back().second < ins[v].size() ) {
+                const int li = ins[v][stack.back().second++];
+                const int u = links[li].src;
+                if (state[u] == 1) {
+                    dropped[li] = 1;
+                } else if (state[u] == 0) {
+                    state[u] = 1;
+                    stack.push_back( std::make_pair(u, (std::size_t)0) );
+                }
+                continue;
+            }
+            int r = 0;
+            for (std::size_t j = 0; j < ins[v].size(); ++j) {
+                if (!dropped[ins[v][j]]) {
+                    r = std::max(r, n[links[ins[v][j]].src].rank + (n[v].dot ? 0 : 1) );
+                }
+            }
+            n[v].rank = r;
+            state[v] = 2;
+            topo.push_back(v);
+            stack.pop_back();
+        }
+    }
+    for (std::size_t k = 0; k < links.size(); ++k) {
+        if (!dropped[k]) {
+            outs[links[k].src].push_back( (int)k );
+        }
+    }
+    // a source sits just above the first node using it (a camera next to its renders, not on top);
+    // through Dots, which share their input's row. lowest[v]: the lowest row v may move down to.
+    std::vector<int> lowest(numReal, std::numeric_limits<int>::max());
+    for (std::size_t t = topo.size(); t-- > 0;) {
+        const int v = topo[t];
+        for (std::size_t j = 0; j < outs[v].size(); ++j) {
+            const int d = links[outs[v][j]].dst;
+            lowest[v] = std::min(lowest[v], n[d].dot ? lowest[d] : n[d].rank - 1);
+        }
+    }
+    for (int v = 0; v < numReal; ++v) {
+        bool hasInput = false;
+        for (std::size_t j = 0; j < ins[v].size(); ++j) {
+            hasInput = hasInput || !dropped[ins[v][j]];
+        }
+        if ( !hasInput && !n[v].dot && ( lowest[v] != std::numeric_limits<int>::max() ) ) {
+            n[v].rank = std::max(n[v].rank, lowest[v]);
+        }
+    }
+    for (std::size_t t = 0; t < topo.size(); ++t) {
+        const int v = topo[t];
+        if (n[v].dot) {
+            for (std::size_t j = 0; j < ins[v].size(); ++j) {
+                if (!dropped[ins[v][j]]) {
+                    n[v].rank = n[links[ins[v][j]].src].rank;
+                }
+            }
+        }
+    }
+    // an output sharing an input with other nodes (renders of one camera) lines up with the
+    // lowest of them
+    for (int v = 0; v < numReal; ++v) {
+        if ( !outs[v].empty() || n[v].dot ) {
+            continue;
+        }
+        int r = n[v].rank;
+        for (std::size_t j = 0; j < ins[v].size(); ++j) {
+            if (dropped[ins[v][j]]) {
+                continue;
+            }
+            const std::vector<int>& sib = outs[links[ins[v][j]].src];
+            for (std::size_t k = 0; k < sib.size(); ++k) {
+                const int d = links[sib[k]].dst;
+                if ( (d != v) && !n[d].dot ) {
+                    r = std::max(r, n[d].rank);
+                }
+            }
+        }
+        n[v].rank = r;
+    }
+
+    // connected parts are laid out side by side
+    std::vector<int> parent(numReal);
+    for (int i = 0; i < numReal; ++i) {
+        parent[i] = i;
+    }
+    for (std::size_t k = 0; k < links.size(); ++k) {
+        if (!dropped[k]) {
+            parent[layoutFind(parent, links[k].src)] = layoutFind(parent, links[k].dst);
+        }
+    }
+    for (int i = 0; i < numReal; ++i) {
+        n[i].comp = layoutFind(parent, i);
+    }
+
+    // adjacency, with placeholders on links spanning several rows; a node's inputs in slot order
+    std::vector<int> order( links.size() );
+    for (std::size_t k = 0; k < order.size(); ++k) {
+        order[k] = (int)k;
+    }
+    std::stable_sort(order.begin(), order.end(), [&links](int a, int b) {
+        return links[a].dst != links[b].dst ? links[a].dst < links[b].dst : links[a].slot < links[b].slot;
+    });
+    for (std::size_t o = 0; o < order.size(); ++o) {
+        if (dropped[order[o]]) {
+            continue;
+        }
+        const LayoutLink l = links[order[o]];
+        if (n[l.src].rank >= n[l.dst].rank) {
+            // same row: a Dot and its input
+            n[l.src].side.push_back(l.dst);
+            n[l.src].sideW.push_back(l.w);
+            n[l.dst].side.push_back(l.src);
+            n[l.dst].sideW.push_back(l.w);
+            n[l.dst].sideIn = l.src;
+            continue;
+        }
+        int above = l.src;
+        for (int r = n[l.src].rank + 1; r <= n[l.dst].rank; ++r) {
+            int below = l.dst;
+            if (r < n[l.dst].rank) {
+                LayoutNode d;
+                d.w = 0.;
+                d.h = 0.;
+                d.oldX = n[l.src].oldX;
+                d.rank = r;
+                d.comp = n[l.dst].comp;
+                d.x = 0.;
+                d.mainUp = -1;
+                d.root = 0;
+                d.dot = false;
+                d.sideIn = -1;
+                below = (int)n.size();
+                n.push_back(d);
+            }
+            if (l.main) {
+                n[below].mainUp = (int)n[below].up.size();
+            }
+            n[below].up.push_back(above);
+            n[below].upW.push_back(l.w);
+            n[above].down.push_back(below);
+            n[above].downW.push_back(l.w);
+            above = below;
+        }
+    }
+
+    int maxRank = 0;
+    for (std::size_t i = 0; i < n.size(); ++i) {
+        maxRank = std::max(maxRank, n[i].rank);
+    }
+
+    // parts ordered by where they were, left to right
+    std::map<int, std::pair<double, int> > compOldX;     // comp -> (sum of x, count)
+    for (int i = 0; i < numReal; ++i) {
+        std::pair<double, int>& c = compOldX[n[i].comp];
+        c.first += n[i].oldX;
+        c.second += 1;
+    }
+    std::vector<std::pair<double, int> > comps;
+    for (std::map<int, std::pair<double, int> >::const_iterator it = compOldX.begin(); it != compOldX.end(); ++it) {
+        comps.push_back( std::make_pair(it->second.first / it->second.second, it->first) );
+    }
+    std::sort( comps.begin(), comps.end() );
+
+    // row centres, shared by all parts, top to bottom
+    std::vector<double> rowH(maxRank + 1, 0.);
+    for (std::size_t i = 0; i < n.size(); ++i) {
+        rowH[n[i].rank] = std::max(rowH[n[i].rank], n[i].h);
+    }
+    std::vector<double> rowY(maxRank + 1, 0.);
+    for (int r = 1; r <= maxRank; ++r) {
+        rowY[r] = rowY[r - 1] + (rowH[r - 1] / 2. + kLayoutVGap + rowH[r] / 2.);
+    }
+
+    double nextLeft = 0.;
+    for (std::size_t c = 0; c < comps.size(); ++c) {
+        const int comp = comps[c].second;
+        std::vector<std::vector<int> > rows(maxRank + 1);
+
+        // first order: depth first up from the outputs, each node's inputs in slot order
+        std::vector<int> sinks;
+        for (int i = 0; i < numReal; ++i) {
+            if ( (n[i].comp == comp) && n[i].down.empty() ) {
+                sinks.push_back(i);
+            }
+        }
+        std::stable_sort(sinks.begin(), sinks.end(), [&n](int a, int b) { return n[a].oldX < n[b].oldX; });
+        std::vector<char> seen(n.size(), 0);
+        for (std::size_t s = 0; s < sinks.size(); ++s) {
+            std::vector<int> stack(1, sinks[s]);
+            while ( !stack.empty() ) {
+                const int v = stack.back();
+                stack.pop_back();
+                if (seen[v]) {
+                    continue;
+                }
+                seen[v] = 1;
+                rows[n[v].rank].push_back(v);
+                for (std::size_t k = n[v].up.size(); k-- > 0;) {
+                    stack.push_back(n[v].up[k]);
+                }
+            }
+        }
+        for (std::size_t i = 0; i < n.size(); ++i) {
+            if ( (n[i].comp == comp) && !seen[i] ) {
+                rows[n[i].rank].push_back( (int)i );
+            }
+        }
+
+        // fewer crossings: barycentre sweeps down and up, keep the best order found
+        std::vector<int> pos(n.size(), 0);
+        auto updatePos = [&]() {
+            for (std::size_t r = 0; r < rows.size(); ++r) {
+                for (std::size_t i = 0; i < rows[r].size(); ++i) {
+                    pos[rows[r][i]] = (int)i;
+                }
+            }
+        };
+        auto crossings = [&]() {
+            int total = 0;
+            for (int r = 1; r <= maxRank; ++r) {
+                total += countCrossings(n, rows[r], pos);
+            }
+
+            return total;
+        };
+        // a Dot on its input's row stays next to that input (only the input's other Dots between
+        // them), on the side it was sorted to: its horizontal wire never runs behind another node
+        auto regroup = [&](std::vector<int>& row) {
+            std::map<int, std::vector<int> > attached;     // input -> its Dots, in row order
+            std::set<int> isAttached;
+            for (std::size_t i = 0; i < row.size(); ++i) {
+                int a = row[i];
+                for (int guard = 0; guard < 64 && n[a].sideIn >= 0; ++guard) {
+                    a = n[a].sideIn;
+                }
+                if ( (a != row[i]) && !n[a].dot ) {
+                    attached[a].push_back(row[i]);
+                    isAttached.insert(row[i]);
+                }
+            }
+            if ( attached.empty() ) {
+                return;
+            }
+            std::vector<int> out;
+            for (std::size_t i = 0; i < row.size(); ++i) {
+                const int v = row[i];
+                if ( isAttached.count(v) ) {
+                    continue;
+                }
+                std::map<int, std::vector<int> >::const_iterator at = attached.find(v);
+                if ( at == attached.end() ) {
+                    out.push_back(v);
+                    continue;
+                }
+                const int here = (int)i;
+                for (std::size_t k = 0; k < at->second.size(); ++k) {
+                    if (pos[at->second[k]] < here) {
+                        out.push_back(at->second[k]);
+                    }
+                }
+                out.push_back(v);
+                for (std::size_t k = 0; k < at->second.size(); ++k) {
+                    if (pos[at->second[k]] > here) {
+                        out.push_back(at->second[k]);
+                    }
+                }
+            }
+            row = out;
+        };
+        updatePos();
+        for (int r = 0; r <= maxRank; ++r) {
+            regroup(rows[r]);
+        }
+        updatePos();
+        std::vector<std::vector<int> > best = rows;
+        int bestCross = crossings();
+        for (int sweep = 0; sweep < 12 && bestCross > 0; ++sweep) {
+            const bool downward = (sweep % 2 == 0);
+            for (int step = 0; step < maxRank; ++step) {
+                const int r = downward ? step + 1 : maxRank - 1 - step;
+                std::vector<int>& row = rows[r];
+                std::vector<double> key( row.size() );
+                for (std::size_t i = 0; i < row.size(); ++i) {
+                    const std::vector<int>& nb = downward ? n[row[i]].up : n[row[i]].down;
+                    const std::vector<double>& nw = downward ? n[row[i]].upW : n[row[i]].downW;
+                    double sum = 0., wsum = 0.;
+                    for (std::size_t k = 0; k < nb.size(); ++k) {
+                        sum += nw[k] * pos[nb[k]];
+                        wsum += nw[k];
+                    }
+                    if ( (wsum == 0.) && n[row[i]].dot ) {
+                        // a Dot (no inputs above): where the nodes it feeds are
+                        const std::vector<int>& dn = n[row[i]].down;
+                        for (std::size_t k = 0; k < dn.size(); ++k) {
+                            const std::vector<int>& other = rows[n[dn[k]].rank];
+                            sum += pos[dn[k]] * (double)row.size() / std::max<std::size_t>(1, other.size());
+                            wsum += 1.;
+                        }
+                    }
+                    key[i] = wsum > 0. ? sum / wsum : (double)i;
+                }
+                std::vector<int> idx( row.size() );
+                for (std::size_t i = 0; i < idx.size(); ++i) {
+                    idx[i] = (int)i;
+                }
+                std::stable_sort(idx.begin(), idx.end(), [&key](int a, int b) { return key[a] < key[b]; });
+                std::vector<int> sorted( row.size() );
+                for (std::size_t i = 0; i < idx.size(); ++i) {
+                    sorted[i] = row[idx[i]];
+                }
+                row = sorted;
+                for (std::size_t i = 0; i < row.size(); ++i) {
+                    pos[row[i]] = (int)i;
+                }
+                regroup(row);
+                for (std::size_t i = 0; i < row.size(); ++i) {
+                    pos[row[i]] = (int)i;
+                }
+            }
+            const int cross = crossings();
+            if (cross < bestCross) {
+                bestCross = cross;
+                best = rows;
+            }
+        }
+        rows = best;
+        updatePos();
+
+        // columns: a node shares the column of its main input. A node that is the main input of
+        // several gives its column to the middle one; alignments never cross each other.
+        for (int r = 0; r <= maxRank; ++r) {
+            for (std::size_t i = 0; i < rows[r].size(); ++i) {
+                n[rows[r][i]].root = rows[r][i];
+            }
+        }
+        for (int r = 1; r <= maxRank; ++r) {
+            std::map<int, std::vector<int> > wants;      // upper node -> lower nodes, in row order
+            for (std::size_t i = 0; i < rows[r].size(); ++i) {
+                const LayoutNode& v = n[rows[r][i]];
+                if (v.mainUp >= 0) {
+                    wants[v.up[v.mainUp]].push_back(rows[r][i]);
+                }
+            }
+            std::set<int> chosen;
+            for (std::map<int, std::vector<int> >::const_iterator it = wants.begin(); it != wants.end(); ++it) {
+                chosen.insert( it->second[(it->second.size() - 1) / 2] );
+            }
+            int last = -1;
+            for (std::size_t i = 0; i < rows[r].size(); ++i) {
+                const int v = rows[r][i];
+                if ( !chosen.count(v) ) {
+                    continue;
+                }
+                const int u = n[v].up[n[v].mainUp];
+                if (pos[u] > last) {
+                    n[v].root = n[u].root;
+                    last = pos[u];
+                }
+            }
+        }
+
+        // x, soft: start packed, then pull every column over the nodes it connects to
+        for (int r = 0; r <= maxRank; ++r) {
+            placeRow( n, rows[r], std::vector<double>(rows[r].size(), 0.) );
+        }
+        for (int iter = 0; iter < 30; ++iter) {
+            std::map<int, std::pair<double, double> > want;    // column -> (sum, weight)
+            for (int r = 0; r <= maxRank; ++r) {
+                for (std::size_t i = 0; i < rows[r].size(); ++i) {
+                    const LayoutNode& v = n[rows[r][i]];
+                    std::pair<double, double>& p = want[v.root];
+                    for (std::size_t k = 0; k < v.up.size(); ++k) {
+                        p.first += v.upW[k] * n[v.up[k]].x;
+                        p.second += v.upW[k];
+                    }
+                    for (std::size_t k = 0; k < v.down.size(); ++k) {
+                        p.first += v.downW[k] * n[v.down[k]].x;
+                        p.second += v.downW[k];
+                    }
+                    for (std::size_t k = 0; k < v.side.size(); ++k) {
+                        p.first += v.sideW[k] * n[v.side[k]].x;
+                        p.second += v.sideW[k];
+                    }
+                    // a little pull towards where it is now, so lone columns stay put
+                    p.first += 0.1 * v.x;
+                    p.second += 0.1;
+                }
+            }
+            for (int step = 0; step <= maxRank; ++step) {
+                const int r = (iter % 2 == 0) ? step : maxRank - step;
+                std::vector<double> desired( rows[r].size() );
+                for (std::size_t i = 0; i < rows[r].size(); ++i) {
+                    const std::pair<double, double>& p = want[n[rows[r][i]].root];
+                    desired[i] = p.first / p.second;
+                }
+                placeRow(n, rows[r], desired);
+            }
+        }
+
+        // x, exact: one x per column, columns pushed right only as far as the gaps need
+        std::map<int, std::pair<double, int> > colSoft;            // column -> (sum of x, count)
+        std::map<int, std::vector<std::pair<int, double> > > rightOf; // column -> (column right of it, gap)
+        std::map<int, int> indegree;
+        for (int r = 0; r <= maxRank; ++r) {
+            for (std::size_t i = 0; i < rows[r].size(); ++i) {
+                const LayoutNode& v = n[rows[r][i]];
+                std::pair<double, int>& s = colSoft[v.root];
+                s.first += v.x;
+                s.second += 1;
+                indegree[v.root] += 0;
+                if (i > 0) {
+                    const LayoutNode& a = n[rows[r][i - 1]];
+                    rightOf[a.root].push_back( std::make_pair( v.root, layoutGap(a, v) ) );
+                    indegree[v.root] += 1;
+                }
+            }
+        }
+        std::vector<int> ready;
+        for (std::map<int, int>::const_iterator it = indegree.begin(); it != indegree.end(); ++it) {
+            if (it->second == 0) {
+                ready.push_back(it->first);
+            }
+        }
+        std::map<int, double> colX;
+        for (std::map<int, std::pair<double, int> >::const_iterator it = colSoft.begin(); it != colSoft.end(); ++it) {
+            colX[it->first] = it->second.first / it->second.second;
+        }
+        std::size_t done = 0;
+        while ( !ready.empty() ) {
+            const int col = ready.back();
+            ready.pop_back();
+            ++done;
+            const std::vector<std::pair<int, double> >& next = rightOf[col];
+            for (std::size_t k = 0; k < next.size(); ++k) {
+                colX[next[k].first] = std::max(colX[next[k].first], colX[col] + next[k].second);
+                if (--indegree[next[k].first] == 0) {
+                    ready.push_back(next[k].first);
+                }
+            }
+        }
+        if ( done == colSoft.size() ) {
+            for (int r = 0; r <= maxRank; ++r) {
+                for (std::size_t i = 0; i < rows[r].size(); ++i) {
+                    n[rows[r][i]].x = colX[n[rows[r][i]].root];
+                }
+            }
+        } // else (crossing columns, should not happen) keep the soft positions: no overlaps either
+        // this part starts right of the previous one
+        double left = std::numeric_limits<double>::max();
+        double right = -std::numeric_limits<double>::max();
+        for (int r = 0; r <= maxRank; ++r) {
+            for (std::size_t i = 0; i < rows[r].size(); ++i) {
+                const LayoutNode& v = n[rows[r][i]];
+                left = std::min(left, v.x - v.w / 2.);
+                right = std::max(right, v.x + v.w / 2.);
+            }
+        }
+        const double shift = nextLeft - left;
+        for (int r = 0; r <= maxRank; ++r) {
+            for (std::size_t i = 0; i < rows[r].size(); ++i) {
+                n[rows[r][i]].x += shift;
+            }
+        }
+        nextLeft += (right - left) + kLayoutCompGap;
+    }
+
+    // keep the graph where it was: same top-left corner
+    const double dx = oldLeft;
+    const double dy = oldTop - (rowY[0] - rowH[0] / 2.);
+    for (int i = 0; i < numReal; ++i) {
+        const LayoutNode& v = n[i];
+        result.push_back( std::make_pair( v.gui, QPointF(v.x - v.w / 2. + dx, rowY[v.rank] - v.h / 2. + dy) ) );
+    }
+} // layeredLayout
 
 static bool
 hasNodeOutputsInList(const std::list<NodeGuiPtr> & nodes,
@@ -992,62 +1494,14 @@ RearrangeNodesCommand::RearrangeNodesCommand(const std::list<NodeGuiPtr> & nodes
     : QUndoCommand(parent)
     , _nodes()
 {
-    ///1) Separate the nodes in trees they belong to, once a node has been "used" by a tree, mark it
-    ///and don't try to reposition it for another tree
-    ///2) For all trees : recursively position each nodes so that each input of a node is positioned as following:
-    /// a) The first non mask input is positioned above the node
-    /// b) All others non mask inputs are positioned on the left of the node, each one separated by the space of half a node
-    /// c) All masks are positioned on the right of the node, each one separated by the space of half a node
-    ///3) Move all trees so that they are next to each other and their "top level" node
-    ///(the input that is at the highest position in the Y coordinate) is at the same
-    ///Y level (node centers have the same Y)
-
-    std::list<NodeGui*> usedNodes;
-
-    ///A list of Tree
-    ///Each tree is a lit of nodes with a boolean indicating if it was already positioned( "used" ) by another tree, if set to
-    ///true we don't do anything
-    /// Each node that doesn't have any output is a potential tree.
-    TreePtrList trees;
-
-    for (std::list<NodeGuiPtr> ::const_iterator it = nodes.begin(); it != nodes.end(); ++it) {
-        if ( !hasNodeOutputsInList( nodes, (*it) ) ) {
-            TreePtr newTree = std::make_shared<Tree>();
-            newTree->buildTree(*it, nodes, usedNodes);
-            trees.push_back(newTree);
-        }
-    }
-
-    ///For all trees find out which one has the top most level node
-    QPointF topLevelPos(0, std::numeric_limits<int>::max());
-    for (TreePtrList::iterator it = trees.begin(); it != trees.end(); ++it) {
-        const QPointF & treeTop = (*it)->getTopLevelNodeCenter();
-        if ( treeTop.y() < topLevelPos.y() ) {
-            topLevelPos = treeTop;
-        }
-    }
-
-    ///now offset all trees to be top aligned at the same level
-    for (TreePtrList::iterator it = trees.begin(); it != trees.end(); ++it) {
-        QPointF treeTop = (*it)->getTopLevelNodeCenter();
-        if (treeTop.y() == std::numeric_limits<int>::max()) {
-            treeTop.setY( topLevelPos.y() );
-        }
-        QPointF delta( 0, topLevelPos.y() - treeTop.y() );
-        if ( (delta.x() != 0) || (delta.y() != 0) ) {
-            (*it)->moveAllTree(delta);
-        }
-
-        ///and insert the final result into the _nodes list
-        const std::list<TreeNode> & treeNodes = (*it)->getNodes();
-        for (std::list<TreeNode>::const_iterator it2 = treeNodes.begin(); it2 != treeNodes.end(); ++it2) {
-            NodeToRearrange n;
-            n.node = it2->first;
-            QSize size = n.node->getSize();
-            n.newPos = it2->second - QPointF(size.width() / 2., size.height() / 2.);
-            n.oldPos = n.node->pos();
-            _nodes.push_back(n);
-        }
+    std::list<std::pair<NodeGuiPtr, QPointF> > placed;
+    layeredLayout(nodes, placed);
+    for (std::list<std::pair<NodeGuiPtr, QPointF> >::const_iterator it = placed.begin(); it != placed.end(); ++it) {
+        NodeToRearrange n;
+        n.node = it->first;
+        n.newPos = it->second;
+        n.oldPos = n.node->pos();
+        _nodes.push_back(n);
     }
     setText( tr("Rearrange nodes") );
 }
