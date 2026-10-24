@@ -57,6 +57,13 @@ public:
     // k objects, recording what lies behind them (layer k), with a transparent film so its alpha
     // is that layer's coverage.
     void setDeepPeel(int k);
+    // Render on the GPU (CUDA) when this build and the machine have one; otherwise, or when the
+    // GPU render fails (e.g. no kernels for this card), on the CPU. deviceMessage() says why the
+    // GPU wasn't used (empty when it was, or wasn't asked for); gpuFailedLastRender() is true once
+    // after a failed GPU render, so the caller can render again (on the CPU).
+    void setUseGpu(bool gpu);
+    std::string deviceMessage() const;
+    bool gpuFailedLastRender();
 
     CyclesRenderer();
     ~CyclesRenderer();

@@ -70,6 +70,7 @@ struct CyclesPassRequest
     // Common render settings.
     bool transparentBg = false;
     bool denoise       = false;  // run Cycles' OpenImageDenoise on the result
+    bool useGpu        = false;  // render on a CUDA GPU when there is one (falls back to the CPU)
 
     // Optional features. Pass nullptr to leave each disabled / default.
     const CyclesRenderer::DOFParams*        dof        = nullptr;

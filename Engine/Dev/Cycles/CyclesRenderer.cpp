@@ -340,6 +340,11 @@ struct CyclesRenderer::Impl
 {
     ccl::unique_ptr<ccl::Session> session;
     int deepPeel = 0;
+    bool useGpu = false;
+    bool gpuBroken = false;        // a GPU render failed: this renderer stays on the CPU
+    bool gpuFailedNow = false;
+    bool onGpu = false;            // the current session's device
+    std::string deviceMessage;
     int width = 0;
     int height = 0;
     int samples = 64;
@@ -1118,6 +1123,26 @@ CyclesRenderer::setDeepPeel(int k)
     _impl->deepPeel = std::max(0, k);
 }
 
+void
+CyclesRenderer::setUseGpu(bool gpu)
+{
+    _impl->useGpu = gpu;
+}
+
+std::string
+CyclesRenderer::deviceMessage() const
+{
+    return _impl->deviceMessage;
+}
+
+bool
+CyclesRenderer::gpuFailedLastRender()
+{
+    const bool f = _impl->gpuFailedNow;
+    _impl->gpuFailedNow = false;
+    return f;
+}
+
 std::string
 CyclesRenderer::lensMessage() const
 {
@@ -1272,9 +1297,23 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     sessionParams.samples = _impl->samples;
     sessionParams.threads = 0;
 
-    // Explicitly select CPU device (required for NanoVDB volume support).
-    // Without this, volumes render as empty/black.
-    {
+    // Explicitly select the device: the default would not be the CPU, which NanoVDB volumes need
+    // when no GPU is asked for (without this, volumes render as empty/black).
+    _impl->onGpu = false;
+    if (_impl->useGpu && !_impl->gpuBroken) {
+        std::vector<ccl::DeviceInfo> gpus = ccl::Device::available_devices( (uint)ccl::DEVICE_MASK_CUDA );
+        if (!gpus.empty()) {
+            sessionParams.device = gpus.front();
+            _impl->onGpu = true;
+            _impl->deviceMessage.clear();
+        } else {
+            _impl->deviceMessage = "GPU: no CUDA device found (this build or this machine has none); "
+                                   "rendered on the CPU";
+        }
+    } else if (!_impl->useGpu) {
+        _impl->deviceMessage.clear();
+    }
+    if (!_impl->onGpu) {
         std::vector<ccl::DeviceInfo> devices = ccl::Device::available_devices(
             (uint)ccl::DEVICE_MASK_CPU);
         if (!devices.empty()) {
@@ -3321,6 +3360,20 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
 
     startRender();
     waitForRender();
+
+    // A GPU that can't render (no kernels for this card, out of memory ...): say why and let the
+    // caller render again; this renderer then uses the CPU.
+    if ( _impl->onGpu && ( _impl->session->progress.get_error() || _impl->session->device->have_error() ) ) {
+        std::string why = _impl->session->progress.get_error_message();
+        if ( why.empty() ) {
+            why = _impl->session->device->error_message();
+        }
+        fprintf(stderr, "[CyclesRenderer] GPU render failed: %s -> CPU\n", why.c_str());
+        _impl->deviceMessage = "GPU render failed (" + why + "); rendered on the CPU";
+        _impl->gpuBroken = true;
+        _impl->gpuFailedNow = true;
+        return false;
+    }
 
     // A cancelled session returns from wait() with an empty/partial buffer.
     // Returning success would let Natron CACHE a black frame (seen as

@@ -79,6 +79,10 @@ if(NATRON_CYCLES)
         ${NATRON_CYCLES_BUILD_DIR}/lib/libcycles_util.a
         ${NATRON_CYCLES_BUILD_DIR}/lib/libextern_sky.a
     )
+    # Cycles built with WITH_CYCLES_DEVICE_CUDA: the CUDA driver is loaded at runtime through cuew
+    if(EXISTS ${NATRON_CYCLES_BUILD_DIR}/lib/libextern_cuew.a)
+        list(APPEND CYCLES_LIBS ${NATRON_CYCLES_BUILD_DIR}/lib/libextern_cuew.a)
+    endif()
     find_library(EMBREE_LIB embree4 HINTS /c/msys64/mingw64/lib)
     find_library(OIDN_LIB OpenImageDenoise HINTS /c/msys64/mingw64/lib)
     find_library(TBB_LIB tbb12 HINTS /c/msys64/mingw64/lib)

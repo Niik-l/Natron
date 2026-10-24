@@ -69,6 +69,8 @@ NATRON_NAMESPACE_ENTER
 struct CyclesRenderPrivate
 {
     KnobIntWPtr samples;
+    KnobChoiceWPtr device;
+    bool deviceWarned = false;
     KnobIntWPtr maxBounces;
     KnobIntWPtr diffuseBounces;
     KnobIntWPtr glossyBounces;
@@ -213,6 +215,22 @@ CyclesRender::initializeKnobs()
         k->setDisplayMinimum(1); k->setDisplayMaximum(4096);
         k->setHintToolTip(tr("Number of path tracing samples. Higher = less noise, slower."));
         page->addKnob(k); _imp->samples = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Device"));
+        k->setName("device");
+        std::vector<ChoiceOption> o;
+        o.push_back(ChoiceOption("cpu", "CPU", "Render on the processor."));
+        o.push_back(ChoiceOption("cuda", "GPU (CUDA)", "Render on an NVIDIA graphics card. Needs a Natron "
+                                                       "built with CUDA and kernels for the card; if the GPU "
+                                                       "can't render, the CPU is used with a warning."));
+        k->populateChoices(o);
+        k->setDefaultValue(0);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Where Cycles renders. GPU (CUDA) is usually several times faster on an "
+                             "NVIDIA card; the image is the same up to noise. Falls back to the CPU (with "
+                             "a warning above the viewer) when there is no usable GPU."));
+        page->addKnob(k); _imp->device = k;
     }
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Bounces"));
@@ -999,6 +1017,7 @@ CyclesRender::render(const RenderActionArgs& args)
     // mirroring how samples are resolved above.
     req.denoise         = settings ? settings->getDenoise(args.time)
                                     : (_imp->denoise.lock() && _imp->denoise.lock()->getValue());
+    req.useGpu          = _imp->device.lock() && _imp->device.lock()->getValue() == 1;
     if (dofParams.enabled) req.dof = &dofParams;
     if (mbParams.enabled)  req.mb  = &mbParams;
     req.integrator = &integParams;
@@ -1071,6 +1090,7 @@ CyclesRender::render(const RenderActionArgs& args)
         sceneHash = hashCombine(sceneHash, (U64)renderW);
         sceneHash = hashCombine(sceneHash, (U64)renderH);
         sceneHash = hashCombine(sceneHash, (U64)renderSamples);
+        sceneHash = hashCombine(sceneHash, req.useGpu ? 1ULL : 0ULL);
         sceneHash = hashCombine(sceneHash, isPreview ? 1ULL : 0ULL);
         hashFloat(req.subdivision.dicingScale);
         hashFloat(req.subdivision.offscreenScale);
@@ -1384,12 +1404,18 @@ CyclesRender::render(const RenderActionArgs& args)
         // A real lens Cycles couldn't set up (it renders with the plain camera then).
         {
             const std::string lm = _imp->activeRenderer->lensMessage();
+            const std::string dm = _imp->activeRenderer->deviceMessage();
             if (!lm.empty()) {
-                setPersistentMessage(eMessageTypeWarning, lm + " (rendering without it).");
+                setPersistentMessage(eMessageTypeWarning, lm + " (rendering without it)." +
+                                     (dm.empty() ? std::string() : "\n" + dm + "."));
                 _imp->lensWarned = true;
-            } else if (_imp->lensWarned) {
+            } else if (!dm.empty()) {
+                setPersistentMessage(eMessageTypeWarning, dm + ".");
+                _imp->deviceWarned = true;
+            } else if (_imp->lensWarned || _imp->deviceWarned) {
                 clearPersistentMessage(false);
                 _imp->lensWarned = false;
+                _imp->deviceWarned = false;
             }
         }
 

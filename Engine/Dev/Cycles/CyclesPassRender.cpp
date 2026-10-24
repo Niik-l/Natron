@@ -268,6 +268,7 @@ executeCyclesPasses(CyclesRenderer&            renderer,
 
     // OpenImageDenoise toggle — applied to the integrator in syncSceneWithCamera.
     renderer.setDenoise(req.denoise);
+    renderer.setUseGpu(req.useGpu);
 
     // Shutter-open/close world matrices for transform motion blur. Empty maps
     // (no motion blur, or a scene where nothing moves) clear any previous
@@ -275,7 +276,9 @@ executeCyclesPasses(CyclesRenderer&            renderer,
     renderer.setMotionTransforms(prepared.motionOpen, prepared.motionClose);
     renderer.setSubdivisionSettings(req.subdivision);
 
-    const bool ok = renderer.renderToBufferWithCameraMultiPass(
+    bool ok = false;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+    ok = renderer.renderToBufferWithCameraMultiPass(
         prepared.sceneGraph,
         prepared.camTX, prepared.camTY, prepared.camTZ,
         prepared.camRX, prepared.camRY, prepared.camRZ,
@@ -295,6 +298,12 @@ executeCyclesPasses(CyclesRenderer&            renderer,
         req.deepMaxSamples,
         req.deepMergeThreshold,
         req.deepAlphaMergeThreshold);
+    // a failed GPU render: once more, now on the CPU
+    if ( ok || !renderer.gpuFailedLastRender() ) {
+        break;
+    }
+    outBuffers.clear();
+    }
 
     if (!ok || outBuffers.empty()) {
         errOut = "renderToBufferWithCameraMultiPass returned no buffers";
