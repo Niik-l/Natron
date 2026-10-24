@@ -195,6 +195,16 @@ private:
 
     void loadAlembicGeo(const std::string& path);
     void loadObjGeo(const std::string& path);
+    // OBJ (.obj) multi-emit: Wavefront groups become one root-level mesh
+    // entry each (per-group vertices pruned out of the file's global pool —
+    // the archive machinery indexes piece-local vertices). Parsed into
+    // _imp->rt.data, then the shared finishArchiveGeo tail.
+    void loadObjArchiveGeo(const std::string& path);
+    // Shared post-parse tail of the archive loaders (caller holds _meshMutex,
+    // rt.data already filled): Bake Transforms flag, objectFilter /
+    // includeMeshes / excludedPaths subtree filter, info line, morph-knob
+    // sync. Split from loadArchiveGeo so the OBJ loader shares it.
+    void finishArchiveGeo(const std::string& path);
     // glTF 2.0 (.gltf/.glb) via cgltf and FBX (.fbx) via ufbx, read through
     // the shared GeoArchiveRuntime (ReadGeoImport.h) — the same parse +
     // per-frame evaluation machinery ReadGeoArchive uses. Loads the whole

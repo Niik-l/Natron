@@ -196,27 +196,21 @@ except Exception as e:
     emit("seq EXCEPTION: %r" % e)
     FAILS.append("seq exception")
 
-# Placeholder: unified + obj literal converted in multi-emit must render
-# EMPTY (no geometry, no crash). Single-mode obj still works and equals legacy.
+# Placeholder: unified + abc multi-emit is the phase-3 slot — must render
+# without crashing (empty emission). obj multi is functional now (the obj
+# battery lives in readgeo_obj_multi_test.py).
 try:
-    objpath = SEQBASE + r"\obj_seq\liquid_00010.obj"
-    n3, scan3 = rig("obj_s", UNIFIED, objpath, multi=False)
-    op = render_frames("obj_s", scan3, [FR])[0]
-    lref = render_frames("obj_ref", rig("obj_ref", GEO_LEGACY, objpath)[1], [FR])[0]
-    if op and lref:
-        check("obj unified single==legacy", img_diff_mean(op, lref) < IDENT_MAX)
+    abcpath = SEQBASE + r"\abc_seq\liquid_00010.abc"
+    n3, scan3 = rig("abc_m", UNIFIED, abcpath, multi=True)
+    ab = render_frames("abc_m", scan3, [FR])[0]
+    if ab:
+        emit("abc placeholder rendered")
+        check("abc unified multi empty (no crash)", is_black(ab))
     else:
-        check("obj unified single==legacy", False)
-    n3.getParam("outputSingleMesh").setValue(0)   # placeholder error path
-    time.sleep(1.0)
-    ob = render_frames("obj_m", scan3, [FR])[0]
-    if ob:
-        check("obj unified multi empty (no crash)", is_black(ob))
-    else:
-        check("obj unified multi empty (no crash)", False)
+        check("abc unified multi empty (no crash)", False)
 except Exception as e:
-    emit("obj EXCEPTION: %r" % e)
-    FAILS.append("obj exception")
+    emit("abc EXCEPTION: %r" % e)
+    FAILS.append("abc exception")
 
 emit("FAILS=%r" % FAILS)
 if not FAILS:

@@ -555,9 +555,15 @@ ReadGeo::getPluginDescription() const
        "the file numbered like each frame provides its content and topology may "
        "change per frame (Realflow mesh caches). Source frame numbers map "
        "natively (frame N = file N); Max Cached Frames bounds the mesh cache."
-       "OBJ: positions, texture coords, and n-gon faces are honored. Group/"
-       "object directives populate the Object dropdown when present; "
-       "otherwise the file loads as a single mesh."
+        "OBJ: positions, texture coords, and n-gon faces are honored. Group/"
+        "object directives populate the Object dropdown when present; "
+        "otherwise the file loads as a single mesh.\n\n"
+        "Output Single Mesh (Object page): ON (default) — the classic single "
+        "merged mesh above. OFF — object-hierarchy mode: every mesh part "
+        "emits as its own 3D object (the glTF/FBX/OBJ tree, filterable and "
+        "[parentable]), and the Rebuild Materials button copies the file's "
+        "materials into standalone Material3D nodes. glTF/FBX/OBJ support "
+        "both modes; Alembic currently keeps the single-mesh mode only."
     ).toStdString();
 }
 
@@ -629,9 +635,10 @@ ReadGeo::initializeKnobs()
                              "merged or selected mesh on its output.\n\n"
                              "OFF: the file's full node hierarchy is exposed to the SceneGraph, "
                              "one entry per node/mesh with parent-child relationships preserved "
-                             "(the archive/emitter behavior). Only glTF (.gltf/.glb) and FBX "
-                             "files support the hierarchy mode; .obj and .abc files keep the "
-                             "single-mesh pipeline. Turning the knob off reveals the archive "
+                             "(the archive/emitter behavior). glTF (.gltf/.glb), FBX, and OBJ "
+                             "files support the hierarchy mode (OBJ: one entry per group, "
+                             "flat); .abc files keep the single-mesh pipeline for now. Turning "
+                             "the knob off reveals the archive "
                              "controls and hides the single-mesh ones (Object dropdown, Freeze "
                              "at Frame, Material/Texture pages)."));
         page->addKnob(k);
@@ -1274,17 +1281,20 @@ ReadGeo::loadGeoFromFile(const std::string& path)
     const std::string e = extOf(loadPath);
     const bool multiEmit = isMultiEmit();
     if (multiEmit) {
-        // Object-hierarchy mode shipped for glTF/FBX (Phase 1); obj/abc
-        // hierarchy support lands later — keep the message explicit.
+        // Object-hierarchy mode: the formats the GeoArchiveRuntime parse
+        // covers (phase 1) plus OBJ groups (phase 2). Alembic hierarchy
+        // support lands in phase 3 — keep the message explicit.
         if (e == ".gltf" || e == ".glb" || e == ".fbx") {
             loadArchiveGeo(path);
+        } else if (e == ".obj") {
+            loadObjArchiveGeo(path);
         } else {
             setPersistentMessage(eMessageTypeError,
-                e == ".abc"
-                    ? "Alembic (.abc) hierarchy import is not implemented yet in this node — "
-                      "switch Output Single Mesh on, or use the ReadAlembicArchive node."
-                    : "OBJ hierarchy import is not implemented yet in this node — "
-                      "switch Output Single Mesh on (single-mesh OBJ always works).");
+                "Alembic (.abc) hierarchy import is not implemented yet in this node — "
+                "switch Output Single Mesh on, or use the ReadAlembicArchive node.");
+            if (KnobStringPtr infoK = _imp->info.lock()) {
+                infoK->setValue(std::string("Alembic files load in single-mesh mode only (Output Single Mesh ON)."));
+            }
         }
     } else if (e == ".obj") {
         loadObjGeo(loadPath);
@@ -1889,6 +1899,76 @@ buildObjGroupMeshData(const std::vector<float>& positions,
     }
 
     for (int i = 0; i < 16; ++i) mesh->transform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+}
+
+// OBJ multi-emit parser: one root-level mesh node per Wavefront group — the
+// flat hierarchy an .obj carries (no transforms anywhere). Each piece gets
+// the group's vertices PRUNED out of the file's global pool (the archive
+// machinery indexes piece-local vertices: skinning/morph/bake code assumes
+// indices into the entry's own payload). UVs are per face-corner, parallel
+// to the face list — untouched by the vertex remap. Edges rebuild from the
+// remapped indices so the wireframe stays correct.
+bool
+parseObjArchiveMulti(const std::string& path, GeoArchiveResult* out, std::string* err)
+{
+    std::vector<float> positions;
+    std::vector<float> texCoords;
+    std::vector<ObjGroup> groups;
+    if (!parseObjGroups(path, &positions, &texCoords, &groups, err)) {
+        return false;
+    }
+    if (groups.empty()) {
+        *err = "No geometry found in " + path;
+        return false;
+    }
+
+    *out = GeoArchiveResult();
+    GeoArchiveResult& data = *out;
+    data.meshes.resize(groups.size());
+    data.nodes.resize(groups.size());
+
+    for (std::size_t k = 0; k < groups.size(); ++k) {
+        MeshDataPtr mesh(new MeshData);
+        buildObjGroupMeshData(positions, groups[k], mesh.get());
+
+        // Vertex prune: face-index walk marking used positions, then remap
+        // the face + edge indices in place. Unused positions drop entirely.
+        std::vector<int> remap((size_t)mesh->numVertices, -1);
+        std::vector<float> pruned;
+        for (size_t fi = 0; fi < mesh->faceIndices.size(); ++fi) {
+            const int v = mesh->faceIndices[fi];
+            if (v < 0 || v >= (int)remap.size()) continue;
+            if (remap[(size_t)v] < 0) {
+                remap[(size_t)v] = (int)(pruned.size() / 3);
+                pruned.push_back(positions[(size_t)v * 3 + 0]);
+                pruned.push_back(positions[(size_t)v * 3 + 1]);
+                pruned.push_back(positions[(size_t)v * 3 + 2]);
+            }
+            mesh->faceIndices[fi] = remap[(size_t)v];
+        }
+        for (size_t ei = 0; ei < mesh->edgeIndices.size(); ++ei) {
+            const int e = mesh->edgeIndices[ei];
+            mesh->edgeIndices[ei] =
+                (e >= 0 && e < (int)remap.size()) ? remap[(size_t)e] : 0;
+        }
+        mesh->vertices.swap(pruned);
+        mesh->numVertices = (int)(mesh->vertices.size() / 3);
+
+        GeoArchiveMeshData md;
+        md.mesh = mesh;
+        data.meshes[k] = md;
+
+        GeoArchiveNodeData& nd = data.nodes[k];
+        nd.name = groups[k].name;
+        nd.fullPath = "/" + groups[k].name;
+        nd.parentIndex = -1;   // flat: every group attaches to the archive root
+        nd.isMesh = true;
+        nd.meshIndex = (int)k;
+        geoArchiveMatIdentity(nd.localMatrix); // hasTrs=false → serves this
+    }
+
+    data.ok = true;
+    return true;
 }
 
 } // anon
@@ -2746,6 +2826,13 @@ ReadGeo::loadArchiveGeo(const std::string& path)
     }
     _imp->rt.bakeMeshWorld = _imp->bakeTransforms.lock() &&
                              _imp->bakeTransforms.lock()->getValue();
+    finishArchiveGeo(path);
+}
+
+void
+ReadGeo::finishArchiveGeo(const std::string& path)
+{
+    // Caller holds _meshMutex; rt.data is parsed and OK.
     const GeoArchiveResult& data = _imp->rt.data;
 
     // Apply objectFilter + includeMeshes + excludedPaths with SUBTREE
@@ -2851,6 +2938,45 @@ ReadGeo::loadArchiveGeo(const std::string& path)
     }
 }
 
+void
+ReadGeo::loadObjArchiveGeo(const std::string& path)
+{
+    // Caller (loadGeoFromFile) holds _meshMutex and the isLoading guard; the
+    // multi state was already cleared there.
+    if (path.empty()) {
+        if (KnobStringPtr infoK = _imp->info.lock()) {
+            infoK->setValue(std::string("No file selected."));
+        }
+        return;
+    }
+
+    // Reference file for the parse: the stored value itself, or the
+    // sequence's first frame file when the knob holds a '#' pattern (the
+    // loadArchiveGeo resolution).
+    std::string referencePath = path;
+    if (_imp->seq.isSequence) {
+        std::map<int, std::string>::const_iterator f0 = _imp->seq.files.begin();
+        if (f0 == _imp->seq.files.end()) {
+            _imp->seq = GeoSequenceInfo();
+        } else {
+            referencePath = f0->second;
+        }
+    }
+
+    std::string err;
+    GeoArchiveResult objData;
+    if (!parseObjArchiveMulti(referencePath, &objData, &err)) {
+        setPersistentMessage(eMessageTypeError, err);
+        _imp->seq = GeoSequenceInfo();
+        _imp->seqRt.clear();
+        return;
+    }
+    // runtime is cleared (loadGeoFromFile); this parse never animates or
+    // carries an FBX scene — assign the flat result straight in.
+    _imp->rt.data = objData;
+    finishArchiveGeo(path);
+}
+
 // One file per frame (multi-emit): each timeline frame samples its own
 // throwaway parse kept in the bounded LRU (ReadGeoArchive policy — the
 // caller holds _meshMutex).
@@ -2877,7 +3003,17 @@ ReadGeo::ensureSequenceFrameArch(double time, bool* outFallbackToReference) cons
     frt.reset(new GeoArchiveRuntime);
     const bool reverse = _imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue();
     std::string err;
-    if (!frt->loadFile(it->second, reverse, err)) {
+    if (_imp->seq.extension == ".obj") {
+        // OBJ sequence: parse the frame file into the flat group hierarchy
+        // (loadObjArchiveMulti's rule) instead of the GeoArchiveRuntime
+        // scene-format reader, which rejects .obj.
+        if (!parseObjArchiveMulti(it->second, &frt->data, &err)) {
+            NodePtr n(getNode());
+            if (n) n->setPersistentMessage(eMessageTypeError,
+                                           "Sequence frame " + std::to_string(frame) + ": " + err);
+            return std::shared_ptr<GeoArchiveRuntime>();
+        }
+    } else if (!frt->loadFile(it->second, reverse, err)) {
         NodePtr n(getNode());
         if (n) n->setPersistentMessage(eMessageTypeError,
                                        "Sequence frame " + std::to_string(frame) + ": " + err);
