@@ -3369,8 +3369,15 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
             why = _impl->session->device->error_message();
         }
         fprintf(stderr, "[CyclesRenderer] GPU render failed: %s -> CPU\n", why.c_str());
-        _impl->deviceMessage = "GPU render failed (" + why + "); rendered on the CPU";
-        _impl->gpuBroken = true;
+        // Out of GPU memory depends on the settings: say what to lower, and try the GPU again on
+        // the next render. Anything else (no kernels for the card, a crash) would fail again.
+        const bool memory = why.find("free on device") != std::string::npos ||
+                            why.find("out of memory") != std::string::npos ||
+                            why.find("Out of memory") != std::string::npos;
+        _impl->deviceMessage = "GPU render failed (" + why + "); rendered on the CPU" +
+                               ( memory ? std::string(". Lower Deep Max Samples or the resolution to fit "
+                                                      "the GPU's memory") : std::string() );
+        _impl->gpuBroken = !memory;
         _impl->gpuFailedNow = true;
         return false;
     }

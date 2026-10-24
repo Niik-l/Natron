@@ -1017,7 +1017,9 @@ CyclesRender::render(const RenderActionArgs& args)
     // mirroring how samples are resolved above.
     req.denoise         = settings ? settings->getDenoise(args.time)
                                     : (_imp->denoise.lock() && _imp->denoise.lock()->getValue());
-    req.useGpu          = _imp->device.lock() && _imp->device.lock()->getValue() == 1;
+    // Device: CyclesRenderSettings (when connected) wins, like Samples / Denoise.
+    req.useGpu          = settings ? settings->getUseGpu(args.time)
+                                   : (_imp->device.lock() && _imp->device.lock()->getValue() == 1);
     if (dofParams.enabled) req.dof = &dofParams;
     if (mbParams.enabled)  req.mb  = &mbParams;
     req.integrator = &integParams;

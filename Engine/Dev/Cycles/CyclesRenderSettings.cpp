@@ -38,6 +38,7 @@ struct CyclesRenderSettingsPrivate
 {
     KnobIntWPtr    samples;
     KnobBoolWPtr   denoise;
+    KnobChoiceWPtr device;
 
     KnobIntWPtr    maxBounces;
     KnobIntWPtr    diffuseBounces;
@@ -116,6 +117,22 @@ CyclesRenderSettings::initializeKnobs()
         k->setName("denoise"); k->setDefaultValue(false);
         k->setHintToolTip(tr("Run Cycles' built-in denoiser on the result."));
         renderPage->addKnob(k); _imp->denoise = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Device"));
+        k->setName("device");
+        std::vector<ChoiceOption> o;
+        o.push_back(ChoiceOption("cpu", "CPU", "Render on the processor."));
+        o.push_back(ChoiceOption("cuda", "GPU (CUDA)", "Render on an NVIDIA graphics card. Needs a Natron "
+                                                       "built with CUDA and kernels for the card; if the GPU "
+                                                       "can't render, the CPU is used with a warning."));
+        k->populateChoices(o);
+        k->setDefaultValue(0);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Where Cycles renders. GPU (CUDA) is usually several times faster on an "
+                             "NVIDIA card; the image is the same up to noise. Falls back to the CPU when "
+                             "there is no usable GPU. Used by every render node this settings node is connected to."));
+        renderPage->addKnob(k); _imp->device = k;
     }
 
     // --- Integrator tab ---
@@ -275,6 +292,12 @@ bool   CyclesRenderSettings::getDenoise(double /*time*/) const
 {
     KnobBoolPtr k = _imp->denoise.lock();
     return k ? k->getValue() : false;
+}
+
+bool   CyclesRenderSettings::getUseGpu(double /*time*/) const
+{
+    KnobChoicePtr k = _imp->device.lock();
+    return k && k->getValue() == 1;
 }
 
 int    CyclesRenderSettings::getMaxBounces(double /*time*/) const

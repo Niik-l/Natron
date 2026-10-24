@@ -129,6 +129,7 @@ struct RenderPassPrivate
     KnobIntWPtr  samples;
     KnobBoolWPtr previewMode;   // render at half res, upscale
     KnobBoolWPtr denoise;       // OpenImageDenoise toggle
+    KnobChoiceWPtr device;      // CPU / GPU (CUDA)
 
     // AOV enable knobs (mirror CyclesRender's AOV Passes tab)
     KnobButtonWPtr refreshPassesBtn;
@@ -508,6 +509,22 @@ CyclesRenderPass::initializeKnobs()
         k->setHintToolTip(tr("Run OpenImageDenoise (CPU) on the result. Cleans up noise at low "
                              "sample counts; adds a denoise pass after rendering."));
         previewPage->addKnob(k); _imp->denoise = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Device"));
+        k->setName("device");
+        std::vector<ChoiceOption> o;
+        o.push_back(ChoiceOption("cpu", "CPU", "Render on the processor."));
+        o.push_back(ChoiceOption("cuda", "GPU (CUDA)", "Render on an NVIDIA graphics card. Needs a Natron "
+                                                       "built with CUDA and kernels for the card; if the GPU "
+                                                       "can't render, the CPU is used with a warning."));
+        k->populateChoices(o);
+        k->setDefaultValue(0);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Where Cycles renders. GPU (CUDA) is usually several times faster on an "
+                             "NVIDIA card; the image is the same up to noise. Falls back to the CPU when "
+                             "there is no usable GPU. Ignored when a CyclesRenderSettings node is connected (input 2); also used by Render to Disk."));
+        previewPage->addKnob(k); _imp->device = k;
     }
 
     // --- AOV Passes page (mirror CyclesRender) ---
@@ -1228,6 +1245,8 @@ CyclesRenderPass::render(const RenderActionArgs& args)
     req.requestedPasses = getEnabledPassesRP(_imp.get());
     req.transparentBg   = false;
     req.denoise         = _imp->denoise.lock() && _imp->denoise.lock()->getValue();
+    req.useGpu          = settings ? settings->getUseGpu(args.time)
+                                   : (_imp->device.lock() && _imp->device.lock()->getValue() == 1);
     req.integrator      = &integParams;
     req.subdivision.dicingScale = isPreview ? 8.0f : 1.0f; // coarse dicing for the live preview
     if (dofParams.enabled) req.dof = &dofParams;
@@ -1453,6 +1472,7 @@ renderPassFrameToBuffers(CyclesRenderPass* self,
                          CyclesRenderer& renderer,
                          double time, int w, int h, int fallbackSamples,
                          const std::vector<std::string>& requestedPasses, bool denoise,
+                         bool useGpu,
                          std::map<std::string, std::vector<float>>& outBuffers,
                          std::string& errOut,
                          CyclesRenderer::DeepPixelData* outDeep = nullptr,
@@ -1503,6 +1523,7 @@ renderPassFrameToBuffers(CyclesRenderPass* self,
     req.requestedPasses = requestedPasses;
     req.transparentBg   = false;
     req.denoise         = denoise;
+    req.useGpu          = settings ? settings->getUseGpu(time) : useGpu;
     req.integrator      = &integ;
     req.subdivision.dicingScale = 1.0f; // final-quality dicing
     if (dof.enabled) req.dof = &dof;
@@ -1575,6 +1596,7 @@ CyclesRenderPass::renderToDisk()
     if (outH <= 0) outH = 1080;
     const int  fallbackSamples = _imp->samples.lock() ? _imp->samples.lock()->getValue() : 16;
     const bool denoise = _imp->denoise.lock() && _imp->denoise.lock()->getValue();
+    const bool useGpu = _imp->device.lock() && _imp->device.lock()->getValue() == 1;
     const std::vector<std::string> passes = getEnabledPassesRP(_imp.get());
 
     refreshObjectLists();
@@ -1630,7 +1652,7 @@ CyclesRenderPass::renderToDisk()
         std::string err;
         CyclesRenderer::DeepPixelData deepRaw;
         if (renderPassFrameToBuffers(this, renderer, (double)f, outW, outH,
-                                     fallbackSamples, passes, denoise, buffers, err,
+                                     fallbackSamples, passes, denoise, useGpu, buffers, err,
                                      seqDeep ? &deepRaw : nullptr,
                                      seqDeepMax, seqDeepMerge, seqDeepAlphaMerge)) {
             const QString fname = QString::fromUtf8("%1.%2.exr")

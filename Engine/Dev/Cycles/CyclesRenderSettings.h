@@ -102,6 +102,7 @@ public:
     // class comment for why).
     int    getSamples(double time) const;
     bool   getDenoise(double time) const;
+    bool   getUseGpu(double time) const;      // Device = GPU (CUDA)
     int    getMaxBounces(double time) const;
     int    getDiffuseBounces(double time) const;
     int    getGlossyBounces(double time) const;
