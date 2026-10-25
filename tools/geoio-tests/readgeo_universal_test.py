@@ -13,6 +13,8 @@ def emit(m):
     sys.stderr.flush()
 
 GEO_LEGACY = "fr.inria.built-in.ReadGeo"
+# The archive NODE was removed; this ID is a hidden deprecated alias that
+# resolves to ReadGeo (loads hierarchy-mode with the outputSingleMesh fix).
 ARCH_LEGACY = "fr.inria.built-in.ReadGeoArchive"
 UNIFIED = "fr.inria.built-in.ReadGeo"
 
@@ -37,7 +39,9 @@ def seq_pattern_of(literal_path):
 def rig(tag, nodeclass, path, multi=False, is_pattern=False, samples=8):
     """Build geo -> Scene3D -> CyclesRender(+light+camera)."""
     n = app.createNode(nodeclass)
-    if multi and nodeclass == UNIFIED:
+    # The uber ReadGeo: multi=False leaves single-mesh; the legacy ARCH class
+    # is now a hidden alias resolving to ReadGeo — always force hierarchy.
+    if multi and (nodeclass == UNIFIED or nodeclass == ARCH_LEGACY):
         n.getParam("outputSingleMesh").setValue(0)
     p = seq_pattern_of(path) if is_pattern else path
     n.getParam("filename").set(p)

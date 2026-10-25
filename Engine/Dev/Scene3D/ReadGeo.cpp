@@ -3192,8 +3192,15 @@ bool
 ReadGeo::isMultiEmit() const
 {
     KnobBoolPtr k = _imp ? _imp->outputSingleMesh.lock() : KnobBoolPtr();
-    // Knob missing (older project): single-mesh default (ON semantics).
-    return k ? !k->getValue() : false;
+    // Knob missing (older project): the REMOVED ReadGeoArchive node aliased to
+    // this class (same BuildEffect, old plugin ID) was hierarchy-only — its
+    // serialized projects never carry outputSingleMesh, so they must load in
+    // multi-emit. Plain ReadGeo projects default to single-mesh.
+    if (!k) {
+        return getPluginID() == PLUGINID_NATRON_READGEOARCHIVE;
+    }
+    // ON = single mesh (classic); OFF = hierarchy multi-emit.
+    return !k->getValue();
 }
 
 double

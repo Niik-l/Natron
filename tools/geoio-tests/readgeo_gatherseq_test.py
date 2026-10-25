@@ -48,6 +48,14 @@ FR_CLAMPS = [(1, 2), (100, 50)]  # (render frame, expected-equals frame)
 def rig(tag, nodeclass, literal_path, use_pattern):
     """Build ReadGeo(X)Archive -> Scene3D -> CyclesRender(+light+camera)."""
     geo = app.createNode(nodeclass)
+    # The archive class is now the hidden ReadGeo alias: force hierarchy mode
+    # (a plain create would default to single-mesh). The plain geo cases keep
+    # the uber node's single-mesh default.
+    if nodeclass == NODES.get("arch"):
+        try:
+            geo.getParam("outputSingleMesh").setValue(0)
+        except Exception:
+            pass
     # Dialog practice: Sequence: mode stores the '#' pattern; File: mode the
     # literal single path.
     geo.getParam("filename").set(seq_pattern_of(literal_path) if use_pattern

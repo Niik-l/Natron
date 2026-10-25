@@ -234,7 +234,6 @@
 #include "Dev/Scene3D/ReadAlembicTransform.h"
 #include "Dev/Scene3D/ReadAlembicArchive.h"
 #include "Dev/Scene3D/ReadGeo.h"
-#include "Dev/Scene3D/ReadGeoArchive.h"
 #include "Dev/Scene3D/GeoMaterialOverride.h"
 #include "Dev/Scene3D/DevStamp.h"
 #include "Dev/Scene3D/CyclesRenderPass.h"
@@ -1640,7 +1639,8 @@ template <typename PLUGIN>
 void
 AppManager::registerBuiltInPlugin(const QString& iconPath,
                                   bool isDeprecated,
-                                  bool internalUseOnly)
+                                  bool internalUseOnly,
+                                  const QString& pluginIDOverride)
 {
     EffectInstancePtr node( PLUGIN::BuildEffect( NodePtr() ) );
     std::map<std::string, void (*)()> functions;
@@ -1659,7 +1659,9 @@ AppManager::registerBuiltInPlugin(const QString& iconPath,
 
     // Empty since statically bundled
     QString resourcesPath = QString();
-    Plugin* p = registerPlugin(resourcesPath, qgrouping, QString::fromUtf8( node->getPluginID().c_str() ), QString::fromUtf8( node->getPluginLabel().c_str() ),
+    const std::string pluginID = pluginIDOverride.isEmpty() ?
+                                     node->getPluginID() : pluginIDOverride.toStdString();
+    Plugin* p = registerPlugin(resourcesPath, qgrouping, QString::fromUtf8( pluginID.c_str() ), QString::fromUtf8( node->getPluginLabel().c_str() ),
                                iconPath, QStringList(), node->isReader(), node->isWriter(), binary, node->renderThreadSafety() == eRenderSafetyUnsafe, node->getMajorVersion(), node->getMinorVersion(), isDeprecated);
     std::list<PluginActionShortcut> shortcuts;
     node->getPluginShortcuts(&shortcuts);
@@ -1764,7 +1766,10 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<ReadAlembicTransform>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadAlembicArchive>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadGeo>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
-    registerBuiltInPlugin<ReadGeoArchive>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    // Legacy archive node removed (the uber ReadGeo covers it); the plugin ID
+    // lives on as a hidden deprecated ALIAS so old projects load as a
+    // hierarchy-mode ReadGeo.
+    registerBuiltInPlugin<ReadGeo>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), true, true, QString::fromUtf8(PLUGINID_NATRON_READGEOARCHIVE));
     registerBuiltInPlugin<GeoMaterialOverride>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<DevStamp>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<CyclesRenderPass>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);

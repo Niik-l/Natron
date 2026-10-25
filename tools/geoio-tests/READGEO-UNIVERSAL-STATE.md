@@ -6,8 +6,11 @@ Carry-over document for the ReadGeo uber-node effort. Read this before touching
 ## Objective
 One format-agnostic geometry reader node (ReadGeo): "Output Single Mesh" knob
 (default ON) switches between classic single-mesh emission (MeshProvider) and
-object-hierarchy multi-emit (ArchiveProvider). Legacy nodes
-(ReadGeoArchive / ReadAlembicArchive) stay registered untouched.
+object-hierarchy multi-emit (ArchiveProvider). 2026-10-25 user decision: the
+ReadGeoArchive NODE was REMOVED — its plugin ID remains a hidden deprecated
+ALIAS to ReadGeo (same BuildEffect) for old projects, which load in
+hierarchy mode (isMultiEmit's knobless fallback keys on the aliased ID).
+ReadAlembicArchive stays registered untouched.
 
 Locked decisions:
 - ODR policy: NO shared emission helpers across the unified and the archive

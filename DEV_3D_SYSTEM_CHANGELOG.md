@@ -1,4 +1,18 @@
 # Natron 3D System
+- **ReadGeoArchive node REMOVED — hidden plugin-ID alias keeps old projects (2026-10-25, user decision)** —
+  the scene-graph archive reader is gone; the unified ReadGeo uber-node (Output Single Mesh knob, phases 1-3) is
+  its only replacement. Compat path: `registerBuiltInPlugin` gained a `pluginIDOverride` parameter and ReadGeo is
+  registered a SECOND time under `PLUGINID_NATRON_READGEOARCHIVE` (deprecated + internalUseOnly — invisible in
+  menus, creatable only from old project loads / Python). A serialized ReadGeoArchive node is knob-for-knob a
+  subset of ReadGeo's knobs, so `loadKnobs` restores it directly; the one behavioural difference is resolved in
+  `ReadGeo::isMultiEmit` — when the knob is absent (old project, it never knew the knob) the node keys on its OLD
+  plugin ID and defaults to hierarchy multi-emit instead of single-mesh. `ReadGeoArchive.{h,cpp}` deleted; the
+  format loaders (ReadGeoArchiveFbx.cpp / ReadGeoArchiveGltf.cpp) stay — they also serve the uber-node's
+  multi-emit dispatch. ReadAlembicArchive stays registered untouched (.abc legacy parity reference; the uber-node
+  never aliases it — abc has no material story in multi-emit). Verified: all five geoio batteries DONE_OK — every
+  parity check against the alias is bit-identical (glb/fbx/spider single+multi 0.0000); the universal battery's
+  ARCH_LEGACY cases now test the alias on purpose. Historical NODE_REGISTRY entry kept in place under the
+  REMOVED status.
 - **Alpha cutouts: opacity maps + texture alpha wired for FBX AND glTF (2026-10-23, headless-verified)** —
   the last gap from the morning's material fixes: `GeoImportMaterial` had no alpha/opacity mapping at all, so
   Mixamo's hair/eyelash masks were ignored by both import paths and glTF BLEND materials rendered solid.

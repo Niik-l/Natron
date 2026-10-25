@@ -657,7 +657,8 @@ protected:
                                         IOPluginsMap* writersMap);
 
     template <typename PLUGIN>
-    void registerBuiltInPlugin(const QString& iconPath, bool isDeprecated, bool internalUseOnly);
+    void registerBuiltInPlugin(const QString& iconPath, bool isDeprecated, bool internalUseOnly,
+                               const QString& pluginIDOverride = QString());
 
     virtual AppInstancePtr makeNewInstance(int appID) const;
     virtual void registerGuiMetaTypes() const
