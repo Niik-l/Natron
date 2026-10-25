@@ -4013,7 +4013,31 @@ ReadGeo::getSceneNodeAt(int idx, double time,
 MeshDataPtr
 ReadGeo::getMeshDataAt(int idx, double time) const
 {
-    std::lock_guard<std::mutex> lk(_meshMutex);
+    // Wireframe edges: the multi-emit payload producers (glTF/FBX frame
+    // evaluation, OBJ multi, abc engine) never built edgeIndices — the
+    // 3D viewport's wire/shaded-wire draws read mesh->edgeIndices and
+    // showed nothing. Build them lazily here (the same density gate as the
+    // single-mesh merged path in geoBuildSceneMeshCore, wrt faceIndices);
+    // edges are derived from topology only, so the in-place per-frame
+    // vertex mutation is unaffected and the cached payloads stay valid.
+    // The edge build mutates a CACHED payload, so it must happen under the
+    // same mesh mutex the impl (and its callers) run under.
+    MeshDataPtr out;
+    {
+        std::lock_guard<std::mutex> lk(_meshMutex);
+        out = getMeshDataAtImpl(idx, time);
+        if (out && out->numVertices > 0 && out->edgeIndices.empty() &&
+            !out->faceIndices.empty() && out->faceIndices.size() <= 4000000) {
+            importBuildEdgeIndices(out.get());
+        }
+    }
+    return out;
+}
+
+MeshDataPtr
+ReadGeo::getMeshDataAtImpl(int idx, double time) const
+{
+    // Lock is taken by getMeshDataAt (its edge build mutates cached payloads).
     if (!_imp->sceneLoaded || idx < 0) {
         return MeshDataPtr();
     }

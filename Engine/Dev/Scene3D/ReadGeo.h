@@ -159,6 +159,10 @@ public:
                         bool& outIsMesh,
                         float outLocalMatrix[16]) const OVERRIDE;
     MeshDataPtr getMeshDataAt(int idx, double time = -1.0) const OVERRIDE;
+
+    // Caller must hold the mesh mutex — the wrapper (getMeshDataAt) takes it
+    // so its canvas-side edge build is serialized with the payload walk.
+    MeshDataPtr getMeshDataAtImpl(int idx, double time = -1.0) const;
     std::vector<ArchiveTreeEntry> getEntryTree() const OVERRIDE;
     bool getEntryWorldMatrix(int idx, double time, float outWorld[16]) const OVERRIDE;
     bool getRootMatrix(float outRoot[16]) const OVERRIDE;
