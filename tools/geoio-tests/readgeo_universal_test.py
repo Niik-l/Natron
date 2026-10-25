@@ -196,18 +196,18 @@ except Exception as e:
     emit("seq EXCEPTION: %r" % e)
     FAILS.append("seq exception")
 
-# Placeholder: unified + abc multi-emit is the phase-3 slot — must render
-# without crashing (empty emission). obj multi is functional now (the obj
-# battery lives in readgeo_obj_multi_test.py).
+# abc multi-emit content check (phase 3 is functional — see
+# readabc_unified_test.py for the full parity battery). Render must not be a
+# black/empty frame any more.
 try:
     abcpath = SEQBASE + r"\abc_seq\liquid_00010.abc"
     n3, scan3 = rig("abc_m", UNIFIED, abcpath, multi=True)
     ab = render_frames("abc_m", scan3, [FR])[0]
     if ab:
-        emit("abc placeholder rendered")
-        check("abc unified multi empty (no crash)", is_black(ab))
+        emit("abc multi rendered")
+        check("abc unified multi renders content", not is_black(ab))
     else:
-        check("abc unified multi empty (no crash)", False)
+        check("abc unified multi renders content", False)
 except Exception as e:
     emit("abc EXCEPTION: %r" % e)
     FAILS.append("abc exception")

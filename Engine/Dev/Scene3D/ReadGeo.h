@@ -43,6 +43,13 @@
 
 NATRON_NAMESPACE_ENTER
 
+// Alembic multi-emit entry (the ReadAlembicArchive engine model) — declared
+// here so ReadGeo.h's private members can store them; defined in ReadGeo.cpp
+// (unconditional forwards: the GUI TUs include this header without the
+// Alembic compile definition).
+struct RgAbcEntry;
+struct RgAbcFrame;
+
 struct ReadGeoPrivate;
 
 /**
@@ -200,6 +207,13 @@ private:
     // the archive machinery indexes piece-local vertices). Parsed into
     // _imp->rt.data, then the shared finishArchiveGeo tail.
     void loadObjArchiveGeo(const std::string& path);
+    // Alembic (.abc) multi-emit: the ReadAlembicArchive engine behavior
+    // (IXform/IPolyMesh walk, per-entry sample times/matrices, animated-vert
+    // pre-load) onto ReadGeo's own state. Abc multi-emit carries no file
+    // materials, and Bake Transforms does not apply (the legacy node has no
+    // bake pass) — the mode still hides/shows the same knob groups. Caller
+    // holds _meshMutex (loadGeoFromFile side).
+    void loadAbcArchiveGeo(const std::string& path);
     // Shared post-parse tail of the archive loaders (caller holds _meshMutex,
     // rt.data already filled): Bake Transforms flag, objectFilter /
     // includeMeshes / excludedPaths subtree filter, info line, morph-knob
@@ -259,6 +273,11 @@ private:
     // reference rt (agent comment in ReadGeoArchive::ensureSequenceFrame).
     std::shared_ptr<GeoArchiveRuntime> ensureSequenceFrameArch(double time,
                                                                bool* outFallbackToReference) const;
+    // Alembic multi-emit sequence: the RgAbcFrame runtime for timeline `time`
+    // (caller holds _meshMutex) — per-frame files parse standalone, hold the
+    // reference on failure/hierarchy mismatch.
+    std::shared_ptr<RgAbcFrame> ensureAbcSequenceFrame(double time,
+                                                       bool* outFallbackToReference) const;
     // Show/hide the per-mode knob groups (setSecret) to match the current
     // Output Single Mesh value. Also called from initializeKnobs.
     void applyModeVisibility();

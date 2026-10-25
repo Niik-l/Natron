@@ -175,15 +175,23 @@ try:
     n3, s3 = rig("m3_seq_m", patseq, multi=True)
     h = [render_one("m3_f%04d" % fr, s3, fr) for fr in (5, 20, 40)]
     if all(h):
+        # Content guard: trivial equal matches on dark/missing-fixture frames
+        # must not read as an animated sequence.
         check("obj seq multi animates",
+              litness(h[0]) > 0 and litness(h[1]) > 0 and
               img_diff_mean(h[0], h[1]) > DIFF_MIN and img_diff_mean(h[1], h[2]) > DIFF_MIN)
+        if litness(h[0]) == 0 or litness(h[1]) == 0:
+            emit("m3 fixture gap: frames dark (seq files %s)" %
+                 ("present" if os.path.isfile(litseq) else "MISSING"))
     else:
         check("obj seq multi animates", False)
     c = [render_one("m3_c%04d" % fr, s3, fr) for fr in (1, 100)]
     b = [render_one("m3_b%04d" % fr, s3, fr) for fr in (2, 50)]
     if all(c) and all(b):
-        check("obj seq multi clamp low", img_diff_mean(c[0], b[0]) < IDENT_MAX)
-        check("obj seq multi clamp high", img_diff_mean(c[1], b[1]) < IDENT_MAX)
+        check("obj seq multi clamp low",
+              litness(c[0]) > 0 and img_diff_mean(c[0], b[0]) < IDENT_MAX)
+        check("obj seq multi clamp high",
+              litness(c[1]) > 0 and img_diff_mean(c[1], b[1]) < IDENT_MAX)
     else:
         check("obj seq multi clamp low", False)
         check("obj seq multi clamp high", False)

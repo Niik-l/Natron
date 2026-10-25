@@ -57,6 +57,7 @@
 
 #ifdef NATRON_HAVE_ALEMBIC
 #include <Alembic/AbcGeom/All.h>
+#include <Alembic/AbcCoreFactory/All.h>
 #include <Alembic/AbcCoreOgawa/All.h>
 #endif
 
@@ -382,6 +383,39 @@ setRebuildMaterialKnobs(NodePtr matNode, const GeoImportMaterial& m)
 
 } // anonymous namespace
 
+#ifdef NATRON_HAVE_ALEMBIC
+// One cached entry per IXform or IPolyMesh in the abc archive (the
+// ReadAlembicArchive::ArchiveEntry model). A struct at namespace scope (not
+// anonymous) so the header's private members can store containers of it.
+struct RgAbcEntry
+{
+    std::string fullPath;            // "/Camera01Trackers/Tracker1"
+    std::string name;                // leaf name, "Tracker1"
+    int parentIndex = -1;            // index into the entries vector; -1 if archive-root
+    bool isMesh = false;             // true => IPolyMesh, false => IXform (locator)
+
+    // Sample data for xforms. Empty for meshes.
+    std::vector<double> sampleTimes;
+    std::vector<Imath::M44d> sampleMatrices;
+
+    // Mesh geometry (rest/sample-0 payload); mesh->vertices holds the
+    // CURRENT-frame positions mutated in place by rgAbcMeshAt.
+    MeshDataPtr meshData;
+
+    bool hasAnimatedVerts = false;
+    std::vector<double> vertexSampleTimes;
+    std::vector<std::vector<float>> vertexSamples;
+};
+
+// Per-frame parse result for an abc one-file-per-frame sequence (multi-emit):
+// a standalone entry list (each frame file is complete) + its sampled fps.
+struct RgAbcFrame
+{
+    std::vector<RgAbcEntry> entries;
+    double sourceFps = 0.0;
+};
+#endif // NATRON_HAVE_ALEMBIC
+
 
 struct ReadGeoPrivate
 {
@@ -508,6 +542,18 @@ struct ReadGeoPrivate
     bool hasAnimatedVerts = false;
     size_t numVertexSamples = 0;
     std::vector<std::vector<float>> vertexSamples; // each: numVerts * 3 floats
+
+    // --- Alembic multi-emit (Output Single Mesh OFF, .abc file) ---
+    // The rgAbc* engine state (see the RgAbcEntry model at parseObj's side):
+    // parsed entry list + the visible filter. Guarded by _meshMutex like
+    // rt / visible above.
+    std::vector<RgAbcEntry> abcEntries;
+    std::vector<int> abcVisible;
+    double abcSourceFps = 0.0;
+    bool abcLoaded = false;
+    // Per-frame parsed engines for an abc one-file-per-frame sequence in
+    // multi-emit mode (the seqRt rule: standalone frame files; LRU-bounded).
+    mutable GeoSequenceLruCache<RgAbcFrame> abcSeqRt{72};
 };
 
 
@@ -1078,6 +1124,10 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
             _imp->entryMaterials.clear();
             _imp->seqRt.clear();
             _imp->rt.clear();
+            _imp->abcEntries.clear();
+            _imp->abcVisible.clear();
+            _imp->abcSeqRt.clear();
+            _imp->abcLoaded = false;
         }
         KnobFilePtr fp = _imp->filePath.lock();
         loadGeoFromFile(fp ? fp->getValue() : std::string());
@@ -1230,6 +1280,10 @@ ReadGeo::loadGeoFromFile(const std::string& path)
     _imp->entryMaterials.clear();
     _imp->seqRt.clear();
     _imp->rt.clear();
+    _imp->abcEntries.clear();
+    _imp->abcVisible.clear();
+    _imp->abcSeqRt.clear();
+    _imp->abcLoaded = false;
 
     if (path.empty()) {
         // No file — no morph targets either; drop any weight knobs from a
@@ -1288,13 +1342,8 @@ ReadGeo::loadGeoFromFile(const std::string& path)
             loadArchiveGeo(path);
         } else if (e == ".obj") {
             loadObjArchiveGeo(path);
-        } else {
-            setPersistentMessage(eMessageTypeError,
-                "Alembic (.abc) hierarchy import is not implemented yet in this node — "
-                "switch Output Single Mesh on, or use the ReadAlembicArchive node.");
-            if (KnobStringPtr infoK = _imp->info.lock()) {
-                infoK->setValue(std::string("Alembic files load in single-mesh mode only (Output Single Mesh ON)."));
-            }
+        } else if (e == ".abc") {
+            loadAbcArchiveGeo(path);
         }
     } else if (e == ".obj") {
         loadObjGeo(loadPath);
@@ -1968,6 +2017,408 @@ parseObjArchiveMulti(const std::string& path, GeoArchiveResult* out, std::string
     }
 
     data.ok = true;
+    return true;
+}
+
+} // anon (obj helpers + obj archive parse)
+
+// ================= Alembic multi-emit engine ================================
+// (ReadGeo-local copy of the ReadAlembicArchive model — deliberately NOT
+// shared code, same ODR rule as the RGEntryMaterialAdapter: the legacy node
+// keeps its own implementation and names, so no header coupling and no
+// CMake change.)
+
+namespace {
+
+// Read sample 0 of an IPolyMesh into a fresh MeshDataPtr (the
+// ReadAlembicArchive::readPolyMeshSample0 logic).
+MeshDataPtr
+rgAbcReadPolyMeshSample0(const Alembic::AbcGeom::IPolyMesh& polyMesh)
+{
+    using namespace Alembic::AbcGeom;
+
+    IPolyMeshSchema schema = polyMesh.getSchema();
+    if (schema.getNumSamples() == 0) return MeshDataPtr();
+
+    IPolyMeshSchema::Sample sample;
+    schema.get(sample, ISampleSelector((Alembic::AbcCoreAbstract::index_t)0));
+
+    Alembic::Abc::P3fArraySamplePtr positions = sample.getPositions();
+    Alembic::Abc::Int32ArraySamplePtr faceIndices = sample.getFaceIndices();
+    Alembic::Abc::Int32ArraySamplePtr faceCounts = sample.getFaceCounts();
+    if (!positions || !faceIndices || !faceCounts) return MeshDataPtr();
+
+    const std::size_t numVerts = positions->size();
+    const std::size_t numFaceIdx = faceIndices->size();
+    const std::size_t numFaces = faceCounts->size();
+    if (numVerts == 0 || numFaceIdx == 0 || numFaces == 0) return MeshDataPtr();
+
+    MeshDataPtr mesh = std::make_shared<MeshData>();
+
+    const float* rawPos = reinterpret_cast<const float*>(positions->get());
+    mesh->vertices.resize(numVerts * 3);
+    mesh->numVertices = numVerts;
+    std::memcpy(mesh->vertices.data(), rawPos, numVerts * 3 * sizeof(float));
+
+    const int32_t* rawIdx = reinterpret_cast<const int32_t*>(faceIndices->get());
+    mesh->faceIndices.resize(numFaceIdx);
+    for (std::size_t i = 0; i < numFaceIdx; ++i) mesh->faceIndices[i] = (int)rawIdx[i];
+
+    const int32_t* rawCnt = reinterpret_cast<const int32_t*>(faceCounts->get());
+    mesh->faceCounts.resize(numFaces);
+    mesh->numFaces = numFaces;
+    for (std::size_t i = 0; i < numFaces; ++i) mesh->faceCounts[i] = (int)rawCnt[i];
+
+    mesh->edgeIndices.reserve(numFaceIdx * 2);
+    std::size_t idxOffset = 0;
+    for (std::size_t f = 0; f < numFaces; ++f) {
+        const int count = (int)rawCnt[f];
+        for (int v = 0; v < count; ++v) {
+            mesh->edgeIndices.push_back((int)rawIdx[idxOffset + v]);
+            mesh->edgeIndices.push_back((int)rawIdx[idxOffset + ((v + 1) % count)]);
+        }
+        idxOffset += (std::size_t)count;
+    }
+
+    IV2fGeomParam uvParam = schema.getUVsParam();
+    if (uvParam.valid()) {
+        IV2fGeomParam::Sample uvSample;
+        uvParam.getExpanded(uvSample);
+        const Alembic::Abc::V2fArraySamplePtr& uvVals = uvSample.getVals();
+        if (uvVals && uvVals->size() > 0) {
+            const std::size_t numUVs = uvVals->size();
+            const float* rawUV = reinterpret_cast<const float*>(uvVals->get());
+            mesh->uvs.resize(numUVs * 2);
+            std::memcpy(mesh->uvs.data(), rawUV, numUVs * 2 * sizeof(float));
+            mesh->hasUVs = true;
+        }
+    }
+
+    // Local transform stays identity — the parent IXform's transform is
+    // handled by the SceneGraph parent chain.
+    return mesh;
+}
+
+// Continuous sample index for one sampled entry list — the legacy
+// time→sample mapping (timeMode 0: native frame indexing with edge clamp;
+// timeMode 1 + known source fps: nearest abc-time bracket as a fractional
+// index for sub-frame interpolation).
+double
+rgAbcSampleIndexContinuous(const std::vector<double>& sampleTimes, std::size_t N,
+                           double time, int frameOffset, int timeMode,
+                           double sourceFps, double projectFps)
+{
+    if (N == 0) return 0.0;
+    double tCont = 0.0;
+    if (timeMode == 1 && sourceFps > 0.0 && sampleTimes.size() == N) {
+        const double abcTimeWanted = (time - 1.0 - (double)frameOffset) / projectFps;
+        int idx0 = 0;
+        for (int i = 0; i + 1 < (int)N; ++i) {
+            if (sampleTimes[i] <= abcTimeWanted &&
+                abcTimeWanted <= sampleTimes[i + 1]) {
+                idx0 = i;
+                break;
+            }
+            if (abcTimeWanted < sampleTimes[i]) break;
+            idx0 = i;
+        }
+        const int idx1 = std::min(idx0 + 1, (int)N - 1);
+        const double t0 = sampleTimes[idx0];
+        const double t1 = sampleTimes[idx1];
+        const double span = (t1 - t0);
+        const double alpha = (span > 1e-12)
+            ? std::max(0.0, std::min(1.0, (abcTimeWanted - t0) / span))
+            : 0.0;
+        tCont = (double)idx0 + alpha;
+    } else {
+        tCont = time - 1.0 - (double)frameOffset;
+        if (tCont < 0.0) tCont = 0.0;
+        if (tCont > (double)(N - 1)) tCont = (double)(N - 1);
+    }
+    return tCont;
+}
+
+// The entry's local matrix at Natron `time` (the legacy getSceneNodeAt
+// entryLocalAt logic — nearest round sample in frame mode; interpolated
+// bracket in time mode; Imath::M44d → column-major).
+void
+rgAbcEntryLocalAt(const RgAbcEntry& ej, double time, int frameOffset,
+                  int timeMode, double sourceFps, double projectFps, float out[16])
+{
+    std::memset(out, 0, 16 * sizeof(float));
+    out[0] = out[5] = out[10] = out[15] = 1.0f;
+    if (ej.sampleMatrices.empty()) return;
+
+    const std::size_t N = ej.sampleMatrices.size();
+    double tCont = 0.0;
+    if (timeMode == 1 && sourceFps > 0.0 && ej.sampleTimes.size() == N) {
+        const double abcTimeWanted = (time - 1.0 - (double)frameOffset) / projectFps;
+        int idx0 = 0;
+        for (int i = 0; i + 1 < (int)N; ++i) {
+            if (ej.sampleTimes[i] <= abcTimeWanted &&
+                abcTimeWanted <= ej.sampleTimes[i + 1]) {
+                idx0 = i;
+                break;
+            }
+            if (abcTimeWanted < ej.sampleTimes[i]) break;
+            idx0 = i;
+        }
+        const int idx1 = std::min(idx0 + 1, (int)N - 1);
+        const double t0 = ej.sampleTimes[idx0];
+        const double t1 = ej.sampleTimes[idx1];
+        const double span = (t1 - t0);
+        const double alpha = (span > 1e-12)
+            ? std::max(0.0, std::min(1.0, (abcTimeWanted - t0) / span))
+            : 0.0;
+        tCont = (double)idx0 + alpha;
+    } else {
+        tCont = time - 1.0 - (double)frameOffset;
+        if (tCont < 0.0) tCont = 0.0;
+        if (tCont > (double)(N - 1)) tCont = (double)(N - 1);
+    }
+
+    const int idx0 = (int)std::floor(tCont);
+    const int idx1 = (int)std::min(idx0 + 1, (int)N - 1);
+    const double alpha = tCont - (double)idx0;
+    const Imath::M44d& m0 = ej.sampleMatrices[idx0];
+    const Imath::M44d& m1 = ej.sampleMatrices[idx1];
+    // Imath stores M_col with row-major memory: out[col*4 + row] = m[col][row].
+    if (idx0 == idx1 || alpha < 1e-9) {
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r)
+                out[c * 4 + r] = (float)m0[c][r];
+    } else {
+        const double oneMinusA = 1.0 - alpha;
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r)
+                out[c * 4 + r] = (float)(m0[c][r] * oneMinusA + m1[c][r] * alpha);
+    }
+}
+
+// The mesh entry's payload at `time` (the legacy getMeshDataAt logic —
+// in-place vertex mutation documented in ReadAlembicArchive; bracket-
+// interpolated sub-frame for motion blur).
+MeshDataPtr
+rgAbcMeshAt(RgAbcEntry& e, double time, int frameOffset,
+            int timeMode, double sourceFps, double projectFps)
+{
+    if (!e.isMesh) return MeshDataPtr();
+
+    if (time >= 0.0 && e.hasAnimatedVerts && !e.vertexSamples.empty() && e.meshData) {
+        const int N = (int)e.vertexSamples.size();
+        const double tCont = rgAbcSampleIndexContinuous(e.vertexSampleTimes,
+                                                        (std::size_t)N,
+                                                        time, frameOffset, timeMode,
+                                                        sourceFps, projectFps);
+        const int idx0 = (int)std::floor(tCont);
+        const int idx1 = std::min(idx0 + 1, N - 1);
+        const double alpha = tCont - (double)idx0;
+        const std::vector<float>& s0 = e.vertexSamples[idx0];
+        const std::vector<float>& s1 = e.vertexSamples[idx1];
+
+        if (!s0.empty() && s0.size() == e.meshData->vertices.size()) {
+            if (idx0 == idx1 || alpha < 1e-9) {
+                std::memcpy(e.meshData->vertices.data(), s0.data(),
+                            s0.size() * sizeof(float));
+            } else if (s1.size() == s0.size()) {
+                const float a = (float)alpha;
+                const float oneMinusA = 1.0f - a;
+                float* dst = e.meshData->vertices.data();
+                const float* src0 = s0.data();
+                const float* src1 = s1.data();
+                const std::size_t n = s0.size();
+                for (std::size_t k = 0; k < n; ++k) {
+                    dst[k] = src0[k] * oneMinusA + src1[k] * a;
+                }
+            } else {
+                // Topology mismatch between brackets: fall back to the lower
+                // sample.
+                std::memcpy(e.meshData->vertices.data(), s0.data(),
+                            s0.size() * sizeof(float));
+            }
+        }
+    }
+
+    return e.meshData;
+}
+
+// Root-down chain world matrix (the legacy getEntryWorldMatrix logic).
+void
+rgAbcEntryWorldAt(const std::vector<RgAbcEntry>& entries, int srcIdx, double time,
+                  int frameOffset, int timeMode, double sourceFps, double projectFps,
+                  float outWorld[16])
+{
+    for (int i = 0; i < 16; ++i) outWorld[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+    if (srcIdx < 0 || srcIdx >= (int)entries.size()) return;
+
+    std::vector<int> chain;
+    int cur = srcIdx;
+    while (cur >= 0 && cur < (int)entries.size()) {
+        chain.push_back(cur);
+        cur = entries[cur].parentIndex;
+    }
+
+    for (int ci = (int)chain.size() - 1; ci >= 0; --ci) {
+        float local[16];
+        rgAbcEntryLocalAt(entries[chain[ci]], time, frameOffset, timeMode,
+                          sourceFps, projectFps, local);
+
+        // outWorld = outWorld * local (column-major).
+        float r[16];
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                float sum = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    sum += outWorld[k * 4 + row] * local[col * 4 + k];
+                }
+                r[col * 4 + row] = sum;
+            }
+        }
+        std::memcpy(outWorld, r, sizeof(r));
+    }
+}
+
+// Recursive archive walker (the ReadAlembicArchive::walkObjectRecursive logic).
+void
+rgAbcWalkObject(const Alembic::AbcGeom::IObject& obj,
+                const std::string& parentPath,
+                int parentEntryIndex,
+                std::vector<RgAbcEntry>& entries)
+{
+    using namespace Alembic::AbcGeom;
+
+    const std::string fullPath = parentPath.empty()
+        ? std::string("/") + obj.getName()
+        : parentPath + "/" + obj.getName();
+
+    int thisEntryIndex = -1;
+
+    if (IXform::matches(obj.getHeader())) {
+        IXform xf(obj, Alembic::Abc::kWrapExisting);
+        IXformSchema& schema = xf.getSchema();
+        const std::size_t numSamples = schema.getNumSamples();
+        Alembic::AbcCoreAbstract::TimeSamplingPtr ts = schema.getTimeSampling();
+
+        RgAbcEntry e;
+        e.fullPath = fullPath;
+        e.name = obj.getName();
+        e.parentIndex = parentEntryIndex;
+        e.isMesh = false;
+        e.sampleTimes.reserve(numSamples);
+        e.sampleMatrices.reserve(numSamples);
+        for (std::size_t i = 0; i < numSamples; ++i) {
+            const double t = ts ? ts->getSampleTime((Alembic::AbcCoreAbstract::index_t)i) : 0.0;
+            XformSample xs;
+            schema.get(xs, ISampleSelector((Alembic::AbcCoreAbstract::index_t)i));
+            e.sampleTimes.push_back(t);
+            e.sampleMatrices.push_back(xs.getMatrix());
+        }
+        thisEntryIndex = (int)entries.size();
+        entries.push_back(e);
+    } else if (IPolyMesh::matches(obj.getHeader())) {
+        // Sample 0 as rest pose, then pre-load all remaining vertex samples
+        // (topology assumed constant — the standard Maya/Blender/Houdini
+        // export). The parent IXform's animation drives positioning via the
+        // SceneGraph parent chain; vertex animation handled by the sampler.
+        IPolyMesh polyMesh(obj, Alembic::Abc::kWrapExisting);
+        RgAbcEntry e;
+        e.fullPath = fullPath;
+        e.name = obj.getName();
+        e.parentIndex = parentEntryIndex;
+        e.isMesh = true;
+        e.meshData = rgAbcReadPolyMeshSample0(polyMesh);
+
+        if (e.meshData && e.meshData->numVertices > 0) {
+            IPolyMeshSchema schema = polyMesh.getSchema();
+            const std::size_t numVertSamples = schema.getNumSamples();
+            if (numVertSamples > 1) {
+                Alembic::AbcCoreAbstract::TimeSamplingPtr ts = schema.getTimeSampling();
+                e.hasAnimatedVerts = true;
+                e.vertexSamples.assign(numVertSamples, std::vector<float>());
+                e.vertexSampleTimes.reserve(numVertSamples);
+                const std::size_t expectedFloats = (std::size_t)e.meshData->numVertices * 3;
+                for (std::size_t s = 0; s < numVertSamples; ++s) {
+                    const double t = ts ? ts->getSampleTime((Alembic::AbcCoreAbstract::index_t)s) : (double)s;
+                    e.vertexSampleTimes.push_back(t);
+                    Alembic::Abc::ISampleSelector ss((Alembic::AbcCoreAbstract::index_t)s);
+                    IPolyMeshSchema::Sample animSample;
+                    schema.get(animSample, ss);
+                    Alembic::Abc::P3fArraySamplePtr positions = animSample.getPositions();
+                    if (!positions || positions->size() != e.meshData->numVertices) continue;
+                    const float* posPtr = reinterpret_cast<const float*>(positions->get());
+                    e.vertexSamples[s].resize(expectedFloats);
+                    std::memcpy(e.vertexSamples[s].data(), posPtr,
+                                expectedFloats * sizeof(float));
+                }
+            }
+        }
+
+        thisEntryIndex = (int)entries.size();
+        entries.push_back(e);
+    }
+    // Cameras / lights / other types: skipped — they have their own dedicated readers.
+
+    // Recurse: pass thisEntryIndex when one was created so deeper entries
+    // attach to the nearest enclosing xform/mesh.
+    const int childParent = (thisEntryIndex >= 0) ? thisEntryIndex : parentEntryIndex;
+    for (std::size_t i = 0; i < obj.getNumChildren(); ++i) {
+        rgAbcWalkObject(obj.getChild(i), fullPath, childParent, entries);
+    }
+}
+
+// Parse one abc file into the flat entry list; source fps from the first
+// uniformly-sampled entry (the legacy loadAlembicFile logic, minus knobs).
+bool
+rgAbcParse(const std::string& path, bool reverseNormals,
+           std::vector<RgAbcEntry>* entries, double* sourceFps, std::string* err)
+{
+    using Alembic::AbcCoreFactory::IFactory;
+
+    entries->clear();
+    *sourceFps = 0.0;
+
+    try {
+        IFactory factory;
+        Alembic::Abc::IArchive archive = factory.getArchive(path);
+        if (!archive.valid()) {
+            *err = std::string("Failed to open Alembic file: ") + path;
+            return false;
+        }
+
+        Alembic::Abc::IObject top = archive.getTop();
+        for (std::size_t i = 0; i < top.getNumChildren(); ++i) {
+            rgAbcWalkObject(top.getChild(i), std::string(), -1, *entries);
+        }
+
+        if (entries->empty()) {
+            *err = "No IXform/IPolyMesh entries in " + path;
+            return false;
+        }
+
+        // Reverse Normals: flip every mesh entry's winding (applied at load
+        // time so a knob toggle just re-runs the load).
+        if (reverseNormals) {
+            for (RgAbcEntry& e : *entries) {
+                if (e.isMesh && e.meshData) {
+                    reverseMeshWinding(*e.meshData);
+                }
+            }
+        }
+
+        for (std::size_t i = 0; i < entries->size(); ++i) {
+            if ((*entries)[i].sampleTimes.size() >= 2) {
+                const double dt = (*entries)[i].sampleTimes[1] - (*entries)[i].sampleTimes[0];
+                if (dt > 0.0) {
+                    *sourceFps = 1.0 / dt;
+                    break;
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        *err = std::string("Error reading Alembic file: ") + e.what();
+        return false;
+    }
+    
     return true;
 }
 
@@ -2977,6 +3428,114 @@ ReadGeo::loadObjArchiveGeo(const std::string& path)
     finishArchiveGeo(path);
 }
 
+void
+ReadGeo::loadAbcArchiveGeo(const std::string& path)
+{
+    // Caller (loadGeoFromFile) holds _meshMutex and the isLoading guard; the
+    // multi state was already cleared there.
+    if (path.empty()) {
+        if (KnobStringPtr infoK = _imp->info.lock()) {
+            infoK->setValue(std::string("No file selected."));
+        }
+        return;
+    }
+
+    // Reference file for the parse: the stored value itself, or the
+    // sequence's first frame file when the knob holds a '#' pattern (the
+    // loadArchiveGeo resolution).
+    std::string referencePath = path;
+    if (_imp->seq.isSequence) {
+        std::map<int, std::string>::const_iterator f0 = _imp->seq.files.begin();
+        if (f0 == _imp->seq.files.end()) {
+            _imp->seq = GeoSequenceInfo();
+        } else {
+            referencePath = f0->second;
+        }
+    }
+
+    const bool reverse = _imp->reverseNormals.lock() &&
+                         _imp->reverseNormals.lock()->getValue();
+    std::string err;
+    if (!rgAbcParse(referencePath, reverse, &_imp->abcEntries,
+                    &_imp->abcSourceFps, &err)) {
+        setPersistentMessage(eMessageTypeError, err);
+        _imp->abcEntries.clear();
+        _imp->abcVisible.clear();
+        _imp->abcSourceFps = 0.0;
+        _imp->abcLoaded = false;
+        _imp->seq = GeoSequenceInfo();
+        _imp->seqRt.clear();
+        return;
+    }
+
+    // Subtree-filtered visibility (the same rule as finishArchiveGeo / the
+    // legacy node: filter glob + excludedPaths + includeMeshes, an entry
+    // shows only when its parent entry does).
+    const std::string pattern = _imp->objectFilter.lock() ?
+                                    _imp->objectFilter.lock()->getValue() : std::string();
+    const bool includeMeshes = _imp->includeMeshes.lock() ?
+                                   _imp->includeMeshes.lock()->getValue() : true;
+    const std::string excludedRaw = _imp->excludedPaths.lock() ?
+                                        _imp->excludedPaths.lock()->getValue() : std::string();
+    std::set<std::string> excluded;
+    {
+        std::size_t pos = 0;
+        while (pos <= excludedRaw.size()) {
+            std::size_t nl = excludedRaw.find('\n', pos);
+            if (nl == std::string::npos) nl = excludedRaw.size();
+            std::string line = excludedRaw.substr(pos, nl - pos);
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' ||
+                                     line.back() == '\t')) {
+                line.pop_back();
+            }
+            std::size_t lead = 0;
+            while (lead < line.size() && (line[lead] == ' ' || line[lead] == '\t')) ++lead;
+            if (lead) line.erase(0, lead);
+            if (!line.empty()) excluded.insert(line);
+            if (nl == excludedRaw.size()) break;
+            pos = nl + 1;
+        }
+    }
+    std::vector<char> entryVisible(_imp->abcEntries.size(), 0);
+    for (int i = 0; i < (int)_imp->abcEntries.size(); ++i) {
+        const RgAbcEntry& e = _imp->abcEntries[i];
+        bool pass = true;
+        if (!includeMeshes && e.isMesh) pass = false;
+        if (pass && !rgGlobMatch(pattern, e.fullPath)) pass = false;
+        if (pass && excluded.count(e.fullPath)) pass = false;
+        if (pass && e.parentIndex >= 0) pass = entryVisible[e.parentIndex] != 0;
+        entryVisible[i] = pass ? 1 : 0;
+        if (pass) _imp->abcVisible.push_back(i);
+    }
+
+    // Info string (the legacy node's format; the unified node has no
+    // Time-mode knob — it evaluates frame-by-frame natively like mode 0).
+    std::size_t numXforms = 0, numMeshes = 0;
+    for (std::size_t i = 0; i < _imp->abcEntries.size(); ++i) {
+        if (_imp->abcEntries[i].isMesh) ++numMeshes; else ++numXforms;
+    }
+    std::ostringstream ss;
+    ss << "Total entries: " << _imp->abcEntries.size()
+       << " (xforms: " << numXforms
+       << ", meshes: " << numMeshes << ")"
+       << " | Visible after filter: " << _imp->abcVisible.size();
+    if (_imp->abcSourceFps > 0.0) {
+        ss << " | Source FPS: " << _imp->abcSourceFps;
+    }
+    if (_imp->seq.isSequence) {
+        ss << " | seq frames " << _imp->seq.firstFrame << "-" << _imp->seq.lastFrame
+           << " (" << _imp->seq.files.size() << " files)";
+    }
+    if (KnobStringPtr infoK = _imp->info.lock()) {
+        infoK->setValue(ss.str());
+    }
+
+    _imp->loadedFilePath = path;
+    _imp->sceneLoaded = true;
+    _imp->abcLoaded = true;
+    clearPersistentMessage(false);
+}
+
 // One file per frame (multi-emit): each timeline frame samples its own
 // throwaway parse kept in the bounded LRU (ReadGeoArchive policy — the
 // caller holds _meshMutex).
@@ -3042,6 +3601,58 @@ ReadGeo::ensureSequenceFrameArch(double time, bool* outFallbackToReference) cons
     return frt;
 }
 
+// Alembic multi-emit sequence: parse the frame file into its own entry
+// engine (per-frame files are standalone); the hierarchy check + LRU + the
+// hold-the-reference rule mirror ensureSequenceFrameArch.
+std::shared_ptr<RgAbcFrame>
+ReadGeo::ensureAbcSequenceFrame(double time, bool* outFallbackToReference) const
+{
+    *outFallbackToReference = true;
+    if (time < 0.0 || _imp->seq.files.empty()) {
+        return std::shared_ptr<RgAbcFrame>();
+    }
+    // Sequence wins over the frameOffset knob: file frame numbers are NATIVE
+    // to the timeline.
+    const int frame = _imp->seq.clampFrame((int)std::floor(time));
+    std::shared_ptr<RgAbcFrame> frt = _imp->abcSeqRt.get(frame);
+    if (frt) {
+        *outFallbackToReference = false;
+        return frt;
+    }
+
+    std::map<int, std::string>::const_iterator it = _imp->seq.files.find(frame);
+    if (it == _imp->seq.files.end()) {
+        return std::shared_ptr<RgAbcFrame>();
+    }
+    frt.reset(new RgAbcFrame);
+    const bool reverse = _imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue();
+    std::string err;
+    if (!rgAbcParse(it->second, reverse, &frt->entries, &frt->sourceFps, &err)) {
+        NodePtr n(getNode());
+        if (n) n->setPersistentMessage(eMessageTypeError,
+                                       "Sequence frame " + std::to_string(frame) + ": " + err);
+        return std::shared_ptr<RgAbcFrame>();
+    }
+
+    // Hierarchy consistency: the frame file must carry the reference's entry
+    // layout (count only — the same rule as the runtime path).
+    if (frt->entries.size() != _imp->abcEntries.size()) {
+        NodePtr n(getNode());
+        if (n) n->setPersistentMessage(eMessageTypeError,
+                                       "Sequence frame " + std::to_string(frame) +
+                                           ": hierarchy mismatch (" +
+                                           std::to_string(frt->entries.size()) +
+                                           " entries, reference has " +
+                                           std::to_string(_imp->abcEntries.size()) +
+                                           ") — holding the reference frame's data.");
+        return std::shared_ptr<RgAbcFrame>();
+    }
+
+    _imp->abcSeqRt.put(frame, frt);
+    *outFallbackToReference = false;
+    return frt;
+}
+
 // --- ArchiveProvider interface (multi-emit; active when Output Single Mesh
 // is OFF). Ported from ReadGeoArchive; the idx space is the VISIBLE entry
 // index (the same space SceneNode::archiveEntryIdx stores).
@@ -3050,6 +3661,10 @@ int
 ReadGeo::getSceneNodeCount() const
 {
     std::lock_guard<std::mutex> lk(_meshMutex);
+    // Alembic multi-emit: the engine's filtered entry list.
+    if (_imp->abcLoaded) {
+        return (int)_imp->abcVisible.size();
+    }
     return (int)_imp->visible.size();
 }
 
@@ -3057,6 +3672,24 @@ std::vector<ArchiveTreeEntry>
 ReadGeo::getEntryTree() const
 {
     std::lock_guard<std::mutex> lk(_meshMutex);
+    // Alembic multi-emit: the engine entries (sampleCount = the xform
+    // sample count; meshes report their vertex count).
+    if (_imp->abcLoaded) {
+        std::vector<ArchiveTreeEntry> out;
+        out.reserve(_imp->abcEntries.size());
+        for (std::size_t i = 0; i < _imp->abcEntries.size(); ++i) {
+            const RgAbcEntry& e = _imp->abcEntries[i];
+            ArchiveTreeEntry te;
+            te.fullPath = e.fullPath;
+            te.name = e.name;
+            te.parentLocalIdx = e.parentIndex;
+            te.isMesh = e.isMesh;
+            te.sampleCount = (int)e.sampleMatrices.size();
+            te.numVertices = (e.meshData) ? (int)e.meshData->numVertices : 0;
+            out.push_back(te);
+        }
+        return out;
+    }
     const GeoArchiveResult& data = _imp->rt.data;
     std::vector<ArchiveTreeEntry> out;
     out.reserve(data.nodes.size());
@@ -3243,7 +3876,49 @@ ReadGeo::getSceneNodeAt(int idx, double time,
                         float outLocalMatrix[16]) const
 {
     std::lock_guard<std::mutex> lk(_meshMutex);
-    if (!_imp->sceneLoaded || idx < 0 || idx >= (int)_imp->visible.size()) return false;
+    if (!_imp->sceneLoaded || idx < 0) {
+        return false;
+    }
+    // Alembic multi-emit guards against the engine's own filtered list —
+    // _imp->visible is empty for a plain .abc load.
+    if (_imp->abcLoaded) {
+        if (idx >= (int)_imp->abcVisible.size()) return false;
+    } else if (idx >= (int)_imp->visible.size()) {
+        return false;
+    }
+
+    // Alembic multi-emit: the engine's own walk (visible-ancestor attachment
+    // + filtered-ancestor folding, ReadAlembicArchive::getSceneNodeAt).
+    if (_imp->abcLoaded && idx < (int)_imp->abcVisible.size()) {
+        const int srcIdx = _imp->abcVisible[idx];
+        const RgAbcEntry& e = _imp->abcEntries[srcIdx];
+        outName = e.fullPath;
+        outIsMesh = e.isMesh;
+        rgAbcEntryLocalAt(e, time, 0, 0, _imp->abcSourceFps,
+                          archiveFps(), outLocalMatrix);
+
+        outParentLocalIndex = -1;
+        int p = e.parentIndex;
+        while (p >= 0 && p < (int)_imp->abcEntries.size()) {
+            int pv = -1;
+            for (int v = 0; v < (int)_imp->abcVisible.size(); ++v) {
+                if (_imp->abcVisible[v] == p) { pv = v; break; }
+            }
+            if (pv >= 0) {
+                outParentLocalIndex = pv;
+                break;
+            }
+            float pl[16];
+            rgAbcEntryLocalAt(_imp->abcEntries[p], time, 0, 0,
+                              _imp->abcSourceFps, archiveFps(), pl);
+            float folded[16];
+            geoArchiveMatMul(pl, outLocalMatrix, folded);
+            std::memcpy(outLocalMatrix, folded, 16 * sizeof(float));
+            p = _imp->abcEntries[p].parentIndex;
+        }
+        return true;
+    }
+
     const int srcIdx = _imp->visible[idx];
     const GeoArchiveNodeData& nd = _imp->rt.data.nodes[srcIdx];
 
@@ -3332,7 +4007,34 @@ MeshDataPtr
 ReadGeo::getMeshDataAt(int idx, double time) const
 {
     std::lock_guard<std::mutex> lk(_meshMutex);
-    if (!_imp->sceneLoaded || idx < 0 || idx >= (int)_imp->visible.size()) return MeshDataPtr();
+    if (!_imp->sceneLoaded || idx < 0) {
+        return MeshDataPtr();
+    }
+    if (_imp->abcLoaded) {
+        if (idx >= (int)_imp->abcVisible.size()) return MeshDataPtr();
+    } else if (idx >= (int)_imp->visible.size()) {
+        return MeshDataPtr();
+    }
+
+    // Alembic multi-emit: the engine's per-time payload (in-place vertex
+    // mutation rule; sequence frames come from their own parsed engine).
+    if (_imp->abcLoaded && idx < (int)_imp->abcVisible.size()) {
+        const int srcIdx = _imp->abcVisible[idx];
+        if (_imp->seq.isSequence && time >= 0.0) {
+            bool fallback = true;
+            std::shared_ptr<RgAbcFrame> frameRt = ensureAbcSequenceFrame(time, &fallback);
+            if (frameRt && !fallback) {
+                return rgAbcMeshAt(frameRt->entries[srcIdx], 0.0, 0, 0,
+                                   frameRt->sourceFps, archiveFps());
+            }
+            // frame unavailable — hold the reference frame's payload
+            return rgAbcMeshAt(_imp->abcEntries[srcIdx], time, 0, 0,
+                               _imp->abcSourceFps, archiveFps());
+        }
+        return rgAbcMeshAt(_imp->abcEntries[srcIdx], time, 0, 0,
+                           _imp->abcSourceFps, archiveFps());
+    }
+
     const int srcIdx = _imp->visible[idx];
     const GeoArchiveNodeData& nd = _imp->rt.data.nodes[srcIdx];
     if (!nd.isMesh || nd.meshIndex < 0 || nd.meshIndex >= (int)_imp->rt.data.meshes.size()) {
@@ -3392,7 +4094,34 @@ bool
 ReadGeo::getEntryWorldMatrix(int idx, double time, float outWorld[16]) const
 {
     std::lock_guard<std::mutex> lk(_meshMutex);
-    if (!_imp->sceneLoaded || idx < 0 || idx >= (int)_imp->visible.size()) return false;
+    if (!_imp->sceneLoaded || idx < 0) {
+        return false;
+    }
+    if (_imp->abcLoaded) {
+        if (idx >= (int)_imp->abcVisible.size()) return false;
+    } else if (idx >= (int)_imp->visible.size()) {
+        return false;
+    }
+
+    // Alembic multi-emit: engine world matrix (chain composition; no bake
+    // post-pass in abc mode — the legacy node has none).
+    if (_imp->abcLoaded && idx < (int)_imp->abcVisible.size()) {
+        const int srcIdx = _imp->abcVisible[idx];
+        if (_imp->seq.isSequence && time >= 0.0) {
+            bool fallback = true;
+            std::shared_ptr<RgAbcFrame> frameRt = ensureAbcSequenceFrame(time, &fallback);
+            if (frameRt && !fallback) {
+                rgAbcEntryWorldAt(frameRt->entries, srcIdx, 1.0, 0, 0,
+                                  frameRt->sourceFps, archiveFps(), outWorld);
+                return true;
+            }
+            // frame unavailable — hold the reference file's state
+        }
+        rgAbcEntryWorldAt(_imp->abcEntries, srcIdx, time, 0, 0,
+                          _imp->abcSourceFps, archiveFps(), outWorld);
+        return true;
+    }
+
     const int srcIdx = _imp->visible[idx];
 
     // File-sequence mode: the world matrix comes from the frame file's
@@ -3439,6 +4168,11 @@ bool
 ReadGeo::getRootMatrix(float outRoot[16]) const
 {
     std::lock_guard<std::mutex> lk(_meshMutex);
+    // Alembic multi-emit: no format-level root normalization (identity).
+    if (_imp->abcLoaded) {
+        geoArchiveMatIdentity(outRoot);
+        return false;
+    }
     if (!_imp->sceneLoaded || _imp->rt.data.rootMatrix.size() != 16) {
         geoArchiveMatIdentity(outRoot);
         return false;
@@ -3454,6 +4188,11 @@ ReadGeo::getEntryMaterialProvider(int idx) const
     // idx is the VISIBLE entry index — remap to the full-archive node index
     // before touching rt.data (ReadGeoArchive: resolving the visible index
     // directly re-shuffled materials when subtrees were filtered out).
+    // Alembic multi-emit: abc carries no entry materials (the legacy node
+    // serves the connected input via the node's own getters) — no provider.
+    if (_imp->abcLoaded) {
+        return nullptr;
+    }
     if (!_imp->sceneLoaded || idx < 0 || idx >= (int)_imp->visible.size()) return nullptr;
     const int srcIdx = _imp->visible[idx];
     if (srcIdx < 0 || srcIdx >= (int)_imp->rt.data.nodes.size()) return nullptr;
@@ -4081,6 +4820,17 @@ ReadGeo::getPreferredMetadata(NodeMetadata& metadata)
         if (_imp->seq.isSequence || (_imp->sceneLoaded && _imp->rt.hasAnimation)) {
             metadata.setIsFrameVarying(true);
             return eStatusOK;
+        }
+        // Alembic multi-emit: animated content = multi-sample xform OR
+        // animated verts (the ReadAlembicArchive metadata rule).
+        if (_imp->abcLoaded) {
+            for (std::size_t i = 0; i < _imp->abcEntries.size(); ++i) {
+                const RgAbcEntry& e = _imp->abcEntries[i];
+                if (e.isMesh ? e.hasAnimatedVerts : (e.sampleMatrices.size() > 1)) {
+                    metadata.setIsFrameVarying(true);
+                    return eStatusOK;
+                }
+            }
         }
         // Animated user morph weights still make the node time-varying.
         KnobBoolPtr uf = _imp->useFileMorphWeights.lock();
