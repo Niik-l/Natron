@@ -1,4 +1,4 @@
-# OBJ multi-emit phase 2 battery.
+﻿# OBJ multi-emit phase 2 battery.
 # 1. unified obj multi vs unified obj single (merged, bake ON): identical
 #    (flat identity hierarchy == merged render).
 # 2. synthetic two-group obj: multi emits 2 entries; excluding one via
@@ -13,7 +13,7 @@ def emit(m):
     sys.stderr.flush()
 
 UNIFIED = "fr.inria.built-in.ReadGeo"
-SEQBASE = r"C:\Users\filmc\Documents\OpenCode_Natron3D\realflow-mcp\spikes\liquid_out\out"
+SEQBASE = r"C:\Users\filmc\Documents\OpenCode_realflow-mcp\spikes\liquid_out\out"
 A = r"C:\Users\filmc\Documents\OpenCode_Natron3D\Natron\tools\geoio-tests\assets"
 OUTD = r"C:\Users\filmc\Documents\OpenCode_Natron3D\Natron\tools\geoio-tests\out\unified"
 os.makedirs(OUTD, exist_ok=True)

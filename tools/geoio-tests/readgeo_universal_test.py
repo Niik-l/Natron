@@ -1,4 +1,4 @@
-# Universal ReadGeo Phase 1: dual-mode glb/fbx parity battery.
+﻿# Universal ReadGeo Phase 1: dual-mode glb/fbx parity battery.
 # For each of (BoxTextured.glb, box.fbx, spider.fbx) x (single, multi):
 #   unified ReadGeo render must MATCH the legacy node rendering
 #   (ReadGeo = single / ReadGeoArchive = multi).
@@ -17,7 +17,7 @@ ARCH_LEGACY = "fr.inria.built-in.ReadGeoArchive"
 UNIFIED = "fr.inria.built-in.ReadGeo"
 
 A = r"C:\Users\filmc\Documents\OpenCode_Natron3D\Natron\tools\geoio-tests\assets"
-SEQBASE = r"C:\Users\filmc\Documents\OpenCode_Natron3D\realflow-mcp\spikes\liquid_out\out"
+SEQBASE = r"C:\Users\filmc\Documents\OpenCode_realflow-mcp\spikes\liquid_out\out"
 OUTD = r"C:\Users\filmc\Documents\OpenCode_Natron3D\Natron\tools\geoio-tests\out\unified"
 os.makedirs(OUTD, exist_ok=True)
 
@@ -196,7 +196,7 @@ except Exception as e:
     emit("seq EXCEPTION: %r" % e)
     FAILS.append("seq exception")
 
-# abc multi-emit content check (phase 3 is functional — see
+# abc multi-emit content check (phase 3 is functional â€” see
 # readabc_unified_test.py for the full parity battery). Render must not be a
 # black/empty frame any more.
 try:

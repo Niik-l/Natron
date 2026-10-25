@@ -1,4 +1,4 @@
-# Gather Sequences (one-file-per-frame geo) end-to-end check.
+﻿# Gather Sequences (one-file-per-frame geo) end-to-end check.
 # For each format (abc/fbx/obj) x node class (ReadGeoArchive, ReadGeo):
 #   - filename = '#' pattern (the file dialog's Sequence: mode result): renders
 #     at frames 5 / 20 / 40 must DIFFER (the sequence plays), out-of-range
@@ -13,7 +13,7 @@ def emit(m):
     sys.stderr.write("GSEQ %7.2fs %s\n" % (time.time() - T0[0], m))
     sys.stderr.flush()
 
-BASE = r"C:\Users\filmc\Documents\OpenCode_Natron3D\realflow-mcp\spikes\liquid_out\out"
+BASE = r"C:\Users\filmc\Documents\OpenCode_realflow-mcp\spikes\liquid_out\out"
 OUTD = r"C:\Users\filmc\Documents\OpenCode_Natron3D\Natron\tools\geoio-tests\out\gatherseq"
 os.makedirs(OUTD, exist_ok=True)
 

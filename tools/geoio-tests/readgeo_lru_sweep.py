@@ -1,8 +1,8 @@
-import os, re, sys, time
+﻿import os, re, sys, time
 OUTD = r"C:\Users\filmc\Documents\OpenCode_Natron3D\Natron\tools\geoio-tests\out\gseqmini"
 os.makedirs(OUTD, exist_ok=True)
 
-OBJ = r"C:\Users\filmc\Documents\OpenCode_Natron3D\realflow-mcp\spikes\liquid_out\out\obj_seq\liquid_00010.obj"
+OBJ = r"C:\Users\filmc\Documents\OpenCode_realflow-mcp\spikes\liquid_out\out\obj_seq\liquid_00010.obj"
 # '#' per digit of the padded frame number (the dialog's Sequence: mode value)
 seq_pat = re.sub(r'(\d+)(\.[^.]+)$', lambda m: '#' * len(m.group(1)) + m.group(2), OBJ)
 

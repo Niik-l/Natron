@@ -107,14 +107,10 @@ single-mode unified == legacy single. readabc_legacy_test.py DONE_OK. All
 static sections of readgeo_universal_test.py + readgeo_obj_multi_test.py
 PASS (glb/fbx/spider parity, twobox, filters).
 
-ENVIRONMENT GAP on this PC (blocks the seq-only checks): the realflow
-fixtures `realflow-mcp/spikes/liquid_out/out/{abc,fbx,obj}_seq` (frames
-2-50) DO NOT EXIST in this workspace — the batteries log "No file selected".
-Until the user copies `realflow-mcp/` from the other PC these remain FAIL:
-universal "seq unified single/multi animates" + "abc unified multi renders
-content"; obj "obj seq multi animates/clamp low/clamp high" (now guarded
-lit>0 so they fail LOUDLY, no more trivial passes); every gatherseq check;
-readgeo_lru_sweep.
+ENVIRONMENT (2026-10-25): the realflow fixtures LIVE at
+`C:\Users\filmc\Documents\OpenCode_realflow-mcp\spikes\liquid_out\out\{abc,fbx,obj}_seq`
+(frames 2-50) — all five batteries DONE_OK (universal / obj multi /
+gatherseq / lru sweep / the readabc pair).
 
 Reference/baseline (green, pre-refactor):
 - Asset: Natron/tools/geoio-tests/assets/animcubetree.abc — Blender-generated
