@@ -1,4 +1,20 @@
 # Natron 3D System
+- **UV-less meshes truncated to one triangle in Cycles + merged face-color double-apply (2026-10-26, `65dc14417` + `6c41383bc`)** —
+  bugset #5 (AnimatedMorphCube.glb): the mesh rendered an empty transparent frame in BOTH output
+  modes. Cause 1: the per-vertex-UV crash fix (`ab7ec9436`) added `if (!hasUV) break;` after each
+  face's triangulation in the mesh sync — intended to stop UV processing once a malformed
+  per-vertex UV set was dropped, but it fires for every UV-less mesh and exits the face loop after
+  the first face, so the whole mesh reached Cycles as a single triangle. Fix: remove the break
+  (the malformed case already breaks the inner loop and clears the UV set). Cause 2 (surfaced by
+  cause 1's fix): single-mesh mode then rendered ~1.7x darker than multi-emit because the merged
+  mesh baked the part's file-material baseColor onto its face corners while the node-level knobs
+  mirror the same material — the Cycles fallback shader applied the color twice (base 0.604 ×
+  baked 0.604; with no diffuse texture the face-color multiply connect lands, unlike the textured
+  case where the "input already connected" guard drops it). Fix: `geoBuildSceneMeshCore` bakes
+  face colors only when the merged build spans >1 distinct file material, and the single-part
+  branch never bakes. Multi-material files keep the previous behavior exactly. Verified: morph
+  cube single vs multi pixel-identical (lit 32400==32400, was 0/0); `readgeo_bugset_repro.py`
+  battery all green (bug1 5597==5597, bug2 3743==3743, bug3 unchanged).
 - **Single-mesh mode now serves the file material's PBR maps (2026-10-26, `04d48fedc`)** —
   bugset #2 (cobra-concept.glb): Output Single Mesh ON rendered ~2x darker than multi-emit with
   crushed highlights (mean luma 3.54 vs 6.37; AOV max 0.17 vs 3.65) while the texture, UVs,
