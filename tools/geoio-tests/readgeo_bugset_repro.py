@@ -39,16 +39,22 @@ def litness(p):
 def render_one(tag, fr, samples=16):
     p = os.path.join(OUTD, "%s_f%04d.png" % (tag, fr))
     if os.path.isfile(p): os.remove(p)
+    # Pin the project range to the render frame: an unpinned range makes
+    # every app.render ALSO queue the 1..250 project render, which (a) pays
+    # ~250 frames per leg and (b) keeps overwriting ALL writers' outputs in
+    # the background after the script moves on — two legs' files can end
+    # byte-identical (the 2026-10-25/26 "stale re-render" chaos, a harness
+    # artifact, not an engine bug).
+    app.getProjectParam("frameRange").setValue(fr, 0)
+    app.getProjectParam("frameRange").setValue(fr, 1)
     w = app.createWriter(p)
     w.connectInput(0, cyc)
     app.render(w, fr, fr)
-    size0 = -1
     for _ in range(480):
-        if os.path.isfile(p) and os.path.getsize(p) > 4096 and os.path.getsize(p) == size0:
+        if os.path.isfile(p) and os.path.getsize(p) > 4096:
+            time.sleep(1.0)
             break
-        if os.path.isfile(p): size0 = os.path.getsize(p)
         time.sleep(0.25)
-    time.sleep(0.5)
     ok = os.path.isfile(p) and os.path.getsize(p) > 0
     emit("%s: %s (lit=%d)" % (tag, "ok" if ok else "MISSING", litness(p) if ok else -1))
     n.destroy(); scene.destroy(); light.destroy(); camera.destroy(); cyc.destroy()
@@ -69,7 +75,7 @@ try:
         scene.connectInput(0, n)
         light = app.createNode("fr.inria.built-in.Light3D")
         scene.connectInput(1, light)
-        light.getParam("intensity").setValue(25.0)
+        light.getParam("intensity").setValue(3.0)
         light.getParam("translateX").setValue(3.0)
         light.getParam("translateY").setValue(4.0)
         light.getParam("translateZ").setValue(5.0)

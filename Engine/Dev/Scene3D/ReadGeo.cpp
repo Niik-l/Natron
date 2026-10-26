@@ -2887,9 +2887,17 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
                 const MeshData& srcM = *st->deformed[nd.meshIndex];
                 if (srcM.vertices.size() >= 3) {
                     std::fprintf(stderr,
-                                 "[GEOIO]   src v0=(%.4f,%.4f,%.4f) srcNumVerts=%d\n",
+                                 "[GEOIO]   src v0=(%.4f,%.4f,%.4f) srcNumVerts=%d"
+                                 " srcCorners=%d srcUvSlots=%d srcHasUv=%d srcTcc=%d"
+                                 " dstCornersBefore=%d dstUvSlotsBefore=%d\n",
                                  srcM.vertices[0], srcM.vertices[1],
-                                 srcM.vertices[2], (int)srcM.numVertices);
+                                 srcM.vertices[2], (int)srcM.numVertices,
+                                 (int)srcM.faceIndices.size(),
+                                 (int)(srcM.uvs.size() / 2),
+                                 srcM.hasUVs ? 1 : 0,
+                                 srcM.texCoordComponents,
+                                 (int)mesh->faceIndices.size(),
+                                 (int)(mesh->uvs.size() / 2));
                 }
             }
             // Per-face material trace: the merged mesh may span several file
