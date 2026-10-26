@@ -3137,10 +3137,18 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                                              (vcolOn ? meshData.get() : nullptr));
             std::vector<ccl::Shader*> slotShaders;
             slotShaders.push_back(objShader);
+            if (scDebugEnabled()) {
+                std::fprintf(stderr, "[CYCSLOT] slot0 fallback shader=%p\n",
+                             (void*)objShader);
+            }
             for (int k = 0; k < mergedSlotCount; ++k) {
                 MaterialProvider* mp = mergedGeo->getMergedMaterialProvider(k);
-                slotShaders.push_back(mp ? createMaterialShader(scene, mp, time)
-                                         : nullptr);
+                ccl::Shader* sh = mp ? createMaterialShader(scene, mp, time) : nullptr;
+                slotShaders.push_back(sh);
+                if (scDebugEnabled()) {
+                    std::fprintf(stderr, "[CYCSLOT] slot%d provider=%p shader=%p\n",
+                                 k + 1, (void*)mp, (void*)sh);
+                }
             }
             // A missing per-slot shader folds that slot's faces back to slot 0.
             std::vector<int> remap(mergedSlotCount + 1, 0);
@@ -3188,6 +3196,26 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     std::fprintf(stderr, "[Cycles MGAT] '%s' slots=%d hist:", sn.name.c_str(), mergedSlotCount);
                     for (int v = 0; v <= mergedSlotCount; ++v) std::fprintf(stderr, " %d:%d", v, hist[v]);
                     std::fprintf(stderr, "\n");
+                    // Per-slot FACE ranges in faceMaterials (render-time truth):
+                    // blocks must match the part order or the slot walk is
+                    // misaligned even when the histogram counts look right.
+                    {
+                        const int nF = (int)meshData->faceCounts.size();
+                        std::vector<int> fmin(mergedSlotCount + 1, -1);
+                        std::vector<int> fmax(mergedSlotCount + 1, -1);
+                        for (int f = 0; f < nF; ++f) {
+                            const int s = ((std::size_t)f < meshData->faceMaterials.size())
+                                              ? meshData->faceMaterials[f] : 0;
+                            if (s < 0 || s > mergedSlotCount) continue;
+                            if (fmin[s] < 0) fmin[s] = f;
+                            fmax[s] = f;
+                        }
+                        std::fprintf(stderr, "[Cycles MGAT] '%s' faceRanges:", sn.name.c_str());
+                        for (int v = 0; v <= mergedSlotCount; ++v) {
+                            if (fmin[v] >= 0) std::fprintf(stderr, " %d:[%d..%d]", v, fmin[v], fmax[v]);
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
                 }
             } else {
                 // Index alignment can't be guaranteed (null shaders with faces
@@ -3196,7 +3224,18 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 merged_triSlot.clear();
             }
         }
-        if ((int)merged_used_shaders.size() > 1) {
+        // set_used_shaders() steals the array's buffer (Node::set_if_different →
+        // steal_data), leaving the source empty — capture the count first.
+        const int mergedUsedCount = (int)merged_used_shaders.size();
+        if (mergedUsedCount > 1) {
+            if (scDebugEnabled()) {
+                std::fprintf(stderr, "[CYCSLOT] used_shaders size=%d:",
+                             (int)merged_used_shaders.size());
+                for (int i = 0; i < (int)merged_used_shaders.size(); ++i) {
+                    std::fprintf(stderr, " %d=%p", i, (void*)merged_used_shaders[i]);
+                }
+                std::fprintf(stderr, "\n");
+            }
             mesh->set_used_shaders(merged_used_shaders);
         } else if (objShader) {
             ccl::array<ccl::Node*> used_shaders;
@@ -3219,14 +3258,30 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             for (size_t v = 0; v < verts.size(); ++v) {
                 mesh->add_vertex(verts[v]);
             }
-            if ((int)merged_used_shaders.size() > 1) {
+            if (mergedUsedCount > 1) {
                 for (int t = 0; t < numTris; ++t) {
                     mesh->add_triangle(triVerts[t * 3 + 0], triVerts[t * 3 + 1],
                                        triVerts[t * 3 + 2], merged_triSlot[t], true);
                 }
                 trisAdded = true;
+                if (scDebugEnabled()) {
+                    int nonZero = 0;
+                    const ccl::array<int>& shArr = mesh->get_shader();
+                    for (int t = 0; t < numTris; ++t) {
+                        if (shArr[t] != 0) ++nonZero;
+                    }
+                    std::fprintf(stderr, "[CYCSLOT] mesh=%p shader array: size=%d nonZero=%d first12:",
+                                 (void*)mesh, (int)shArr.size(), nonZero);
+                    for (int t = 0; t < numTris && t < 12; ++t) {
+                        std::fprintf(stderr, " %d", shArr[t]);
+                    }
+                    std::fprintf(stderr, "\n");
+                }
             }
             if (!trisAdded) {
+                if (scDebugEnabled()) {
+                    std::fprintf(stderr, "[CYCSLOT] FALLBACK single-shader add path taken\n");
+                }
                 for (int t = 0; t < numTris; ++t) {
                     mesh->add_triangle(triVerts[t * 3 + 0], triVerts[t * 3 + 1],
                                        triVerts[t * 3 + 2], 0, true);
@@ -3308,6 +3363,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 }
             }
         }
+
 
 
         // Motion blur for animated meshes (vertex deformation only — Cycles
