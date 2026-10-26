@@ -206,6 +206,76 @@ readXformMatrix(const Alembic::AbcGeom::IXformSchema& xSchema,
     }
 }
 
+// Time-based variant (nearest sample) — composing ancestor xform levels
+// whose sampling differs from the direct parent's.
+static void
+readXformMatrixAtTime(const Alembic::AbcGeom::IXformSchema& xSchema,
+                      double time, float outMatrix[16])
+{
+    using namespace Alembic::AbcGeom;
+    ISampleSelector sel(time);
+    XformSample xSample;
+    xSchema.get(xSample, sel);
+
+    Imath::M44d matrix = xSample.getMatrix();
+    const double* rawMat = reinterpret_cast<const double*>(&matrix);
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            outMatrix[c * 4 + r] = static_cast<float>(rawMat[r * 4 + c]);
+        }
+    }
+}
+
+// out = out * m (column-major 4x4) — right-multiply the next chain level.
+static void
+xformMulRight(const float m[16], float out[16])
+{
+    float r[16];
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                sum += out[k * 4 + row] * m[col * 4 + k];
+            }
+            r[col * 4 + row] = sum;
+        }
+    }
+    std::memcpy(out, r, sizeof(r));
+}
+
+// Compose the mesh's FULL ancestor xform chain (topmost .. direct parent)
+// into outMatrix: world = M_top * ... * M_parent. Multi-emit composes the
+// whole chain (getSceneNodeAt folds ancestors), so the single-mesh mode
+// must too — with only the direct parent, deep hierarchies (RealFlow
+// exports with root xforms) land in a different place per mode.
+// `time` is the parent sample's own time — every level samples nearest to
+// it, so animated ancestors track the parent's samples and single-sample
+// (static) levels return their only matrix.
+static void
+composeAbcXformChain(const std::vector<Alembic::AbcGeom::IObject>& xfChain,
+                     double time, float outMatrix[16])
+{
+    using namespace Alembic::AbcGeom;
+    for (int i = 0; i < 16; ++i) outMatrix[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+    if (xfChain.empty()) return;
+
+    std::vector<IXformSchema> levels;
+    levels.reserve(xfChain.size());
+    for (std::size_t i = 0; i < xfChain.size(); ++i) {
+        IXform xf(xfChain[i], Alembic::Abc::kWrapExisting);
+        IXformSchema ls = xf.getSchema();
+        if (ls.getNumSamples() == 0) continue;
+        levels.push_back(ls);
+    }
+
+    float m[16];
+    // Topmost first (right-multiplies accumulate toward the direct parent).
+    for (std::size_t li = levels.size(); li-- > 0; ) {
+        readXformMatrixAtTime(levels[li], time, m);
+        xformMulRight(m, outMatrix);
+    }
+}
+
 /**
  * @brief Copy a mesh schema's UV param (PolyMesh/SubD) into out->uvs when
  * present (per u,v pair). Shares the raw-float policy of readMeshArrays.
@@ -1787,7 +1857,7 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             return;
         }
 
-        // --- Read Xform from parent if available ---
+        // --- Read Xforms: full ancestor chain (see composeAbcXformChain) ---
         _imp->hasAnimatedXform = false;
         _imp->numXformSamples = 0;
         _imp->xformMatrices.clear();
@@ -1799,12 +1869,26 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             size_t numSamples = xSchema.getNumSamples();
 
             if (numSamples > 0) {
+                // Walk the whole ancestor chain (direct parent first).
+                std::vector<IObject> xfChain;
+                {
+                    IObject walk = parent;
+                    while (walk.valid() && IXform::matches(walk.getHeader())) {
+                        xfChain.push_back(walk);
+                        walk = walk.getParent();
+                    }
+                }
+                Alembic::AbcCoreAbstract::TimeSamplingPtr parentTs =
+                    xSchema.getTimeSampling();
+
                 _imp->numXformSamples = numSamples;
                 _imp->hasAnimatedXform = (numSamples > 1);
-                _imp->xformMatrices.resize(numSamples * 16);
-
+                _imp->xformMatrices.assign(numSamples * 16, 0.0f);
                 for (size_t s = 0; s < numSamples; ++s) {
-                    readXformMatrix(xSchema, s, &_imp->xformMatrices[s * 16]);
+                    const double t = parentTs
+                        ? parentTs->getSampleTime((Alembic::AbcCoreAbstract::index_t)s)
+                        : (double)s;
+                    composeAbcXformChain(xfChain, t, &_imp->xformMatrices[s * 16]);
                 }
 
                 // Set frame 0 transform on the mesh
@@ -2869,12 +2953,18 @@ ReadGeo::buildAbcSeqFrame(int frame, MeshData* out, std::string* err) const
             return false;
         }
 
-        // Frame transform: parent IXform's first sample.
-        IObject parent = obj.getParent();
-        if (parent.valid() && IXform::matches(parent.getHeader())) {
-            IXformSchema xSchema = IXform(parent).getSchema();
-            if (xSchema.getNumSamples() > 0) {
-                readXformMatrix(xSchema, 0, out->transform);
+        // Frame transform: full ancestor xform chain (multi-emit composes
+        // the whole chain — see composeAbcXformChain; per-frame files carry
+        // their own samples, so every level selects its frame-0 sample).
+        {
+            std::vector<IObject> xfChain;
+            IObject walk = obj.getParent();
+            while (walk.valid() && IXform::matches(walk.getHeader())) {
+                xfChain.push_back(walk);
+                walk = walk.getParent();
+            }
+            if (!xfChain.empty()) {
+                composeAbcXformChain(xfChain, 0.0, out->transform);
             }
         }
 
@@ -3024,7 +3114,11 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
             }
             if (!seen) distinctMats.push_back(mi);
         }
-        const bool bakeFaceColors = distinctMats.size() > 1;
+        // Any file material present: bake its base color as face colors (the
+        // multi-emit viewport serves the same color per entry — with the old
+        // ">1 distinct materials" rule, single-material files showed grey in
+        // the viewport while multi-emit showed the material color).
+        const bool bakeFaceColors = distinctMats.size() >= 1;
         for (std::size_t e = 0; e < meshEntries.size(); ++e) {
             const int nodeIdx = meshEntries[e];
             if (nodeIdx >= (int)data.nodes.size()) continue;
@@ -4620,6 +4714,14 @@ ReadGeo::getEntryMaterialProvider(int idx) const
     std::shared_ptr<RGEntryMaterialAdapter> adapter =
         std::make_shared<RGEntryMaterialAdapter>(_imp->rt.data.materials[md.materialIndex]);
     _imp->entryMaterials[srcIdx] = adapter;
+    if (std::getenv("NATRON_DEBUG_GEOIO")) {
+        const GeoImportMaterial& m = _imp->rt.data.materials[md.materialIndex];
+        std::fprintf(stderr,
+            "[RG-MAT] entry provider idx=%d src=%d mat=%d base=(%.4f,%.4f,%.4f) present=%d\n",
+            idx, srcIdx, md.materialIndex,
+            m.baseColor[0], m.baseColor[1], m.baseColor[2], (int)m.present);
+        std::fflush(stderr);
+    }
     return adapter.get();
 }
 
@@ -5376,8 +5478,9 @@ ReadGeo::getMaterialBaseColor(double time, double& r, double& g, double& b) cons
             b = _imp->rt.data.materials[0].baseColor[2];
             return;
         }
-        r = 0.7; g = 0.7; b = 0.7;
-        return;
+        // No file materials: fall through to the knobs (the single-mesh
+        // fallback) — the hardcoded 0.7 grey rendered no-material archives
+        // ~10% darker than single-mesh mode (liquid.abc brightness gap).
     }
     KnobColorPtr c = _imp->baseColor.lock();
     if (c) { r = c->getValueAtTime(time, 0); g = c->getValueAtTime(time, 1); b = c->getValueAtTime(time, 2); }
@@ -5391,7 +5494,7 @@ double ReadGeo::getMaterialRoughness(double time) const
         if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
             return _imp->rt.data.materials[0].roughness;
         }
-        return 0.5;
+        // No file materials: fall through to the knob (single-mesh fallback).
     }
     KnobDoublePtr k = _imp->roughness.lock(); return k ? k->getValueAtTime(time) : 0.5;
 }
@@ -5403,7 +5506,7 @@ double ReadGeo::getMaterialMetallic(double time) const
         if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
             return _imp->rt.data.materials[0].metallic;
         }
-        return 0.0;
+        // No file materials: fall through to the knob (single-mesh fallback).
     }
     KnobDoublePtr k = _imp->metallic.lock(); return k ? k->getValueAtTime(time) : 0.0;
 }
@@ -5415,7 +5518,7 @@ double ReadGeo::getMaterialSpecular(double time) const
         if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
             return _imp->rt.data.materials[0].specular;
         }
-        return 0.5;
+        // No file materials: fall through to the knob (single-mesh fallback).
     }
     KnobDoublePtr k = _imp->specular.lock(); return k ? k->getValueAtTime(time) : 0.5;
 }
@@ -5435,8 +5538,7 @@ ReadGeo::getMaterialEmission(double time, double& r, double& g, double& b, doubl
             strength = _imp->rt.data.materials[0].emissionStrength;
             return;
         }
-        r = 1.0; g = 1.0; b = 1.0; strength = 0.0;
-        return;
+        // No file materials: fall through to the knobs (single-mesh fallback).
     }
     KnobColorPtr c = _imp->emissionColor.lock();
     if (c) { r = c->getValueAtTime(time, 0); g = c->getValueAtTime(time, 1); b = c->getValueAtTime(time, 2); }
@@ -5452,7 +5554,7 @@ double ReadGeo::getMaterialTransmission(double time) const
         if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
             return _imp->rt.data.materials[0].transmission;
         }
-        return 0.0;
+        // No file materials: fall through to the knob (single-mesh fallback).
     }
     KnobDoublePtr k = _imp->transmission.lock(); return k ? k->getValueAtTime(time) : 0.0;
 }
@@ -5464,7 +5566,7 @@ double ReadGeo::getMaterialIOR(double time) const
         if (_imp && !_imp->rt.data.materials.empty() && _imp->rt.data.materials[0].present) {
             return _imp->rt.data.materials[0].ior;
         }
-        return 1.45;
+        // No file materials: fall through to the knob (single-mesh fallback).
     }
     KnobDoublePtr k = _imp->ior.lock(); return k ? k->getValueAtTime(time) : 1.45;
 }

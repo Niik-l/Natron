@@ -3106,10 +3106,17 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     mergedGeo = dynamic_cast<ReadGeo*>(srcNode->getEffectInstance().get());
                     mergedSlotCount = (mergedGeo && sn.type == eSceneNodeMesh)
                                           ? mergedGeo->getMergedMaterialCount() : 0;
-                    if (mergedSlotCount > 1 && !matProv->hasMaterialInput()) {
-                        // Multi-material merged payload (a connected Material3D
+                    if (mergedSlotCount >= 1 && !matProv->hasMaterialInput()) {
+                        // File-material merged payload — one slot per distinct
+                        // file material, faces without one bind slot 0. The
+                        // >= 1 (was > 1) rule binds single-material files to
+                        // their file material here, the same material the
+                        // multi-emit entries shade with — otherwise single
+                        // rendered them with the knob-mirror color while
+                        // multi used the file's (a 1-material colored file
+                        // looked different per mode). A connected Material3D
                         // input still overrides the whole node — resolved by
-                        // createMaterialShader on the fallback).
+                        // createMaterialShader on the fallback.
                         fallbackMat = matProv;
                         mergedUseFaceMats = true;
                     } else {
