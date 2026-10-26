@@ -1,4 +1,13 @@
 # Natron 3D System
+- **RealFlow single-file .abc load crash (2026-10-26, `ec3f200e1`)** — loading a RealFlow
+  stitched-mesh Alembic (topology grows every sample, 814 → 127871 verts over 49 samples)
+  crashed Natron with an access violation ~1 run in 2. The varying-topology pre-load in
+  `loadAlembicGeo` served malformed samples unguarded: the edge builder in `readMeshArrays`
+  walked the face-index array with an unvalidated running offset (wild reads past the mmap'd
+  Ogawa arrays + unbounded edgeIndices growth), and per-sample UVs went through
+  `IV2fGeomParam::getExpanded`, which trusts the index array blindly. Both are now bounds-
+  checked (`readAlembicUvParamSel` expands indexed UVs manually, bad indices → (0,0));
+  a `[RG-ABC2]` stage tracer (NATRON_DEBUG_GEOIO) remains for future abc debugging.
 - **Toggle-drift: root transform double-applied after Output Single Mesh flips (2026-10-26, `8b646be5e`)** —
   the core bugset #2/#5 defect: scale/orientation mismatch between single-mesh and multi-mesh modes
   that appears only after sequential mode toggles, never on fresh load. `GeoArchiveRuntime::bakeMeshWorld`
