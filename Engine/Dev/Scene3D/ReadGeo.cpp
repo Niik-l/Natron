@@ -3112,6 +3112,12 @@ ReadGeo::loadSceneGeo(const std::string& path)
         setPersistentMessage(eMessageTypeError, err);
         return;
     }
+    // Single-mesh mode applies transforms in its own build step (the merged
+    // path multiplies worldMatrixAt into the corners; the single-part path
+    // bakes or rides MeshData::transform per the Bake Transforms knob). The
+    // eval bake post-pass must stay OFF here — a leaked ON flag from a
+    // multi-emit load double-applied the root transform (toggle-drift bug).
+    _imp->rt.bakeMeshWorld = false;
     const GeoArchiveResult& data = _imp->rt.data;
 
     // Mesh entries are the renderable parts (glTF primitives / FBX
@@ -3332,8 +3338,11 @@ ReadGeo::buildSceneSeqFrame(int frame, std::string* err) const
     if (!frt->loadFile(pit->second, reverse, *err)) {
         return MeshDataPtr();
     }
+    // No eval bake post-pass: this runtime feeds geoBuildSceneMeshCore only,
+    // and the merged path applies worldMatrixAt itself (single-part path
+    // handles the Bake Transforms knob via MeshData::transform). Enabling the
+    // post-pass here double-applied the root transform.
     const bool bake = _imp->bakeTransforms.lock() && _imp->bakeTransforms.lock()->getValue();
-    frt->bakeMeshWorld = bake;
     const double fps = getApp() ? getApp()->getProjectFrameRate() : 24.0;
     const std::shared_ptr<const GeoArchiveFrameEval> st = frt->ensureFrameState(fps, 0);
 

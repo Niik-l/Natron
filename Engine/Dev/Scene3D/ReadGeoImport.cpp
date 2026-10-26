@@ -334,6 +334,13 @@ GeoArchiveRuntime::clear()
     // leak into the next parse (set ids restart at 0).
     morphOverrideEnabled = false;
     morphOverrideWeights.clear();
+    // The bake post-pass flag is per-load semantics (multi-emit sets it from
+    // the Bake Transforms knob; the single-mesh paths apply transforms in
+    // their own build step and need file-space payloads). It must not leak
+    // across a mode flip: single→multi→single otherwise baked the root
+    // transform into the eval AND applied worldMatrixAt again in the merge
+    // — the double rotation/scale behind the toggle-drift bug.
+    bakeMeshWorld = false;
     {
         std::lock_guard<std::mutex> fl(frameMutex);
         frameCache.clear();
