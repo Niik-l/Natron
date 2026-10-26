@@ -1,4 +1,27 @@
 # Natron 3D System
+- **Single-mesh mode now serves the file material's PBR maps (2026-10-26, `04d48fedc`)** —
+  bugset #2 (cobra-concept.glb): Output Single Mesh ON rendered ~2x darker than multi-emit with
+  crushed highlights (mean luma 3.54 vs 6.37; AOV max 0.17 vs 3.65) while the texture, UVs,
+  geometry, and every printed material scalar matched. Root cause: the merged path builds its
+  Cycles shader from ReadGeo's node-level MaterialProvider, whose map getters all inherited the
+  base-class empty defaults — the glTF material's metallicRoughness texture (per-texel
+  roughness/metallic) and normal map were silently dropped, shading fell back to the scalar knob
+  factors (rough=1, metal=1 = full-rough metal), while multi-emit entries read the same
+  `GeoImportMaterial` through the entry adapter and wired every map. The knob mirror
+  (`applyImportedMaterialKnobs`) only carries scalars + the diffuse path, and `[CYCMAT]` doesn't
+  print maps, so the logs looked identical while the shaders differed. Decisive experiment:
+  `NATRON_CYCLES_NOTEX` A/B — flat renders also differ massively (single max 1.42 vs multi 22.98),
+  proving the divergence is the map wiring (it also cleared a false lead: the merged shader's
+  `geo_face_color` multiply connect is dropped by Cycles' "input already connected" guard — stock
+  `ShaderGraph::connect` DROPS the new link — but that dead multiply is brightness-neutral for
+  white baked colors; `NATRON_GEOIO_NO_VCOL` A/B showed no visual effect). Fix:
+  `ReadGeo::activeFileMaterial()` resolves the same file material the load-time knob mirror used
+  (selected part's material, else the first part carrying one) and the normal/roughness/metallic/
+  opacity map getters serve it, matching the entry adapter incl. the `ormMetallicEnabled` MR-blue
+  rule. Files without maps are unaffected. Verified: cobra single vs multi pixel-identical (max
+  channel diff 0); `readgeo_bugset_repro.py` battery all green (bug1 5597==5597 unchanged,
+  bug2 3743==3743, was 3246 vs 3743; bug3 unchanged). Harness gotcha recorded in TODO:
+  `bg3c_cobra.py`'s `BG3X_SINGLE` defaults to 1 when unset.
 - **Merged single-mesh Cycles per-face materials actually reaching the triangles (2026-10-26)** —
   the 2026-10-25 per-face-material plumbing (`f8096803c`) built the right data but the merged render
   still showed one texture on every part (mixamo.fbx: the Shoes texture on shins/shorts/torso/hands).
