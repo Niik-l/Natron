@@ -2860,6 +2860,31 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
         // part's file material color bakes onto its face corners (the merged
         // mesh has no per-part material slots; multi-material files keep
         // their per-part colors as face colors).
+        // Bake those face colors only when the build actually spans several
+        // distinct file materials — that is the case they exist for (per-part
+        // color survives the merge). A single-material file's color already
+        // reaches the shader through the node-level knob mirror; baking it
+        // into the faces as well made the Cycles fallback shader apply the
+        // same color twice (base 0.604 x baked 0.604 — bugset #5's
+        // single-vs-multi brightness gap on AnimatedMorphCube.glb).
+        std::vector<int> distinctMats;
+        for (std::size_t e = 0; e < meshEntries.size(); ++e) {
+            const int nodeIdx = meshEntries[e];
+            if (nodeIdx >= (int)data.nodes.size()) continue;
+            const GeoArchiveNodeData& nd = data.nodes[nodeIdx];
+            if (nd.meshIndex < 0 || nd.meshIndex >= (int)data.meshes.size()) continue;
+            const int mi = data.meshes[nd.meshIndex].materialIndex;
+            if (mi < 0 || mi >= (int)data.materials.size() ||
+                !data.materials[mi].present) {
+                continue;
+            }
+            bool seen = false;
+            for (std::size_t j = 0; j < distinctMats.size(); ++j) {
+                if (distinctMats[j] == mi) { seen = true; break; }
+            }
+            if (!seen) distinctMats.push_back(mi);
+        }
+        const bool bakeFaceColors = distinctMats.size() > 1;
         for (std::size_t e = 0; e < meshEntries.size(); ++e) {
             const int nodeIdx = meshEntries[e];
             if (nodeIdx >= (int)data.nodes.size()) continue;
@@ -2870,7 +2895,8 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
             }
             float partColor[3] = { -1.f, 0.f, 0.f };
             const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
-            if (md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
+            if (bakeFaceColors &&
+                md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
                 data.materials[md.materialIndex].present) {
                 const GeoImportMaterial& m = data.materials[md.materialIndex];
                 partColor[0] = (float)m.baseColor[0];
@@ -2948,18 +2974,12 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
                 src = st->deformed[nd.meshIndex];
             }
             if (src) {
-                // Single part: bake the part's material color on its faces
-                // (the merged-style face-color consumption applies 1:1).
-                float partColor[3] = { -1.f, 0.f, 0.f };
-                const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
-                if (md.materialIndex >= 0 && md.materialIndex < (int)data.materials.size() &&
-                    data.materials[md.materialIndex].present) {
-                    const GeoImportMaterial& m = data.materials[md.materialIndex];
-                    partColor[0] = (float)m.baseColor[0];
-                    partColor[1] = (float)m.baseColor[1];
-                    partColor[2] = (float)m.baseColor[2];
-                }
-                const float* pc = partColor[0] >= 0.f ? partColor : nullptr;
+                // Single part: no face-color bake — the node-level material
+                // knobs mirror this part's file material at load, so the
+                // color reaches the shader exactly once (a bake here applied
+                // the same color a second time through the Cycles face-color
+                // multiply).
+                const float* pc = nullptr;
                 if (bake) {
                     // Baked: the part's evaluated world matrix goes into the
                     // vertices; MeshData::transform stays identity.
