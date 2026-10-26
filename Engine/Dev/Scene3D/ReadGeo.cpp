@@ -460,6 +460,15 @@ struct RgAbcEntry
     bool hasAnimatedVerts = false;
     std::vector<double> vertexSampleTimes;
     std::vector<std::vector<float>> vertexSamples;
+
+    // Varying-topology meshes (RealFlow stitched exports grow the particle
+    // mesh every sample): positions AND topology change per sample, so the
+    // in-place mutation rule above cannot apply. Each sample carries a full
+    // standalone payload; rgAbcMeshAt serves the nearest sample's payload
+    // directly (no interpolation across topology changes — the same model as
+    // the single-mesh path's abcVaryingSamples pre-load).
+    bool hasVaryingTopology = false;
+    std::vector<MeshDataPtr> varyingSamples;
 };
 
 // Per-frame parse result for an abc one-file-per-frame sequence (multi-emit):
@@ -2232,48 +2241,61 @@ rgAbcReadPolyMeshSample0(const Alembic::AbcGeom::IPolyMesh& polyMesh)
     if (numVerts == 0 || numFaceIdx == 0 || numFaces == 0) return MeshDataPtr();
 
     MeshDataPtr mesh = std::make_shared<MeshData>();
-
-    const float* rawPos = reinterpret_cast<const float*>(positions->get());
-    mesh->vertices.resize(numVerts * 3);
-    mesh->numVertices = numVerts;
-    std::memcpy(mesh->vertices.data(), rawPos, numVerts * 3 * sizeof(float));
-
-    const int32_t* rawIdx = reinterpret_cast<const int32_t*>(faceIndices->get());
-    mesh->faceIndices.resize(numFaceIdx);
-    for (std::size_t i = 0; i < numFaceIdx; ++i) mesh->faceIndices[i] = (int)rawIdx[i];
-
-    const int32_t* rawCnt = reinterpret_cast<const int32_t*>(faceCounts->get());
-    mesh->faceCounts.resize(numFaces);
-    mesh->numFaces = numFaces;
-    for (std::size_t i = 0; i < numFaces; ++i) mesh->faceCounts[i] = (int)rawCnt[i];
-
-    mesh->edgeIndices.reserve(numFaceIdx * 2);
-    std::size_t idxOffset = 0;
-    for (std::size_t f = 0; f < numFaces; ++f) {
-        const int count = (int)rawCnt[f];
-        for (int v = 0; v < count; ++v) {
-            mesh->edgeIndices.push_back((int)rawIdx[idxOffset + v]);
-            mesh->edgeIndices.push_back((int)rawIdx[idxOffset + ((v + 1) % count)]);
-        }
-        idxOffset += (std::size_t)count;
-    }
+    readMeshArrays(positions->get(), numVerts,
+                   faceIndices->get(), numFaceIdx,
+                   faceCounts->get(), numFaces,
+                   mesh.get());
+    if (mesh->numVertices == 0 || mesh->faceIndices.empty()) return MeshDataPtr();
 
     IV2fGeomParam uvParam = schema.getUVsParam();
     if (uvParam.valid()) {
-        IV2fGeomParam::Sample uvSample;
-        uvParam.getExpanded(uvSample);
-        const Alembic::Abc::V2fArraySamplePtr& uvVals = uvSample.getVals();
-        if (uvVals && uvVals->size() > 0) {
-            const std::size_t numUVs = uvVals->size();
-            const float* rawUV = reinterpret_cast<const float*>(uvVals->get());
-            mesh->uvs.resize(numUVs * 2);
-            std::memcpy(mesh->uvs.data(), rawUV, numUVs * 2 * sizeof(float));
-            mesh->hasUVs = true;
-        }
+        // Guarded manual expansion — see readAlembicUvParamSel; getExpanded
+        // reads OOB on malformed per-sample UV indices.
+        readAlembicUvParamSel(uvParam,
+                              ISampleSelector((Alembic::AbcCoreAbstract::index_t)0),
+                              mesh.get());
     }
 
     // Local transform stays identity — the parent IXform's transform is
     // handled by the SceneGraph parent chain.
+    return mesh;
+}
+
+// Full standalone payload for one PolyMesh sample (varying-topology meshes:
+// each sample's positions AND topology are read fresh; edges built by
+// readMeshArrays, UVs via the guarded expansion).
+MeshDataPtr
+rgAbcReadPolyMeshSample(const Alembic::AbcGeom::IPolyMesh& polyMesh,
+                        std::size_t sampleIndex)
+{
+    using namespace Alembic::AbcGeom;
+
+    IPolyMeshSchema schema = polyMesh.getSchema();
+    if (sampleIndex >= schema.getNumSamples()) return MeshDataPtr();
+
+    Alembic::Abc::ISampleSelector ss((Alembic::AbcCoreAbstract::index_t)sampleIndex);
+    IPolyMeshSchema::Sample sample;
+    schema.get(sample, ss);
+
+    Alembic::Abc::P3fArraySamplePtr positions = sample.getPositions();
+    Alembic::Abc::Int32ArraySamplePtr faceIndices = sample.getFaceIndices();
+    Alembic::Abc::Int32ArraySamplePtr faceCounts = sample.getFaceCounts();
+    if (!positions || !faceIndices || !faceCounts) return MeshDataPtr();
+    if (positions->size() == 0 || faceIndices->size() == 0 || faceCounts->size() == 0) {
+        return MeshDataPtr();
+    }
+
+    MeshDataPtr mesh = std::make_shared<MeshData>();
+    readMeshArrays(positions->get(), positions->size(),
+                   faceIndices->get(), faceIndices->size(),
+                   faceCounts->get(), faceCounts->size(),
+                   mesh.get());
+    if (mesh->numVertices == 0 || mesh->faceIndices.empty()) return MeshDataPtr();
+
+    IV2fGeomParam uvParam = schema.getUVsParam();
+    if (uvParam.valid()) {
+        readAlembicUvParamSel(uvParam, ss, mesh.get());
+    }
     return mesh;
 }
 
@@ -2381,6 +2403,24 @@ rgAbcMeshAt(RgAbcEntry& e, double time, int frameOffset,
             int timeMode, double sourceFps, double projectFps)
 {
     if (!e.isMesh) return MeshDataPtr();
+
+    // Varying topology: serve the nearest sample's standalone payload (no
+    // interpolation — bracketing samples have different vertex/index counts).
+    if (time >= 0.0 && e.hasVaryingTopology && !e.varyingSamples.empty()) {
+        const int N = (int)e.varyingSamples.size();
+        const double tCont = rgAbcSampleIndexContinuous(e.vertexSampleTimes,
+                                                        (std::size_t)N,
+                                                        time, frameOffset, timeMode,
+                                                        sourceFps, projectFps);
+        int idx = (int)std::floor(tCont);
+        if (idx < 0) idx = 0;
+        if (idx > N - 1) idx = N - 1;
+        if (e.varyingSamples[idx]) {
+            return e.varyingSamples[idx];
+        }
+        // Sample payload unavailable — hold the rest (sample-0) payload.
+        return e.meshData;
+    }
 
     if (time >= 0.0 && e.hasAnimatedVerts && !e.vertexSamples.empty() && e.meshData) {
         const int N = (int)e.vertexSamples.size();
@@ -2514,19 +2554,46 @@ rgAbcWalkObject(const Alembic::AbcGeom::IObject& obj,
                 e.hasAnimatedVerts = true;
                 e.vertexSamples.assign(numVertSamples, std::vector<float>());
                 e.vertexSampleTimes.reserve(numVertSamples);
-                const std::size_t expectedFloats = (std::size_t)e.meshData->numVertices * 3;
                 for (std::size_t s = 0; s < numVertSamples; ++s) {
                     const double t = ts ? ts->getSampleTime((Alembic::AbcCoreAbstract::index_t)s) : (double)s;
                     e.vertexSampleTimes.push_back(t);
+                }
+                // Peek pass: per-sample vertex counts pick the animation
+                // model. Constant topology (the standard Maya/Blender/Houdini
+                // export) interpolates positions in place against the
+                // sample-0 payload; growing topology (RealFlow stitched
+                // exports) needs full standalone payloads served
+                // nearest-sample.
+                bool topologyConstant = true;
+                for (std::size_t s = 0; s < numVertSamples; ++s) {
                     Alembic::Abc::ISampleSelector ss((Alembic::AbcCoreAbstract::index_t)s);
-                    IPolyMeshSchema::Sample animSample;
-                    schema.get(animSample, ss);
-                    Alembic::Abc::P3fArraySamplePtr positions = animSample.getPositions();
-                    if (!positions || positions->size() != e.meshData->numVertices) continue;
-                    const float* posPtr = reinterpret_cast<const float*>(positions->get());
-                    e.vertexSamples[s].resize(expectedFloats);
-                    std::memcpy(e.vertexSamples[s].data(), posPtr,
-                                expectedFloats * sizeof(float));
+                    IPolyMeshSchema::Sample peek;
+                    schema.get(peek, ss);
+                    Alembic::Abc::P3fArraySamplePtr peekPos = peek.getPositions();
+                    if (!peekPos || peekPos->size() != e.meshData->numVertices) {
+                        topologyConstant = false;
+                        break;
+                    }
+                }
+                if (topologyConstant) {
+                    const std::size_t expectedFloats = (std::size_t)e.meshData->numVertices * 3;
+                    for (std::size_t s = 0; s < numVertSamples; ++s) {
+                        Alembic::Abc::ISampleSelector ss((Alembic::AbcCoreAbstract::index_t)s);
+                        IPolyMeshSchema::Sample animSample;
+                        schema.get(animSample, ss);
+                        Alembic::Abc::P3fArraySamplePtr positions = animSample.getPositions();
+                        if (!positions || positions->size() != e.meshData->numVertices) continue;
+                        const float* posPtr = reinterpret_cast<const float*>(positions->get());
+                        e.vertexSamples[s].resize(expectedFloats);
+                        std::memcpy(e.vertexSamples[s].data(), posPtr,
+                                    expectedFloats * sizeof(float));
+                    }
+                } else {
+                    e.hasVaryingTopology = true;
+                    e.varyingSamples.assign(numVertSamples, MeshDataPtr());
+                    for (std::size_t s = 0; s < numVertSamples; ++s) {
+                        e.varyingSamples[s] = rgAbcReadPolyMeshSample(polyMesh, s);
+                    }
                 }
             }
         }
@@ -2574,11 +2641,19 @@ rgAbcParse(const std::string& path, bool reverseNormals,
         }
 
         // Reverse Normals: flip every mesh entry's winding (applied at load
-        // time so a knob toggle just re-runs the load).
+        // time so a knob toggle just re-runs the load). Varying-topology
+        // samples are separate payloads — flip each (the alias check keeps a
+        // shared sample-0 payload from being flipped twice).
         if (reverseNormals) {
             for (RgAbcEntry& e : *entries) {
-                if (e.isMesh && e.meshData) {
+                if (!e.isMesh) continue;
+                if (e.meshData) {
                     reverseMeshWinding(*e.meshData);
+                }
+                for (MeshDataPtr& vm : e.varyingSamples) {
+                    if (vm && vm != e.meshData) {
+                        reverseMeshWinding(*vm);
+                    }
                 }
             }
         }
