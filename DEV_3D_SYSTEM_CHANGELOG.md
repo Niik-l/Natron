@@ -1,4 +1,21 @@
 # Natron 3D System
+- **Merged single-mesh Cycles per-face materials actually reaching the triangles (2026-10-26)** —
+  the 2026-10-25 per-face-material plumbing (`f8096803c`) built the right data but the merged render
+  still showed one texture on every part (mixamo.fbx: the Shoes texture on shins/shorts/torso/hands).
+  Root cause: `Node::set_used_shaders()` **steals** the caller's `ccl::array` buffer
+  (`Node::set_if_different` → `array::steal_data`, cycles/src/graph/node.cpp:896 — stock Cycles
+  behavior; upstream callers never reuse the array), so `syncSceneWithCamera`'s post-call re-check
+  `if ((int)merged_used_shaders.size() > 1)` saw 0 and the per-triangle loop fell into the
+  hardcoded-shader-0 fallback — all 35196 triangles bound to slot 0 (the fallback material carrying
+  the Shoes knobs; the shoes rendered "correctly" by accident). Solo renders were immune because the
+  single-shader path never re-reads its array after the call. Fix: capture `mergedUsedCount` before
+  the `set_used_shaders` call and gate the per-triangle `add_triangle(..., merged_triSlot[t], ...)`
+  loop on that captured count (CyclesRenderer.cpp). Diagnosis instrumentation (all `NATRON_DEBUG_SC`-gated)
+  kept: `[CYCSLOT]` slot/used_shaders/pointer prints + MGAT per-slot faceRanges + shader-array
+  read-back + fallback-path note. Verified headlessly: `readgeo_bugset_repro.py` all legs ok with
+  bug1_single lit=5597 == bug1_multi lit=5597, and the render shows skin shins + correct sneakers
+  (`tools/geoio-tests/out/bugset/bug1_mixamo_fbx_single_f0001.png`). LESSON: Cycles socket-array
+  setters consume the source array — never read it after the call.
 - **Per-face file materials on the merged mesh + stale-material reset + tree refresh signal (2026-10-25/26, `f8096803c`)** —
   the 2026-10-25 evening bug-set fixes, recovered and verified 2026-10-26 after the session died mid-verification.
   (1) ReadGeo's merged single-mesh output of a multi-material file (e.g. mixamo.fbx, 7 parts) now shades per part in
