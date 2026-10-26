@@ -1,4 +1,20 @@
 # Natron 3D System
+- **Toggle-drift: root transform double-applied after Output Single Mesh flips (2026-10-26, `8b646be5e`)** —
+  the core bugset #2/#5 defect: scale/orientation mismatch between single-mesh and multi-mesh modes
+  that appears only after sequential mode toggles, never on fresh load. `GeoArchiveRuntime::bakeMeshWorld`
+  (multi-emit's Bake Transforms knob) bakes entry world matrices into the eval payloads, with multi
+  emitters attaching identity locals; the single-mesh merged path applies `worldMatrixAt` itself. The
+  flag leaked across mode flips (`clear()` didn't reset it, `loadSceneGeo` never set it), so a
+  single-mesh load after a multi-emit load evaluated world-space payloads AND multiplied
+  `worldMatrixAt` again — the file's root transform twice (cobra: 90° orientation flip; scaled roots
+  would scale quadratically). Fixed: `clear()` resets the flag, `loadSceneGeo` pins it false, and
+  `buildSceneSeqFrame` no longer enables the post-pass (its runtime also feeds only the merged build).
+  Toggle probe (single,multi,single,multi,single): all five renders byte-identical.
+- **Archive Contents tree visibility now tracks the mode live (2026-10-26, `99a694c6b`)** — bugset #4
+  follow-up: the tree hid in BOTH modes after the first construction-time gate (the settings panel
+  stays alive across knob toggles). `ArchiveTreeWidget::updateModeVisibility()` now runs at
+  construction and on every `archiveReloaded()` (a mode flip re-loads and emits it): hidden in
+  single-mesh mode (dual-interface ReadGeo), shown in multi-emit and in pure archive nodes.
 - **UV-less meshes truncated to one triangle in Cycles + merged face-color double-apply (2026-10-26, `65dc14417` + `6c41383bc`)** —
   bugset #5 (AnimatedMorphCube.glb): the mesh rendered an empty transparent frame in BOTH output
   modes. Cause 1: the per-vertex-UV crash fix (`ab7ec9436`) added `if (!hasUV) break;` after each
