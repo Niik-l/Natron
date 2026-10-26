@@ -1,4 +1,12 @@
 # Natron 3D System
+- **Single/multi mode parity: placement, brightness, file materials (2026-10-26, `bce4eeb58`)** —
+  three mismatches when toggling Output Single Mesh, all now exact-pixel-equal headlessly:
+  single-mesh abc composed only the direct parent xform (deep hierarchies landed elsewhere per
+  mode — now the full chain, `composeAbcXformChain`); multi-emit no-material fallbacks hardcoded
+  0.7 grey vs single's Base Color knob 0.8 (~6% brightness gap — now knob fall-through);
+  one-material files skipped face-color baking and Cycles shading used the knob-mirror instead
+  of the file material (>= 1 distinct material now bakes face colors for the viewport and takes
+  the per-slot file-material path in Cycles).
 - **Multi-emit: growing-topology single-file .abc was frozen at the start frame (2026-10-26,
   `ba7beb5bc`)** — RealFlow stitched meshes (topology grows every sample) played in single-mesh
   mode but multi-emit showed a static first frame: the multi engine's vertex pre-load dropped
