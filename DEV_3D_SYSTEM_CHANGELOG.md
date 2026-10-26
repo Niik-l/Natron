@@ -1,4 +1,12 @@
 # Natron 3D System
+- **Multi-emit: growing-topology single-file .abc was frozen at the start frame (2026-10-26,
+  `ba7beb5bc`)** — RealFlow stitched meshes (topology grows every sample) played in single-mesh
+  mode but multi-emit showed a static first frame: the multi engine's vertex pre-load dropped
+  every sample whose vertex count differed from sample 0. The parse now peeks per-sample vertex
+  counts and picks the animation model — constant topology keeps in-place interpolation;
+  varying topology stores a full standalone payload per sample, served nearest-sample
+  (mirroring the single-mesh `abcVaryingSamples` model). The multi sample-0 reader also moved
+  onto the hardened `readMeshArrays`/UV-expansion helpers.
 - **RealFlow single-file .abc load crash (2026-10-26, `ec3f200e1`)** — loading a RealFlow
   stitched-mesh Alembic (topology grows every sample, 814 → 127871 verts over 49 samples)
   crashed Natron with an access violation ~1 run in 2. The varying-topology pre-load in
