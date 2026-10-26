@@ -47,6 +47,7 @@
 #include "Engine/Utils.h" // convertFromPlainText
 #include "Engine/Dev/Scene3D/ArchiveProvider.h"
 #include "Engine/Dev/Scene3D/GeoMaterialOverride.h"
+#include "Engine/Dev/Scene3D/ReadGeo.h"
 
 #include "Gui/ArchiveTreeWidget.h"
 #include "Gui/MaterialOverridePickerWidget.h"
@@ -177,10 +178,19 @@ NodeSettingsPanel::initializeExtraGui(QVBoxLayout* layout)
         if (effect) {
             // Archive nodes (ReadAlembicArchive / ReadGeoArchive) — show a
             // tree view of the archive's contents with per-entry checkboxes
-            // (drives the node's excludedPaths knob).
+            // (drives the node's excludedPaths knob). The dual-interface
+            // ReadGeo only exposes archive entries with Output Single Mesh
+            // OFF — in single-mesh mode the accessors are inert, so the tree
+            // would show a dead hierarchy (bugset #4 follow-up).
             if (dynamic_cast<ArchiveProvider*>(effect.get())) {
-                ArchiveTreeWidget* tree = new ArchiveTreeWidget(effect.get(), this);
-                layout->addWidget(tree);
+                bool showArchiveTree = true;
+                if (ReadGeo* rg = dynamic_cast<ReadGeo*>(effect.get())) {
+                    showArchiveTree = rg->isMultiEmit();
+                }
+                if (showArchiveTree) {
+                    ArchiveTreeWidget* tree = new ArchiveTreeWidget(effect.get(), this);
+                    layout->addWidget(tree);
+                }
             }
             // GeoMaterialOverride — show a checkable surface picker reading the
             // upstream archive (drives the node's surfaces knob), so the user
