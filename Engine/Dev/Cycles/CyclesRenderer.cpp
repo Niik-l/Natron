@@ -2931,7 +2931,12 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                             }
                         }
                     }
-                    if (!hasUV) break; // malformed per-vertex UVs: no more face UVs
+                    // NOTE: no break here when hasUV went false (malformed
+                    // per-vertex UVs, or the mesh never had any): the faces
+                    // must keep triangulating, just without UV pushes. An
+                    // early break here truncated every UV-less mesh to its
+                    // first face's triangle (bugset #5: AnimatedMorphCube
+                    // rendered a single invisible triangle).
                     idxOffset += count;
                 }
 
