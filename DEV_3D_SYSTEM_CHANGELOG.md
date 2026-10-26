@@ -1,4 +1,12 @@
 # Natron 3D System
+- **Mode parity: bbox, pivots, sequence frame mapping (2026-10-26, `b47e4d318`)** — single-mesh
+  pivoted at the world origin while multi-emit pivoted at the content centre; the single node
+  drew no real-bounds box; and sequences mapped raw filename numbers onto the timeline (a
+  RealFlow export starting at 00002 began at frame 2 while the same sim as a single abc began
+  at 1). All unified: rotationPivot (bbox-centre default) works in every branch including
+  Group3D (new knob + SceneGraph pivot pass — rebuilt-materials trees match), the single node
+  draws the real-bounds dashed box, and sequence evaluation starts its FIRST file at frame 1
+  (`GeoSequenceInfo::evalFrame`, frameOffset shifts; also honored on single-file abc now).
 - **Single/multi mode parity: placement, brightness, file materials (2026-10-26, `bce4eeb58`)** —
   three mismatches when toggling Output Single Mesh, all now exact-pixel-equal headlessly:
   single-mesh abc composed only the direct parent xform (deep hierarchies landed elsewhere per
