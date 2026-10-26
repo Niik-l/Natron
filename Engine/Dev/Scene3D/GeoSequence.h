@@ -46,9 +46,13 @@ NATRON_NAMESPACE_ENTER
  * files; a literal path (the dialog's File: mode) is not a sequence and is
  * used as a single static file.
  *
- * Frame mapping: the FILE's frame numbers are kept on the Natron timeline —
- * timeline frame N evaluates the file numbered N, held (clamped) at the
- * sequence ends and at gaps (hold the nearest earlier present frame).
+ * Frame mapping: evaluation renumbers the sequence so its FIRST file shows
+ * at timeline frame 1 — the same frame where a single animated file (e.g.
+ * one Alembic with all the samples) shows its first sample. This keeps a
+ * simulation loaded as a sequence and as a single file playing in sync;
+ * the raw file numbering is one `frameOffset` away (offset = firstFrame - 1
+ * restores timeline-frame == file-number). Frames before the (shifted) start
+ * hold the first file; gaps hold the nearest earlier file.
  */
 
 struct GeoSequenceInfo
@@ -67,6 +71,29 @@ struct GeoSequenceInfo
      * [firstFrame, lastFrame]; a gap holds the nearest earlier frame in range.
      */
     int clampFrame(int frame) const;
+
+    /**
+     * @brief Evaluation mapping: timeline frame (+ frameOffset) -> file frame.
+     * The first file lands at timeline frame 1 + frameOffset (see the file
+     * comment); the result is clampFrame'd (end clamps, gaps hold earlier).
+     * frameOffset follows the animated-format convention (positive shows an
+     * earlier file; firstFrame - 1 restores raw file numbering).
+     */
+    int evalFrame(int timelineFrame, int frameOffset) const
+    {
+        return clampFrame(timelineFrame + firstFrame - 1 - frameOffset);
+    }
+
+    /**
+     * @brief The effective timeline range evaluation serves (with the same
+     * frameOffset): [1 + frameOffset, fileCount + frameOffset] for a
+     * non-empty sequence.
+     */
+    void evalRange(int frameOffset, int& firstOut, int& lastOut) const
+    {
+        firstOut = 1 + frameOffset;
+        lastOut = 1 + frameOffset + (lastFrame - firstFrame);
+    }
 };
 
 /**

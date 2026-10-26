@@ -2006,7 +2006,56 @@ extractGeometry(EffectInstancePtr effect, double time, ViewIdx view, GeoData& ou
         const float sz = readDouble("scaleZ", 1.0f) * us;
         float userTRS[16];
         SceneGraph::buildTRS(tx, ty, tz, rx, ry, rz, sx, sy, sz, userTRS);
-        mat4Mul(out.localMatrix, userTRS, embedded);
+
+        // Rotation pivot — must mirror SceneGraph::rebuild's regular-branch
+        // logic exactly (same knob, same semantics) or the geo sits/turns
+        // differently in ScanlineRender than in the viewport and Cycles:
+        // 0 = content bbox centre (in the embedded transform's parent
+        // frame), 1 = authored origin (embedded translation), 2 = world
+        // origin. The user transform composes T(pv) · userTRS · T(−pv).
+        bool pivotComposed = false;
+        {
+            KnobIPtr kPV = effect->getKnobByName("rotationPivot");
+            KnobChoice* pc = kPV ? dynamic_cast<KnobChoice*>(kPV.get()) : NULL;
+            const int pivotMode = pc ? pc->getValue() : -1; // -1: no knob
+            if (pivotMode == 0 || pivotMode == 1) {
+                float pv[3] = { 0.f, 0.f, 0.f };
+                if (pivotMode == 0) {
+                    float emn[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+                    float emx[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+                    const std::vector<float>& mv = mesh->vertices;
+                    for (size_t k = 0; k + 2 < mv.size(); k += 3) {
+                        const float lx = mv[k], ly = mv[k + 1], lz = mv[k + 2];
+                        const float wx = embedded[0] * lx + embedded[4] * ly + embedded[8] * lz + embedded[12];
+                        const float wy = embedded[1] * lx + embedded[5] * ly + embedded[9] * lz + embedded[13];
+                        const float wz = embedded[2] * lx + embedded[6] * ly + embedded[10] * lz + embedded[14];
+                        if (wx < emn[0]) emn[0] = wx; else if (wx > emx[0]) emx[0] = wx;
+                        if (wy < emn[1]) emn[1] = wy; else if (wy > emx[1]) emx[1] = wy;
+                        if (wz < emn[2]) emn[2] = wz; else if (wz > emx[2]) emx[2] = wz;
+                    }
+                    if (emn[0] <= emx[0] && emn[1] <= emx[1] && emn[2] <= emx[2]) {
+                        pv[0] = 0.5f * (emn[0] + emx[0]);
+                        pv[1] = 0.5f * (emn[1] + emx[1]);
+                        pv[2] = 0.5f * (emn[2] + emx[2]);
+                    }
+                } else {
+                    pv[0] = embedded[12];
+                    pv[1] = embedded[13];
+                    pv[2] = embedded[14];
+                }
+                float tPos[16], tNeg[16], tmp[16];
+                SceneGraph::buildTRS(pv[0], pv[1], pv[2], 0, 0, 0, 1, 1, 1, tPos);
+                SceneGraph::buildTRS(-pv[0], -pv[1], -pv[2], 0, 0, 0, 1, 1, 1, tNeg);
+                // out.localMatrix = T(pv) · userTRS · T(−pv) · embedded
+                mat4Mul(tmp, tNeg, embedded);          // tmp = T(−pv) · embedded
+                mat4Mul(tmp, userTRS, tmp);            // tmp = userTRS · T(−pv) · embedded
+                mat4Mul(out.localMatrix, tPos, tmp);   // out = T(pv) · (…)
+                pivotComposed = true;
+            }
+        }
+        if (!pivotComposed) {
+            mat4Mul(out.localMatrix, userTRS, embedded);
+        }
 
         // Optional Image input (input 1) — per-mesh texture for the scanline.
         ReadGeo* readGeo = dynamic_cast<ReadGeo*>(effect.get());   // only ReadGeo has an Image input

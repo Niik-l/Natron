@@ -1926,7 +1926,7 @@ Viewport3D::paintGL()
         glMultMatrixf(sn.worldMatrix);
 
         switch (sn.type) {
-            case eSceneNodeMesh:       drawMeshNode(sn); break;
+            case eSceneNodeMesh:       drawMeshNode(sn); drawMeshBBoxIfNeeded(sn); break;
             case eSceneNodeCard:       drawCardNode(sn); break;
             case eSceneNodeCamera:     drawCameraNode(sn); break;
             case eSceneNodePointCloud: drawPointCloudNode(sn); break;
@@ -5956,10 +5956,10 @@ Viewport3D::drawPointCloudNode(const SceneNode& sn) const
     // Actual drawing is done by drawPointCloud() which uses the cached PointCloudDataPtr.
 }
 
-// out = a * b, both column-major 4x4 (out must not alias a or b).
-static void
-v3dMatMulColMajor(const float a[16], const float b[16], float out[16])
+void
+Viewport3D::drawGroupNode(const SceneNode& sn, const std::vector<SceneNode>& sceneNodes) const
 {
+    Q_UNUSED(sceneNodes);
     // Small origin tripod so the group can be found and clicked even when its
     // children sit far away (selection picks on the node origin). The box
     // around the children is drawn in world space by drawGroupBounds(). This
@@ -6109,6 +6109,58 @@ Viewport3D::drawGroupBounds(const SceneNode& sn, const std::vector<SceneNode>& s
         glVertex3f(w[0], w[1], w[2] - r); glVertex3f(w[0], w[1], w[2] + r);
         glEnd();
     }
+    glDisable(GL_LINE_STIPPLE);
+    glLineWidth(1.0f);
+}
+
+void
+Viewport3D::drawMeshBBoxIfNeeded(const SceneNode& sn) const
+{
+    // Single-mesh ReadGeo parity with the archive root's real-bounds box
+    // (drawGroupNode): the same dashed box, enclosing this node's mesh
+    // content in its local frame, gated by the same Show Bounding Box knob.
+    // Nodes without the knob (procedural primitives) draw nothing.
+    NodePtr node = sn.sourceNode.lock();
+    EffectInstancePtr effect = node ? node->getEffectInstance() : EffectInstancePtr();
+    if (!effect) return;
+    KnobIPtr kb = effect->getKnobByName("showBBox");
+    KnobBool* showKnob = dynamic_cast<KnobBool*>(kb.get());
+    if (!showKnob || !showKnob->getValue()) return;
+    if (!sn.meshData || sn.meshData->vertices.empty()) return;
+
+    float mn[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+    float mx[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+    const std::vector<float>& vtx = sn.meshData->vertices;
+    for (size_t v = 0; v + 2 < vtx.size(); v += 3) {
+        const float x = vtx[v], y = vtx[v + 1], z = vtx[v + 2];
+        mn[0] = std::min(mn[0], x); mx[0] = std::max(mx[0], x);
+        mn[1] = std::min(mn[1], y); mx[1] = std::max(mx[1], y);
+        mn[2] = std::min(mn[2], z); mx[2] = std::max(mx[2], z);
+    }
+    if (mn[0] > mx[0] || mn[1] > mx[1] || mn[2] > mx[2]) return;
+
+    glColor3f(0.9f, 0.5f, 0.1f);
+    glLineWidth(1.5f);
+    glEnable(GL_LINE_STIPPLE);
+    glLineStipple(2, 0xAAAA);
+
+    const float x0 = mn[0], y0 = mn[1], z0 = mn[2];
+    const float x1 = mx[0], y1 = mx[1], z1 = mx[2];
+    glBegin(GL_LINE_LOOP);
+    glVertex3f(x0, y0, z0); glVertex3f(x1, y0, z0);
+    glVertex3f(x1, y1, z0); glVertex3f(x0, y1, z0);
+    glEnd();
+    glBegin(GL_LINE_LOOP);
+    glVertex3f(x0, y0, z1); glVertex3f(x1, y0, z1);
+    glVertex3f(x1, y1, z1); glVertex3f(x0, y1, z1);
+    glEnd();
+    glBegin(GL_LINES);
+    glVertex3f(x0, y0, z0); glVertex3f(x0, y0, z1);
+    glVertex3f(x1, y0, z0); glVertex3f(x1, y0, z1);
+    glVertex3f(x1, y1, z0); glVertex3f(x1, y1, z1);
+    glVertex3f(x0, y1, z0); glVertex3f(x0, y1, z1);
+    glEnd();
+
     glDisable(GL_LINE_STIPPLE);
     glLineWidth(1.0f);
 }

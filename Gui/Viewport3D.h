@@ -200,13 +200,17 @@ private:
     bool pickPathPointAtPosition(int screenX, int screenY);
     void drawZapEndpoints(const SceneNode& sn) const;
     void drawPointCloudNode(const SceneNode& sn) const;
-    void drawGroupNode(const SceneNode& sn) const;
+    void drawGroupNode(const SceneNode& sn, const std::vector<SceneNode>& sceneNodes) const;
     // World-space dashed box around everything under a Group3D / Transform3D
-    // plus a cross on its pivot. Drawn BEFORE the node's matrix push.
+    // plus a cross on its pivot. Drawn BEFORE the node's matrix push. Gated by
+    // the node's Show Bounding Box knob when it has one (ReadGeoArchive, Group3D).
     void drawGroupBounds(const SceneNode& sn, const std::vector<SceneNode>& sceneNodes) const;
     // Local-space bounds of one scene node's geometry (mesh space, i.e. before
     // the node's own transform). False for lights / cameras / point clouds.
     bool sceneNodeLocalBounds(const SceneNode& sn, float bmin[3], float bmax[3]) const;
+    // Dashed bbox around one mesh node's own geometry (ReadGeo single/merged),
+    // gated by the node's Show Bounding Box knob; silent without the knob.
+    void drawMeshBBoxIfNeeded(const SceneNode& sn) const;
     void drawSphereNode(const SceneNode& sn) const;
     void drawCubeNode(const SceneNode& sn) const;
     void drawCylinderNode(const SceneNode& sn) const;

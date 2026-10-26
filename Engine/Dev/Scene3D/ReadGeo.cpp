@@ -1128,7 +1128,8 @@ ReadGeo::initializeKnobs()
         k->populateChoices(opts);
         k->setDefaultValue(0);  // Bounding-Box Center
         k->setHintToolTip(tr("Point the Translate/Rotate/Scale knobs pivot around. "
-                             "Object-hierarchy mode only."));
+                             "Bounding-Box Center encloses the node's content at its "
+                             "centre — the same pivot every mode uses."));
         xformPage->addKnob(k);
         _imp->rotationPivot = k;
     }
@@ -1541,8 +1542,16 @@ ReadGeo::loadGeoFromFile(const std::string& path)
         if (infoK) {
             std::ostringstream seqInfo;
             seqInfo << infoK->getValue()
-                    << " | seq frames " << _imp->seq.firstFrame << "-" << _imp->seq.lastFrame
-                    << " (" << _imp->seq.files.size() << " files)";
+                    << " | seq frames ";
+            {
+                // Effective timeline range (renumbered evaluation — first
+                // file at frame 1; frameOffset shifts it).
+                KnobIntPtr fo = _imp->frameOffset.lock();
+                int ef0 = 1, ef1 = 1;
+                _imp->seq.evalRange(fo ? fo->getValue() : 0, ef0, ef1);
+                seqInfo << ef0 << "-" << ef1;
+            }
+            seqInfo << " (" << _imp->seq.files.size() << " files)";
             infoK->setValue(seqInfo.str());
         }
     }
@@ -3704,13 +3713,18 @@ ReadGeo::applyModeVisibility()
     if (KnobButtonPtr k = _imp->rebuildMaterialsBtn.lock()) k->setSecret(!multi);
     if (KnobStringPtr k = _imp->objectFilter.lock()) k->setSecret(!multi);
     if (KnobBoolPtr k = _imp->includeMeshes.lock()) k->setSecret(!multi);
-    if (KnobBoolPtr k = _imp->showBBox.lock()) k->setSecret(!multi);
-    if (KnobIntPtr k = _imp->frameOffset.lock()) k->setSecret(!multi);
-    if (KnobDoublePtr k = _imp->fpsKnob.lock()) k->setSecret(!multi);
-    if (KnobStringPtr k = _imp->excludedPaths.lock()) k->setSecret(!multi);
-    if (KnobChoicePtr k = _imp->rotationPivot.lock()) k->setSecret(!multi);
     if (KnobBoolPtr k = _imp->showLocators.lock()) k->setSecret(!multi);
     if (KnobDoublePtr k = _imp->locatorSize.lock()) k->setSecret(!multi);
+    if (KnobStringPtr k = _imp->excludedPaths.lock()) k->setSecret(!multi);
+    // Mode-parity knobs: shown in BOTH modes — they take effect in
+    // single-mesh mode too (showBBox draws the real-bounds box around the
+    // merged mesh; rotationPivot pivots the user transform at the content
+    // centre like multi-emit; frameOffset shifts the abc sample / sequence
+    // frame mapping). Hiding them made the modes behave differently.
+    if (KnobBoolPtr k = _imp->showBBox.lock()) k->setSecret(false);
+    if (KnobIntPtr k = _imp->frameOffset.lock()) k->setSecret(false);
+    if (KnobChoicePtr k = _imp->rotationPivot.lock()) k->setSecret(false);
+    if (KnobDoublePtr k = _imp->fpsKnob.lock()) k->setSecret(!multi);
 }
 
 void
@@ -3839,7 +3853,12 @@ ReadGeo::finishArchiveGeo(const std::string& path)
         ss << " | baked";
     }
     if (_imp->seq.isSequence) {
-        ss << " | seq frames " << _imp->seq.firstFrame << "-" << _imp->seq.lastFrame
+        // Effective timeline range (renumbered evaluation - first file at
+        // frame 1; frameOffset shifts it).
+        KnobIntPtr fo = _imp->frameOffset.lock();
+        int ef0 = 1, ef1 = 1;
+        _imp->seq.evalRange(fo ? fo->getValue() : 0, ef0, ef1);
+        ss << " | seq frames " << ef0 << "-" << ef1
            << " (" << _imp->seq.files.size() << " files)";
     }
     if (KnobStringPtr infoK = _imp->info.lock()) {
@@ -3996,7 +4015,12 @@ ReadGeo::loadAbcArchiveGeo(const std::string& path)
         ss << " | Source FPS: " << _imp->abcSourceFps;
     }
     if (_imp->seq.isSequence) {
-        ss << " | seq frames " << _imp->seq.firstFrame << "-" << _imp->seq.lastFrame
+        // Effective timeline range (renumbered evaluation - first file at
+        // frame 1; frameOffset shifts it).
+        KnobIntPtr fo = _imp->frameOffset.lock();
+        int ef0 = 1, ef1 = 1;
+        _imp->seq.evalRange(fo ? fo->getValue() : 0, ef0, ef1);
+        ss << " | seq frames " << ef0 << "-" << ef1
            << " (" << _imp->seq.files.size() << " files)";
     }
     if (KnobStringPtr infoK = _imp->info.lock()) {
@@ -4019,9 +4043,13 @@ ReadGeo::ensureSequenceFrameArch(double time, bool* outFallbackToReference) cons
     if (time < 0.0 || _imp->seq.files.empty()) {
         return std::shared_ptr<GeoArchiveRuntime>();
     }
-    // Sequence wins over the frameOffset knob: file frame numbers are NATIVE
-    // to the timeline.
-    const int frame = _imp->seq.clampFrame((int)std::floor(time));
+    // Renumbered evaluation (GeoSequenceInfo::evalFrame): the sequence's
+    // first file shows at timeline frame 1 — the same start a single animated
+    // file gets; frameOffset shifts the mapping (positive = earlier file).
+    const int frame = [this](double t) {
+        KnobIntPtr fo = _imp->frameOffset.lock();
+        return _imp->seq.evalFrame((int)std::floor(t), fo ? fo->getValue() : 0);
+    }(time);
     std::shared_ptr<GeoArchiveRuntime> frt = _imp->seqRt.get(frame);
     if (frt) {
         *outFallbackToReference = false;
@@ -4084,9 +4112,12 @@ ReadGeo::ensureAbcSequenceFrame(double time, bool* outFallbackToReference) const
     if (time < 0.0 || _imp->seq.files.empty()) {
         return std::shared_ptr<RgAbcFrame>();
     }
-    // Sequence wins over the frameOffset knob: file frame numbers are NATIVE
-    // to the timeline.
-    const int frame = _imp->seq.clampFrame((int)std::floor(time));
+    // Renumbered evaluation (GeoSequenceInfo::evalFrame — first file at
+    // timeline frame 1; frameOffset shifts, positive = earlier file).
+    const int frame = [this](double t) {
+        KnobIntPtr fo = _imp->frameOffset.lock();
+        return _imp->seq.evalFrame((int)std::floor(t), fo ? fo->getValue() : 0);
+    }(time);
     std::shared_ptr<RgAbcFrame> frt = _imp->abcSeqRt.get(frame);
     if (frt) {
         *outFallbackToReference = false;
@@ -5113,9 +5144,11 @@ ReadGeo::onKnobsAboutToBeLoaded(const NodeSerializationPtr& serialization)
 // Mesh data access
 // ---------------------------------------------------------------------------
 
-// One built sequence frame (caller holds _meshMutex): the timeline frame maps
-// to the sequence's FILE frame numbers — frozen evaluation substitutes the
-// frozen frame, out-of-range/gap times hold at the nearest present file.
+// One built sequence frame (caller holds _meshMutex): the timeline frame is
+// renumbered so the sequence's FIRST file shows at frame 1 (GeoSequenceInfo::
+// evalFrame — parity with a single animated file's first sample); frameOffset
+// shifts the mapping (positive = earlier file). Frozen evaluation substitutes
+// the frozen frame, out-of-range/gap times hold at the nearest present file.
 // Built meshes are served from the bounded LRU; misses parse + build the
 // frame file through the format dispatch.
 MeshDataPtr
@@ -5127,7 +5160,10 @@ ReadGeo::getMeshDataAtSeqFrame(double time) const
                             ? _imp->freezeFrame.lock()->getValue() : 1);
     }
     int frame = (int)std::floor(tEff < 0.0 ? 0.0 : tEff);
-    frame = _imp->seq.clampFrame(frame);
+    {
+        KnobIntPtr fo = _imp->frameOffset.lock();
+        frame = _imp->seq.evalFrame(frame, fo ? fo->getValue() : 0);
+    }
 
     std::shared_ptr<MeshData> cached = _imp->frameCache.get(frame);
     if (cached) {
@@ -5219,7 +5255,8 @@ ReadGeo::getMeshData(double time) const
     // impossible across a topology boundary; the xform anim still interpolates.
     if (_imp && _imp->abcVaryingTopology && !_imp->abcVaryingSamples.empty()) {
         const int N = (int)_imp->abcVaryingSamples.size();
-        int idx = (int)std::floor(effTime - 1.0);
+        KnobIntPtr foVar = _imp->frameOffset.lock();
+        int idx = (int)std::floor(effTime - 1.0 - (double)(foVar ? foVar->getValue() : 0));
         if (idx < 0) idx = 0;
         if (idx >= N) idx = N - 1;
         MeshDataPtr pick = _imp->abcVaryingSamples[idx];
@@ -5276,7 +5313,8 @@ ReadGeo::updateTransformAtTime(MeshData* mesh, double time) const
     // need slerp on the rotation block) but at sub-frame deltas the error is
     // negligible.
     const int N = static_cast<int>(_imp->numXformSamples);
-    double tCont = time - 1.0;
+    KnobIntPtr foXf = _imp->frameOffset.lock();
+    double tCont = time - 1.0 - (double)(foXf ? foXf->getValue() : 0);
     if (tCont < 0.0) tCont = 0.0;
     if (tCont > (double)(N - 1)) tCont = (double)(N - 1);
 
@@ -5313,7 +5351,8 @@ ReadGeo::updateVerticesAtTime(MeshData* mesh, double time) const
     // sourceFps + projectFps + Frame Offset mapping (mirrors ReadAlembicArchive's
     // timeMode 1 path).
     const int N = static_cast<int>(_imp->numVertexSamples);
-    double tCont = time - 1.0;
+    KnobIntPtr foXf = _imp->frameOffset.lock();
+    double tCont = time - 1.0 - (double)(foXf ? foXf->getValue() : 0);
     if (tCont < 0.0) tCont = 0.0;
     if (tCont > (double)(N - 1)) tCont = (double)(N - 1);
 

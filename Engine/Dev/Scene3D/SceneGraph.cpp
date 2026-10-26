@@ -366,6 +366,56 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             for (int r = 0; r < 4; ++r)
                 for (int c = 0; c < 4; ++c)
                     embedded[c * 4 + r] = mesh->transform[r * 4 + c];
+
+            // Rotation pivot — same knob + semantics as the archive branch
+            // (nodes without the knob keep origin behavior): 0 = content
+            // bbox centre (default), 1 = authored origin (the embedded
+            // transform's translation), 2 = world origin. Without this the
+            // single-mesh mode turned/scaled around (0,0,0) while multi-emit
+            // turned around the content centre — toggling modes moved the
+            // gizmo and the transform result. The user transform composes
+            // T(pv) · userTRS · T(−pv); sn.pivot seeds the gizmo at the same
+            // point (translation + pivot, the archive gizmo convention).
+            float pv[3] = { 0.f, 0.f, 0.f };
+            {
+                KnobIPtr kPV = effect->getKnobByName("rotationPivot");
+                KnobChoice* pc = kPV ? dynamic_cast<KnobChoice*>(kPV.get()) : NULL;
+                const int pivotMode = pc ? pc->getValue() : -1; // -1: no knob
+                if (pivotMode == 0) {
+                    float emn[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+                    float emx[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+                    const std::vector<float>& mv = mesh->vertices;
+                    for (size_t k = 0; k + 2 < mv.size(); k += 3) {
+                        const float lx = mv[k], ly = mv[k + 1], lz = mv[k + 2];
+                        const float wx = embedded[0] * lx + embedded[4] * ly + embedded[8] * lz + embedded[12];
+                        const float wy = embedded[1] * lx + embedded[5] * ly + embedded[9] * lz + embedded[13];
+                        const float wz = embedded[2] * lx + embedded[6] * ly + embedded[10] * lz + embedded[14];
+                        if (wx < emn[0]) emn[0] = wx; else if (wx > emx[0]) emx[0] = wx;
+                        if (wy < emn[1]) emn[1] = wy; else if (wy > emx[1]) emx[1] = wy;
+                        if (wz < emn[2]) emn[2] = wz; else if (wz > emx[2]) emx[2] = wz;
+                    }
+                    if (emn[0] <= emx[0] && emn[1] <= emx[1] && emn[2] <= emx[2]) {
+                        pv[0] = 0.5f * (emn[0] + emx[0]);
+                        pv[1] = 0.5f * (emn[1] + emx[1]);
+                        pv[2] = 0.5f * (emn[2] + emx[2]);
+                    }
+                } else if (pivotMode == 1) {
+                    pv[0] = embedded[12];
+                    pv[1] = embedded[13];
+                    pv[2] = embedded[14];
+                }
+                if (pivotMode == 0 || pivotMode == 1) {
+                    float tPos[16], tNeg[16], tmp[16];
+                    buildTRS(pv[0], pv[1], pv[2], 0, 0, 0, 1, 1, 1, tPos);
+                    buildTRS(-pv[0], -pv[1], -pv[2], 0, 0, 0, 1, 1, 1, tNeg);
+                    matMulCM(userTRS, tNeg, tmp);   // tmp = userTRS · T(−pv)
+                    matMulCM(tPos, tmp, userTRS);   // userTRS = T(pv) · userTRS · T(−pv)
+                    sn.pivot[0] = pv[0];
+                    sn.pivot[1] = pv[1];
+                    sn.pivot[2] = pv[2];
+                }
+            }
+
             // localMatrix = userTRS * embedded (4x4 column-major).
             for (int c = 0; c < 4; ++c) {
                 for (int r = 0; r < 4; ++r) {
@@ -957,6 +1007,83 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
     }
 
     // ===== PASS 3: Compute world transforms (also propagates visibility) =====
+    computeWorldTransforms();
+
+    // ===== PASS 3.5: Group3D rotation pivots =====
+    // A Group3D with the rotationPivot knob turns/scales its content around
+    // a pivot: 0 = the content bbox centre (the default — matching the
+    // archive root and the single-mesh ReadGeo branches), 1 = the group's
+    // own translation ("authored"), 2 = the world origin. The content bbox
+    // needs the final child locals, so this runs after the world pass: the
+    // pivot is measured in the group's own PRE-transform local frame (the
+    // same convention as the archive branch's root-local pivot), the group's
+    // local matrix is recomposed around it (T(pv) · TRS · T(−pv) — the same
+    // buildTRSPivot the archive branch uses), and the world transforms are
+    // recomputed. sn.pivot seeds the gizmo at the same point (translation +
+    // pivot, the archive gizmo convention).
+    for (int i = 0; i < (int)_nodes.size(); ++i) {
+        SceneNode& sn = _nodes[i];
+        if (sn.type != eSceneNodeGroup) continue;
+        NodePtr node = sn.sourceNode.lock();
+        if (!node) continue;
+        Group3D* group = dynamic_cast<Group3D*>(node->getEffectInstance().get());
+        if (!group) continue;
+        KnobIPtr kPV = node->getKnobByName("rotationPivot");
+        KnobChoice* pc = kPV ? dynamic_cast<KnobChoice*>(kPV.get()) : NULL;
+        if (!pc) continue;
+        const int pivotMode = pc->getValue();
+
+        float gtx, gty, gtz, grx, gry, grz, gsx, gsy, gsz;
+        group->getGroupTransform(time, gtx, gty, gtz, grx, gry, grz, gsx, gsy, gsz);
+
+        float pv[3] = { 0.f, 0.f, 0.f };
+        if (pivotMode == 0) {
+            // Content bbox centre in the group's pre-transform local frame.
+            float emn[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+            float emx[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+            bool got = false;
+            auto walk = [&](auto&& self, int idx, const float M[16]) -> void {
+                const SceneNode& nd = _nodes[idx];
+                float NM[16];
+                matMulCM(M, nd.localMatrix, NM);
+                if (nd.type == eSceneNodeMesh && nd.meshData) {
+                    const std::vector<float>& mv = nd.meshData->vertices;
+                    for (size_t k = 0; k + 2 < mv.size(); k += 3) {
+                        const float lx = mv[k], ly = mv[k + 1], lz = mv[k + 2];
+                        const float wx = NM[0] * lx + NM[4] * ly + NM[8] * lz + NM[12];
+                        const float wy = NM[1] * lx + NM[5] * ly + NM[9] * lz + NM[13];
+                        const float wz = NM[2] * lx + NM[6] * ly + NM[10] * lz + NM[14];
+                        if (wx < emn[0]) emn[0] = wx; else if (wx > emx[0]) emx[0] = wx;
+                        if (wy < emn[1]) emn[1] = wy; else if (wy > emx[1]) emx[1] = wy;
+                        if (wz < emn[2]) emn[2] = wz; else if (wz > emx[2]) emx[2] = wz;
+                    }
+                    got = true;
+                }
+                for (size_t c = 0; c < nd.childIndices.size(); ++c) {
+                    self(self, nd.childIndices[c], NM);
+                }
+            };
+            float idM[16];
+            SceneNode::setIdentity(idM);
+            for (size_t c = 0; c < sn.childIndices.size(); ++c) {
+                walk(walk, sn.childIndices[c], idM);
+            }
+            if (got) {
+                pv[0] = 0.5f * (emn[0] + emx[0]);
+                pv[1] = 0.5f * (emn[1] + emx[1]);
+                pv[2] = 0.5f * (emn[2] + emx[2]);
+            }
+        } else if (pivotMode == 1) {
+            // Authored origin: the group's own translation.
+            pv[0] = gtx; pv[1] = gty; pv[2] = gtz;
+        }
+
+        // Fold the pivot into the group's local matrix: T(pv) · TRS · T(−pv).
+        buildTRSPivot(gtx, gty, gtz, grx, gry, grz, gsx, gsy, gsz,
+                      pv[0], pv[1], pv[2], sn.localMatrix);
+        std::memcpy(sn.pivot, pv, sizeof(pv));
+    }
+    // A re-composed group changed its (and its subtree's) worlds — recompute.
     computeWorldTransforms();
 
     // ===== PASS 4: Apply archive user transforms in WORLD space =====

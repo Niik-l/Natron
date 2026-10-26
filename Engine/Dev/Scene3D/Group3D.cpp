@@ -32,6 +32,7 @@
 #include <sstream>
 
 #include "../../AppInstance.h"
+#include "../../ChoiceOption.h"
 #include "../../Image.h"
 #include "../../ImagePlaneDesc.h"
 #include "../../KnobTypes.h"
@@ -154,6 +155,27 @@ Group3D::initializeKnobs()
                                "in the 3D viewport. The box encloses the actual geometry "
                                "of every mesh connected to the group."));
     page->addKnob(showBox); _imp->showBBox = showBox;
+
+    // Rotation pivot — same knob and semantics as ReadGeo's (multi-emit and
+    // single-mesh branches): the group's Translate/Rotate/Scale turn the
+    // content around this point instead of the world origin. 0 = the content
+    // bbox centre (default — matches the archive root and the single-mesh
+    // ReadGeo branches), 1 = the group's own translation ("authored"), 2 =
+    // the world origin. SceneGraph::rebuild's group-pivot pass reads this by
+    // name and folds it into the group's local matrix.
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Rotation Pivot"));
+        k->setName("rotationPivot");
+        std::vector<ChoiceOption> opts;
+        opts.push_back(ChoiceOption("Bounding-Box Center", "", ""));
+        opts.push_back(ChoiceOption("Authored Origin", "", ""));
+        opts.push_back(ChoiceOption("World Origin", "", ""));
+        k->populateChoices(opts);
+        k->setDefaultValue(0);  // Bounding-Box Center
+        k->setHintToolTip(tr("Point the group's Translate/Rotate/Scale knobs pivot around. "
+                             "Bounding-Box Center pivots at the centre of the group's content."));
+        page->addKnob(k);
+    }
 
     KnobDoublePtr tx = AppManager::createKnob<KnobDouble>(this, tr("Translate X"));
     tx->setName("translateX"); tx->setDefaultValue(0); tx->setAnimationEnabled(true);
