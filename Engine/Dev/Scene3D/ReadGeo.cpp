@@ -153,14 +153,26 @@ readMeshArrays(const void* positionsRaw, size_t numVerts,
     }
 
     // -- Build edge indices for wireframe rendering --
+    // Fully guarded: malformed samples (RealFlow stitched exports can carry
+    // inconsistent faceCounts/faceIndices per sample) must not walk off the
+    // arrays — off+count is bounds-checked against numFaceIndices and vertex
+    // indices against numVerts. Same rules as importBuildEdgeIndices.
     mesh->edgeIndices.clear();
     mesh->edgeIndices.reserve(numFaceIndices * 2); // upper bound
     size_t idxOffset = 0;
     for (size_t f = 0; f < numFaces; ++f) {
         int count = static_cast<int>(rawCnt[f]);
+        if (count < 2 || idxOffset + (size_t)count > numFaceIndices) {
+            idxOffset += (size_t)std::max(0, count);
+            continue;
+        }
         for (int v = 0; v < count; ++v) {
-            mesh->edgeIndices.push_back(static_cast<int>(rawIdx[idxOffset + v]));
-            mesh->edgeIndices.push_back(static_cast<int>(rawIdx[idxOffset + ((v + 1) % count)]));
+            const int a = static_cast<int>(rawIdx[idxOffset + v]);
+            const int b = static_cast<int>(rawIdx[idxOffset + ((v + 1) % count)]);
+            if (a >= 0 && (size_t)a < numVerts && b >= 0 && (size_t)b < numVerts) {
+                mesh->edgeIndices.push_back(a);
+                mesh->edgeIndices.push_back(b);
+            }
         }
         idxOffset += count;
     }
@@ -197,20 +209,63 @@ readXformMatrix(const Alembic::AbcGeom::IXformSchema& xSchema,
 /**
  * @brief Copy a mesh schema's UV param (PolyMesh/SubD) into out->uvs when
  * present (per u,v pair). Shares the raw-float policy of readMeshArrays.
+ *
+ * Indexed UVs are expanded MANUALLY with a per-index bounds check instead of
+ * calling getExpanded: RealFlow stitched-mesh exports grow the topology every
+ * sample and their per-sample UV index arrays can reference past the value
+ * array — Alembic's getExpanded trusts the indices and reads out of bounds
+ * (access violation; observed crashing liquid.abc's load ~1 run in 2). Bad
+ * indices expand to (0,0).
  */
 static void
-readAlembicUvParam(const Alembic::AbcGeom::IV2fGeomParam& uvParam, MeshData* mesh)
+readAlembicUvParamSel(const Alembic::AbcGeom::IV2fGeomParam& uvParam,
+                      const Alembic::Abc::ISampleSelector& ss, MeshData* mesh)
 {
     Alembic::AbcGeom::IV2fGeomParam::Sample uvSample;
-    uvParam.getExpanded(uvSample);
-    const Alembic::Abc::V2fArraySamplePtr& uvVals = uvSample.getVals();
-    if (uvVals && uvVals->size() > 0) {
-        size_t numUVs = uvVals->size();
+    if (uvParam.isIndexed()) {
+        // Manual expansion with a per-index bounds check — getExpanded trusts
+        // the index array blindly and reads out of bounds when a sample's UV
+        // indices reference past the value array (RealFlow stitched exports
+        // grow the topology every sample). Bad indices expand to (0,0).
+        uvParam.getIndexed(uvSample, ss);
+        const Alembic::Abc::V2fArraySamplePtr& uvVals = uvSample.getVals();
+        const Alembic::Abc::UInt32ArraySamplePtr uvIdxs = uvSample.getIndices();
+        if (!uvVals || uvVals->size() == 0 || !uvIdxs || uvIdxs->size() == 0) {
+            return;
+        }
+        const uint32_t* rawIdx = uvIdxs->get();
+        const size_t nIdx = uvIdxs->size();
+        const float* rawVals = reinterpret_cast<const float*>(uvVals->get());
+        const size_t nVals = uvVals->size();
+        mesh->uvs.resize(nIdx * 2);
+        for (size_t i = 0; i < nIdx; ++i) {
+            const uint32_t j = rawIdx[i];
+            if (j < nVals) {
+                mesh->uvs[i * 2]     = rawVals[j * 2];
+                mesh->uvs[i * 2 + 1] = rawVals[j * 2 + 1];
+            } else {
+                mesh->uvs[i * 2]     = 0.f;
+                mesh->uvs[i * 2 + 1] = 0.f;
+            }
+        }
+    } else {
+        uvParam.getExpanded(uvSample, ss);
+        const Alembic::Abc::V2fArraySamplePtr& uvVals = uvSample.getVals();
+        if (!uvVals || uvVals->size() == 0) {
+            return;
+        }
+        const size_t numUVs = uvVals->size();
         const float* rawUV = reinterpret_cast<const float*>(uvVals->get());
         mesh->uvs.resize(numUVs * 2);
         std::memcpy(mesh->uvs.data(), rawUV, numUVs * 2 * sizeof(float));
-        mesh->hasUVs = true;
     }
+    mesh->hasUVs = true;
+}
+
+static void
+readAlembicUvParam(const Alembic::AbcGeom::IV2fGeomParam& uvParam, MeshData* mesh)
+{
+    readAlembicUvParamSel(uvParam, Alembic::Abc::ISampleSelector(), mesh);
 }
 #endif // NATRON_HAVE_ALEMBIC
 
@@ -1461,6 +1516,22 @@ ReadGeo::loadAlembicGeo(const std::string& path)
 #ifdef NATRON_HAVE_ALEMBIC
     using namespace Alembic::AbcGeom;
 
+    // Crash bisect tracer (liquid.abc 0xC0000005 during load): every stage
+    // prints + flushes so a dead process leaves the last stage behind.
+    const bool dbgAbc = (std::getenv("NATRON_DEBUG_GEOIO") != NULL);
+    struct AbcTrace {
+        explicit AbcTrace(bool on) : on(on) {}
+        ~AbcTrace() { if (on) { std::fprintf(stderr, "[RG-ABC2] load end\n"); std::fflush(stderr); } }
+        void step(const char* s) const
+        {
+            if (!on) return;
+            std::fprintf(stderr, "[RG-ABC2] %s\n", s);
+            std::fflush(stderr);
+        }
+        bool on;
+    } trace(dbgAbc);
+    trace.step("enter");
+
     try {
         // Verify file is readable before handing to Alembic
         {
@@ -1471,11 +1542,13 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             }
             fclose(testF);
         }
+        trace.step("file readable");
 
         // Open archive with Ogawa reader
         Alembic::AbcCoreOgawa::ReadArchive reader;
         IArchive archive(reader, path);
         IObject top = archive.getTop();
+        trace.step("archive open");
 
         // --- Discover geometry objects ---
         // Start from top's children (not top itself) so paths don't include
@@ -1515,6 +1588,7 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             }
         }
         std::string selectedPath = _imp->geoPaths[selectedIdx];
+        trace.step("object selected");
 
         // --- Navigate to the selected object ---
         IObject obj;
@@ -1551,6 +1625,7 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             size_t      numFaces   = sample.getFaceCounts()->size();
 
             readMeshArrays(posPtr, numVerts, idxPtr, numIdx, cntPtr, numFaces, mesh.get());
+            trace.step("sample0 read");
 
             // Pre-load all vertex samples if the mesh is animated. Topology
             // (faceIndices/faceCounts) is assumed constant — only positions
@@ -1563,6 +1638,11 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             // Detect that and pre-load one FULL MeshData per sample instead
             // (served by nearest-sample lookup from getMeshData).
             const size_t numVertSamples = schema.getNumSamples();
+            if (dbgAbc) {
+                std::fprintf(stderr, "[RG-ABC2] numVertSamples=%u numVerts=%u numFaces=%u\n",
+                             (unsigned)numVertSamples, (unsigned)numVerts, (unsigned)numFaces);
+                std::fflush(stderr);
+            }
             bool topologyConstant = true;
             std::vector<size_t> sampleVertCounts;
             if (numVertSamples > 1) {
@@ -1575,6 +1655,11 @@ ReadGeo::loadAlembicGeo(const std::string& path)
                     const size_t c = p ? p->size() : 0;
                     sampleVertCounts.push_back(c);
                     if (c != numVerts) topologyConstant = false;
+                    if (dbgAbc && (s % 10 == 0 || s + 1 == numVertSamples)) {
+                        std::fprintf(stderr, "[RG-ABC2] peek s=%u c=%u\n",
+                                     (unsigned)s, (unsigned)c);
+                        std::fflush(stderr);
+                    }
                 }
             }
             if (numVertSamples > 1 && !topologyConstant) {
@@ -1605,19 +1690,17 @@ ReadGeo::loadAlembicGeo(const std::string& path)
                         readMeshArrays(aPos, aNumVerts, aIdx, aNumIdx, aCnt, aNumFaces,
                                        vary.get());
                         importBuildEdgeIndices(vary.get());
+                        if (dbgAbc && (s % 10 == 0 || s + 1 == numVertSamples)) {
+                            std::fprintf(stderr, "[RG-ABC2] varying preload s=%u verts=%u\n",
+                                         (unsigned)s, (unsigned)aNumVerts);
+                            std::fflush(stderr);
+                        }
                         IV2fGeomParam uvParamA = schema.getUVsParam();
                         if (uvParamA.valid()) {
-                            IV2fGeomParam::Sample uvSampleA;
-                            uvParamA.getExpanded(uvSampleA, ss);
-                            const Alembic::Abc::V2fArraySamplePtr& uvValsA = uvSampleA.getVals();
-                            if (uvValsA && uvValsA->size() > 0) {
-                                const float* rawUVA =
-                                    reinterpret_cast<const float*>(uvValsA.get());
-                                vary->uvs.resize(uvValsA->size() * 2);
-                                std::memcpy(vary->uvs.data(), rawUVA,
-                                            uvValsA->size() * 2 * sizeof(float));
-                                vary->hasUVs = true;
-                            }
+                            // Guarded manual expansion — see
+                            // readAlembicUvParamSel; getExpanded reads OOB on
+                            // malformed per-sample UV indices.
+                            readAlembicUvParamSel(uvParamA, ss, vary.get());
                         }
                         _imp->abcVaryingSamples[s] = vary;
                     }
@@ -1643,20 +1726,11 @@ ReadGeo::loadAlembicGeo(const std::string& path)
                 }
             }
 
-            // Read UVs â€” try common Alembic UV param names
+            // Read UVs — guarded manual expansion (readAlembicUvParamSel);
+            // getExpanded reads OOB on malformed per-sample UV indices.
             IV2fGeomParam uvParam = schema.getUVsParam();
             if (uvParam.valid()) {
-                IV2fGeomParam::Sample uvSample;
-                uvParam.getExpanded(uvSample);
-                const Alembic::Abc::V2fArraySamplePtr& uvVals = uvSample.getVals();
-                if (uvVals && uvVals->size() > 0) {
-                    size_t numUVs = uvVals->size();
-                    const float* rawUV = reinterpret_cast<const float*>(uvVals->get());
-                    mesh->uvs.resize(numUVs * 2);
-                    std::memcpy(mesh->uvs.data(), rawUV, numUVs * 2 * sizeof(float));
-                    mesh->hasUVs = true;
-                    (void)0; // UVs loaded
-                }
+                readAlembicUvParam(uvParam, mesh.get());
             }
 
         } else if (isSubD) {
@@ -1696,17 +1770,7 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             // Read UVs from SubD
             IV2fGeomParam uvParam = schema.getUVsParam();
             if (uvParam.valid()) {
-                IV2fGeomParam::Sample uvSample;
-                uvParam.getExpanded(uvSample);
-                const Alembic::Abc::V2fArraySamplePtr& uvVals = uvSample.getVals();
-                if (uvVals && uvVals->size() > 0) {
-                    size_t numUVs = uvVals->size();
-                    const float* rawUV = reinterpret_cast<const float*>(uvVals->get());
-                    mesh->uvs.resize(numUVs * 2);
-                    std::memcpy(mesh->uvs.data(), rawUV, numUVs * 2 * sizeof(float));
-                    mesh->hasUVs = true;
-                    (void)0; // UVs loaded
-                }
+                readAlembicUvParam(uvParam, mesh.get());
             }
 
         } else {
@@ -1744,6 +1808,7 @@ ReadGeo::loadAlembicGeo(const std::string& path)
         }
 
         // --- Store result ---
+        trace.step("storing result");
         _lastMeshData = mesh;
         _imp->loadedFilePath = path;
         _imp->loadedObjectPath = selectedPath;
