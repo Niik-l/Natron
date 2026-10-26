@@ -5332,6 +5332,76 @@ std::string ReadGeo::getMaterialTextureFile() const
     KnobFilePtr k = _imp->textureFile.lock(); return k ? k->getValue() : std::string();
 }
 
+const GeoImportMaterial*
+ReadGeo::activeFileMaterial() const
+{
+    if (!_imp) return nullptr;
+    const GeoArchiveResult& data = _imp->rt.data;
+    if (data.materials.empty() || _imp->meshEntries.empty()) return nullptr;
+    int chosenIdx = 0;
+    if (KnobChoicePtr objKnob = _imp->objectPath.lock()) {
+        chosenIdx = objKnob->getValue();
+    }
+    if (chosenIdx < 0) chosenIdx = 0;
+    if (chosenIdx > 0) {
+        if ((std::size_t)chosenIdx > _imp->meshEntries.size()) return nullptr;
+        const int nodeIdx = _imp->meshEntries[chosenIdx - 1];
+        if (nodeIdx < 0 || nodeIdx >= (int)data.nodes.size()) return nullptr;
+        const GeoArchiveNodeData& nd = data.nodes[nodeIdx];
+        if (nd.meshIndex < 0 || nd.meshIndex >= (int)data.meshes.size()) return nullptr;
+        const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
+        if (md.materialIndex < 0 || md.materialIndex >= (int)data.materials.size()) {
+            return nullptr;
+        }
+        const GeoImportMaterial& m = data.materials[md.materialIndex];
+        return m.present ? &m : nullptr;
+    }
+    for (std::size_t i = 0; i < _imp->meshEntries.size(); ++i) {
+        const int nodeIdx = _imp->meshEntries[i];
+        if (nodeIdx < 0 || nodeIdx >= (int)data.nodes.size()) continue;
+        const GeoArchiveNodeData& nd = data.nodes[nodeIdx];
+        if (nd.meshIndex < 0 || nd.meshIndex >= (int)data.meshes.size()) continue;
+        const GeoArchiveMeshData& md = data.meshes[nd.meshIndex];
+        if (md.materialIndex < 0 || md.materialIndex >= (int)data.materials.size()) continue;
+        if (data.materials[md.materialIndex].present) {
+            return &data.materials[md.materialIndex];
+        }
+    }
+    return nullptr;
+}
+
+// PBR map slots have no ReadGeo knobs (only the diffuse map is mirrored into
+// textureFile) — serve them straight from the active file material. Without
+// this the merged single-mesh Cycles shader rendered from scalar rough/metal
+// factors while multi-emit entries wired the file's metallicRoughness/normal
+// maps, so the same file shaded darker with crushed highlights in single-mesh
+// mode (bugset #2: cobra-concept.glb).
+std::string ReadGeo::getMaterialNormalMapFile() const
+{
+    const GeoImportMaterial* m = activeFileMaterial();
+    return m ? m->normalMapPath : std::string();
+}
+
+std::string ReadGeo::getMaterialRoughnessMapFile() const
+{
+    const GeoImportMaterial* m = activeFileMaterial();
+    return m ? m->metallicRoughnessMapPath : std::string();
+}
+
+std::string ReadGeo::getMaterialMetallicMapFile() const
+{
+    const GeoImportMaterial* m = activeFileMaterial();
+    // ORM packs where blue is AO must not read that channel as metallic
+    // (same rule as the multi-emit entry adapter).
+    return (m && m->ormMetallicEnabled) ? m->metallicRoughnessMapPath : std::string();
+}
+
+std::string ReadGeo::getMaterialOpacityMapFile() const
+{
+    const GeoImportMaterial* m = activeFileMaterial();
+    return m ? m->opacityMapPath : std::string();
+}
+
 bool ReadGeo::hasMaterialInput() const
 {
     EffectInstancePtr inp = skipDots(getInput(0));

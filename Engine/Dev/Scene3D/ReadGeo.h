@@ -145,8 +145,21 @@ public:
     virtual double getMaterialIOR(double time) const OVERRIDE;
     virtual std::string getMaterialTextureFile() const OVERRIDE;
     virtual std::string getMaterialDiffuseColorspace() const OVERRIDE;
+    virtual std::string getMaterialNormalMapFile() const OVERRIDE;
+    virtual std::string getMaterialRoughnessMapFile() const OVERRIDE;
+    virtual std::string getMaterialMetallicMapFile() const OVERRIDE;
+    virtual std::string getMaterialOpacityMapFile() const OVERRIDE;
     virtual bool hasMaterialInput() const OVERRIDE;
     virtual MaterialProvider* getConnectedMaterial() const OVERRIDE;
+
+    /**
+     * @brief The file material the node-level material getters present in
+     * single-mesh mode: the selected part's material (Object menu), else the
+     * first part that carries one — the same selection
+     * applyImportedMaterialKnobs() mirrored into the material knobs at load.
+     * Returns null when nothing is loaded or the file has no material.
+     */
+    const GeoImportMaterial* activeFileMaterial() const;
 
     // --- ArchiveProvider interface (active when Output Single Mesh is OFF) ---
     // Ported from ReadGeoArchive — the consumers (SceneGraph::rebuild,
