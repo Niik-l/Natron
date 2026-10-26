@@ -72,6 +72,14 @@ struct MeshData
     std::vector<float> vertexColors; // r,g,b per face-corner
     bool hasVertexColors;
 
+    // Per-face material index into the loader's file-material table (the
+    // merged single-mesh payload of a multi-material file —
+    // ReadGeo::getMergedMaterialProvider resolves the index to a provider).
+    // Parallel to faceCounts; -1 = face has no file material (falls back to
+    // the node-level material knobs). EMPTY = not populated — the consumers
+    // supporting this must treat any other value as a single-material mesh.
+    std::vector<int> faceMaterials;
+
     float transform[16];             // 4x4 column-major transform
     std::size_t numVertices;
     std::size_t numFaces;

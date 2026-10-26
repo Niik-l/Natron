@@ -3059,6 +3059,18 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             if (vit != visibilityMap->end() && vit->second.reflectionMatte) isMatteObj = true;
         }
         ccl::Shader* objShader = nullptr;
+        // Merged single-mesh per-face file materials (ReadGeo outputSingleMesh
+        // ON): sn.meshData->faceMaterials carries a compressed slot per face
+        // (position in getMergedMaterialProvider's table +1; 0 = faces without
+        // a file material). >1 distinct slot → one shader per slot, so a
+        // multi-material merged model (mixamo.fbx: Shoes/Top/Bottom/Hair/Body/
+        // Eyelashes/Eyes) shades per part instead of everything (first part's
+        // single knob-mirror material — the garbled-texture bug).
+        int mergedSlotCount = 0;      // shader slots 1..mergedSlotCount exist
+        MaterialProvider* fallbackMat = nullptr;
+        ReadGeo* mergedGeo = nullptr;
+        bool mergedUseFaceMats = false;
+        bool vcolOn = (std::getenv("NATRON_GEOIO_NO_VCOL") == NULL);
         if (_impl->emissiveMatteMode && isMatteObj) {
             // Matte render: override this object's material with white emission.
             objShader = createEmissiveMatteShader(scene);
@@ -3086,23 +3098,107 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             } else if (srcNode) {
                 MaterialProvider* matProv = dynamic_cast<MaterialProvider*>(srcNode->getEffectInstance().get());
                 if (matProv) {
-                    // Face colors baked on the merged mesh (ReadGeo multi-part
-                    // file): tint the material with them. NATRON_GEOIO_NO_VCOL=1
-                    // kills the face-color chain (plain Principled) — shader-A/B
-                    // switch for invisible-object debugging.
-                    const bool vcolOn = (std::getenv("NATRON_GEOIO_NO_VCOL") == NULL);
-                    objShader = createMaterialShader(scene, matProv, time,
-                                                     /*particleColorTint*/ false,
-                                                     /*particleEmissionStrength*/ -1.0f,
-                                                     (vcolOn && sn.type == eSceneNodeMesh) ? meshData.get() : nullptr);
+                    mergedGeo = dynamic_cast<ReadGeo*>(srcNode->getEffectInstance().get());
+                    mergedSlotCount = (mergedGeo && sn.type == eSceneNodeMesh)
+                                          ? mergedGeo->getMergedMaterialCount() : 0;
+                    if (mergedSlotCount > 1 && !matProv->hasMaterialInput()) {
+                        // Multi-material merged payload (a connected Material3D
+                        // input still overrides the whole node — resolved by
+                        // createMaterialShader on the fallback).
+                        fallbackMat = matProv;
+                        mergedUseFaceMats = true;
+                    } else {
+                        mergedSlotCount = 0;
+                        // Face colors baked on the merged mesh (ReadGeo multi-part
+                        // file): tint the material with them. NATRON_GEOIO_NO_VCOL=1
+                        // kills the face-color chain (plain Principled) — shader-A/B
+                        // switch for invisible-object debugging.
+                        objShader = createMaterialShader(scene, matProv, time,
+                                                         /*particleColorTint*/ false,
+                                                         /*particleEmissionStrength*/ -1.0f,
+                                                         (vcolOn && sn.type == eSceneNodeMesh) ? meshData.get() : nullptr);
+                    }
                 }
             }
         }
 
         ccl::Mesh* mesh = scene->create_node<ccl::Mesh>();
 
-        // Assign per-object shader
-        if (objShader) {
+        bool trisAdded = false;
+        ccl::array<ccl::Node*> merged_used_shaders;
+        std::vector<int> merged_triSlot;
+        if (mergedUseFaceMats) {
+            // Slot 0: faces WITHOUT a file material bind the node-level knob
+            // shader (the face-color tinted material). Always present so the
+            // per-face shader indices stay stable.
+            objShader = createMaterialShader(scene, fallbackMat, time,
+                                             /*particleColorTint*/ false,
+                                             /*particleEmissionStrength*/ -1.0f,
+                                             (vcolOn ? meshData.get() : nullptr));
+            std::vector<ccl::Shader*> slotShaders;
+            slotShaders.push_back(objShader);
+            for (int k = 0; k < mergedSlotCount; ++k) {
+                MaterialProvider* mp = mergedGeo->getMergedMaterialProvider(k);
+                slotShaders.push_back(mp ? createMaterialShader(scene, mp, time)
+                                         : nullptr);
+            }
+            // A missing per-slot shader folds that slot's faces back to slot 0.
+            std::vector<int> remap(mergedSlotCount + 1, 0);
+            int nextSlot = 1;
+            if (slotShaders[0]) merged_used_shaders.push_back_slow(slotShaders[0]);
+            remap[0] = slotShaders[0] ? 0 : -1;
+            for (int k = 1; k <= mergedSlotCount; ++k) {
+                if (slotShaders[k]) {
+                    remap[k] = nextSlot;
+                    ++nextSlot;
+                    merged_used_shaders.push_back_slow(slotShaders[k]);
+                } else {
+                    remap[k] = slotShaders[0] ? 0 : -1;
+                }
+            }
+            int lostSlots = 0;
+            for (int k = 0; k <= mergedSlotCount; ++k) {
+                if (remap[k] < 0) ++lostSlots;
+            }
+            if ((int)merged_used_shaders.size() > 1 && lostSlots == 0) {
+                // Per-face shader walk (the fan expansion that matches the
+                // triangulation order used to build triVerts).
+                const int nFaces = (int)meshData->faceCounts.size();
+                merged_triSlot.reserve(numTris);
+                for (int f = 0; f < nFaces; ++f) {
+                    const int count = meshData->faceCounts[f];
+                    const int slot = ((std::size_t)f < meshData->faceMaterials.size())
+                                         ? meshData->faceMaterials[f] : 0;
+                    const int remapSlot = (slot >= 0 && slot < (int)remap.size())
+                                              ? remap[slot] : 0;
+                    for (int t = 1; t < count - 1; ++t) {
+                        merged_triSlot.push_back(remapSlot < 0 ? 0 : remapSlot);
+                    }
+                }
+                if ((int)merged_triSlot.size() != numTris) {
+                    merged_used_shaders.clear(); // fall back the whole build
+                    merged_triSlot.clear();
+                }
+                if (scDebugEnabled()) {
+                    std::vector<int> hist(mergedSlotCount + 1, 0);
+                    for (std::size_t t = 0; t < merged_triSlot.size(); ++t) {
+                        const int v = merged_triSlot[t];
+                        if (v >= 0 && v <= mergedSlotCount) ++hist[v];
+                    }
+                    std::fprintf(stderr, "[Cycles MGAT] '%s' slots=%d hist:", sn.name.c_str(), mergedSlotCount);
+                    for (int v = 0; v <= mergedSlotCount; ++v) std::fprintf(stderr, " %d:%d", v, hist[v]);
+                    std::fprintf(stderr, "\n");
+                }
+            } else {
+                // Index alignment can't be guaranteed (null shaders with faces
+                // mapped to slot 0) — degenerate to the old single-shader path.
+                merged_used_shaders.clear();
+                merged_triSlot.clear();
+            }
+        }
+        if ((int)merged_used_shaders.size() > 1) {
+            mesh->set_used_shaders(merged_used_shaders);
+        } else if (objShader) {
             ccl::array<ccl::Node*> used_shaders;
             used_shaders.push_back_slow(objShader);
             mesh->set_used_shaders(used_shaders);
@@ -3123,8 +3219,18 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             for (size_t v = 0; v < verts.size(); ++v) {
                 mesh->add_vertex(verts[v]);
             }
-            for (int t = 0; t < numTris; ++t) {
-                mesh->add_triangle(triVerts[t * 3 + 0], triVerts[t * 3 + 1], triVerts[t * 3 + 2], 0, true);
+            if ((int)merged_used_shaders.size() > 1) {
+                for (int t = 0; t < numTris; ++t) {
+                    mesh->add_triangle(triVerts[t * 3 + 0], triVerts[t * 3 + 1],
+                                       triVerts[t * 3 + 2], merged_triSlot[t], true);
+                }
+                trisAdded = true;
+            }
+            if (!trisAdded) {
+                for (int t = 0; t < numTris; ++t) {
+                    mesh->add_triangle(triVerts[t * 3 + 0], triVerts[t * 3 + 1],
+                                       triVerts[t * 3 + 2], 0, true);
+                }
             }
 
             // Per-vertex normals supplied by the primitive generators (see
@@ -3201,8 +3307,8 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     }
                 }
             }
-
         }
+
 
         // Motion blur for animated meshes (vertex deformation only — Cycles
         // reads ATTR_STD_MOTION_VERTEX_POSITION and interpolates between the

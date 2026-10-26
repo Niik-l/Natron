@@ -167,10 +167,23 @@ public:
     bool getEntryWorldMatrix(int idx, double time, float outWorld[16]) const OVERRIDE;
     bool getRootMatrix(float outRoot[16]) const OVERRIDE;
     MaterialProvider* getEntryMaterialProvider(int idx) const OVERRIDE;
+    /** @brief Per-face file materials of the single-mode MERGED mesh
+     *  (the Cycles consumer). count = distinct file materials present on the
+     *  last merged build (0 = none — consumers fall back to the node-level
+     *  material knobs); i indexes that distinct set, first-use order. */
+    int getMergedMaterialCount() const;
+    MaterialProvider* getMergedMaterialProvider(int i) const;
     /** @brief Mode flag: false = single mesh (getMeshData path), true = the
      *  multi-emit hierarchy above. The knob's missing-from-project fallback
      *  is single-mesh (the default knob value is ON). */
     bool isMultiEmit() const OVERRIDE;
+
+Q_SIGNALS:
+    // Archive contents tree auto-refresh (ArchiveTreeWidget connects to this
+    // signal by name on any ArchiveProvider node). The unified node was
+    // merged from the archive node WITHOUT it — the tree was built once at
+    // panel construction and never refreshed on load / mode flip / Reload.
+    void archiveReloaded();
 
 private:
 
@@ -249,6 +262,14 @@ private:
     // Write file-authored PBR values into the material knobs (Material page +
     // Texture Maps page). Only called when the file actually had a material.
     void applyImportedMaterialKnobs(const GeoImportMaterial& material);
+    // Reset the material knobs to the no-material defaults + clear the
+    // texture — a newly loaded file that carries NO material must not
+    // inherit the previous file's material (the stale-texture bug: swap
+    // mixamo.fbx to a material-less liquid sequence and Cycles renders a
+    // texture that no longer exists). Deliberately NOT run when the file has
+    // a material: applyImportedMaterialKnobs overwrites everything in that
+    // case. Caller holds _meshMutex, GUI thread.
+    void resetMaterialKnobs();
     // Dispatch on file extension (.obj/.abc), guarded by _imp->isLoading, then
     // refresh metadata. Shared by knobChanged (file/reload/object change) and
     // onKnobsLoaded (project load).

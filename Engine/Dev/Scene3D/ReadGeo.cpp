@@ -453,6 +453,14 @@ struct ReadGeoPrivate
     std::vector<int> visible;
     mutable std::map<int, std::shared_ptr<RGEntryMaterialAdapter>> entryMaterials;
 
+    // Single-mode merged mesh per-face file materials (the Cycles consumer):
+    // distinct material indices of the last merged build (first-use order —
+    // getMergedMaterialProvider's index space) + the cached provider
+    // adapters. Guarded by _meshMutex (written in buildSceneMesh / loaders).
+    std::vector<int> mergedMaterialList;
+    mutable std::vector<std::shared_ptr<RGEntryMaterialAdapter>>
+        mergedMaterialAdapters;
+
     // Transform
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
@@ -542,6 +550,15 @@ struct ReadGeoPrivate
     bool hasAnimatedVerts = false;
     size_t numVertexSamples = 0;
     std::vector<std::vector<float>> vertexSamples; // each: numVerts * 3 floats
+
+    // Varying-topology payloads (e.g. RealFlow stitched particle meshes whose
+    // POSITION array grows every sample): when the samples' vertex counts do
+    // not all match sample 0, the loader pre-loads ONE FULL MeshData per
+    // sample instead of the lerp-friendly arrays. Served per frame by
+    // nearest-sample lookup (vertex lerp is impossible across a topology
+    // boundary). Guarded by _meshMutex like the rest of the load state.
+    bool abcVaryingTopology = false;
+    std::vector<MeshDataPtr> abcVaryingSamples;
 
     // --- Alembic multi-emit (Output Single Mesh OFF, .abc file) ---
     // The rgAbc* engine state (see the RgAbcEntry model at parseObj's side):
@@ -1122,6 +1139,8 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
             _imp->seq = GeoSequenceInfo();
             _imp->visible.clear();
             _imp->entryMaterials.clear();
+            _imp->mergedMaterialList.clear();
+            _imp->mergedMaterialAdapters.clear();
             _imp->seqRt.clear();
             _imp->rt.clear();
             _imp->abcEntries.clear();
@@ -1260,7 +1279,7 @@ void
 ReadGeo::loadGeoFromFile(const std::string& path)
 {
     // Serialise (re)loads against getMeshData readers on render threads.
-    std::lock_guard<std::mutex> lk(_meshMutex);
+    std::unique_lock<std::mutex> lk(_meshMutex);
 
     // Drop the previous geometry FIRST — clearing the path or a failed load
     // must not keep serving the old mesh (stale-render class).
@@ -1278,6 +1297,8 @@ ReadGeo::loadGeoFromFile(const std::string& path)
     _imp->frameCache.clear();
     _imp->visible.clear();
     _imp->entryMaterials.clear();
+    _imp->mergedMaterialList.clear();
+    _imp->mergedMaterialAdapters.clear();
     _imp->seqRt.clear();
     _imp->rt.clear();
     _imp->abcEntries.clear();
@@ -1312,6 +1333,9 @@ ReadGeo::loadGeoFromFile(const std::string& path)
     // Re-entrancy guard: loading modifies knobs which would re-trigger knobChanged.
     _imp->isLoading = true;
 
+    // Stale-material guard (below): did this call REPLACE a previously loaded
+    // DIFFERENT file? loadPath (not `path`) — sequences resolve to frame 0.
+
     // Detect the sequence from the stored value BEFORE loading. With the
     // Read-node dialog practice the value is either a '#' pattern (the
     // dialog's Sequence: mode) or a literal path (File: mode); detection
@@ -1333,6 +1357,10 @@ ReadGeo::loadGeoFromFile(const std::string& path)
     }
 
     const std::string e = extOf(loadPath);
+    // Stale-material guard: did this call REPLACE a previously loaded
+    // DIFFERENT file? loadPath (not `path`) — sequences resolve to frame 0.
+    const std::string prevLoaded = _imp->loadedFilePath;
+    const bool fileChanged = prevLoaded.empty() ? false : (prevLoaded != loadPath);
     const bool multiEmit = isMultiEmit();
     if (multiEmit) {
         // Object-hierarchy mode: the formats the GeoArchiveRuntime parse
@@ -1385,11 +1413,25 @@ ReadGeo::loadGeoFromFile(const std::string& path)
         }
     }
 
+    // File swap on the OBJ/ABC single loaders: they never touch the material
+    // knobs (obj/abc carry no file materials) — a swapped file must not
+    // inherit the previous file's material/texture (scène formats reset in
+    // loadSceneGeo). Same file (Reload / filter re-run) keeps user settings.
+    if (!multiEmit && fileChanged && e != ".gltf" && e != ".glb" && e != ".fbx") {
+        resetMaterialKnobs();
+    }
+
     _imp->isLoading = false;
     // Re-read metadata so getPreferredMetadata picks up the new
     // hasAnimatedXform / hasAnimatedVerts flags (Scene3D + ScanlineRender
     // cache need to see frame-varying when the new file has animation).
     refreshMetadata_public(true);
+
+    // Auto-refresh the consumer widgets (Archive contents tree). Outside
+    // _meshMutex — the slot calls getEntryTree which takes it (the
+    // ReadAlembicArchive deadlock lesson).
+    lk.unlock();
+    Q_EMIT archiveReloaded();
 }
 
 void
@@ -1488,6 +1530,8 @@ ReadGeo::loadAlembicGeo(const std::string& path)
         _imp->hasAnimatedVerts = false;
         _imp->numVertexSamples = 0;
         _imp->vertexSamples.clear();
+        _imp->abcVaryingTopology = false;
+        _imp->abcVaryingSamples.clear();
 
         bool isPoly = IPolyMesh::matches(obj.getHeader());
         bool isSubD = ISubD::matches(obj.getHeader());
@@ -1509,11 +1553,76 @@ ReadGeo::loadAlembicGeo(const std::string& path)
             readMeshArrays(posPtr, numVerts, idxPtr, numIdx, cntPtr, numFaces, mesh.get());
 
             // Pre-load all vertex samples if the mesh is animated. Topology
-            // (faceIndices/faceCounts) is assumed constant â€” only positions
+            // (faceIndices/faceCounts) is assumed constant — only positions
             // change. Stored in _imp->vertexSamples for per-frame memcpy via
             // updateVerticesAtTime. See ReadGeoPrivate::hasAnimatedVerts.
+            // EXCEPTION: exporters like RealFlow's stitched Alembic GROW the
+            // POSITION array every sample (particles being born) — those
+            // samples don't match sample 0's size and the lerp arrays above
+            // stay empty, so the mesh froze on sample 0 while scrubbing.
+            // Detect that and pre-load one FULL MeshData per sample instead
+            // (served by nearest-sample lookup from getMeshData).
             const size_t numVertSamples = schema.getNumSamples();
+            bool topologyConstant = true;
+            std::vector<size_t> sampleVertCounts;
             if (numVertSamples > 1) {
+                sampleVertCounts.reserve(numVertSamples);
+                for (size_t s = 0; s < numVertSamples; ++s) {
+                    Alembic::Abc::ISampleSelector ss((Alembic::Abc::index_t)s);
+                    IPolyMeshSchema::Sample peek;
+                    schema.get(peek, ss);
+                    const Alembic::Abc::P3fArraySamplePtr& p = peek.getPositions();
+                    const size_t c = p ? p->size() : 0;
+                    sampleVertCounts.push_back(c);
+                    if (c != numVerts) topologyConstant = false;
+                }
+            }
+            if (numVertSamples > 1 && !topologyConstant) {
+                // Varying topology: full per-sample MeshData pre-load.
+                _imp->hasAnimatedVerts = true;
+                _imp->abcVaryingTopology = true;
+                _imp->numVertexSamples = numVertSamples;
+                _imp->vertexSamples.clear();
+                _imp->abcVaryingSamples.assign(numVertSamples, MeshDataPtr());
+                for (size_t s = 0; s < numVertSamples; ++s) {
+                    Alembic::Abc::ISampleSelector ss((Alembic::Abc::index_t)s);
+                    IPolyMeshSchema::Sample animSample;
+                    schema.get(animSample, ss);
+                    const Alembic::Abc::P3fArraySamplePtr& positions = animSample.getPositions();
+                    if (!positions || positions->size() == 0) continue;
+                    MeshDataPtr vary(new MeshData);
+                    const void* aPos = reinterpret_cast<const void*>(positions->get());
+                    const size_t aNumVerts = positions->size();
+                    const void* aIdx = animSample.getFaceIndices() ?
+                                           animSample.getFaceIndices()->get() : nullptr;
+                    const size_t aNumIdx = animSample.getFaceIndices() ?
+                                           animSample.getFaceIndices()->size() : 0;
+                    const void* aCnt = animSample.getFaceCounts() ?
+                                           animSample.getFaceCounts()->get() : nullptr;
+                    const size_t aNumFaces = animSample.getFaceCounts() ?
+                                             animSample.getFaceCounts()->size() : 0;
+                    if (aIdx && aCnt) {
+                        readMeshArrays(aPos, aNumVerts, aIdx, aNumIdx, aCnt, aNumFaces,
+                                       vary.get());
+                        importBuildEdgeIndices(vary.get());
+                        IV2fGeomParam uvParamA = schema.getUVsParam();
+                        if (uvParamA.valid()) {
+                            IV2fGeomParam::Sample uvSampleA;
+                            uvParamA.getExpanded(uvSampleA, ss);
+                            const Alembic::Abc::V2fArraySamplePtr& uvValsA = uvSampleA.getVals();
+                            if (uvValsA && uvValsA->size() > 0) {
+                                const float* rawUVA =
+                                    reinterpret_cast<const float*>(uvValsA.get());
+                                vary->uvs.resize(uvValsA->size() * 2);
+                                std::memcpy(vary->uvs.data(), rawUVA,
+                                            uvValsA->size() * 2 * sizeof(float));
+                                vary->hasUVs = true;
+                            }
+                        }
+                        _imp->abcVaryingSamples[s] = vary;
+                    }
+                }
+            } else if (numVertSamples > 1) {
                 _imp->hasAnimatedVerts = true;
                 _imp->numVertexSamples = numVertSamples;
                 _imp->vertexSamples.assign(numVertSamples, std::vector<float>());
@@ -1527,6 +1636,10 @@ ReadGeo::loadAlembicGeo(const std::string& path)
                     _imp->vertexSamples[s].resize(numVerts * 3);
                     std::memcpy(_imp->vertexSamples[s].data(), posPtrAnim,
                                 numVerts * 3 * sizeof(float));
+                    if (std::getenv("NATRON_DEBUG_GEOIO") && (s == 0 || s == 1 || s == 20)) {
+                        std::fprintf(stderr, "[RG-ABC1] preload sample %u v0=(%.4f,%.4f,%.4f)\n",
+                                     (unsigned)s, posPtrAnim[0], posPtrAnim[1], posPtrAnim[2]);
+                    }
                 }
             }
 
@@ -2730,10 +2843,16 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
                       const std::string& chosenLabel,
                       int chosenIdx,
                       bool bake,
-                      double fps, double timeEff, int key)
+                      double fps, double timeEff, int key,
+                      std::vector<int>* outUsedMaterialIdxs = nullptr)
 {
     const GeoArchiveResult& data = rt.data;
     MeshDataPtr mesh(new MeshData);
+    // Per-face material slots (merged builds): distinct file-material indices
+    // in first-use order — the stored face value is position+1 (0 = no file
+    // material). outUsedMaterialIdxs hands the table back to buildSceneMesh
+    // for getMergedMaterialProvider's index space.
+    std::vector<int> usedMats;
 
     if (chosenIdx == 0) {
         // Merged: every mesh entry's evaluated vertices baked through its
@@ -2773,8 +2892,37 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
                                  srcM.vertices[2], (int)srcM.numVertices);
                 }
             }
+            // Per-face material trace: the merged mesh may span several file
+            // materials — record each face's compressed slot (position+1 in
+            // usedMats, 0 = no material) so Cycles binds one shader per
+            // slot. Faces of parts with no file material get 0.
+            const std::size_t faceStart = mesh->faceCounts.size();
             appendArchiveMesh(*st->deformed[nd.meshIndex], world, mesh.get(),
                               partColor[0] >= 0.f ? partColor : nullptr);
+            const std::size_t faceEnd = mesh->faceCounts.size();
+            if (faceEnd > faceStart) {
+                mesh->faceMaterials.resize(faceEnd, 0);
+                int slot = 0;
+                bool found = false;
+                if (md.materialIndex >= 0 &&
+                    md.materialIndex < (int)data.materials.size() &&
+                    data.materials[md.materialIndex].present) {
+                    for (std::size_t j = 0; j < usedMats.size(); ++j) {
+                        if (usedMats[j] == md.materialIndex) {
+                            slot = (int)j + 1;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        usedMats.push_back(md.materialIndex);
+                        slot = (int)usedMats.size();
+                    }
+                }
+                for (std::size_t f = faceStart; f < faceEnd; ++f) {
+                    mesh->faceMaterials[f] = slot;
+                }
+            }
             if (std::getenv("NATRON_DEBUG_GEOIO") && mesh->vertices.size() >= 3) {
                 std::fprintf(stderr,
                              "[GEOIO]   baked v0=(%.4f,%.4f,%.4f)\n",
@@ -2898,6 +3046,9 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
         fprintf(stderr, "%s\n", dbg.str().c_str());
     }
 
+    if (outUsedMaterialIdxs) {
+        *outUsedMaterialIdxs = usedMats;
+    }
     return mesh;
 }
 
@@ -2923,6 +3074,8 @@ ReadGeo::loadSceneGeo(const std::string& path)
     _imp->meshEntries.clear();
     _imp->partLabels.clear();
     _imp->builtCache.clear();
+    _imp->mergedMaterialList.clear();
+    _imp->mergedMaterialAdapters.clear();
     _imp->rt.clear();
 
     const bool reverse = _imp->reverseNormals.lock() && _imp->reverseNormals.lock()->getValue();
@@ -2972,8 +3125,13 @@ ReadGeo::loadSceneGeo(const std::string& path)
     MeshDataPtr mesh = buildSceneMesh(1.0);
 
     // Material: the selected part's (single mode), else the first part that
-    // carries one in the file. With no material in the file the knobs are
-    // left alone (user's manual settings stay).
+    // carries one in the file. A FILE SWAP to a material-less file must NOT
+    // inherit the previous file's material/texture (the knob mirror is the
+    // Cycles single-mode material): reset to defaults then — reloading the
+    // SAME file keeps the user's manual settings.
+    const bool replacingFile = _imp->loadedFilePath.empty()
+                                   ? false
+                                   : (_imp->loadedFilePath != path);
     const GeoImportMaterial* mat = NULL;
     if (chosenIdx > 0) {
         const GeoArchiveNodeData& nd = data.nodes[_imp->meshEntries[chosenIdx - 1]];
@@ -2994,6 +3152,8 @@ ReadGeo::loadSceneGeo(const std::string& path)
     }
     if (mat) {
         applyImportedMaterialKnobs(*mat);
+    } else if (replacingFile) {
+        resetMaterialKnobs();
     }
 
     _imp->loadedFilePath = path;
@@ -3104,8 +3264,19 @@ ReadGeo::buildSceneMesh(double time) const
     const std::string chosenLabel =
         (chosenIdx >= 0 && chosenIdx < (int)imp->partLabels.size())
             ? imp->partLabels[chosenIdx] : std::string();
+    std::vector<int> usedMats;
     MeshDataPtr mesh = geoBuildSceneMeshCore(imp->rt, st, imp->meshEntries, chosenLabel,
-                                             chosenIdx, bake, fps, timeEff, key);
+                                             chosenIdx, bake, fps, timeEff, key, &usedMats);
+
+    // Per-face material table (merged builds): the core's distinct file
+    // material indices, first-use order — getMergedMaterialProvider's index
+    // space (face values on MeshData are position+1). Empty when the file
+    // carries no materials or a single part is selected.
+    imp->mergedMaterialList.clear();
+    imp->mergedMaterialAdapters.clear();
+    if (chosenIdx == 0 && mesh) {
+        imp->mergedMaterialList = usedMats;
+    }
 
     imp->builtCache.insert(std::make_pair(cacheKey, mesh));
     return mesh;
@@ -3151,6 +3322,30 @@ ReadGeo::buildSceneSeqFrame(int frame, std::string* err) const
             ? _imp->partLabels[chosenIdx] : std::string();
     return geoBuildSceneMeshCore(*frt, st, _imp->meshEntries, chosenLabel,
                                  chosenIdx, bake, fps, 1.0, 0);
+}
+
+void
+ReadGeo::resetMaterialKnobs()
+{
+    if (KnobColorPtr c = _imp->baseColor.lock()) {
+        c->setValue(0.8, ViewSpec::all(), 0);
+        c->setValue(0.8, ViewSpec::all(), 1);
+        c->setValue(0.8, ViewSpec::all(), 2);
+    }
+    if (KnobDoublePtr k = _imp->roughness.lock()) k->setValue(0.5);
+    if (KnobDoublePtr k = _imp->metallic.lock()) k->setValue(0.0);
+    if (KnobDoublePtr k = _imp->specular.lock()) k->setValue(0.5);
+    if (KnobColorPtr c = _imp->emissionColor.lock()) {
+        c->setValue(0.0, ViewSpec::all(), 0);
+        c->setValue(0.0, ViewSpec::all(), 1);
+        c->setValue(0.0, ViewSpec::all(), 2);
+    }
+    if (KnobDoublePtr k = _imp->emissionStrength.lock()) k->setValue(1.0);
+    if (KnobDoublePtr k = _imp->transmission.lock()) k->setValue(0.0);
+    if (KnobDoublePtr k = _imp->ior.lock()) k->setValue(1.45);
+    // The texture is the one the stale render cannot hide — kill it first so
+    // even a partially-applied reset never serves the previous file's image.
+    if (KnobFilePtr k = _imp->textureFile.lock()) k->setValue(std::string());
 }
 
 void
@@ -4251,6 +4446,44 @@ ReadGeo::getEntryMaterialProvider(int idx) const
     return adapter.get();
 }
 
+// --- Single-mode merged mesh per-face file materials (Cycles) ----------------
+
+int
+ReadGeo::getMergedMaterialCount() const
+{
+    // Callers may hold this while a merged build is on the stack — the list
+    // itself is written under _meshMutex in buildSceneMesh (same mutex, so
+    // the read is consistent), and sceneLoaded/abcLoaded gate the payload.
+    std::lock_guard<std::mutex> lk(_meshMutex);
+    if (_imp->abcLoaded) return 0;
+    if (!_imp->sceneLoaded) return 0;
+    return (int)_imp->mergedMaterialList.size();
+}
+
+MaterialProvider*
+ReadGeo::getMergedMaterialProvider(int i) const
+{
+    std::lock_guard<std::mutex> lk(_meshMutex);
+    if (_imp->abcLoaded || !_imp->sceneLoaded ||
+        i < 0 || i >= (int)_imp->mergedMaterialList.size()) {
+        return nullptr;
+    }
+    if (i < (int)_imp->mergedMaterialAdapters.size() &&
+        _imp->mergedMaterialAdapters[i]) {
+        return _imp->mergedMaterialAdapters[i].get();
+    }
+    const int matIdx = _imp->mergedMaterialList[i];
+    if (matIdx < 0 || matIdx >= (int)_imp->rt.data.materials.size() ||
+        !_imp->rt.data.materials[matIdx].present) {
+        return nullptr;
+    }
+    std::shared_ptr<RGEntryMaterialAdapter> adapter =
+        std::make_shared<RGEntryMaterialAdapter>(_imp->rt.data.materials[matIdx]);
+    _imp->mergedMaterialAdapters.resize(i + 1);
+    _imp->mergedMaterialAdapters[i] = adapter;
+    return adapter.get();
+}
+
 // --- Re-build Materials (multi-emit) -----------------------------------------
 // Standalone ReadGeo + Material3D node set under Group3D, replicating this
 // node's archive-mode output; the port of ReadGeoArchive::rebuildMaterialsSet
@@ -4702,6 +4935,25 @@ ReadGeo::getMeshData(double time) const
                                ? _imp->freezeFrame.lock()->getValue() : 1);
     }
 
+    // Varying-topology .abc: serve the nearest sample's full MeshData (a
+    // fresh copy — the payload cache material is immutable). Vertex lerp is
+    // impossible across a topology boundary; the xform anim still interpolates.
+    if (_imp && _imp->abcVaryingTopology && !_imp->abcVaryingSamples.empty()) {
+        const int N = (int)_imp->abcVaryingSamples.size();
+        int idx = (int)std::floor(effTime - 1.0);
+        if (idx < 0) idx = 0;
+        if (idx >= N) idx = N - 1;
+        MeshDataPtr pick = _imp->abcVaryingSamples[idx];
+        if (pick) {
+            MeshDataPtr out(new MeshData(*pick));
+            if (out && _imp->hasAnimatedXform && _imp->numXformSamples > 0 &&
+                !_imp->xformMatrices.empty()) {
+                updateTransformAtTime(out.get(), effTime);
+            }
+            return out;
+        }
+    }
+
     if (_lastMeshData && effTime >= 0 && _imp) {
         if (_imp->hasAnimatedXform && _imp->numXformSamples > 0 &&
             !_imp->xformMatrices.empty()) {
@@ -4710,6 +4962,16 @@ ReadGeo::getMeshData(double time) const
         if (_imp->hasAnimatedVerts && _imp->numVertexSamples > 0 &&
             !_imp->vertexSamples.empty()) {
             updateVerticesAtTime(_lastMeshData.get(), effTime);
+        }
+        if (std::getenv("NATRON_DEBUG_GEOIO")) {
+            std::fprintf(stderr,
+                "[RG-ABC1] getMeshData t=%.2f animX=%d numXf=%u animV=%d numVs=%u v0=(%.4f,%.4f,%.4f)\n",
+                effTime, (int)_imp->hasAnimatedXform,
+                (unsigned)_imp->numXformSamples, (int)_imp->hasAnimatedVerts,
+                (unsigned)_imp->numVertexSamples,
+                _lastMeshData->vertices.size() >= 3 ? _lastMeshData->vertices[0] : 0.f,
+                _lastMeshData->vertices.size() >= 3 ? _lastMeshData->vertices[1] : 0.f,
+                _lastMeshData->vertices.size() >= 3 ? _lastMeshData->vertices[2] : 0.f);
         }
     }
 
