@@ -80,6 +80,7 @@ private:
     void writeExcludedPathsToKnob();
     void redisplayChecks();
     void rebuildFromArchive();
+    bool updateModeVisibility();
     void setBranchChecked(QTreeWidgetItem* root, bool checked);
     void applySearchFilter(const QString& text);
 
@@ -91,6 +92,7 @@ private:
     bool _applyingExcluded;           // writing excludedPaths → skip the self-induced
                                       // archiveReloaded rebuild (would delete the item
                                       // mid-itemChanged signal → use-after-free crash)
+    bool _modeVisible;                // tree shown (multi-emit / pure archive node)
 };
 
 NATRON_NAMESPACE_EXIT

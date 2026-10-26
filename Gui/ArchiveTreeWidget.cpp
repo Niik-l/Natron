@@ -40,6 +40,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/KnobTypes.h"
 #include "Engine/EffectInstance.h"
 #include "Engine/Dev/Scene3D/ArchiveProvider.h"
+#include "Engine/Dev/Scene3D/ReadGeo.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -73,8 +74,9 @@ ArchiveTreeWidget::ArchiveTreeWidget(EffectInstance* archive, QWidget* parent)
     , _provider(archive ? dynamic_cast<ArchiveProvider*>(archive) : NULL)
     , _search(nullptr)
     , _tree(nullptr)
-    , _suppressItemChanged(false)
-    , _applyingExcluded(false)
+, _suppressItemChanged(false)
+, _applyingExcluded(false)
+, _modeVisible(true)
 {
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(2, 4, 2, 2);
@@ -194,11 +196,35 @@ ArchiveTreeWidget::ArchiveTreeWidget(EffectInstance* archive, QWidget* parent)
                          this, SLOT(refresh()));
     }
 
-    rebuildFromArchive();
+    updateModeVisibility();
+    if (_modeVisible) {
+        rebuildFromArchive();
+    }
 }
 
 ArchiveTreeWidget::~ArchiveTreeWidget()
 {
+}
+
+bool
+ArchiveTreeWidget::updateModeVisibility()
+{
+    // The dual-interface ReadGeo serves archive entries only with Output
+    // Single Mesh OFF — in single-mesh mode the accessors are inert and the
+    // tree would show a dead hierarchy. Pure archive nodes (ReadAlembicArchive
+    // / ReadGeoArchive) always show. Called on construction and on every
+    // archiveReloaded() (a mode flip re-loads the file and emits it), so the
+    // tree appears/disappears live while the panel stays open. Returns the
+    // computed mode (true = tree should be shown).
+    bool multi = true;
+    if (_provider) {
+        if (ReadGeo* rg = dynamic_cast<ReadGeo*>(_provider)) {
+            multi = rg->isMultiEmit();
+        }
+    }
+    _modeVisible = multi;
+    setVisible(multi);
+    return multi;
 }
 
 void
@@ -211,6 +237,8 @@ ArchiveTreeWidget::refresh()
     // write - deleting the clicked item out from under Qt (use-after-free crash).
     // Legitimate reloads (file change, Reload button) still rebuild, and the
     // Refresh button calls rebuildFromArchive() directly.
+    const bool multi = updateModeVisibility();
+    if (!multi) return;
     if (_applyingExcluded) return;
     rebuildFromArchive();
 }
@@ -218,6 +246,7 @@ ArchiveTreeWidget::refresh()
 void
 ArchiveTreeWidget::onRefreshClicked()
 {
+    if (!_modeVisible) return;
     rebuildFromArchive();
 }
 
