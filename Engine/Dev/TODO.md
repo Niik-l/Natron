@@ -14,6 +14,8 @@ Tracking known bugs, incomplete features, and planned improvements.
 
 ## My TODO (user priorities)
 
+- [ ] **Re-verify the 2026-10-25 evening bug-set renders under the FIXED build** (the session died before this): yesterday's `bug1`/`bug2`/`bug5` PNGs in `tools/geoio-tests/out/bugset/` predate the final 21:43 rebuild + staging, so their single-vs-multi verdicts are stale. Re-run `readgeo_bugset_repro.py` legs ONE RENDER PER PROCESS (`%TEMP%\opencode\bg3x_oneshot.py` pattern) with `frameRange` pinned — the 2026-10-26 recheck proved the same-session pair goes byte-identical (stale re-render, TODO (f)) and unpinned runs capture mid-write debris frames. Merged per-face materials themselves ARE verified (`[Cycles MGAT]` slots=6 hist all-assigned, `[CYCMAT]` 7 correct binds, soft-light render `bg3z_soft_f0001.png` shows per-part textures). GUI pass still pending (archiveReloaded tree refresh is GUI-only).
+
 Pruned 2026-10-13: finished items moved to **Done (2026)** at the end of this section with their dates. The long diagnostic notes of the fixed bugs live in git history (`git log -p -- Engine/Dev/TODO.md`).
 
 ### Waiting on a GUI test

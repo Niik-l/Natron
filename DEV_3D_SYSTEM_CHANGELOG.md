@@ -1,4 +1,18 @@
 # Natron 3D System
+- **Per-face file materials on the merged mesh + stale-material reset + tree refresh signal (2026-10-25/26, `f8096803c`)** —
+  the 2026-10-25 evening bug-set fixes, recovered and verified 2026-10-26 after the session died mid-verification.
+  (1) ReadGeo's merged single-mesh output of a multi-material file (e.g. mixamo.fbx, 7 parts) now shades per part in
+  Cycles: `MeshData::faceMaterials` (per-face slot parallel to `faceCounts`; empty = single-material mesh),
+  `ReadGeo::getMergedMaterialCount/Provider` (distinct file-material table, first-use order, `_meshMutex`-guarded),
+  and `CyclesRenderer::syncSceneWithCamera` builds one shader per slot (slot 0 = node-knob fallback) with
+  per-triangle shader indices matched to the fan-expansion triangulation order (`[Cycles MGAT]` debug gate); a
+  connected Material3D input still overrides the whole node. (2) `ReadGeo::resetMaterialKnobs` — a newly loaded file
+  without a material resets the material knobs and clears `textureFile`, so swapping e.g. mixamo.fbx to a
+  material-less liquid sequence no longer renders the previous file's texture (verified state-level both directions).
+  (3) `archiveReloaded` Q_SIGNAL on load/mode flip/Reload so ArchiveTreeWidget refreshes on the unified node.
+  NOTE: pixel-verifying the swap headlessly is BLOCKED by the stale-re-render defect (TODO (f) — a CyclesRender node
+  serves its first render's pixels for later renders in the same session); the swap is verified via knob/info
+  readback instead (`tools/geoio-tests/readgeo_bugset_stalemat.py` pattern, one-shot scripts + `test-watchdog.ps1`).
 - **ReadGeoArchive node REMOVED — hidden plugin-ID alias keeps old projects (2026-10-25, user decision)** —
   the scene-graph archive reader is gone; the unified ReadGeo uber-node (Output Single Mesh knob, phases 1-3) is
   its only replacement. Compat path: `registerBuiltInPlugin` gained a `pluginIDOverride` parameter and ReadGeo is
