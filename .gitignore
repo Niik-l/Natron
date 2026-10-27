@@ -316,3 +316,5 @@ Engine/Dev/Research_*.md
 # Dev-only tools (local)
 tools/particle_testbed/
 tools/abc_dump.cpp
+tools/mcp/
+tools/geoio-tests/
