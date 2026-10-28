@@ -1036,6 +1036,28 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         float gtx, gty, gtz, grx, gry, grz, gsx, gsy, gsz;
         group->getGroupTransform(time, gtx, gty, gtz, grx, gry, grz, gsx, gsy, gsz);
 
+        // The group's own Pivot X/Y/Z (the Transform3D gizmo / Move-Pivot
+        // buttons write them) and its axis input are already composed into
+        // pass 1's local matrix (getLocalMatrix). Rebuilding from the raw
+        // knobs here used to stomp that sandwich and drop the axis — a
+        // Transform3D with a user-set pivot rendered rotated about the wrong
+        // point. When the group carries its own pivot, pass 1's matrix wins.
+        {
+            float pxk = 0.f, pyk = 0.f, pzk = 0.f;
+            bool knobOk = true;
+            const char* names[3] = { "pivotX", "pivotY", "pivotZ" };
+            float* dsts[3] = { &pxk, &pyk, &pzk };
+            for (int k = 0; k < 3 && knobOk; ++k) {
+                KnobIPtr kk = node->getKnobByName(names[k]);
+                KnobDouble* kd = kk ? dynamic_cast<KnobDouble*>(kk.get()) : NULL;
+                if (!kd) { knobOk = false; break; }
+                *dsts[k] = (float)kd->getValueAtTime(time);
+            }
+            if (knobOk && (pxk != 0.f || pyk != 0.f || pzk != 0.f)) {
+                continue;   // pass 1's getLocalMatrix composition stands
+            }
+        }
+
         float pv[3] = { 0.f, 0.f, 0.f };
         if (pivotMode == 0) {
             // Content bbox centre in the group's pre-transform local frame.
@@ -1078,9 +1100,17 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             pv[0] = gtx; pv[1] = gty; pv[2] = gtz;
         }
 
-        // Fold the pivot into the group's local matrix: T(pv) · TRS · T(−pv).
-        buildTRSPivot(gtx, gty, gtz, grx, gry, grz, gsx, gsy, gsz,
-                      pv[0], pv[1], pv[2], sn.localMatrix);
+        // Fold the rotationPivot into the group's local matrix — re-compose
+        // pass 1's matrix (which may already carry the axis input and the
+        // group's own Pivot X/Y/Z sandwich) around pv: new = T(pv)·M·T(−pv).
+        // Rebuilding from the raw knobs here dropped both.
+        float tMinus[16], tPlus[16], inner[16];
+        SceneNode::setIdentity(tMinus);
+        SceneNode::setIdentity(tPlus);
+        tMinus[12] = -pv[0]; tMinus[13] = -pv[1]; tMinus[14] = -pv[2];
+        tPlus[12]  =  pv[0]; tPlus[13]  =  pv[1]; tPlus[14]  =  pv[2];
+        multiply(tMinus, sn.localMatrix, inner);   // inner = M · T(−pv) (apply T(−pv) first)
+        multiply(inner, tPlus, sn.localMatrix);    // new = T(pv) · inner
         std::memcpy(sn.pivot, pv, sizeof(pv));
     }
     // A re-composed group changed its (and its subtree's) worlds — recompute.
@@ -1128,6 +1158,15 @@ SceneGraph::computeWorldRecursive(int nodeIdx)
         // own getEntryWorldMatrix (ScanlineRender, motion blur) always composed
         // in the correct order, so the renderers disagreed.
         multiply(node.localMatrix, _nodes[node.parentIndex].worldMatrix, node.worldMatrix);
+        if (std::getenv("NATRON_DEBUG_GEOIO")) {
+            const float* P = _nodes[node.parentIndex].worldMatrix;
+            std::fprintf(stderr,
+                         "[SG-W] '%s' parent '%s' parentT=(%.4f,%.4f,%.4f) "
+                         "worldT=(%.4f,%.4f,%.4f)\n",
+                         node.name.c_str(), _nodes[node.parentIndex].name.c_str(),
+                         P[12], P[13], P[14],
+                         node.worldMatrix[12], node.worldMatrix[13], node.worldMatrix[14]);
+        }
         // Propagate disabled state from ancestor: a disabled Group3D / Scene3D
         // hides every node downstream of it.
         if (!_nodes[node.parentIndex].visible) {

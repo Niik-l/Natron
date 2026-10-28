@@ -51,8 +51,11 @@ Viewport3DMeshCache::destroyEntry(Entry& e)
     if (e.cornerVbo) glDeleteBuffers(1, &e.cornerVbo);
     if (e.vertexVbo) glDeleteBuffers(1, &e.vertexVbo);
     if (e.edgeEbo)   glDeleteBuffers(1, &e.edgeEbo);
+    if (e.colorVbo)  glDeleteBuffers(1, &e.colorVbo);
     e.cornerVbo = e.vertexVbo = e.edgeEbo = 0;
+    e.colorVbo = 0;
     e.cornerCount = e.edgeIndexCount = 0;
+    e.hasVColor = false;
     _bytes -= std::min(_bytes, e.bytes);
     e.bytes = 0;
 }
@@ -156,8 +159,14 @@ Viewport3DMeshCache::upload(const MeshData& m, Entry& e)
     if (nTris == 0) return false;
 
     const bool perCornerUV = (m.texCoordComponents == 2) && (m.uvs.size() >= m.faceIndices.size() * 2);
+    const bool perCornerColor = m.hasVertexColors &&
+                                m.vertexColors.size() >= m.faceIndices.size() * 3;
     std::vector<unsigned char> corners;
     corners.resize(nTris * 3 * (std::size_t)kCornerStride);
+    std::vector<unsigned char> cornerColors;
+    if (perCornerColor) {
+        cornerColors.reserve(nTris * 3 * 4);
+    }
     unsigned char* dst = corners.data();
     std::size_t written = 0;
 
@@ -177,6 +186,18 @@ Viewport3DMeshCache::upload(const MeshData& m, Entry& e)
         packCorner(dst + (written    ) * kCornerStride, p0, n, uv[0], uv[1]);
         packCorner(dst + (written + 1) * kCornerStride, p1, n, uv[2], uv[3]);
         packCorner(dst + (written + 2) * kCornerStride, p2, n, uv[4], uv[5]);
+        if (perCornerColor) {
+            // One face color per triangle corner (the bake repeats it per
+            // face-vertex); quantized to normalized GLubyte for the preview.
+            const std::size_t fc[3] = { f0, f1, f2 };
+            for (int k = 0; k < 3; ++k) {
+                const float* c = &m.vertexColors[fc[k] * 3];
+                cornerColors.push_back((unsigned char)std::min(255.f, std::max(0.f, c[0] * 255.f + 0.5f)));
+                cornerColors.push_back((unsigned char)std::min(255.f, std::max(0.f, c[1] * 255.f + 0.5f)));
+                cornerColors.push_back((unsigned char)std::min(255.f, std::max(0.f, c[2] * 255.f + 0.5f)));
+                cornerColors.push_back(255);
+            }
+        }
         written += 3;
     };
     if (!m.faceCounts.empty()) {
@@ -206,6 +227,7 @@ Viewport3DMeshCache::upload(const MeshData& m, Entry& e)
     }
 
     const std::size_t cornerBytes = written * (std::size_t)kCornerStride;
+    const std::size_t colorBytes  = cornerColors.size();
     const std::size_t vertexBytes = edges.empty() ? 0 : (std::size_t)nv * 12;
     const std::size_t edgeBytes   = edges.size() * sizeof(unsigned int);
 
@@ -214,6 +236,13 @@ Viewport3DMeshCache::upload(const MeshData& m, Entry& e)
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)cornerBytes, corners.data(), GL_STATIC_DRAW);
     e.cornerCount = (GLsizei)written;
     e.hasUV = perCornerUV;
+    e.hasVColor = false;
+    if (perCornerColor && cornerColors.size() == written * 4) {
+        glGenBuffers(1, &e.colorVbo);
+        glBindBuffer(GL_ARRAY_BUFFER, e.colorVbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)colorBytes, cornerColors.data(), GL_STATIC_DRAW);
+        e.hasVColor = true;
+    }
     if (!edges.empty()) {
         glGenBuffers(1, &e.vertexVbo);
         glBindBuffer(GL_ARRAY_BUFFER, e.vertexVbo);
@@ -225,7 +254,7 @@ Viewport3DMeshCache::upload(const MeshData& m, Entry& e)
         e.edgeIndexCount = (GLsizei)edges.size();
     }
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-    e.bytes = cornerBytes + vertexBytes + edgeBytes;
+    e.bytes = cornerBytes + colorBytes + vertexBytes + edgeBytes;
     _bytes += e.bytes;
     return true;
 }
@@ -260,7 +289,11 @@ Viewport3DMeshCache::acquire(const MeshDataPtr& mesh, int paintSerial)
 
     // Rough size before building so a mesh that can never fit is skipped cheaply.
     const std::size_t estTris = estimateTriangles(*mesh);
-    const std::size_t est = estTris * 3 * (std::size_t)kCornerStride + mesh->numVertices * 12 + mesh->edgeIndices.size() * 4;
+    const bool estColors = mesh->hasVertexColors &&
+                           mesh->vertexColors.size() >= mesh->faceIndices.size() * 3;
+    const std::size_t est = estTris * 3 * (std::size_t)kCornerStride
+                            + (estColors ? estTris * 3 * 4 : 0)
+                            + mesh->numVertices * 12 + mesh->edgeIndices.size() * 4;
     if (est > _budget) return NULL;
     evictFor(est, paintSerial);
     if (_bytes + est > _budget) return NULL;

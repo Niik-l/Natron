@@ -314,6 +314,14 @@ Group3D::getLocalMatrix(double time, float out[16], float pivotOut[3]) const
     float trs[16];
     SceneGraph::buildTRSPivot(tx, ty, tz, rx, ry, rz, sx, sy, sz, px, py, pz, trs);
 
+    if (std::getenv("NATRON_DEBUG_GEOIO")) {
+        std::fprintf(stderr,
+                     "[G3D] trs=(%.3f,%.3f,%.3f) rot=(%.1f,%.1f,%.1f) scl=(%.2f,%.2f,%.2f) "
+                     "pivot=(%.3f,%.3f,%.3f) outT=(%.3f,%.3f,%.3f)\n",
+                     tx, ty, tz, rx, ry, rz, sx, sy, sz, px, py, pz,
+                     trs[12], trs[13], trs[14]);
+    }
+
     // out = Axis × TRS (column-major): the node's own transform acts on the
     // vertices first, then the axis parent — the same Parent × Local order
     // SceneGraph uses for the world matrix. SceneGraph::multiply() applies its

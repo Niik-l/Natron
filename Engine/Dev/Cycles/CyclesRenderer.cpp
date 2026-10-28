@@ -893,13 +893,15 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
         const int n = matLogCounter.fetch_add(1);
         double rr, gg, bb;
         mat->getMaterialBaseColor(time, rr, gg, bb);
-        std::        fprintf(stderr, "[CYCMAT] #%d base=(%.3f,%.3f,%.3f) rough=%.3f metal=%.3f tex='%s' texIm=%d texA=%d op=%.3f opMap=%d opInv=%d\n",
+        std::        fprintf(stderr, "[CYCMAT] #%d base=(%.3f,%.3f,%.3f) rough=%.3f metal=%.3f tex='%s' texIm=%d texA=%d op=%.3f opMap=%d opInv=%d trs=%.3f ior=%.3f\n",
                      n, rr, gg, bb, mat->getMaterialRoughness(time), mat->getMaterialMetallic(time),
                      texFile.c_str(), texFile.empty() ? 0 : 1,
                      mat->getMaterialTextureUsesAlpha() ? 1 : 0,
                      mat->getMaterialOpacity(time),
                      resolveTextureFrame(mat->getMaterialOpacityMapFile(), frame).empty() ? 0 : 1,
-                     mat->getMaterialOpacityInvert() ? 1 : 0);
+                     mat->getMaterialOpacityInvert() ? 1 : 0,
+                     mat->getMaterialTransmission(time),
+                     mat->getMaterialIOR(time));
     }
     if (!texFile.empty()) {
         baseTex = graph->create_node<ccl::ImageTextureNode>();
@@ -3453,6 +3455,14 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         ccl::Object* obj = scene->create_node<ccl::Object>();
         obj->set_geometry(mesh);
         obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix));
+
+        if (std::getenv("NATRON_DEBUG_GEOIO")) {
+            std::fprintf(stderr,
+                         "[CYC-WM] '%s' worldT=(%.4f,%.4f,%.4f) worldDiag=(%.4f,%.4f,%.4f)\n",
+                         sn.name.c_str(),
+                         sn.worldMatrix[12], sn.worldMatrix[13], sn.worldMatrix[14],
+                         sn.worldMatrix[0], sn.worldMatrix[5], sn.worldMatrix[10]);
+        }
 
         // Transform motion blur — world matrices sampled at shutter open/close
         // by the caller (SceneGraph rebuilds at those times, so parent Group3D

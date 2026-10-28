@@ -74,6 +74,8 @@ public:
         GLuint vertexVbo = 0;        // original vertex positions (wire pass)
         GLuint edgeEbo = 0;          // GL_UNSIGNED_INT index pairs into vertexVbo
         GLsizei edgeIndexCount = 0;
+        GLuint colorVbo = 0;         // per-corner RGB (3x normalized GLubyte + pad), when the mesh bakes face colors
+        bool hasVColor = false;      // colorVbo carries real per-face file colors
         unsigned long long version = 0;
         std::weak_ptr<MeshData> owner;
         std::size_t bytes = 0;

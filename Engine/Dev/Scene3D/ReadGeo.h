@@ -283,6 +283,11 @@ private:
     // a material: applyImportedMaterialKnobs overwrites everything in that
     // case. Caller holds _meshMutex, GUI thread.
     void resetMaterialKnobs();
+    // True when the material knobs still mirror the file's material (a fresh
+    // node's defaults, or a just-applied mirror). A same-file reload then
+    // re-seeds; a user-diverged set keeps their edits instead of snapping the
+    // sliders back to the loaded values.
+    bool materialKnobsMatchFile(const GeoImportMaterial& material) const;
     // Dispatch on file extension (.obj/.abc), guarded by _imp->isLoading, then
     // refresh metadata. Shared by knobChanged (file/reload/object change) and
     // onKnobsLoaded (project load).

@@ -862,22 +862,8 @@ ReadGeo::initializeKnobs()
     }
 
     // --- Object-hierarchy (multi-emit) controls — hidden while Output Single
-    // Mesh is on (see applyModeVisibility) ---
-    {
-        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Re-build Materials"));
-        k->setName("rebuildMaterials");
-        k->setAnimationEnabled(false);
-        k->setHintToolTip(tr("Analyze the imported object's structure and build a standalone "
-                             "material composition in the node editor beside this node: "
-                             "per material-bearing part, one ReadGeo scoped to that part via "
-                             "its Object dropdown and a Material3D wired into the ReadGeo's "
-                             "Material input (diffuse map / PBR values carried over from the "
-                             "file), all assembled under a Group3D. The rebuilt set "
-                             "replicates this node's hierarchy output 100% — nothing "
-                             "connects back to it."));
-        page->addKnob(k);
-        _imp->rebuildMaterialsBtn = k;
-    }
+    // Mesh is on (see applyModeVisibility) --- (Re-build Materials lives on the
+    // Material page below, next to the material knobs it builds.)
 
     {
         KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Object Filter"));
@@ -1138,6 +1124,28 @@ ReadGeo::initializeKnobs()
     createSubdivisionKnobs(this, page, _imp->subdKnobs);
 
     KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));
+    {
+        // Re-build Materials (multi-emit only): per material-bearing part, one
+        // ReadGeo scoped to that part via its Object dropdown and a Material3D
+        // wired into the ReadGeo's Material input (diffuse map / PBR values
+        // carried over from the file), all assembled under a Group3D. The
+        // rebuilt set replicates this node's hierarchy output 100% — nothing
+        // connects back to it. Lives on the Material tab, next to the material
+        // knobs it builds.
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Re-build Materials"));
+        k->setName("rebuildMaterials");
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Analyze the imported object's structure and build a standalone "
+                             "material composition in the node editor beside this node: "
+                             "per material-bearing part, one ReadGeo scoped to that part via "
+                             "its Object dropdown and a Material3D wired into the ReadGeo's "
+                             "Material input (diffuse map / PBR values carried over from the "
+                             "file), all assembled under a Group3D. The rebuilt set "
+                             "replicates this node's hierarchy output 100% — nothing "
+                             "connects back to it."));
+        matPage->addKnob(k);
+        _imp->rebuildMaterialsBtn = k;
+    }
     {
         KnobColorPtr k = AppManager::createKnob<KnobColor>(this, tr("Base Color"), 3);
         k->setName("baseColor");
@@ -2528,6 +2536,11 @@ rgAbcMeshAt(RgAbcEntry& e, double time, int frameOffset,
         const std::vector<float>& s1 = e.vertexSamples[idx1];
 
         if (!s0.empty() && s0.size() == e.meshData->vertices.size()) {
+            // Vertices are rewritten in place: bump the version stamp so the
+            // viewport's GPU mesh cache and the group bounding-box cache
+            // re-upload / re-scan instead of showing a stale frame (the
+            // ReadAlembicArchive rule — the ported rgAbcMeshAt lost it).
+            bumpMeshVersion(*e.meshData);
             if (idx0 == idx1 || alpha < 1e-9) {
                 std::memcpy(e.meshData->vertices.data(), s0.data(),
                             s0.size() * sizeof(float));
@@ -3427,9 +3440,15 @@ ReadGeo::loadSceneGeo(const std::string& path)
             }
         }
     }
-    if (mat) {
+    if (mat && (replacingFile || materialKnobsMatchFile(*mat))) {
+        // Seed the knob mirror from the file when the file changed, or when
+        // the knobs are still in sync with it (fresh node: defaults; project
+        // open: the serialized mirror). A same-file reload after the user
+        // dragged Roughness / Specular / ... must KEEP their edits — re-seeding
+        // snapped the sliders back to the loaded values on every Reload /
+        // mode flip / Object change / project open.
         applyImportedMaterialKnobs(*mat);
-    } else if (replacingFile) {
+    } else if (!mat && replacingFile) {
         resetMaterialKnobs();
     }
 
@@ -3628,11 +3647,51 @@ ReadGeo::resetMaterialKnobs()
     if (KnobFilePtr k = _imp->textureFile.lock()) k->setValue(std::string());
 }
 
+// True when the node's material knobs still carry `m`'s values (the knob
+// mirror is in sync with the file: a fresh node's defaults, or a just-applied
+// mirror). A mismatch means the user has diverged — a same-file reload must
+// keep their edits instead of re-seeding from the file.
+static bool
+approxSameKnob(double a, double b)
+{
+    return std::fabs(a - b) < 1e-4;
+}
+
+bool
+ReadGeo::materialKnobsMatchFile(const GeoImportMaterial& m) const
+{
+    if (KnobColorPtr c = _imp->baseColor.lock()) {
+        if (!approxSameKnob(c->getValue(0), m.baseColor[0]) ||
+            !approxSameKnob(c->getValue(1), m.baseColor[1]) ||
+            !approxSameKnob(c->getValue(2), m.baseColor[2])) {
+            return false;
+        }
+    }
+    if (KnobDoublePtr k = _imp->roughness.lock()) {
+        if (!approxSameKnob(k->getValue(), m.roughness)) return false;
+    }
+    if (KnobDoublePtr k = _imp->metallic.lock()) {
+        if (!approxSameKnob(k->getValue(), m.metallic)) return false;
+    }
+    if (KnobDoublePtr k = _imp->specular.lock()) {
+        if (!approxSameKnob(k->getValue(), m.specular)) return false;
+    }
+    if (KnobDoublePtr k = _imp->transmission.lock()) {
+        if (!approxSameKnob(k->getValue(), m.transmission)) return false;
+    }
+    if (KnobDoublePtr k = _imp->ior.lock()) {
+        if (!approxSameKnob(k->getValue(), m.ior)) return false;
+    }
+    if (KnobFilePtr f = _imp->textureFile.lock()) {
+        if (f->getValue() != m.diffuseMapPath) return false;
+    }
+    return true;
+}
+
 void
 ReadGeo::applyImportedMaterialKnobs(const GeoImportMaterial& m)
 {
     if (!m.present) return;
-
     if (KnobColorPtr c = _imp->baseColor.lock()) {
         c->setValue(m.baseColor[0], ViewSpec::all(), 0);
         c->setValue(m.baseColor[1], ViewSpec::all(), 1);
