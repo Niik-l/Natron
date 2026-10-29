@@ -375,6 +375,56 @@ struct RGEntryMaterialAdapter : public MaterialProvider
     std::string getMaterialDiffuseColorspace() const OVERRIDE { return "sRGB"; }
 };
 
+// The single-mode (merged) merged-slot provider: the file material's maps /
+// face colors with the node's Material-tab scalars layered on top WHEN the
+// knob mirror has diverged from the file material (the check is live, so a
+// knob drag takes over and dragging back to the file values restores the
+// file-faithful look). Without this the Material tab was inert in one-mesh
+// mode for material-bearing files: every slot shader bound the file's raw
+// scalars and the knobs only reached faces without a file material (slot 0).
+// The mirrored knob set is exactly materialKnobsMatchFileAt's (base color,
+// roughness, metallic, specular, transmission, ior, diffuse texture) — the
+// mirror seeds them from the file at load, so the default state matches the
+// file byte-for-byte and only a user edit changes the render.
+struct RGMergedSlotMaterialAdapter : public MaterialProvider
+{
+    RGEntryMaterialAdapter file;
+    const ReadGeo* node;
+
+    RGMergedSlotMaterialAdapter(const GeoImportMaterial& m, const ReadGeo* n)
+        : file(m), node(n) {}
+
+    bool live(double time) const { return node && node->materialKnobsOverrideActive(time); }
+
+    void getMaterialBaseColor(double time, double& r, double& g, double& b) const OVERRIDE
+    {
+        if (live(time)) { node->getMaterialBaseColor(time, r, g, b); return; }
+        file.getMaterialBaseColor(time, r, g, b);
+    }
+    double getMaterialRoughness(double time) const OVERRIDE
+    { return live(time) ? node->getMaterialRoughness(time) : file.getMaterialRoughness(time); }
+    double getMaterialMetallic(double time) const OVERRIDE
+    { return live(time) ? node->getMaterialMetallic(time) : file.getMaterialMetallic(time); }
+    double getMaterialSpecular(double time) const OVERRIDE
+    { return live(time) ? node->getMaterialSpecular(time) : file.getMaterialSpecular(time); }
+    void getMaterialEmission(double time, double& r, double& g, double& b, double& strength) const OVERRIDE
+    { file.getMaterialEmission(time, r, g, b, strength); }   // no node knob mirror — file only
+    double getMaterialTransmission(double time) const OVERRIDE
+    { return live(time) ? node->getMaterialTransmission(time) : file.getMaterialTransmission(time); }
+    double getMaterialIOR(double time) const OVERRIDE
+    { return live(time) ? node->getMaterialIOR(time) : file.getMaterialIOR(time); }
+    std::string getMaterialTextureFile() const OVERRIDE
+    { return (node && node->materialKnobsOverrideActive(0.0)) ? node->getMaterialTextureFile()
+                                                              : file.getMaterialTextureFile(); }
+    std::string getMaterialRoughnessMapFile() const OVERRIDE { return file.getMaterialRoughnessMapFile(); }
+    std::string getMaterialMetallicMapFile() const OVERRIDE { return file.getMaterialMetallicMapFile(); }
+    std::string getMaterialNormalMapFile() const OVERRIDE { return file.getMaterialNormalMapFile(); }
+    std::string getMaterialOpacityMapFile() const OVERRIDE { return file.getMaterialOpacityMapFile(); }
+    double getMaterialOpacity(double time) const OVERRIDE { return file.getMaterialOpacity(time); }
+    bool getMaterialTextureUsesAlpha() const OVERRIDE { return file.getMaterialTextureUsesAlpha(); }
+    std::string getMaterialDiffuseColorspace() const OVERRIDE { return file.getMaterialDiffuseColorspace(); }
+};
+
 // Simple glob match: '*' matches any substring (mirror of ReadGeoArchive's
 // arcGlobMatch — internal linkage in each TU's anonymous namespace).
 bool
@@ -592,7 +642,7 @@ struct ReadGeoPrivate
     // getMergedMaterialProvider's index space) + the cached provider
     // adapters. Guarded by _meshMutex (written in buildSceneMesh / loaders).
     std::vector<int> mergedMaterialList;
-    mutable std::vector<std::shared_ptr<RGEntryMaterialAdapter>>
+    mutable std::vector<std::shared_ptr<MaterialProvider>>
         mergedMaterialAdapters;
 
     // Transform
@@ -3440,13 +3490,15 @@ ReadGeo::loadSceneGeo(const std::string& path)
             }
         }
     }
-    if (mat && (replacingFile || materialKnobsMatchFile(*mat))) {
-        // Seed the knob mirror from the file when the file changed, or when
-        // the knobs are still in sync with it (fresh node: defaults; project
-        // open: the serialized mirror). A same-file reload after the user
-        // dragged Roughness / Specular / ... must KEEP their edits — re-seeding
-        // snapped the sliders back to the loaded values on every Reload /
-        // mode flip / Object change / project open.
+    if (mat && (replacingFile || materialKnobsAtDefaults() || materialKnobsMatchFile(*mat))) {
+        // Seed the knob mirror from the file when the file changed, when the
+        // knobs have never been written (fresh instance — loadedFilePath is
+        // still empty here, so replacingFile alone misses the FIRST load and
+        // the mirror stayed at factory values), or when the knobs are still
+        // in sync with it (project open: the serialized mirror). A same-file
+        // reload after the user dragged Roughness / Specular / ... must KEEP
+        // their edits — re-seeding snapped the sliders back to the loaded
+        // values on every Reload / mode flip / Object change / project open.
         applyImportedMaterialKnobs(*mat);
     } else if (!mat && replacingFile) {
         resetMaterialKnobs();
@@ -3660,32 +3712,89 @@ approxSameKnob(double a, double b)
 bool
 ReadGeo::materialKnobsMatchFile(const GeoImportMaterial& m) const
 {
+    // GUI-time check (no meaningful frame): the reload-reseed rule.
+    return materialKnobsMatchFileAt(0.0, m);
+}
+
+// True when every mirrored material knob still sits at the resetMaterialKnobs
+// factory value (0.8 / 0.5 / 0 / 0.5 / 0 / 1.45 / no texture) — i.e. neither
+// the mirror nor the user has written anything into it. A fresh instance
+// qualifies; a project-open instance only when the saved knobs were never
+// customized.
+bool
+ReadGeo::materialKnobsAtDefaults() const
+{
     if (KnobColorPtr c = _imp->baseColor.lock()) {
-        if (!approxSameKnob(c->getValue(0), m.baseColor[0]) ||
-            !approxSameKnob(c->getValue(1), m.baseColor[1]) ||
-            !approxSameKnob(c->getValue(2), m.baseColor[2])) {
+        if (!approxSameKnob(c->getValue(0), 0.8) ||
+            !approxSameKnob(c->getValue(1), 0.8) ||
+            !approxSameKnob(c->getValue(2), 0.8)) {
             return false;
         }
     }
     if (KnobDoublePtr k = _imp->roughness.lock()) {
-        if (!approxSameKnob(k->getValue(), m.roughness)) return false;
+        if (!approxSameKnob(k->getValue(), 0.5)) return false;
     }
     if (KnobDoublePtr k = _imp->metallic.lock()) {
-        if (!approxSameKnob(k->getValue(), m.metallic)) return false;
+        if (!approxSameKnob(k->getValue(), 0.0)) return false;
     }
     if (KnobDoublePtr k = _imp->specular.lock()) {
-        if (!approxSameKnob(k->getValue(), m.specular)) return false;
+        if (!approxSameKnob(k->getValue(), 0.5)) return false;
     }
     if (KnobDoublePtr k = _imp->transmission.lock()) {
-        if (!approxSameKnob(k->getValue(), m.transmission)) return false;
+        if (!approxSameKnob(k->getValue(), 0.0)) return false;
     }
     if (KnobDoublePtr k = _imp->ior.lock()) {
-        if (!approxSameKnob(k->getValue(), m.ior)) return false;
+        if (!approxSameKnob(k->getValue(), 1.45)) return false;
+    }
+    if (KnobFilePtr f = _imp->textureFile.lock()) {
+        if (!f->getValue().empty()) return false;
+    }
+    return true;
+}
+
+bool
+ReadGeo::materialKnobsMatchFileAt(double time, const GeoImportMaterial& m) const
+{
+    if (KnobColorPtr c = _imp->baseColor.lock()) {
+        if (!approxSameKnob(c->getValueAtTime(time, 0), m.baseColor[0]) ||
+            !approxSameKnob(c->getValueAtTime(time, 1), m.baseColor[1]) ||
+            !approxSameKnob(c->getValueAtTime(time, 2), m.baseColor[2])) {
+            return false;
+        }
+    }
+    if (KnobDoublePtr k = _imp->roughness.lock()) {
+        if (!approxSameKnob(k->getValueAtTime(time), m.roughness)) return false;
+    }
+    if (KnobDoublePtr k = _imp->metallic.lock()) {
+        if (!approxSameKnob(k->getValueAtTime(time), m.metallic)) return false;
+    }
+    if (KnobDoublePtr k = _imp->specular.lock()) {
+        if (!approxSameKnob(k->getValueAtTime(time), m.specular)) return false;
+    }
+    if (KnobDoublePtr k = _imp->transmission.lock()) {
+        if (!approxSameKnob(k->getValueAtTime(time), m.transmission)) return false;
+    }
+    if (KnobDoublePtr k = _imp->ior.lock()) {
+        if (!approxSameKnob(k->getValueAtTime(time), m.ior)) return false;
     }
     if (KnobFilePtr f = _imp->textureFile.lock()) {
         if (f->getValue() != m.diffuseMapPath) return false;
     }
     return true;
+}
+
+bool
+ReadGeo::materialKnobsOverrideActive(double time) const
+{
+    // Multi-emit contract stays file-faithful (per-entry file materials).
+    if (isMultiEmit()) return false;
+    // No file material (or a connected Material3D, which replaces the whole
+    // slot path in CyclesRenderer): the node provider already serves the
+    // knobs everywhere — nothing to override.
+    if (hasMaterialInput()) return false;
+    const GeoImportMaterial* m = activeFileMaterial();
+    if (!m) return false;
+    return !materialKnobsMatchFileAt(time, *m);
 }
 
 void
@@ -4846,8 +4955,13 @@ ReadGeo::getMergedMaterialProvider(int i) const
         !_imp->rt.data.materials[matIdx].present) {
         return nullptr;
     }
-    std::shared_ptr<RGEntryMaterialAdapter> adapter =
-        std::make_shared<RGEntryMaterialAdapter>(_imp->rt.data.materials[matIdx]);
+    // The merged-slot adapter layers the node's material knobs over the file
+    // scalars LIVE once the knob mirror has diverged (Material tab was inert
+    // in one-mesh mode — RGMergedSlotMaterialAdapter); the cached adapter
+    // re-evaluates the divergence at every getter call, so knob drags show
+    // up without a reload.
+    std::shared_ptr<RGMergedSlotMaterialAdapter> adapter =
+        std::make_shared<RGMergedSlotMaterialAdapter>(_imp->rt.data.materials[matIdx], this);
     _imp->mergedMaterialAdapters.resize(i + 1);
     _imp->mergedMaterialAdapters[i] = adapter;
     return adapter.get();

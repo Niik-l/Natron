@@ -161,6 +161,18 @@ public:
      */
     const GeoImportMaterial* activeFileMaterial() const;
 
+    /**
+     * @brief True when the node's material knobs have DIVERGED from
+     * activeFileMaterial() (the mirrored set: base color, roughness,
+     * metallic, specular, transmission, ior, diffuse texture) — the
+     * single-mode merged slot providers then serve the knob values over the
+     * file's scalars (maps stay file-sourced). Evaluated live at render
+     * time: a knob drag takes over, and matching the file values again
+     * restores the file-faithful look. Time-aware so animated material
+     * knobs evaluate at the render frame.
+     */
+    bool materialKnobsOverrideActive(double time) const;
+
     // --- ArchiveProvider interface (active when Output Single Mesh is OFF) ---
     // Ported from ReadGeoArchive — the consumers (SceneGraph::rebuild,
     // ScanlineRender, CyclesRenderer) route through whichever interface
@@ -288,6 +300,13 @@ private:
     // re-seeds; a user-diverged set keeps their edits instead of snapping the
     // sliders back to the loaded values.
     bool materialKnobsMatchFile(const GeoImportMaterial& material) const;
+    // Time-aware variant used by materialKnobsOverrideActive at render time
+    // (getValueAtTime so animated material knobs evaluate at the frame).
+    bool materialKnobsMatchFileAt(double time, const GeoImportMaterial& material) const;
+    // True when the mirrored material knobs still sit at the resetMaterialKnobs
+    // factory values (nothing loaded or written into them yet) — qualifies a
+    // fresh instance's FIRST load for the mirror seed.
+    bool materialKnobsAtDefaults() const;
     // Dispatch on file extension (.obj/.abc), guarded by _imp->isLoading, then
     // refresh metadata. Shared by knobChanged (file/reload/object change) and
     // onKnobsLoaded (project load).

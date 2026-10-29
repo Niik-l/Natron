@@ -33,6 +33,7 @@ CLANG_DIAG_OFF(deprecated)
 CLANG_DIAG_OFF(uninitialized)
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QSizePolicy>
 #include <QStyle>
 #include <QColorDialog>
 #include <QToolTip>
@@ -143,6 +144,12 @@ KnobGuiButton::createWidget(QHBoxLayout* layout)
         _button->setIconSize( QSize(NATRON_MEDIUM_BUTTON_ICON_SIZE, NATRON_MEDIUM_BUTTON_ICON_SIZE) );
     } else {
         _button = new Button( label, layout->parentWidget() );
+        // A long-label text button on its own row (the ReadGeo "Re-build
+        // Materials" pattern) must not be squeezed to the field column's
+        // width: expand to the row like the other full-width panel elements.
+        if ( label.size() > 12 ) {
+            _button->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Fixed );
+        }
     }
     if (checkable) {
         _button->setCheckable(true);
