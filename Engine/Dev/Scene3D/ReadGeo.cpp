@@ -382,10 +382,13 @@ struct RGEntryMaterialAdapter : public MaterialProvider
 // file-faithful look). Without this the Material tab was inert in one-mesh
 // mode for material-bearing files: every slot shader bound the file's raw
 // scalars and the knobs only reached faces without a file material (slot 0).
-// The mirrored knob set is exactly materialKnobsMatchFileAt's (base color,
-// roughness, metallic, specular, transmission, ior, diffuse texture) — the
-// mirror seeds them from the file at load, so the default state matches the
-// file byte-for-byte and only a user edit changes the render.
+// Scalars (base color, roughness, metallic, specular, transmission, ior) key
+// off the scalar divergence ONLY; the diffuse texture keys off its OWN knob
+// (a scalar drag must not touch the per-slot textures — the knob mirror
+// holds just the ACTIVE part's texture, so a global texture swap would paint
+// every slot with it). The mirror seeds both groups from the file at load,
+// so the default state matches the file byte-for-byte and only a user edit
+// changes the render.
 struct RGMergedSlotMaterialAdapter : public MaterialProvider
 {
     RGEntryMaterialAdapter file;
@@ -395,6 +398,7 @@ struct RGMergedSlotMaterialAdapter : public MaterialProvider
         : file(m), node(n) {}
 
     bool live(double time) const { return node && node->materialKnobsOverrideActive(time); }
+    bool texLive() const { return node && node->textureKnobOverrideActive(); }
 
     void getMaterialBaseColor(double time, double& r, double& g, double& b) const OVERRIDE
     {
@@ -414,8 +418,7 @@ struct RGMergedSlotMaterialAdapter : public MaterialProvider
     double getMaterialIOR(double time) const OVERRIDE
     { return live(time) ? node->getMaterialIOR(time) : file.getMaterialIOR(time); }
     std::string getMaterialTextureFile() const OVERRIDE
-    { return (node && node->materialKnobsOverrideActive(0.0)) ? node->getMaterialTextureFile()
-                                                              : file.getMaterialTextureFile(); }
+    { return texLive() ? node->getMaterialTextureFile() : file.getMaterialTextureFile(); }
     std::string getMaterialRoughnessMapFile() const OVERRIDE { return file.getMaterialRoughnessMapFile(); }
     std::string getMaterialMetallicMapFile() const OVERRIDE { return file.getMaterialMetallicMapFile(); }
     std::string getMaterialNormalMapFile() const OVERRIDE { return file.getMaterialNormalMapFile(); }
@@ -3755,6 +3758,16 @@ ReadGeo::materialKnobsAtDefaults() const
 bool
 ReadGeo::materialKnobsMatchFileAt(double time, const GeoImportMaterial& m) const
 {
+    return materialScalarsMatchFileAt(time, m) && materialTextureMatchesFile(m);
+}
+
+// Scalar half of materialKnobsMatchFileAt (base color, roughness, metallic,
+// specular, transmission, ior) — the merged-slot override keys scalar
+// getters off this alone so a texture edit never rides a scalar drag (and
+// vice versa).
+bool
+ReadGeo::materialScalarsMatchFileAt(double time, const GeoImportMaterial& m) const
+{
     if (KnobColorPtr c = _imp->baseColor.lock()) {
         if (!approxSameKnob(c->getValueAtTime(time, 0), m.baseColor[0]) ||
             !approxSameKnob(c->getValueAtTime(time, 1), m.baseColor[1]) ||
@@ -3777,8 +3790,14 @@ ReadGeo::materialKnobsMatchFileAt(double time, const GeoImportMaterial& m) const
     if (KnobDoublePtr k = _imp->ior.lock()) {
         if (!approxSameKnob(k->getValueAtTime(time), m.ior)) return false;
     }
+    return true;
+}
+
+bool
+ReadGeo::materialTextureMatchesFile(const GeoImportMaterial& m) const
+{
     if (KnobFilePtr f = _imp->textureFile.lock()) {
-        if (f->getValue() != m.diffuseMapPath) return false;
+        return f->getValue() == m.diffuseMapPath;
     }
     return true;
 }
@@ -3794,7 +3813,22 @@ ReadGeo::materialKnobsOverrideActive(double time) const
     if (hasMaterialInput()) return false;
     const GeoImportMaterial* m = activeFileMaterial();
     if (!m) return false;
-    return !materialKnobsMatchFileAt(time, *m);
+    return !materialScalarsMatchFileAt(time, *m);
+}
+
+bool
+ReadGeo::textureKnobOverrideActive() const
+{
+    // Node-level diffuse-texture override: fires ONLY when the texture knob
+    // itself diverges from the active file material's diffuse map — scalar
+    // drags must keep every slot's own texture (the mirror holds just the
+    // active part's path; keying this off the scalar divergence painted all
+    // slots with it).
+    if (isMultiEmit()) return false;
+    if (hasMaterialInput()) return false;
+    const GeoImportMaterial* m = activeFileMaterial();
+    if (!m) return false;
+    return !materialTextureMatchesFile(*m);
 }
 
 void
