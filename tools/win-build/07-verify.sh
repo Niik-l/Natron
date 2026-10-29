@@ -28,7 +28,11 @@ if grep -q "fr.inria.built-in.CyclesRender" <<<"$out"; then ok "Cycles node pres
 elif [ "${WITH_CYCLES:-1}" = "1" ]; then die "CyclesRender node missing (WITH_CYCLES=1)"
 else ok "Cycles intentionally absent (WITH_CYCLES=0)"; fi
 
-grep -q "WriteOIIO" <<<"$out" || die "openfx-io (WriteOIIO) not loaded"
+# All the per-plugin checks below grep the RESULT CHECK lines (2026-10-29) —
+# the raw host log no longer prints per-plugin registration lines, which
+# killed the old raw-stream greps (WriteOIIO sorts 6th in the capped CHECK
+# write list, so the old check false-negatived on a healthy install).
+grep -q "fr.inria.openfx.WriteOIIO" <<<"$out" || die "openfx-io (WriteOIIO) not loaded"
 grep -q "eu.cimg."  <<<"$out" || die "CImg.ofx not loaded"
 grep -q "net.fxarena.openfx.ReadSVG" <<<"$out" || die "Arena.ofx not loaded (ReadSVG missing)"
 # SeExpr/SeExprSimple/SeNoise/SeGrain are built into IO.ofx only when openfx-io finds the

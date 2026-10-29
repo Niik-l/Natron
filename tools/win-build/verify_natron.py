@@ -11,7 +11,8 @@ try:
         return m[:5]
 
     for key in ["read", "write", "blur", "merge", "transform",
-                "cimg", "cycles", "grade", "shuffle", "roto"]:
+                "cimg", "cycles", "grade", "shuffle", "roto", "oiio",
+                "readsvg", "seexprsimple", "senoise", "softthreshold"]:
         print("RESULT CHECK %-10s -> %s" % (key, find(key)))
 
     # Qt image-format plugins (imageformats/): PySide6 scripts write JPEG/TIFF/WebP
