@@ -1,4 +1,4 @@
-﻿# OBJ multi-emit phase 2 battery.
+# OBJ multi-emit phase 2 battery.
 # 1. unified obj multi vs unified obj single (merged, bake ON): identical
 #    (flat identity hierarchy == merged render).
 # 2. synthetic two-group obj: multi emits 2 entries; excluding one via

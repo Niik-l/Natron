@@ -1,4 +1,4 @@
-﻿/* ***** BEGIN LICENSE BLOCK *****
+/* ***** BEGIN LICENSE BLOCK *****
  * This file is part of Natron <https://natrongithub.github.io/>,
  * (C) 2018-2023 The Natron developers
  * (C) 2013-2018 INRIA and Alexandre Gauthier-Foichat
@@ -111,7 +111,7 @@ CLANG_DIAG_ON(uninitialized)
 
 
 // ============================================================================
-// Section 1: Demo math functions â€” copied VERBATIM from ImGuizmo/example/main.cpp
+// Section 1: Demo math functions — copied VERBATIM from ImGuizmo/example/main.cpp
 // ============================================================================
 
 static void Cross(const float* a, const float* b, float* r)
@@ -139,12 +139,12 @@ static void Normalize(const float* a, float* r)
 // top-right-behind-camera, same as Maya's default headlight).
 //
 // Two flavors:
-//   ViewportLitFromVertexNormals â€” preferred when the geometry carries
+//   ViewportLitFromVertexNormals — preferred when the geometry carries
 //     per-vertex normals (Sphere3D / Card3D / Cube3D / Cylinder3D). The
 //     averaged local normal is transformed into eye space via the upper-left
 //     3x3 of the modelview matrix. Winding-agnostic since we use the supplied
 //     normals directly, not a cross product.
-//   ViewportLitFromVerts â€” fallback for ReadGeo / Alembic where we don't have
+//   ViewportLitFromVerts — fallback for ReadGeo / Alembic where we don't have
 //     vertex normals. Cross product of (b-a) x (c-a) gives the face normal
 //     assuming CCW-from-outside winding (the Maya/Houdini/Blender default
 //     that exporters typically produce).
@@ -272,7 +272,7 @@ static void LookAt(const float* eye, const float* at, const float* up, float* m1
    m16[15] = 1.0f;
 }
 
-// Matrix multiply â€” copied from ImGuizmo.cpp line 78
+// Matrix multiply — copied from ImGuizmo.cpp line 78
 static void FPU_MatrixF_x_MatrixF(const float* a, const float* b, float* r)
 {
    r[0] = a[0] * b[0] + a[1] * b[4] + a[2] * b[8] + a[3] * b[12];
@@ -298,7 +298,7 @@ static void FPU_MatrixF_x_MatrixF(const float* a, const float* b, float* r)
 
 
 // ============================================================================
-// Section 2: Minimal ImGui OpenGL2 renderer â€” copied from existing Viewport3D.cpp
+// Section 2: Minimal ImGui OpenGL2 renderer — copied from existing Viewport3D.cpp
 // ============================================================================
 
 static GLuint g_DevImGuiFontTexture = 0;
@@ -434,7 +434,7 @@ NATRON_NAMESPACE_ENTER
 // borderColor (RGBA, optional): when either wrap mode is GL_CLAMP_TO_BORDER, texels
 // sampled outside [0,1] return this colour. Used by Project3D "crop to frame": the
 // plate maps to [0,1], so outside the camera frustum we return an opaque base-grey
-// instead of smearing the plate's edge pixels â€” the geo keeps its normal shading there.
+// instead of smearing the plate's edge pixels — the geo keeps its normal shading there.
 static void
 uploadPreviewTextureSRGB(const float* pixels, int w, int h, GLint wrapS, GLint wrapT,
                          const float* borderColor = NULL)
@@ -583,7 +583,7 @@ static const float kProject3DBorderGrey[4]  = { 0.45f, 0.45f, 0.45f, 1.0f };
 // True if vertex `idx`'s Project3D projection lands inside the plate frame [0,1] (and in front
 // of the projector). projSTW holds (s*w, t*w, w) per vertex; project-on-culled verts were
 // pushed to a (2,2,1) out-of-range value upstream, so this also rejects them. Used to crop the
-// wireframe to the projected region (only meaningful when Crop is on â€” see callers).
+// wireframe to the projected region (only meaningful when Crop is on — see callers).
 static inline bool
 project3DVertVisible(const std::vector<float>& projSTW, int idx)
 {
@@ -647,7 +647,7 @@ computeMeshVertexNormals(const std::vector<float>& verts,
 }
 
 // Resolve the Project3D previewed in the 3D viewport from a geo's material. A Project3D
-// projects directly; a MergeMat resolves to its FOREGROUND (A, then B) Project3D â€” the
+// projects directly; a MergeMat resolves to its FOREGROUND (A, then B) Project3D — the
 // fixed-function viewport can't composite layers like ScanlineRender, so it previews the
 // top projection with full settings (crop/alpha/project-on) instead of breaking. The full
 // layered composite is shown in the render; a multi-pass viewport preview is a future step.
@@ -667,7 +667,7 @@ resolveViewportProject3D(MaterialProvider* mat)
 // or several (MergeMat tree); the geo draw paints them back-to-front with alpha blending so
 // they composite, mirroring the ScanlineRender shader's per-fragment compositing.
 struct Project3DLayer {
-    const float* texPixels;          // plate pixels (in the Project3D's CachedTexture â€” kept alive by it)
+    const float* texPixels;          // plate pixels (in the Project3D's CachedTexture — kept alive by it)
     int texW, texH;
     std::vector<float> projSTW;      // per-vertex (s*w, t*w, w)
     const float* borderColor;        // clear (crop) / grey (project-on cull, no crop) / NULL (smear)
@@ -809,7 +809,7 @@ applyProject3DToGeo(const EffectInstancePtr& geoEffect,
 }
 
 // ============================================================================
-// Section 3: Private struct â€” demo-style camera + ImGuizmo state
+// Section 3: Private struct — demo-style camera + ImGuizmo state
 // ============================================================================
 
 // Cached coarse density lattice for a ReadVDB viewport splat preview. Sampling a
@@ -840,7 +840,7 @@ struct Viewport3DPrivate
     bool imguiInitialized;
     // This widget's own ImGui context. ImGui keeps ONE global current context,
     // so with two Viewport3Ds open the second CreateContext() silently made both
-    // widgets share it â€” each overwriting the other's DisplaySize/MousePos every
+    // widgets share it — each overwriting the other's DisplaySize/MousePos every
     // repaint. Kept per widget and made current before any ImGui/ImGuizmo call.
     ImGuiContext* imguiCtx;
     ImGuizmo::OPERATION imguizmoOp;
@@ -874,12 +874,12 @@ struct Viewport3DPrivate
     // Toggle from the Grid button in Viewport3DTab. Default visible.
     bool showGrid;
 
-    // Viewport shading style â€” driven by the Shading dropdown in Viewport3DTab.
+    // Viewport shading style — driven by the Shading dropdown in Viewport3DTab.
     // Default Shaded+Wire so meshes show solid grey + edges (Maya-like) while
     // shapes carrying textures still display them.
     Viewport3D::ShadingMode shadingMode;
 
-    // Right-click context menu â€” track the press position so we only show the
+    // Right-click context menu — track the press position so we only show the
     // menu when the user releases without dragging (otherwise right-drag for
     // zoom/navigation would constantly trigger the menu). Threshold checked
     // in mouseReleaseEvent.
@@ -887,7 +887,7 @@ struct Viewport3DPrivate
     bool rightPressWasNav = false;   // the RMB press mapped to a navigation action: never show the Blast menu on release
     int rightPressX, rightPressY;
 
-    // "Look Through" â€” when set, the viewport view+projection matrices come
+    // "Look Through" — when set, the viewport view+projection matrices come
     // from this Camera3D / ReadAlembicCamera instead of the orbit camera.
     // Same math helpers as ScanlineRender (CameraMath::composeProjectionMatrix
     // + RotationConventions::composeInverse), so wireframes match the actual
@@ -1029,7 +1029,7 @@ Viewport3D::onViewport3DSettingsChanged()
 }
 
 // Which viewport currently drives the shared ImGuizmo state. See the comment at
-// the Manipulate call in paintGL â€” ImGuizmo's context is a file-static, so two
+// the Manipulate call in paintGL — ImGuizmo's context is a file-static, so two
 // viewports manipulating at once corrupt each other's drag.
 Viewport3D* Viewport3D::s_gizmoOwner = NULL;
 
@@ -1098,7 +1098,7 @@ Viewport3D::initializeGL()
     glEnable(GL_POINT_SMOOTH);
 
     // Initialize ImGui + ImGuizmo.
-    // The ImGui *context* is CPU-side state â€” create it once for this widget.
+    // The ImGui *context* is CPU-side state — create it once for this widget.
     if (!_imp->imguiInitialized) {
         _imp->imguiCtx = ImGui::CreateContext();
         ImGui::SetCurrentContext(_imp->imguiCtx);
@@ -1113,7 +1113,7 @@ Viewport3D::initializeGL()
     // The font texture is a GL resource. QOpenGLWidget calls initializeGL again
     // whenever its GL context is recreated (e.g. when the widget is reparented
     // during a workspace/layout restore). The previous handle belongs to the now
-    // destroyed context, so delete it and rebuild against the current context â€”
+    // destroyed context, so delete it and rebuild against the current context —
     // otherwise paintGL binds a stale texture and crashes (masked by NDEBUG).
     if (g_DevImGuiFontTexture) {
         glDeleteTextures(1, &g_DevImGuiFontTexture);
@@ -1269,7 +1269,7 @@ Viewport3D::initializeGL()
     }
 
     // On-demand rendering: no auto-refresh timer. The viewport repaints only when
-    // something requests it â€” Gui::redrawAllViewers() (knob/graph changes, same path
+    // something requests it — Gui::redrawAllViewers() (knob/graph changes, same path
     // the 2D viewers use), frame changes, camera navigation, or the Refresh button.
 }
 
@@ -1284,7 +1284,7 @@ Viewport3D::resizeGL(int w, int h)
 
 
 // ============================================================================
-// Section 5: paintGL â€” THE CRITICAL PART
+// Section 5: paintGL — THE CRITICAL PART
 // ============================================================================
 
 // Helper: read T/R/S from a node's knobs
@@ -1353,14 +1353,14 @@ static void readTRSFromNode(NATRON_NAMESPACE::EffectInstancePtr effect,
 }
 
 // ==================== Look-through camera edit helpers ====================
-// When the viewport is looking through a Camera3D (NOT a ReadAlembicCamera â€”
+// When the viewport is looking through a Camera3D (NOT a ReadAlembicCamera —
 // .abc cameras get overwritten every frame so editing them is pointless), the
 // orbit / pan / dolly drag interactions write directly to that camera's
 // translateX/Y/Z and rotateX/Y/Z knobs. ReadAlembicCamera drags are ignored.
 
 // Returns the look-through camera as a Camera3DNode (writable), or nullptr.
 // All these helpers live in the file's existing NATRON_NAMESPACE block.
-// True when a node's transform is locked â€” either via a "lockTransform" bool
+// True when a node's transform is locked — either via a "lockTransform" bool
 // knob (Camera3D Lock Transform, and any future node using the same
 // convention) or via a user-level per-knob lock (right-click -> Lock
 // Parameter) on any of its TRS knobs.
@@ -1463,12 +1463,12 @@ eulerFromLookAt(const float pos[3], const float pivot[3],
     };
     double rlen = std::sqrt(right[0]*right[0] + right[1]*right[1] + right[2]*right[2]);
     if (rlen < 1e-6) {
-        // Camera looking straight up/down â€” pick X as right
+        // Camera looking straight up/down — pick X as right
         right[0] = 1; right[1] = 0; right[2] = 0;
     } else {
         right[0] /= rlen; right[1] /= rlen; right[2] /= rlen;
     }
-    // up = cross(right, fwd) â€” orthogonal to both
+    // up = cross(right, fwd) — orthogonal to both
     double up[3] = {
         right[1]*fwd[2] - right[2]*fwd[1],
         right[2]*fwd[0] - right[0]*fwd[2],
@@ -1625,7 +1625,7 @@ Viewport3D::paintGL()
         if (eff) lookCam = dynamic_cast<CameraProvider*>(eff.get());
     }
 
-    // Gate rect in pixel coords â€” populated below when looking through a
+    // Gate rect in pixel coords — populated below when looking through a
     // camera, then used after the 3D pass to draw the gate outline.
     int gateX = 0, gateY = 0, gateW = _imp->viewW, gateH = _imp->viewH;
 
@@ -1661,10 +1661,10 @@ Viewport3D::paintGL()
         out[14] = (float)(mInv[2][0]*ntx + mInv[2][1]*nty + mInv[2][2]*ntz);
         out[15] = 1.f;
 
-        // Projection â€” both apertures, no aspect (matches ScanlineRender).
+        // Projection — both apertures, no aspect (matches ScanlineRender).
         CameraMath::composeProjectionMatrix(focal, hAp, vAp, near_, far_, _imp->cameraProjection);
 
-        // Camera gate â€” letterbox the 3D draw region to the camera sensor aspect
+        // Camera gate — letterbox the 3D draw region to the camera sensor aspect
         // so the wireframe matches ScanlineRender's output bit-perfectly. Without
         // this the projection is stretched by the pane's aspect ratio.
         if (hAp > 1e-6 && vAp > 1e-6 && _imp->viewW > 0 && _imp->viewH > 0) {
@@ -1885,7 +1885,7 @@ Viewport3D::paintGL()
     // 6. Render scene nodes using ImGuizmo::RecomposeMatrixFromComponents for transforms
     // Particles are DEFERRED to a second pass after all opaque geometry:
     // they blend with depth-write off, so they must be drawn last for the
-    // depth buffer to occlude them per pixel â€” drawn inline, any opaque mesh
+    // depth buffer to occlude them per pixel — drawn inline, any opaque mesh
     // later in the node list paints over the whole cloud regardless of Z.
     const std::vector<SceneNode>& sceneNodes = _imp->sceneGraph.nodes();
     std::vector<size_t> deferredParticleNodes;
@@ -1911,7 +1911,7 @@ Viewport3D::paintGL()
 
         // Use the SceneGraph-computed world matrix instead of reading the source
         // node's TRS knobs. This is required for multi-emit nodes (e.g.
-        // ReadAlembicArchive) where many SceneNodes share one Natron source â€”
+        // ReadAlembicArchive) where many SceneNodes share one Natron source —
         // reading knobs from the source would draw them all at the same place.
         // Also picks up Group3D parent transforms correctly.
         if (sn.type == eSceneNodeCamera && sn.name == _imp->selectedNodeName) {
@@ -1997,7 +1997,7 @@ Viewport3D::paintGL()
         glViewport(0, 0, _imp->viewW, _imp->viewH);
 
         // Draw a thin outline around the camera gate, in pixel coords. The
-        // outline marks the edge of the camera frustum â€” what actually gets
+        // outline marks the edge of the camera frustum — what actually gets
         // rendered. The dark area outside is the letterbox.
         if (gateW > 0 && gateH > 0 &&
             (gateW < _imp->viewW || gateH < _imp->viewH)) {
@@ -2100,7 +2100,7 @@ Viewport3D::paintGL()
 
         // ImGuizmo Manipulate for selected node
         // ImGuizmo keeps ONE file-static context (ImGuizmo.cpp gContext) holding
-        // the view/projection, screen rect and in-progress drag state â€” it is not
+        // the view/projection, screen rect and in-progress drag state — it is not
         // per ImGui context, so it cannot be made per widget the way the ImGui
         // context above was. With two viewports both calling Manipulate, each
         // repaint overwrote the other's matrices and the drag delta was computed
@@ -2203,7 +2203,7 @@ Viewport3D::paintGL()
                     }
                 }
 
-                // Manipulate â€” draws gizmo AND handles interaction
+                // Manipulate — draws gizmo AND handles interaction
                 if (ImGuizmo::Manipulate(_imp->cameraView, _imp->cameraProjection,
                                           _imp->imguizmoOp, _imp->imguizmoMode,
                                           objMat, NULL, NULL))
@@ -2521,10 +2521,10 @@ Viewport3D::mouseReleaseEvent(QMouseEvent* e)
         int bw = std::abs(_imp->boxEndX - _imp->boxStartX);
         int bh = std::abs(_imp->boxEndY - _imp->boxStartY);
         if (bw > 5 || bh > 5) {
-            // Real drag â€” box select points
+            // Real drag — box select points
             boxSelectPoints();
         } else {
-            // Tiny drag â€” treat as click, do object selection
+            // Tiny drag — treat as click, do object selection
             selectObjectAtPosition(_imp->boxStartX, _imp->boxStartY);
         }
         update();
@@ -2560,7 +2560,7 @@ Viewport3D::wheelEvent(QWheelEvent* e)
     SettingsPtr settings = appPTR->getCurrentSettings();
     if ( settings->getViewport3DInvertWheel() ) delta = -delta;
     _imp->camDistance *= (1.0f - delta * 0.1f * (float)settings->getViewport3DZoomSpeed());
-    // Clamp â€” wide range so large environments can be framed (the old 500
+    // Clamp — wide range so large environments can be framed (the old 500
     // cap couldn't even back away far enough to see a big terrain).
     _imp->camDistance = std::max(0.01f, std::min(50000.0f, _imp->camDistance));
     update();
@@ -2646,7 +2646,7 @@ Viewport3D::keyPressEvent(QKeyEvent* e)
         if (!framed && !_imp->selectedNodeName.empty()) {
             // Frame the selection's ACTUAL world-space geometry bounds, so framing
             // stays correct when the node (e.g. an archive) is scaled. A multi-emit
-            // archive shares one name across all its entries â€” union the world AABB of
+            // archive shares one name across all its entries — union the world AABB of
             // every mesh entry, transforming each vertex by that entry's worldMatrix
             // (which includes the user scale). Falls back to the node's world position
             // when it has no mesh geometry (e.g. a locator-only selection).
@@ -2727,7 +2727,7 @@ Viewport3D::keyPressEvent(QKeyEvent* e)
             return;
         }
 
-        // Look-through path: editable Camera3D â€” translate the camera node
+        // Look-through path: editable Camera3D — translate the camera node
         // along its current view direction (-Z in camera frame). For
         // ReadAlembicCamera (or any non-editable look-through source),
         // getEditableCamera3D returns null and we fall back to the
@@ -2858,7 +2858,7 @@ Viewport3D::pickPointAtPosition(int screenX, int screenY)
         _imp->selectedPointCol[1] = data[bestIdx * stride + 4];
         _imp->selectedPointCol[2] = data[bestIdx * stride + 5];
         // Replace multi-selection with this single index. Selection is purely
-        // visual now â€” committing to Blast is explicit via the right-click
+        // visual now — committing to Blast is explicit via the right-click
         // context menu (see contextMenuEvent).
         _imp->selectedPointIndices.clear();
         _imp->selectedPointIndices.push_back(bestIdx);
@@ -2867,7 +2867,7 @@ Viewport3D::pickPointAtPosition(int screenX, int screenY)
         return true;
     }
 
-    // No hit â€” clear the multi-selection.
+    // No hit — clear the multi-selection.
     _imp->selectedPointIndex = -1;
     _imp->selectedPointIndices.clear();
     notifyProviderSelectionChanged();
@@ -2935,7 +2935,7 @@ Viewport3D::setPaused(bool paused)
 void
 Viewport3D::requestRedraw()
 {
-    // Event-driven repaint entry point â€” called by Gui::redrawAllViewers() on any
+    // Event-driven repaint entry point — called by Gui::redrawAllViewers() on any
     // knob/graph change (same central trigger the 2D viewers use). No-op while paused.
     if (!_imp->paused) {
         update();
@@ -3000,7 +3000,7 @@ Viewport3D::showBlastContextMenu(const QPoint& globalPos)
 
     QMenu menu(this);
 
-    // Primary action: Houdini-style delete â€” chain a new Blast seeded with
+    // Primary action: Houdini-style delete — chain a new Blast seeded with
     // the selection. Same code path as the Delete key.
     QAction* createAct = menu.addAction(QString::fromUtf8("Delete Selected Points (Del)"));
     createAct->setEnabled(hasSel && hasCloud);
@@ -3049,7 +3049,7 @@ Viewport3D::createBlastFromSelection()
     // Houdini-style: append a Blast (Selection mode) downstream of the
     // displayed provider, seeded with the current viewport selection. The
     // new Blast's input cloud IS the displayed cloud, so the viewport
-    // indices are valid input indices by construction â€” no remapping.
+    // indices are valid input indices by construction — no remapping.
     std::vector<int> sel;
     NodePtr provider;
     {
@@ -3089,7 +3089,7 @@ Viewport3D::createBlastFromSelection()
         newBlast->setSelectedIndices(sel);
     }
 
-    // The selected points are deleted now â€” clear the viewport selection
+    // The selected points are deleted now — clear the viewport selection
     // (mirroring the empty selection to the old provider) and make the new
     // Blast the displayed provider.
     {
@@ -3156,7 +3156,7 @@ Viewport3D::boxSelectPoints()
         _imp->selectedPointCol[1] = data[idx * stride + 4];
         _imp->selectedPointCol[2] = data[idx * stride + 5];
     }
-    // Note: selection is purely visual now â€” committing to Blast is explicit
+    // Note: selection is purely visual now — committing to Blast is explicit
     // via the right-click context menu.
     notifyProviderSelectionChanged();
 }
@@ -3251,7 +3251,7 @@ Viewport3D::selectObjectAtPosition(int screenX, int screenY)
 
 
 // ============================================================================
-// Section 9: Scene rendering helpers â€” copied from old Viewport3D.cpp
+// Section 9: Scene rendering helpers — copied from old Viewport3D.cpp
 // ============================================================================
 
 void
@@ -3393,7 +3393,7 @@ Viewport3D::drawPointCloud() const
                             if (blast->getBlastOBB(0, bCenter, bExtent, bMatrix)) {
                                 glLineWidth(2.0f);
                                 glColor3f(1.0f, 0.2f, 0.2f); // red
-                                // Draw the box in OBB local space â€” matrix carries
+                                // Draw the box in OBB local space — matrix carries
                                 // translation + rotation so the wireframe matches a
                                 // Cube3D bounds input's rotation in the viewport.
                                 glPushMatrix();
@@ -3515,7 +3515,7 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
     // Two cull passes over the same triangles: front faces (as wound) in
     // blue, back faces in red. Winding is the source of truth for normals
     // everywhere (viewport lighting, ScanlineRender, Cycles), so red = faces
-    // whose normals point away â€” candidates for the readers' Reverse Normals.
+    // whose normals point away — candidates for the readers' Reverse Normals.
     if (mode == eFaceOrientation) {
         auto emitAllTris = [&]() {
             glBegin(GL_TRIANGLES);
@@ -3613,7 +3613,7 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
         if (!texPixels) {
             // MeshData carries no normals; build them on demand ONLY when a projecting material
             // might use Project On front/back (a MergeMat: any layer could; a Project3D: only if
-            // not Both) â€” so non-projected / Both-mode meshes pay nothing. Then build the layers.
+            // not Both) — so non-projected / Both-mode meshes pay nothing. Then build the layers.
             EffectInstancePtr meshEff = meshSrc->getEffectInstance();
             std::vector<float> meshNormals;
             {
@@ -3869,7 +3869,7 @@ Viewport3D::drawCardNode(const SceneNode& sn) const
     Card3D::CachedTexturePtr texSnapPtr = card3dNew->getCachedTexture();
     const Card3D::CachedTexture& tex = *texSnapPtr;
 
-    // Texture + UVs â€” prefer a downstream UVProject (projects its img onto the card
+    // Texture + UVs — prefer a downstream UVProject (projects its img onto the card
     // with rewritten UVs), else the card's own cached texture.
     const float* texPixels = NULL;
     int texW = 0, texH = 0;
@@ -4452,7 +4452,7 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
     const ShadingMode mode = _imp->shadingMode;
 
     // Texture + UVs. A downstream UVProject (geo -> UVProject) projects its img
-    // (input 2) onto this geo with rewritten UVs â€” prefer it so the projection
+    // (input 2) onto this geo with rewritten UVs — prefer it so the projection
     // shows in the viewport. Otherwise use the sphere's own cached texture.
     const float* texPixels = NULL;
     int texW = 0, texH = 0;
@@ -4514,7 +4514,7 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
         float mvForLit[16];
         if (lit) glGetFloatv(GL_MODELVIEW_MATRIX, mvForLit);
         // Sphere carries per-vertex normals (sphereVerts[i].nx/ny/nz) so use
-        // those directly â€” winding-agnostic, always points outward.
+        // those directly — winding-agnostic, always points outward.
         auto litForTri = [&](int i0, int i1, int i2) -> float {
             if (!lit) return 1.0f;
             const float n0[3] = { sphereVerts[i0].nx, sphereVerts[i0].ny, sphereVerts[i0].nz };
@@ -4628,7 +4628,7 @@ Viewport3D::drawSphereNode(const SceneNode& sn) const
 
         // Crop the wireframe to the projected region when a Project3D crop is active, so the
         // cropped-away part of the geo doesn't leave stray wireframe lines. Only for the clear
-        // (crop) border â€” a grey/NULL border means the geo stays visible, so the wireframe does
+        // (crop) border — a grey/NULL border means the geo stays visible, so the wireframe does
         // too. A strip is broken whenever a vertex falls outside the projection (per-vertex
         // granularity, so the cut is at wireframe resolution, not the exact frame edge).
         const bool cropWire = (projBorderColor == kProject3DBorderClear) && (projComp == 3);
@@ -4686,7 +4686,7 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
     double time = app->getTimeLine()->currentFrame();
 
     // Wireframe-only display (Viewport Display knob): draw just the edges and
-    // skip the shaded/textured pass â€” used when the cube is a bounds/kill
+    // skip the shaded/textured pass — used when the cube is a bounds/kill
     // volume and the particles/geometry inside must stay visible. Also skips
     // the cached-texture pull (nothing to texture).
     // Auto (default): wireframe when this cube feeds a bounds input
@@ -4729,7 +4729,7 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
             glLineWidth(isSelected ? 2.0f : 1.5f);
             if (isSelected) glColor4f(1.0f, 0.85f, 0.2f, 1.0f);
             else            glColor4f(0.8f, 0.8f, 0.8f, 1.0f);
-            // 4 consecutive verts per face (generateCubeMesh layout) â€” one
+            // 4 consecutive verts per face (generateCubeMesh layout) — one
             // line loop per face gives clean quad outlines, no diagonals.
             for (size_t f = 0; f + 3 < wireVerts.size(); f += 4) {
                 glBegin(GL_LINE_LOOP);
@@ -4753,7 +4753,7 @@ Viewport3D::drawCubeNode(const SceneNode& sn) const
 
     const ShadingMode mode = _imp->shadingMode;
 
-    // Texture + UVs â€” prefer a downstream UVProject (projects its img with rewritten
+    // Texture + UVs — prefer a downstream UVProject (projects its img with rewritten
     // UVs), else the cube's own cached texture (incl. a connected material).
     const float* texPixels = NULL;
     int texW = 0, texH = 0;
@@ -4948,7 +4948,7 @@ Viewport3D::drawCylinderNode(const SceneNode& sn) const
 
     const ShadingMode mode = _imp->shadingMode;
 
-    // Texture + UVs â€” prefer a downstream UVProject (projects its img with rewritten
+    // Texture + UVs — prefer a downstream UVProject (projects its img with rewritten
     // UVs), else the cylinder's own cached texture (incl. a connected material).
     const float* texPixels = NULL;
     int texW = 0, texH = 0;
@@ -5240,7 +5240,7 @@ Viewport3D::drawVolumeNode(const SceneNode& sn) const
         if (res > 0 && !volData.empty()) {
             // Soft-splat cloud preview: sample the density field and draw each
             // sample as a soft round point-sprite through the same shader the
-            // ParticleSystem uses. Splats are sized to the sample spacing (Ã— the
+            // ParticleSystem uses. Splats are sized to the sample spacing (× the
             // node's world scale) so neighbours overlap into a continuous cloud,
             // over-blended (not additive, which blew out), with a gentle top-down
             // shade so it reads as a 3D form rather than flat haze.
@@ -5546,13 +5546,13 @@ void
 Viewport3D::drawTransformNode(const SceneNode& sn) const
 {
     // The dispatch loop has already applied sn.worldMatrix (= parent.world * local),
-    // so we are at this transform's world frame â€” draw the locator at the origin.
+    // so we are at this transform's world frame — draw the locator at the origin.
     // Do NOT re-apply sn.localMatrix: worldMatrix already contains it, and re-applying
     // it double-transformed the gizmo.
     //
     // Keep the locator a fixed VISUAL size by dividing each axis by the node's world
     // scale, so a baked unit scale (e.g. an FBX->Alembic cm->m conversion, common in
-    // these archives â€” and often non-uniform across the xform chain) doesn't balloon
+    // these archives — and often non-uniform across the xform chain) doesn't balloon
     // it into a viewport-spanning diamond.
     bool selected = (sn.name == _imp->selectedNodeName);
     float lineW = selected ? 3.0f : 2.0f;
@@ -5591,15 +5591,15 @@ Viewport3D::drawTransformNode(const SceneNode& sn) const
     glLineWidth(lineW);
     glBegin(GL_LINES);
 
-    // X axis â€” red
+    // X axis — red
     glColor3f(1.0f, 0.2f, 0.2f);
     glVertex3f(0, 0, 0); glVertex3f(ax, 0, 0);
 
-    // Y axis â€” green
+    // Y axis — green
     glColor3f(0.2f, 1.0f, 0.2f);
     glVertex3f(0, 0, 0); glVertex3f(0, ay, 0);
 
-    // Z axis â€” blue
+    // Z axis — blue
     glColor3f(0.3f, 0.3f, 1.0f);
     glVertex3f(0, 0, 0); glVertex3f(0, 0, az);
 

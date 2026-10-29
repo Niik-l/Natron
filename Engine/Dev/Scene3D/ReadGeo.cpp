@@ -668,7 +668,7 @@ struct ReadGeoPrivate
     KnobChoiceWPtr diffuseColorspace;
 
     // Static-frame controls for animated scene files (glTF/FBX; also applies
-    // to .abc sampling) â€” "show static frame X":
+    // to .abc sampling) — "show static frame X":
     KnobBoolWPtr freezeAtFrame;
     KnobIntWPtr freezeFrame;
     // Single-part selection: bake the part's evaluated world matrix into the
@@ -711,7 +711,7 @@ struct ReadGeoPrivate
     // while the batch is on the stack must not double-build).
     bool rebuildBusy = false;
 
-    // Scene formats (glTF/FBX) read through the shared archive runtime â€” the
+    // Scene formats (glTF/FBX) read through the shared archive runtime — the
     // same parse + per-frame evaluation machinery ReadGeoArchive uses. Guarded
     // by _meshMutex (loadGeoFromFile and getMeshData both take it).
     GeoArchiveRuntime rt;
@@ -728,12 +728,12 @@ struct ReadGeoPrivate
     size_t numXformSamples = 0;
     std::vector<float> xformMatrices; // numXformSamples * 16 floats (column-major)
 
-    // Cached vertex samples for animated (deforming) meshes â€” populated by
+    // Cached vertex samples for animated (deforming) meshes — populated by
     // loadAlembicGeo when the .abc has more than one PolyMesh / SubD sample
     // (e.g. a morphing terrain or animated character mesh). Pre-loaded into
     // memory at file-load time so per-frame fetches are a cheap memcpy.
     // Topology (faceIndices / faceCounts) is assumed constant across samples
-    // â€” true for the typical exporter (Maya / Blender / Houdini Alembic).
+    // — true for the typical exporter (Maya / Blender / Houdini Alembic).
     bool hasAnimatedVerts = false;
     size_t numVertexSamples = 0;
     std::vector<std::vector<float>> vertexSamples; // each: numVerts * 3 floats
@@ -788,7 +788,7 @@ ReadGeo::getPluginDescription() const
 #else
        "Import geometry from .glb/.gltf (glTF), .fbx, or .obj (Wavefront) "
        "files. The parser dispatches on the file extension.\n\n"
-       "Alembic (.abc) support is not built into this binary â€” rebuild with "
+       "Alembic (.abc) support is not built into this binary — rebuild with "
        "Alembic to enable it.\n\n"
 #endif
        "glTF/FBX: the Object dropdown lists \"All parts (merged)\" (the whole "
@@ -796,7 +796,7 @@ ReadGeo::getPluginDescription() const
        "Animated glTF/FBX files play on the timeline: node transforms and "
        "skinned vertices are evaluated per frame (rigid transforms interpolate "
        "for motion blur). Freeze at Frame pins the evaluation to a fixed frame "
-       "â€” the static-snapshot mode. The file's PBR material (base color, "
+       "— the static-snapshot mode. The file's PBR material (base color, "
        "roughness, metallic, emission, transmission, IOR, diffuse texture) is "
        "applied to the node's Material and Texture Maps pages.\n\n"
        "File sequences: pick the series with the file picker's Sequence: mode "
@@ -956,7 +956,7 @@ ReadGeo::initializeKnobs()
         k->setAnimationEnabled(false);
         k->setHintToolTip(tr("Evaluate the file at a fixed frame instead of following the "
                              "timeline. Turns an animated glTF/FBX (or .abc) into a static "
-                             "snapshot â€” the built mesh never changes with the playhead."));
+                             "snapshot — the built mesh never changes with the playhead."));
         page->addKnob(k);
         _imp->freezeAtFrame = k;
     }
@@ -990,7 +990,7 @@ ReadGeo::initializeKnobs()
         k->setAnimationEnabled(false);
         k->setHintToolTip(tr("Bake the part's file-authored transform into the vertices at "
                              "the evaluated frame. Only applies when a single part is picked "
-                             "in the Object dropdown â€” merged mode always bakes. When off, "
+                             "in the Object dropdown — merged mode always bakes. When off, "
                              "the part keeps its node-local vertices and the file's transform "
                              "animates through the node's transform slot (the user "
                              "Translate/Rotate/Scale composes on top of it). Default is on: "
@@ -1056,7 +1056,7 @@ ReadGeo::initializeKnobs()
         k->setHintToolTip(tr("When on, morph target (shape key) weights come from the "
                              "file's animation or rest values. When off, the per-target "
                              "Morph Weight knobs on this page drive every target instead "
-                             "â€” keyframable, so you can animate your own blends. The "
+                             "— keyframable, so you can animate your own blends. The "
                              "knobs appear after a file with morph targets is loaded."));
         page->addKnob(k);
         _imp->useFileMorphWeights = k;
@@ -1254,7 +1254,7 @@ ReadGeo::initializeKnobs()
         k->setHintToolTip(tr("Index of refraction. Glass=1.5, Water=1.33, Diamond=2.42"));
         matPage->addKnob(k); _imp->ior = k;
     }
-    // Texture Maps page â€” order: Diffuse, Metallic, Roughness, Emission, Normal
+    // Texture Maps page — order: Diffuse, Metallic, Roughness, Emission, Normal
     KnobPagePtr texPage = AppManager::createKnob<KnobPage>(this, tr("Texture Maps"));
     {
         KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr("Diffuse Map"));
@@ -1400,7 +1400,7 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     }
 
     // Freeze at Frame / Freeze Frame: the built-mesh cache is keyed by the
-    // source frame key, so a freeze change remaps what a key evaluates to â€”
+    // source frame key, so a freeze change remaps what a key evaluates to —
     // drop the built meshes. Freezing also toggles frame-varying metadata
     // (a frozen file is static), so refresh it.
     if (_imp->freezeAtFrame.lock().get() == k || _imp->freezeFrame.lock().get() == k) {
@@ -1441,7 +1441,7 @@ ReadGeo::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/,
     }
 
     // Morph-weight edits (Use File Morph Weights off): the runtime's frame
-    // cache and the built-mesh cache both embed the weights, so drop both â€”
+    // cache and the built-mesh cache both embed the weights, so drop both —
     // same pattern as the Bake Transforms branch (ReadGeoArchive mirrors it).
     bool isMorphKnob = (_imp->useFileMorphWeights.lock().get() == k);
     if (!isMorphKnob) {
@@ -1588,7 +1588,7 @@ ReadGeo::loadGeoFromFile(const std::string& path)
 
     // Non-scene formats carry no morph targets: drop any weight knobs left
     // over from a previous scene-format file (the runtime is not touched
-    // here â€” loadSceneGeo manages it for the scene formats).
+    // here — loadSceneGeo manages it for the scene formats).
     if (!(e == ".gltf" || e == ".glb" || e == ".fbx")) {
         std::vector<GeoMorphTargetRef> none;
         if (syncMorphWeightKnobs(none)) {
@@ -3072,11 +3072,11 @@ ReadGeo::buildAbcSeqFrame(int frame, MeshData* out, std::string* err) const
 namespace {
 
 // Append `src` to `dst`, baking the entry's world matrix `world` into the
-// appended vertices (identity for skinned glTF entries â€” their deformed
+// appended vertices (identity for skinned glTF entries — their deformed
 // vertices are already in world space) and re-basing vertex indices. UVs are
 // per face-vertex, parallel to faceIndices: parts without UVs contribute
 // zero-padded slots so the interleaving stays aligned. `partColor` (when
-// non-null) is baked as per face-corner colors â€” a merged multi-material
+// non-null) is baked as per face-corner colors — a merged multi-material
 // asset keeps each part's file material color on its faces (single MeshData =
 // no per-part material slots; consumers shade the face colors). Call
 // importBuildEdgeIndices() once after all parts are appended.
@@ -3161,7 +3161,7 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
 
     if (chosenIdx == 0) {
         // Merged: every mesh entry's evaluated vertices baked through its
-        // world matrix, concatenated â€” the whole asset as one mesh. Each
+        // world matrix, concatenated — the whole asset as one mesh. Each
         // part's file material color bakes onto its face corners (the merged
         // mesh has no per-part material slots; multi-material files keep
         // their per-part colors as face colors).
@@ -3297,7 +3297,7 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
                     appendArchiveMesh(*src, world, mesh.get(), pc);
                 } else {
                     // Non-baked: the part keeps its node-local vertices and
-                    // the part's world matrix rides in MeshData::transform â€”
+                    // the part's world matrix rides in MeshData::transform —
                     // the animation keeps flowing through it and the user
                     // T/R/S composes on top in every consumer.
                     float identity[16];
@@ -3321,7 +3321,7 @@ geoBuildSceneMeshCore(const GeoArchiveRuntime& rt,
     // Geometry-loader diagnostics gate (same pattern as NATRON_DEBUG_SC):
     // set env NATRON_DEBUG_GEOIO=1 to dump the raw built geometry (vertex
     // values, not just counts) so headless tests can verify what the loader
-    // actually produced â€” a degenerate all-zero vertex array renders as an
+    // actually produced — a degenerate all-zero vertex array renders as an
     // empty scene and is invisible in the counts alone.
     if (std::getenv("NATRON_DEBUG_GEOIO")) {
         std::ostringstream dbg;
@@ -3523,7 +3523,7 @@ ReadGeo::loadSceneGeo(const std::string& path)
     if (mesh && mesh->hasUVs) {
         ss << " | UVs";
     }
-    // Morph targets (shape keys): count targets over DISTINCT morph sets â€”
+    // Morph targets (shape keys): count targets over DISTINCT morph sets —
     // the material pieces of one FBX node mesh share one set.
     {
         std::set<const GeoMorphSet*> seen;
@@ -3550,7 +3550,7 @@ ReadGeo::loadSceneGeo(const std::string& path)
     _imp->info.lock()->setValue(ss.str());
 
     // Morph Weight knobs: sync to the file's distinct morph sets (no-op when
-    // the file has none â€” the knobs drop). Caller (loadGeoFromFile) holds
+    // the file has none — the knobs drop). Caller (loadGeoFromFile) holds
     // _meshMutex; the panel refresh inside recreateKnobs never re-enters it,
     // so the call can run under the lock.
     {
@@ -3852,7 +3852,7 @@ ReadGeo::applyImportedMaterialKnobs(const GeoImportMaterial& m)
     if (KnobDoublePtr k = _imp->transmission.lock()) k->setValue(m.transmission);
     if (KnobDoublePtr k = _imp->ior.lock()) k->setValue(m.ior);
     // Diffuse map: write the resolved path, including clearing it when the
-    // file's material has no texture â€” knob state must match file state
+    // file's material has no texture — knob state must match file state
     // (a stale texture from a previously loaded file is worse than a blank).
     if (KnobFilePtr k = _imp->textureFile.lock()) k->setValue(m.diffuseMapPath);
 }
@@ -4536,7 +4536,7 @@ ReadGeo::syncMorphWeightKnobs(const std::vector<GeoMorphTargetRef>& targets)
         mn->setValue(newList);
     }
 
-    // NOTE: the caller calls recreateKnobs(true) when this returns true â€”
+    // NOTE: the caller calls recreateKnobs(true) when this returns true —
     // ReadGeoArchive must do that AFTER releasing its archive mutex (the
     // panel refresh must not run under the lock).
     return structureChanged;
@@ -5321,7 +5321,7 @@ ReadGeo::onKnobsAboutToBeLoaded(const NodeSerializationPtr& serialization)
     }
 
     // Create the knobs from the saved list only (no runtime needed). The
-    // parallel vectors must be filled too â€” buildSceneMesh maps knob i ->
+    // parallel vectors must be filled too — buildSceneMesh maps knob i ->
     // (setId, targetIdx) through them.
     KnobPagePtr page = _imp->filePage.lock();
     _imp->morphWeightKnobs.clear();
@@ -5514,7 +5514,7 @@ ReadGeo::updateTransformAtTime(MeshData* mesh, double time) const
     }
 
     // Continuous sample index (frame 1 = sample 0). Bracket with floor/ceil
-    // and linearly interpolate matrix components â€” without this, motion blur
+    // and linearly interpolate matrix components — without this, motion blur
     // sub-frame sampling returns snapped data and animated xforms don't blur.
     // Linear matrix interp isn't strictly correct for large rotations (would
     // need slerp on the rotation block) but at sub-frame deltas the error is
@@ -5569,7 +5569,7 @@ ReadGeo::updateVerticesAtTime(MeshData* mesh, double time) const
 
     const std::vector<float>& s0 = _imp->vertexSamples[idx0];
     if (s0.empty() || s0.size() != mesh->vertices.size()) {
-        // Sample missing or mismatched topology â€” skip (mesh keeps its current
+        // Sample missing or mismatched topology — skip (mesh keeps its current
         // verts, no flicker).
         return;
     }
@@ -5582,7 +5582,7 @@ ReadGeo::updateVerticesAtTime(MeshData* mesh, double time) const
 
     const std::vector<float>& s1 = _imp->vertexSamples[idx1];
     if (s1.size() != s0.size()) {
-        // Topology mismatch between brackets â€” fall back to lower sample.
+        // Topology mismatch between brackets — fall back to lower sample.
         std::memcpy(mesh->vertices.data(), s0.data(), s0.size() * sizeof(float));
         return;
     }
@@ -5626,7 +5626,7 @@ ReadGeo::getPreferredMetadata(NodeMetadata& metadata)
     // shows live motion; CyclesRender sets frame-varying on its own node
     // which is why Cycles worked while ScanlineRender did not.
     //
-    // A frozen file is static by definition â€” never frame-varying, so the
+    // A frozen file is static by definition — never frame-varying, so the
     // cache does its job (one render reused across all frames).
     if (!_imp) {
         return eStatusOK;
@@ -5680,7 +5680,7 @@ ReadGeo::getPreferredMetadata(NodeMetadata& metadata)
             metadata.setIsFrameVarying(true);
         }
         // Animated user morph weights (Use File Morph Weights off) also make
-        // the node time-varying â€” the file-animation checks above don't see
+        // the node time-varying — the file-animation checks above don't see
         // knob animation.
         KnobBoolPtr uf = _imp->useFileMorphWeights.lock();
         if (uf && !uf->getValue()) {

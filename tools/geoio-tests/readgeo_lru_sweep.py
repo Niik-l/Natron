@@ -1,4 +1,4 @@
-﻿import os, re, sys, time
+import os, re, sys, time
 OUTD = r"C:\Users\filmc\Documents\OpenCode_Natron3D\Natron\tools\geoio-tests\out\gseqmini"
 os.makedirs(OUTD, exist_ok=True)
 

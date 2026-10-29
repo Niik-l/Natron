@@ -1,4 +1,4 @@
-﻿# Gather Sequences (one-file-per-frame geo) end-to-end check.
+# Gather Sequences (one-file-per-frame geo) end-to-end check.
 # For each format (abc/fbx/obj) x node class (ReadGeoArchive, ReadGeo):
 #   - filename = '#' pattern (the file dialog's Sequence: mode result): renders
 #     at frames 5 / 20 / 40 must DIFFER (the sequence plays), out-of-range
