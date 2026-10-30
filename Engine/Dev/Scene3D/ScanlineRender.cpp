@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>   // fprintf/fflush — used by Phase 3 GLSL helpers
 #include <cstring>

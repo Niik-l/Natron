@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib> // strtol
@@ -3397,11 +3398,13 @@ ReadGeo::loadSceneGeo(const std::string& path)
     // Caller (loadGeoFromFile) holds _meshMutex and the isLoading guard.
 
     // Label by the file's actual container: .glb vs .gltf (XML/JSON) vs .fbx.
+    // (_stricmp is MSVC/MinGW-only; lower-case the extension so Linux builds too.)
     const std::size_t dot = path.find_last_of('.');
-    const bool isFbx = (dot != std::string::npos) &&
-        _stricmp(path.c_str() + dot, ".fbx") == 0;
-    const bool isGlb = (dot != std::string::npos) &&
-        _stricmp(path.c_str() + dot, ".glb") == 0;
+    std::string ext = (dot != std::string::npos) ? path.substr(dot) : std::string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    const bool isFbx = (ext == ".fbx");
+    const bool isGlb = (ext == ".glb");
     const char* fmtName = isFbx ? "FBX" : (isGlb ? "GLB" : "glTF");
 
     // Reset the scene-format state: the runtime re-parses from scratch and
