@@ -20,13 +20,14 @@ If you've found this fork useful, consider buying me a beer :) **[Ko-fi](https:/
 
 | Area | Nodes | Highlights |
 |---|---|---|
-| 3D scene | 9 geometry + 9 scene/render + 4 camera/light + 3 material | 3D viewport with gizmos, Card / Sphere / Cube / Cylinder, ReadGeo (.obj / .abc), Alembic archives and cameras, **GeoBuilder** (draw grids over the plate, projected through the camera), Project3D / UVProject / MergeMat, PBR Material3D with texture maps, Megascans loader |
+| 3D scene | 9 geometry + 9 scene/render + 4 camera/light + 3 material | 3D viewport with gizmos, Card / Sphere / Cube / Cylinder, ReadGeo (glTF / GLB, FBX, OBJ, Alembic, as one mesh or part by part with file materials, morph targets and skinning), Alembic cameras, **GeoBuilder** (draw grids over the plate, projected through the camera), Project3D / UVProject / MergeMat, PBR Material3D with texture maps, Megascans loader |
 | Cycles | in the scene/render set | Blender's Cycles path tracer as a node: materials, lights with **light-group AOVs**, HDRI domes, motion blur, DOF, AOV passes, shadow catcher and holdout, **CyclesRenderPass** that renders passes to versioned multi-layer EXR (deep EXR too) and builds the comp tree |
 | ScanlineRender | in the scene/render set | GLSL scanline renderer with AOVs and particle modes, for fast previews |
 | Deep compositing | 17 (+19 unreleased) | DeepRead / Write / Merge / Recolor / Flatten / Reformat / Expression …, deep to point cloud and back (**Blast** editing), Cycles native deep output |
 | Particles | 18 | Emitter, solver, forces, spawn, collisions, ParticleMaterial, instancing on geo, rendered in ScanlineRender and Cycles |
 | Volumes | in the geometry/render set | ReadVDB (fire / smoke), procedural Volume3D, **FastVolumeRender** real-time GPU preview |
 | Matchmove | 2 | CameraTracker (detect / track / solve) and PointCloudGenerator |
+| Depth of field | 2 | **LensDefocus** (physically based DOF: camera-driven blur, real lens designs ray traced through their glass, tilt-shift, GPU option) and DeepDefocus on deep images; Cycles can shoot through the same lenses |
 | Colour + transform | 5 | GPU OCIO ACES views in the viewer (tested on the ACES 2.0 reference config), ColorChartMatch, SphericalTransform (8 projections), LensWarp |
 
 Templates menu: ready-made graphs for a basic 3D scene, the Megascans loader, Fast Volume Render, particle presets, and an HDRI face-edit rig.
@@ -60,6 +61,10 @@ Verified on Rocky 8/9, AlmaLinux 9, Fedora, Ubuntu 22.04/24.04, Debian 12, Arch 
 - **OpenRV** for the *Open in RV* buttons on Write and CyclesRenderPass. Get a build from the [OpenRV releases](https://github.com/AcademySoftwareFoundation/OpenRV/releases), then either set the `NATRON_RV_PATH` environment variable to the executable (`rv.exe` on Windows, `rv` on Linux) or fill in the RV Executable knob on the node. On Linux the OpenRV project publishes no binaries: build it from source (Rocky 8/9 are the supported targets) or use a distribution package, then point `NATRON_RV_PATH` at the resulting `rv`. The buttons themselves are platform-neutral.
 
 To build from source, see [BUILDING.md](BUILDING.md) (Windows: MSYS2 / MinGW with an automated script set under `tools/win-build/`; Linux: the GitHub Actions workflows, documented in the same file).
+
+## Contributors
+
+- [alejandroua](https://github.com/alejandroua) — the universal ReadGeo: glTF / GLB and FBX import (cgltf, ufbx), Output Single Mesh and part-by-part modes with file materials, the Archive Contents tree, Re-build Materials, mesh-file sequences, morph targets and skinning, and a run of Cycles mesh-sync fixes (2026-10).
 
 ## Contributing
 
