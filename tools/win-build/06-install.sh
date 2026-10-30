@@ -108,6 +108,14 @@ fi
 # bundle (and adds ~100 MB of dead weight).
 rm -rf "$I/Plugins/PyPlugs/.git"
 
+# --- Licences: Natron's GPL + the vendored MIT libraries ReadGeo links (cgltf, ufbx) ---
+# MIT requires the licence text to accompany binary distributions.
+log "Licenses"
+mkdir -p "$I/Licenses"
+cp "$NATRON_ROOT/Natron/LICENSE.txt" "$I/Licenses/Natron-LICENSE.txt"
+cp "$NATRON_ROOT/Natron/libs/cgltf/LICENSE" "$I/Licenses/cgltf-LICENSE.txt"
+cp "$NATRON_ROOT/Natron/libs/ufbx/LICENSE" "$I/Licenses/ufbx-LICENSE.txt"
+
 # --- OpenColorIO configs: reuse local copy if present, else download (non-fatal) ---
 if [ -d "$I/Resources/OpenColorIO-Configs" ]; then
   ok "OCIO configs already present"

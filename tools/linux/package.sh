@@ -45,6 +45,13 @@ if ls nik-kit-natron/pyplugs/*/ >/dev/null 2>&1; then
     cp -r nik-kit-natron/pyplugs/*/ "$D/Plugins/PyPlugs/NikKit/"
 fi
 
+# Licences: Natron's GPL + the vendored MIT libraries ReadGeo links (cgltf, ufbx).
+# MIT requires the licence text to accompany binary distributions.
+mkdir -p "$D/Licenses"
+cp natron/LICENSE.txt "$D/Licenses/Natron-LICENSE.txt"
+cp natron/libs/cgltf/LICENSE "$D/Licenses/cgltf-LICENSE.txt"
+cp natron/libs/ufbx/LICENSE "$D/Licenses/ufbx-LICENSE.txt"
+
 curl -fsSL https://github.com/NatronGitHub/OpenColorIO-Configs/archive/Natron-v2.4.tar.gz \
     | tar -xz -C "$D/Resources"
 mv "$D/Resources/OpenColorIO-Configs-Natron-v2.4" "$D/Resources/OpenColorIO-Configs"
