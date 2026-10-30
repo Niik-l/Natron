@@ -119,6 +119,10 @@ export NATRON_ROOT=/d/projects
 mkdir -p $NATRON_ROOT
 cd $NATRON_ROOT
 
+# Windows: allow paths longer than 260 characters first, or the clone can die with
+# "Filename too long" on a Qt patch under tools/jenkins/ (one-time, user-wide).
+git config --global core.longpaths true
+
 # Clone Natron
 git clone https://github.com/Niik-l/Natron.git
 cd Natron
