@@ -260,6 +260,10 @@ public:
     bool getViewport3DInvertWheel() const;
     bool getViewport3DOrbitAroundSelection() const;
     bool getViewport3DClampOrbit() const;
+    /// Shift-held gizmo increment snapping (Preferences > 3D Viewport > Gizmo).
+    double getViewport3DSnapTranslate() const;
+    double getViewport3DSnapRotate() const;
+    double getViewport3DSnapScale() const;
     bool getViewport3DGradientBackground() const;
     void getViewport3DBackgroundColor(double* r, double* g, double* b) const;
     void getViewport3DBackgroundTopColor(double* r, double* g, double* b) const;
@@ -574,6 +578,9 @@ private:
     KnobBoolPtr _viewport3DInvertWheel;
     KnobBoolPtr _viewport3DOrbitAroundSelection;
     KnobBoolPtr _viewport3DClampOrbit;
+    KnobDoublePtr _viewport3DSnapTranslate;
+    KnobDoublePtr _viewport3DSnapRotate;
+    KnobDoublePtr _viewport3DSnapScale;
     KnobChoicePtr _viewport3DBackgroundMode;
     KnobColorPtr _viewport3DBackgroundColor;
     KnobColorPtr _viewport3DBackgroundTop;

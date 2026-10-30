@@ -1253,6 +1253,31 @@ Settings::initializeKnobsViewport3D()
                                               "flips. Off: tumble over the top like Maya.") );
     _viewport3DTab->addKnob(_viewport3DClampOrbit);
 
+    // ---- Gizmo ----
+    _viewport3DSnapTranslate = AppManager::createKnob<KnobDouble>( this, tr("Snap translate (Shift)") );
+    _viewport3DSnapTranslate->setName("viewport3DSnapTranslate");
+    _viewport3DSnapTranslate->setMinimum(0.); _viewport3DSnapTranslate->setMaximum(1000.);
+    _viewport3DSnapTranslate->setDisplayMinimum(0.); _viewport3DSnapTranslate->setDisplayMaximum(10.);
+    _viewport3DSnapTranslate->setHintToolTip( tr("Holding Shift while dragging the translate gizmo moves in steps of this "
+                                                 "many units (measured from where the drag started). 0 disables snapping.") );
+    _viewport3DTab->addKnob(_viewport3DSnapTranslate);
+
+    _viewport3DSnapRotate = AppManager::createKnob<KnobDouble>( this, tr("Snap rotate (Shift)") );
+    _viewport3DSnapRotate->setName("viewport3DSnapRotate");
+    _viewport3DSnapRotate->setMinimum(0.); _viewport3DSnapRotate->setMaximum(180.);
+    _viewport3DSnapRotate->setDisplayMinimum(0.); _viewport3DSnapRotate->setDisplayMaximum(90.);
+    _viewport3DSnapRotate->setHintToolTip( tr("Holding Shift while dragging the rotate gizmo turns in steps of this many "
+                                              "degrees. 0 disables snapping.") );
+    _viewport3DTab->addKnob(_viewport3DSnapRotate);
+
+    _viewport3DSnapScale = AppManager::createKnob<KnobDouble>( this, tr("Snap scale (Shift)") );
+    _viewport3DSnapScale->setName("viewport3DSnapScale");
+    _viewport3DSnapScale->setMinimum(0.); _viewport3DSnapScale->setMaximum(10.);
+    _viewport3DSnapScale->setDisplayMinimum(0.); _viewport3DSnapScale->setDisplayMaximum(1.);
+    _viewport3DSnapScale->setHintToolTip( tr("Holding Shift while dragging the scale gizmo scales in steps of this "
+                                             "amount. 0 disables snapping.") );
+    _viewport3DTab->addKnob(_viewport3DSnapScale);
+
     // ---- Background & grid ----
     _viewport3DBackgroundMode = AppManager::createKnob<KnobChoice>( this, tr("Background") );
     _viewport3DBackgroundMode->setName("viewport3DBackground");
@@ -1730,6 +1755,9 @@ Settings::setDefaultValues()
     _viewport3DInvertWheel->setDefaultValue(false);
     _viewport3DOrbitAroundSelection->setDefaultValue(true);
     _viewport3DClampOrbit->setDefaultValue(true);
+    _viewport3DSnapTranslate->setDefaultValue(0.5);
+    _viewport3DSnapRotate->setDefaultValue(15.);
+    _viewport3DSnapScale->setDefaultValue(0.1);
     _viewport3DBackgroundMode->setDefaultValue(0);     // Solid
     for (int i = 0; i < 3; ++i) {
         _viewport3DBackgroundColor->setDefaultValue(0.15, i);
@@ -2589,6 +2617,7 @@ Settings::onKnobValueChanged(KnobI* k,
     } else if ( k == _viewport3DNavPreset.get() || k == _viewport3DOrbitSpeed.get() || k == _viewport3DPanSpeed.get() ||
                 k == _viewport3DZoomSpeed.get() || k == _viewport3DInvertWheel.get() || k == _viewport3DOrbitAroundSelection.get() ||
                 k == _viewport3DClampOrbit.get() || k == _viewport3DBackgroundMode.get() || k == _viewport3DBackgroundColor.get() ||
+                k == _viewport3DSnapTranslate.get() || k == _viewport3DSnapRotate.get() || k == _viewport3DSnapScale.get() ||
                 k == _viewport3DBackgroundTop.get() || k == _viewport3DBackgroundBottom.get() || k == _viewport3DGridColor.get() ||
                 k == _viewport3DDefaultFov.get() || k == _viewport3DNearClip.get() || k == _viewport3DFarClip.get() ||
                 k == _viewport3DGridAtStartup.get() || k == _viewport3DDefaultShading.get() ) {
@@ -2742,6 +2771,9 @@ double Settings::getViewport3DZoomSpeed() const { return _viewport3DZoomSpeed->g
 bool Settings::getViewport3DInvertWheel() const { return _viewport3DInvertWheel->getValue(); }
 bool Settings::getViewport3DOrbitAroundSelection() const { return _viewport3DOrbitAroundSelection->getValue(); }
 bool Settings::getViewport3DClampOrbit() const { return _viewport3DClampOrbit->getValue(); }
+double Settings::getViewport3DSnapTranslate() const { return _viewport3DSnapTranslate->getValue(); }
+double Settings::getViewport3DSnapRotate() const { return _viewport3DSnapRotate->getValue(); }
+double Settings::getViewport3DSnapScale() const { return _viewport3DSnapScale->getValue(); }
 bool Settings::getViewport3DGradientBackground() const { return _viewport3DBackgroundMode->getValue() == 1; }
 
 void

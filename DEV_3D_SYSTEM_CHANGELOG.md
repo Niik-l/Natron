@@ -386,6 +386,29 @@
   19-piece FBX spider renders as one assembled merged mesh, Avocado keeps its
   embedded texture. The `NATRON_DEBUG_GEOIO` dump now reports the built
   merged/single geometry (frame, selection, bake flag).
+- **3D viewport gizmo: Shift increment snapping + rounded write-back (2026-10-21)** — user
+  request. Holding Shift while dragging the translate / rotate / scale gizmo snaps in steps set
+  on Preferences > 3D Viewport > Gizmo (`Snap translate` 0.5 units, `Snap rotate` 15 deg,
+  `Snap scale` 0.1; 0 = off). ImGuizmo's `snap` argument quantises the cumulative delta since
+  the drag started (Blender-style increments, not an absolute grid). Separately the values the
+  gizmo wrote were raw float-decompose noise (`scale 0.999997`, `translate -13.66400`): the
+  write-back now rounds translate / scale to 1e-4 and rotate to 1e-3 deg, in DOUBLE (a float-
+  rounded 1.0815 is 1.08150005... as a double and the SpinBox, which shows 2 decimals or else the
+  full 16-digit form, printed `1.081500`; first GUI pass caught this). Safe because ImGuizmo
+  translates / scales from the drag-start values and the matrix is rebuilt from the knobs each
+  paint; rotation is a per-paint delta so the error is bounded by half a step. Needs a GUI check.
+- **3D viewport: orbit snapped the view onto the selected node (2026-10-21)** — user report:
+  tumbling "seemed to snap the rotation point to a different location". Cause: Preferences >
+  3D Viewport > "Orbit around selection" (default on) re-aimed `camTarget` at the selected
+  node at every Alt+LMB press, keeping the eye, so the view swung onto the selection before the
+  orbit started; and the node-graph selection is synced into the viewport every paint, so
+  merely having a Card3D selected while editing its knobs triggered it on every tumble. Fix
+  (`Gui/Viewport3D.cpp`): the press captures the node's drawn position (worldMatrix x pivot,
+  where the gizmo sits) as `orbitPivot` and the look-target's offset from it in the camera
+  frame; the drag then rebuilds `camTarget = pivot + offset(right, up, forward)` from the new
+  angles, so eye and target rotate rigidly about the selection and the framing at press is
+  preserved (Maya's tumble-about-selection). Over-the-pole up-hint flips mirror the stored
+  right/up components. Needs a GUI check (TODO).
 - **LensDefocus stack merged (2026-10-23/24)** — another agent's work, merged by three fast-forwards
   (RB-2.6 62d278bbb, b84b6d484, f13f6b4f8; Cycles fork feature/cycles-deep 3a20cc0b1). Per-commit
   details, probes, the regression testbed and the known limitations live OUTSIDE the repo in

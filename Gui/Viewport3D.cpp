@@ -910,7 +910,13 @@ struct Viewport3DPrivate
     // Mouse
     int lastMouseX, lastMouseY;
     bool orbiting, panning, zooming;
-    float orbitPivot[3];  // pivot point for orbiting (set from depth buffer on orbit start)
+    float orbitPivot[3];  // world-space tumble pivot for the current drag (selected node)
+    // "Orbit around selection": the drag rotates eye AND look-target rigidly
+    // about orbitPivot, so the view does not jump at press. The look-target
+    // is kept as a constant offset from the pivot in the camera frame.
+    bool  orbitAboutPivot;
+    float orbitTargetOffset[3]; // camTarget - orbitPivot as (right, up, forward) components
+    float orbitUpSign;          // LookAt up-hint sign when the offset was captured
     int viewW, viewH;
 
     // Scene graph (rebuilt each frame)
@@ -982,6 +988,9 @@ struct Viewport3DPrivate
         , zooming(false)
         , viewW(100)
         , orbitPivot{0, 0, 0}
+        , orbitAboutPivot(false)
+        , orbitTargetOffset{0, 0, 0}
+        , orbitUpSign(1.f)
         , viewH(100)
         , pointSize(2.0f)
         , gizmoDragging(false)
@@ -2203,10 +2212,28 @@ Viewport3D::paintGL()
                     }
                 }
 
+                // Shift held = increment snapping (Preferences > 3D Viewport >
+                // Gizmo). ImGuizmo snaps the cumulative delta since the drag
+                // started: translate per axis in units, rotate in degrees,
+                // scale as a step. 0 in the preference = no snapping.
+                const float* snapPtr = NULL;
+                float snapVals[3] = { 0.f, 0.f, 0.f };
+                if (QApplication::keyboardModifiers() & Qt::ShiftModifier) {
+                    SettingsPtr st = appPTR->getCurrentSettings();
+                    float step = 0.f;
+                    if (_imp->imguizmoOp == ImGuizmo::TRANSLATE)   step = (float)st->getViewport3DSnapTranslate();
+                    else if (_imp->imguizmoOp == ImGuizmo::ROTATE) step = (float)st->getViewport3DSnapRotate();
+                    else if (_imp->imguizmoOp == ImGuizmo::SCALE)  step = (float)st->getViewport3DSnapScale();
+                    if (step > 0.f) {
+                        snapVals[0] = snapVals[1] = snapVals[2] = step;
+                        snapPtr = snapVals;
+                    }
+                }
+
                 // Manipulate — draws gizmo AND handles interaction
                 if (ImGuizmo::Manipulate(_imp->cameraView, _imp->cameraProjection,
                                           _imp->imguizmoOp, _imp->imguizmoMode,
-                                          objMat, NULL, NULL))
+                                          objMat, NULL, snapPtr))
                 {
                     // Back to the node's own space (Local = Parent⁻¹ × World), then
                     // decompose to T/R/S and back out the pivot offset so the plain
@@ -2222,27 +2249,42 @@ Viewport3D::paintGL()
                     float newT[3], newR[3], newS[3];
                     ImGuizmo::DecomposeMatrixToComponents(localMat, newT, newR, newS);
                     newT[0] -= piv[0]; newT[1] -= piv[1]; newT[2] -= piv[2];
+                    // Round what the gizmo writes: the float decompose left
+                    // noise like scale 0.999997 / translate -13.66400 in the
+                    // panel. ImGuizmo moves/scales from the drag-start values
+                    // and the matrix is rebuilt from the knobs every paint, so
+                    // rounding here does not accumulate (rotation is applied
+                    // as a per-paint delta, bounded by half a step per paint).
+                    // Round in DOUBLE: a float-rounded 1.0815 is 1.08150005...
+                    // as a double and the SpinBox then shows its full 16-digit
+                    // form; a double-rounded one prints as "1.0815".
+                    double outT[3], outR[3], outS[3];
+                    for (int k = 0; k < 3; ++k) {
+                        outT[k] = std::round((double)newT[k] * 10000.) / 10000.;  // 1e-4 unit
+                        outR[k] = std::round((double)newR[k] * 1000.)  / 1000.;   // 1e-3 degree
+                        outS[k] = std::round((double)newS[k] * 10000.) / 10000.;  // 1e-4
+                    }
 
                     KnobIPtr kTX = effect->getKnobByName("translateX");
                     KnobIPtr kTY = effect->getKnobByName("translateY");
                     KnobIPtr kTZ = effect->getKnobByName("translateZ");
-                    if (kTX) dynamic_cast<KnobDouble*>(kTX.get())->setValue(newT[0]);
-                    if (kTY) dynamic_cast<KnobDouble*>(kTY.get())->setValue(newT[1]);
-                    if (kTZ) dynamic_cast<KnobDouble*>(kTZ.get())->setValue(newT[2]);
+                    if (kTX) dynamic_cast<KnobDouble*>(kTX.get())->setValue(outT[0]);
+                    if (kTY) dynamic_cast<KnobDouble*>(kTY.get())->setValue(outT[1]);
+                    if (kTZ) dynamic_cast<KnobDouble*>(kTZ.get())->setValue(outT[2]);
 
                     KnobIPtr kRX = effect->getKnobByName("rotateX");
                     KnobIPtr kRY = effect->getKnobByName("rotateY");
                     KnobIPtr kRZ = effect->getKnobByName("rotateZ");
-                    if (kRX) dynamic_cast<KnobDouble*>(kRX.get())->setValue(newR[0]);
-                    if (kRY) dynamic_cast<KnobDouble*>(kRY.get())->setValue(newR[1]);
-                    if (kRZ) dynamic_cast<KnobDouble*>(kRZ.get())->setValue(newR[2]);
+                    if (kRX) dynamic_cast<KnobDouble*>(kRX.get())->setValue(outR[0]);
+                    if (kRY) dynamic_cast<KnobDouble*>(kRY.get())->setValue(outR[1]);
+                    if (kRZ) dynamic_cast<KnobDouble*>(kRZ.get())->setValue(outR[2]);
 
                     KnobIPtr kSX = effect->getKnobByName("scaleX");
                     KnobIPtr kSY = effect->getKnobByName("scaleY");
                     KnobIPtr kSZ = effect->getKnobByName("scaleZ");
-                    if (kSX) dynamic_cast<KnobDouble*>(kSX.get())->setValue(newS[0]);
-                    if (kSY) dynamic_cast<KnobDouble*>(kSY.get())->setValue(newS[1]);
-                    if (kSZ) dynamic_cast<KnobDouble*>(kSZ.get())->setValue(newS[2]);
+                    if (kSX) dynamic_cast<KnobDouble*>(kSX.get())->setValue(outS[0]);
+                    if (kSY) dynamic_cast<KnobDouble*>(kSY.get())->setValue(outS[1]);
+                    if (kSZ) dynamic_cast<KnobDouble*>(kSZ.get())->setValue(outS[2]);
 
                     effect->endChanges();
                 }
@@ -2269,6 +2311,28 @@ Viewport3D::paintGL()
 // Preset = Preferences > 3D Viewport > Navigation preset.
 // ----------------------------------------------------------------------------
 enum NavAction { eNavNone = 0, eNavOrbit, eNavPan, eNavDolly };
+
+// Orthonormal camera frame of the free-orbit camera for the given angles,
+// matching paintGL's eye formula and its over-the-top up-hint flip.
+static void
+orbitCameraBasis(float yAngle, float xAngle, float right[3], float up[3], float forward[3])
+{
+    // paintGL: eye = target + d * distance, so forward = -d.
+    const float d[3] = { cosf(yAngle) * cosf(xAngle), sinf(xAngle), sinf(yAngle) * cosf(xAngle) };
+    forward[0] = -d[0]; forward[1] = -d[1]; forward[2] = -d[2];
+    const float hint[3] = { 0.f, (cosf(xAngle) < 0.f) ? -1.f : 1.f, 0.f };
+    // right = forward x hint
+    right[0] = forward[1] * hint[2] - forward[2] * hint[1];
+    right[1] = forward[2] * hint[0] - forward[0] * hint[2];
+    right[2] = forward[0] * hint[1] - forward[1] * hint[0];
+    float len = sqrtf(right[0]*right[0] + right[1]*right[1] + right[2]*right[2]);
+    if (len < 1e-6f) { right[0] = 1.f; right[1] = 0.f; right[2] = 0.f; len = 1.f; }
+    right[0] /= len; right[1] /= len; right[2] /= len;
+    // up = right x forward
+    up[0] = right[1] * forward[2] - right[2] * forward[1];
+    up[1] = right[2] * forward[0] - right[0] * forward[2];
+    up[2] = right[0] * forward[1] - right[1] * forward[0];
+}
 
 static NavAction
 classifyNav(Qt::MouseButton button, Qt::KeyboardModifiers mods)
@@ -2367,24 +2431,30 @@ Viewport3D::mousePressEvent(QMouseEvent* e)
 
     if (nav == eNavOrbit) {
         _imp->orbiting = true;
-        // Maya's tumble-about-selection: re-centre the orbit on the selected
-        // node's WORLD position (a child of a Group3D used to orbit its local
-        // offset instead), keeping the eye where it is.
+        // Maya's tumble-about-selection: tumble about the selected node's
+        // DRAWN world position (worldMatrix x pivot, where the gizmo sits)
+        // without moving the view at press. The old code re-aimed camTarget at
+        // the node, which swung the whole view onto the selection every time
+        // an orbit started while something was selected in the node graph.
+        _imp->orbitAboutPivot = false;
         if ( appPTR->getCurrentSettings()->getViewport3DOrbitAroundSelection() && !_imp->selectedNodeName.empty() ) {
             const std::vector<SceneNode>& nodes = _imp->sceneGraph.nodes();
             for (size_t si = 0; si < nodes.size(); ++si) {
                 if (nodes[si].name == _imp->selectedNodeName) {
-                    float eye[3];
-                    eye[0] = cosf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[0];
-                    eye[1] = sinf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[1];
-                    eye[2] = sinf(_imp->camYAngle) * cosf(_imp->camXAngle) * _imp->camDistance + _imp->camTarget[2];
-                    _imp->camTarget[0] = nodes[si].worldMatrix[12];
-                    _imp->camTarget[1] = nodes[si].worldMatrix[13];
-                    _imp->camTarget[2] = nodes[si].worldMatrix[14];
-                    const float dx = eye[0] - _imp->camTarget[0];
-                    const float dy = eye[1] - _imp->camTarget[1];
-                    const float dz = eye[2] - _imp->camTarget[2];
-                    _imp->camDistance = std::max(0.01f, sqrtf(dx*dx + dy*dy + dz*dz));
+                    const float* M = nodes[si].worldMatrix; const float* p = nodes[si].pivot;
+                    _imp->orbitPivot[0] = M[0]*p[0] + M[4]*p[1] + M[8]*p[2]  + M[12];
+                    _imp->orbitPivot[1] = M[1]*p[0] + M[5]*p[1] + M[9]*p[2]  + M[13];
+                    _imp->orbitPivot[2] = M[2]*p[0] + M[6]*p[1] + M[10]*p[2] + M[14];
+                    float r[3], u[3], f[3];
+                    orbitCameraBasis(_imp->camYAngle, _imp->camXAngle, r, u, f);
+                    const float o[3] = { _imp->camTarget[0] - _imp->orbitPivot[0],
+                                         _imp->camTarget[1] - _imp->orbitPivot[1],
+                                         _imp->camTarget[2] - _imp->orbitPivot[2] };
+                    _imp->orbitTargetOffset[0] = o[0]*r[0] + o[1]*r[1] + o[2]*r[2];
+                    _imp->orbitTargetOffset[1] = o[0]*u[0] + o[1]*u[1] + o[2]*u[2];
+                    _imp->orbitTargetOffset[2] = o[0]*f[0] + o[1]*f[1] + o[2]*f[2];
+                    _imp->orbitUpSign = (cosf(_imp->camXAngle) < 0.f) ? -1.f : 1.f;
+                    _imp->orbitAboutPivot = true;
                     break;
                 }
             }
@@ -2472,6 +2542,25 @@ Viewport3D::mouseMoveEvent(QMouseEvent* e)
             if (_imp->camXAngle >  3.1415927f) _imp->camXAngle -= twoPi;
             if (_imp->camXAngle < -3.1415927f) _imp->camXAngle += twoPi;
         }
+        if (_imp->orbitAboutPivot) {
+            // Rigid rotation about the pivot: eye = target + d*distance and
+            // target = pivot + offset in the (rotating) camera frame, so both
+            // swing around the selection and the framing is preserved.
+            float r[3], u[3], f[3];
+            orbitCameraBasis(_imp->camYAngle, _imp->camXAngle, r, u, f);
+            const float sign = (cosf(_imp->camXAngle) < 0.f) ? -1.f : 1.f;
+            if (sign != _imp->orbitUpSign) {
+                // Went over the pole (unclamped orbit): the up hint flipped, so
+                // right/up reversed; mirror the stored components to follow.
+                _imp->orbitTargetOffset[0] = -_imp->orbitTargetOffset[0];
+                _imp->orbitTargetOffset[1] = -_imp->orbitTargetOffset[1];
+                _imp->orbitUpSign = sign;
+            }
+            const float* o = _imp->orbitTargetOffset;
+            for (int k = 0; k < 3; ++k) {
+                _imp->camTarget[k] = _imp->orbitPivot[k] + o[0]*r[k] + o[1]*u[k] + o[2]*f[k];
+            }
+        }
         update();
     } else if (_imp->panning) {
         // Pan: move camTarget in camera-right and camera-up directions
@@ -2548,6 +2637,7 @@ Viewport3D::mouseReleaseEvent(QMouseEvent* e)
     }
 
     _imp->orbiting = false;
+    _imp->orbitAboutPivot = false;
     _imp->panning = false;
     _imp->zooming = false;
     _imp->lookThroughEditMode = Viewport3DPrivate::LT_NONE;
