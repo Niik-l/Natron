@@ -101,6 +101,9 @@ pacman -S --noconfirm \
 > without .abc support (ReadGeo limited; ReadAlembicArchive/Camera/Transform and
 > the matchmove ingest all degraded). Don't skip it.
 >
+> glTF / GLB and FBX import need **no extra package**: the loaders (cgltf, ufbx)
+> are vendored under `libs/` and built by the top-level CMake.
+>
 > **Note:** `mingw-w64-x86_64-openvdb` is required by Cycles' VDB image loader.
 > Without it, the Natron + Cycles link step fails with `undefined reference to
 > ccl::VDBImageLoader::VDBImageLoader(...)`. Pull it in even if you don't plan
