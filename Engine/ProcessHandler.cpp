@@ -30,6 +30,7 @@
 
 #include <QtGlobal> // for Q_OS_*
 #include <QProcess>
+#include <iostream>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QCoreApplication>
@@ -102,7 +103,14 @@ ProcessHandler::ProcessHandler(const QString & projectPath,
     ///connect the useful slots of the process
     QObject::connect( _process, SIGNAL(readyReadStandardOutput()), this, SLOT(onStandardOutputBytesWritten()) );
     QObject::connect( _process, SIGNAL(readyReadStandardError()), this, SLOT(onStandardErrorBytesWritten()) );
+    // Qt 5.6 renamed QProcess::error() to errorOccurred(); the string-based
+    // connect to the old name silently matched nothing under Qt 6, so a child
+    // that failed to start or crashed was never reported.
+#if QT_VERSION >= QT_VERSION_CHECK(5, 6, 0)
+    QObject::connect( _process, SIGNAL(errorOccurred(QProcess::ProcessError)), this, SLOT(onProcessError(QProcess::ProcessError)) );
+#else
     QObject::connect( _process, SIGNAL(error(QProcess::ProcessError)), this, SLOT(onProcessError(QProcess::ProcessError)) );
+#endif
     QObject::connect( _process, SIGNAL(finished(int,QProcess::ExitStatus)), this, SLOT(onProcessEnd(int,QProcess::ExitStatus)) );
 
 
@@ -267,8 +275,17 @@ ProcessHandler::onProcessEnd(int exitCode,
 
     if (stat == QProcess::CrashExit) {
         returnCode = 2;
-    } else if (exitCode == 1) {
+    } else if (exitCode != 0) {
+        // Any non-zero exit is a failed render. Only exit code 1 used to count,
+        // so a child that died before rendering with another code (e.g. the
+        // Python interpreter's 2 for a bad command line) showed up as
+        // "Finished" with no frames written (issue #6).
         returnCode = 1;
+    }
+    if (returnCode != 0) {
+        std::cerr << "Background render of " << _writer->getScriptName() << " exited with code " << exitCode
+                  << (stat == QProcess::CrashExit ? " (crashed)" : "") << ". Process log:" << std::endl
+                  << _processLog.toStdString() << std::endl;
     }
     Q_EMIT processFinished(returnCode);
 }

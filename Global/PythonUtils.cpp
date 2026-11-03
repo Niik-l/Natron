@@ -248,6 +248,16 @@ PyObject* initializePython3(const std::vector<wchar_t*>& commandLineArgsWide)
 
     config.user_site_directory = 0;
 
+    // argv is Natron's command line, not Python's. PyConfig_InitPythonConfig()
+    // defaults to parse_argv = 1, which made Py_InitializeFromConfig() run
+    // Python's own option parser over it: "-w Write1" (and any Natron option
+    // placed before the project path) printed "Unknown option: -w" and exited
+    // the process with code 2 before Natron ever saw it. The GUI's "Render in
+    // a separate process" launches exactly that command line, so every such
+    // render died at startup (issue #6). The legacy PySys_SetArgv() this
+    // replaced only ever stored argv in sys.argv; do the same.
+    config.parse_argv = 0;
+
     // Set program name
     status = PyConfig_SetString(&config, &config.program_name, commandLineArgsWide[0]);
     if (PyStatus_Exception(status)) {
