@@ -31,7 +31,7 @@
 NATRON_NAMESPACE_ENTER
 
 void
-createCryptomatteKnobs(EffectInstance* effect)
+createCryptomatteKnobs(EffectInstance* effect, bool perInstanceOption)
 {
     KnobPagePtr page = AppManager::createKnob<KnobPage>(effect, QObject::tr("Cryptomatte"));
     {
@@ -53,6 +53,27 @@ createCryptomatteKnobs(EffectInstance* effect)
                                       "\"default\"."));
         page->addKnob(k);
     }
+    if (perInstanceOption) {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(effect, QObject::tr("Crypto Per Instance"));
+        k->setName(kCryptomattePerInstanceKnobName);
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(QObject::tr("Give every instance its own Cryptomatte object ID, named <node>/<instance index> "
+                                      "(ParticleInstance1/0, /1, ...), so single instances can be matted. Off: all "
+                                      "instances share the node's ID. The asset layer keeps the whole system as one "
+                                      "matte either way. Indices follow the particle order of the current frame."));
+        page->addKnob(k);
+    }
+}
+
+bool
+getCryptomatteKnobBool(const NodePtr& node, const char* knobName)
+{
+    if (!node) {
+        return false;
+    }
+    KnobBoolPtr k = std::dynamic_pointer_cast<KnobBool>(node->getKnobByName(knobName));
+    return k ? k->getValue() : false;
 }
 
 std::string

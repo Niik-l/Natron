@@ -55,13 +55,27 @@ card = a.createNode("fr.inria.built-in.Card3D")
 setp(card, "translateZ", -2.5)   # a wall behind the sphere and cube, facing the camera
 setp(card, "scaleX", 8.0); setp(card, "scaleY", 8.0)
 
+# five small spheres scattered on a pad in front of the wall (the wall is far wider than the
+# view, so scattering on it lands most points out of frame), one Cryptomatte ID each
+pad = a.createNode("fr.inria.built-in.Card3D")
+setp(pad, "translateZ", -2.3); setp(pad, "translateY", 1.0); setp(pad, "scaleX", 1.5); setp(pad, "scaleY", 1.0)
+proto = a.createNode("fr.inria.built-in.Sphere3D")
+scatter = a.createNode("fr.inria.built-in.Scatter3D")
+log("scatter connect", scatter.connectInput(0, pad))
+setp(scatter, "count", 5); setp(scatter, "seed", 3)
+inst = a.createNode("fr.inria.built-in.ParticleInstance")
+log("instance connect", inst.connectInput(0, scatter), inst.connectInput(1, proto))
+setp(inst, "scaleMultiplier", 0.35)
+setp(inst, "cryptoCustom", "dots")
+setp(inst, "cryptoPerInstance", True)
+
 light = a.createNode("fr.inria.built-in.Light3D")
 setp(light, "intensity", 25.0); setp(light, "translateX", 3.0); setp(light, "translateY", 4.0); setp(light, "translateZ", 5.0)
 camera = a.createNode("fr.inria.built-in.Camera3D")
 setp(camera, "translateY", 0.5); setp(camera, "translateZ", 6.0)
 
 scene = a.createNode("fr.inria.built-in.Scene3D")
-for i, n in enumerate([group, cube, card, light]):
+for i, n in enumerate([group, cube, card, inst, light]):
     log("scene input", i, n.getScriptName(), scene.connectInput(i, n))
 
 cyc = a.createNode("fr.inria.built-in.CyclesRender")
@@ -104,6 +118,10 @@ cases.append(("custom_default", crypto("CryptoCustom", "default")[0]))
 cases.append(("asset_hero", crypto("CryptoAsset", "HeroAsset")[0]))
 cases.append(("asset_cube", crypto("CryptoAsset", cube.getScriptName())[0]))
 cases.append(("mat_cube", crypto("CryptoMaterial", mat.getScriptName())[0]))
+instNames = [inst.getScriptName() + "/" + str(i) for i in range(5)]
+cases.append(("inst_0", crypto("CryptoObject", instNames[0])[0]))
+cases.append(("inst_union", crypto("CryptoObject", ", ".join(instNames))[0]))
+cases.append(("inst_asset", crypto("CryptoAsset", inst.getScriptName())[0]))
 writers = [(name, writer(c, name)) for name, c in cases]
 # the beauty alpha, for the all-objects comparison
 writers.append(("beauty", writer(cyc, "beauty")))
@@ -113,7 +131,7 @@ for name, w in writers:
 
 # manifests the decoders got from the render node
 for name, c in cases:
-    if name in ("obj_sphere", "custom_hero", "asset_hero", "mat_cube"):
+    if name in ("obj_sphere", "custom_hero", "asset_hero", "mat_cube", "inst_0"):
         c.getParam("reloadManifest").trigger()   # the render just produced the manifests
         log("manifest", name, "|", c.getParam("manifestInfo").get(), "|", c.getParam("manifestNames").get().replace("\n", ","))
 

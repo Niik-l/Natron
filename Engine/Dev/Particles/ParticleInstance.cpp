@@ -267,7 +267,7 @@ ParticleInstance::initializeKnobs()
         k->setHintToolTip(tr("Maximum number of instances to render. Limits performance impact."));
         page->addKnob(k); _imp->maxInstances = k;
     }
-    createCryptomatteKnobs(this);
+    createCryptomatteKnobs(this, true);
 }
 
 bool

@@ -2254,7 +2254,10 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 const float shutterClose = mbShutterClose;
 
                 // Create one ccl::Object per instance (shared mesh = native Cycles instancing)
+                const bool cryptoPerInstance = getCryptomatteKnobBool(srcNode, kCryptomattePerInstanceKnobName);
+                int instIndex = -1;
                 for (const auto& inst : instances) {
+                    ++instIndex;
                     if (inst.geoSourceIndex < 0 || inst.geoSourceIndex >= 4) continue;
                     ccl::Mesh* proto = protoMeshes[inst.geoSourceIndex];
                     if (!proto) continue;
@@ -2272,6 +2275,10 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     ccl::Object* instObj = scene->create_node<ccl::Object>();
                     instObj->set_geometry(proto);
                     applyCryptoNames(instObj, sg, sn, srcNode);
+                    if (cryptoPerInstance) {
+                        // One object ID per instance; the asset ID stays the node's (set above).
+                        instObj->name = ccl::ustring(sn.name + "/" + std::to_string(instIndex));
+                    }
                     instObj->set_tfm(buildInstTfm(0.0f)); // center (current frame)
 
                     if (mbEnabled) {
@@ -2286,6 +2293,11 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
                     instObj->set_color(ccl::make_float3(inst.r, inst.g, inst.b));
                     instObj->tag_update(scene);
+                    if (std::getenv("NATRON_DEBUG_GEOIO") && instIndex < 8) {
+                        std::fprintf(stderr, "[CyclesInstance] #%d geo=%d pos=(%.3f,%.3f,%.3f) scale=%.3f tfm.x=(%.3f,%.3f,%.3f,%.3f)\n",
+                                     instIndex, inst.geoSourceIndex, inst.px, inst.py, inst.pz, inst.sx,
+                                     base.x.x, base.x.y, base.x.z, base.x.w);
+                    }
                 }
 
                 continue; // done with this node

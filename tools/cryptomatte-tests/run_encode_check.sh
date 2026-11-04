@@ -16,7 +16,7 @@ same() { oiiotool "$1" --ch A "$2" --ch A --diff --fail "$3" --failpercent 0 --h
 amax() { oiiotool "$1" --ch A --printstats 2>/dev/null | grep "Stats Max" | awk '{print $3}'; }
 # sum of two mattes == a third (A channels)
 sum2() { oiiotool "$1" --ch A "$2" --ch A --add -o "$O/_sum.exr" >/dev/null 2>&1 && same "$O/_sum.exr" "$3" "$4"; }
-for f in obj_sphere obj_cube obj_card obj_all custom_hero custom_default asset_hero asset_cube mat_cube beauty; do
+for f in obj_sphere obj_cube obj_card obj_all custom_hero custom_default asset_hero asset_cube mat_cube inst_0 inst_union inst_asset beauty; do
   [ -s "$O/$f.exr" ] || { bad "missing output $f.exr"; }
 done
 [ $fail = 1 ] && { echo "CYCLES_CRYPTO_CHECK FAILED (renders missing)"; exit 1; }
@@ -26,8 +26,13 @@ m=$(amax "$O/obj_cube.exr");   awk -v m="$m" 'BEGIN{exit !(m>0.9)}' && ok "cube 
 m=$(amax "$O/obj_card.exr");   awk -v m="$m" 'BEGIN{exit !(m>0.9)}' && ok "card matte present (max $m)"   || bad "card matte max=$m"
 oiiotool "$O/obj_sphere.exr" --ch A "$O/obj_cube.exr" --ch A --add "$O/obj_card.exr" --ch A --add -o "$O/_sum3.exr" >/dev/null 2>&1
 same "$O/_sum3.exr" "$O/obj_all.exr" 1e-5 && ok "sphere + cube + card == all objects" || bad "object mattes do not sum to all objects"
-# 2. all objects == beauty alpha (same samples; lights are not hit)
-same "$O/obj_all.exr" "$O/beauty.exr" 0.02 && ok "all objects == beauty alpha (tol 0.02)" || bad "all objects != beauty alpha"
+# 2. all objects + the instances == beauty alpha (same samples; lights are not hit)
+sum2 "$O/obj_all.exr" "$O/inst_asset.exr" "$O/beauty.exr" 0.02 && ok "all objects + instances == beauty alpha (tol 0.02)" || bad "all objects + instances != beauty alpha"
+# 2b. per-instance IDs: one instance has a matte, the five together == the node's asset matte,
+#     and instance 0 alone is clearly smaller than all five
+m=$(amax "$O/inst_0.exr"); awk -v m="$m" 'BEGIN{exit !(m>0.9)}' && ok "instance 0 matte present (max $m)" || bad "instance 0 matte max=$m"
+same "$O/inst_union.exr" "$O/inst_asset.exr" 1e-5 && ok "instances /0../4 == ParticleInstance asset" || bad "instances union != asset"
+m=$(oiiotool "$O/inst_asset.exr" --ch A "$O/inst_0.exr" --ch A --sub --printstats 2>/dev/null | grep "Stats Max" | awk '{print $3}'); awk -v m="$m" 'BEGIN{exit !(m>0.5)}' && ok "other instances exist besides instance 0 (max diff $m)" || bad "instance 0 alone == asset (per-instance IDs not applied?) max diff $m"
 # 3. custom layer: "hero" == sphere (inherited from the group) + cube (own tag); "default" == card
 sum2 "$O/obj_sphere.exr" "$O/obj_cube.exr" "$O/custom_hero.exr" 1e-5 && ok "custom hero == sphere + cube" || bad "custom hero != sphere + cube"
 same "$O/custom_default.exr" "$O/obj_card.exr" 1e-5 && ok "custom default == card" || bad "custom default != card"

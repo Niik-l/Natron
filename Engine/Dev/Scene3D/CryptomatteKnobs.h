@@ -44,12 +44,17 @@ NATRON_NAMESPACE_ENTER
  */
 #define kCryptomatteAssetKnobName "cryptoAsset"
 #define kCryptomatteCustomKnobName "cryptoCustom"
+// ParticleInstance only: one ID per instance ("<node>/<index>") instead of one per node.
+#define kCryptomattePerInstanceKnobName "cryptoPerInstance"
 
-// Adds a "Cryptomatte" page with the two string knobs to a node (call from initializeKnobs()).
-void createCryptomatteKnobs(EffectInstance* effect);
+// Adds a "Cryptomatte" page with the two string knobs to a node (call from initializeKnobs());
+// perInstanceOption adds the Crypto Per Instance toggle (instancers).
+void createCryptomatteKnobs(EffectInstance* effect, bool perInstanceOption = false);
 
 // The value of one of the two knobs on a node, "" if the node has no such string knob.
 std::string getCryptomatteKnobValue(const NodePtr& node, const char* knobName);
+// A boolean Cryptomatte knob on a node, false if the node has no such knob.
+bool getCryptomatteKnobBool(const NodePtr& node, const char* knobName);
 
 NATRON_NAMESPACE_EXIT
 

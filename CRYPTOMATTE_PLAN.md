@@ -171,6 +171,13 @@ not shuffling crypto layers, FEATURE_REQUESTS.md entry -> done.
   layer, identically). Note: the render node upsamples its native size to the project format,
   the saved EXR is native.
 
+- 2026-11-04 (later): per-instance IDs for ParticleInstance (Crypto Per Instance toggle, names
+  <node>/<index>, asset stays the node). run_encode_check.sh now 16/16 with five scattered
+  instances (instance 0 alone, union == asset). Scatter3D as points/hair still renders as one
+  object (per-point IDs would need a per-point ID attribute in the kernel, not done).
+  Gotcha while testing: the scatter surface must sit inside the camera view, a wall wider than
+  the frame put every point out of shot and looked like a render bug.
+
 ## Order of work
 
 1. MurmurHash + hash_to_float + hash_to_rgb with unit checks against the Blender manifest.
