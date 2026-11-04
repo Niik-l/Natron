@@ -66,6 +66,11 @@ struct CyclesPassRequest
     // Per-pass overrides — caller fills these.
     int samples = 64;
     std::vector<std::string> requestedPasses;  // pass-name list (e.g. "Combined", "Depth", "Mist")
+    // Cryptomatte: ID/coverage pairs per pixel for the "CryptoObject" / "CryptoMaterial" /
+    // "CryptoAsset" / "CryptoCustom" pass tokens; the manifests of the rendered layers (keyed by
+    // prefix) are written to *outCryptoManifests when it is set.
+    int cryptomatteLevels = 6;
+    std::map<std::string, std::string>* outCryptoManifests = nullptr;
 
     // Common render settings.
     bool transparentBg = false;

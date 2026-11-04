@@ -39,6 +39,7 @@
 #include "../../Node.h"
 #include "../../NodeMetadata.h"
 #include "../../ViewIdx.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -272,6 +273,7 @@ Group3D::initializeKnobs()
     info->setDefaultValue(getNumChildInputs() == 1 ? "Connect a 3D node to the geo input."
                                                    : "Connect 3D nodes to group them together.");
     infoPage->addKnob(info); _imp->info = info;
+    createCryptomatteKnobs(this);
 }
 
 void

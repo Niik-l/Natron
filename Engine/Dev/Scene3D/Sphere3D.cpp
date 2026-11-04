@@ -37,6 +37,7 @@
 #include "../../Node.h"
 #include "../../TimeLine.h"
 #include "../../ViewIdx.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -223,6 +224,7 @@ Sphere3D::initializeKnobs()
 
     // Material page
     createSubdivisionKnobs(this, geoPage, _imp->subdKnobs);
+    createCryptomatteKnobs(this);
 
     KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));
     {

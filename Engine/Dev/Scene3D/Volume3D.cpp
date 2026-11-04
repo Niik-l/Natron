@@ -34,6 +34,7 @@
 #include "../../KnobTypes.h"
 #include "../../Node.h"
 #include "../../ViewIdx.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -410,6 +411,7 @@ Volume3D::initializeKnobs()
     }
 
     updateKnobVisibility();   // hide the noise knobs until Enable Noise is ticked
+    createCryptomatteKnobs(this);
 }
 
 void

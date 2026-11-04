@@ -55,6 +55,7 @@
 #include "../../Node.h"
 #include "../../Project.h"
 #include "../../ViewIdx.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 #ifdef NATRON_HAVE_ALEMBIC
 #include <Alembic/AbcGeom/All.h>
@@ -1176,6 +1177,7 @@ ReadGeo::initializeKnobs()
 
     // Material page
     createSubdivisionKnobs(this, page, _imp->subdKnobs);
+    createCryptomatteKnobs(this);
 
     KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));
     {

@@ -21,7 +21,7 @@ If you've found this fork useful, consider buying me a beer :) **[Ko-fi](https:/
 | Area | Nodes | Highlights |
 |---|---|---|
 | 3D scene | 9 geometry + 9 scene/render + 4 camera/light + 3 material | 3D viewport with gizmos, Card / Sphere / Cube / Cylinder, ReadGeo (glTF / GLB, FBX, OBJ, Alembic, as one mesh or part by part with file materials, morph targets and skinning), Alembic cameras, **GeoBuilder** (draw grids over the plate, projected through the camera), Project3D / UVProject / MergeMat, PBR Material3D with texture maps, Megascans loader |
-| Cycles | in the scene/render set | Blender's Cycles path tracer as a node: materials, lights with **light-group AOVs**, HDRI domes, motion blur, DOF, AOV passes, shadow catcher and holdout, **CyclesRenderPass** that renders passes to versioned multi-layer EXR (deep EXR too) and builds the comp tree |
+| Cycles | in the scene/render set | Blender's Cycles path tracer as a node: materials, lights with **light-group AOVs**, HDRI domes, motion blur, DOF, AOV passes, shadow catcher and holdout, **CyclesRenderPass** that renders passes to versioned multi-layer EXR (deep EXR too) and builds the comp tree **Cryptomatte** output (object / material / asset plus a free custom tag per node), decoded by the Cryptomatte node or any other package |
 | ScanlineRender | in the scene/render set | GLSL scanline renderer with AOVs and particle modes, for fast previews |
 | Deep compositing | 17 (+19 unreleased) | DeepRead / Write / Merge / Recolor / Flatten / Reformat / Expression …, deep to point cloud and back (**Blast** editing), Cycles native deep output |
 | Particles | 18 | Emitter, solver, forces, spawn, collisions, ParticleMaterial, instancing on geo, rendered in ScanlineRender and Cycles |

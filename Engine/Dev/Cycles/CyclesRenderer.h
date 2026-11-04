@@ -277,6 +277,20 @@ public:
     void setSamples(int samples);
 
     /**
+     * @brief Cryptomatte levels (ID/coverage pairs per pixel, 2..16, default 6). Each layer type
+     * requested through the pass names "CryptoObject", "CryptoMaterial", "CryptoAsset" and
+     * "CryptoCustom" produces ceil(levels/2) RGBA planes named <Type>00, <Type>01, ...
+     */
+    void setCryptomatteLevels(int levels);
+
+    /// The pass list with every Cryptomatte type token replaced by its <Type>NN plane names.
+    static std::vector<std::string> expandCryptomattePassNames(const std::vector<std::string>& passes, int levels);
+
+    /// The manifests ({"name":"hex",...}) of the Cryptomatte layers of the last synced scene,
+    /// keyed by layer prefix ("CryptoObject" ...). Empty until a scene with those passes was synced.
+    std::map<std::string, std::string> getCryptomatteManifests() const;
+
+    /**
      * @brief Enable/disable denoising.
      */
     void setDenoise(bool enabled);
@@ -322,7 +336,8 @@ public:
     static bool saveMultiLayerEXR(const std::string& filepath,
                                    const std::map<std::string, std::vector<float>>& passBuffers,
                                    int width, int height,
-                                   const ExrOutputOptions& opts);
+                                   const ExrOutputOptions& opts,
+                                   const std::map<std::string, std::string>* cryptoManifests = nullptr);
 
     /**
      * @brief Save a single 4-float RGBA buffer to PNG / TIFF / JPEG via OIIO.

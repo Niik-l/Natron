@@ -37,6 +37,7 @@
 #include "../../Node.h"
 #include "../../TimeLine.h"
 #include "../../ViewIdx.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -189,6 +190,7 @@ Card3D::initializeKnobs()
     {
         KnobPagePtr geoPage = AppManager::createKnob<KnobPage>(this, tr("Geometry"));
         createSubdivisionKnobs(this, geoPage, _imp->subdKnobs);
+        createCryptomatteKnobs(this);
     }
 
     KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));

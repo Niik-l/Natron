@@ -159,6 +159,18 @@ not shuffling crypto layers, FEATURE_REQUESTS.md entry -> done.
   discussion: a per-node "Crypto Asset" string knob (default: top-level group name) gives a
   user-defined layer through Cycles' asset hash without kernel changes.
 
+- 2026-11-04: Part 2 done. Cycles fork 689977518 (feature/cycles-deep): CRYPT_CUSTOM layer type,
+  Object::cryptomatte_custom_name, manifest getter, post-sort of every layer (upstream sorted only
+  the first), empty-scene manifest guard. Natron: CyclesRender AOV toggles + Levels, pass node
+  tokens, per-node Crypto Asset / Crypto Custom knobs (Scene3D/CryptomatteKnobs, 13 node classes,
+  inherited down Group3D), object/shader naming in CyclesRenderer, manifests in-graph + in the
+  EXR header, decoder reads them from an upstream CyclesRender. Checks:
+  tools/cryptomatte-tests/run_encode_check.sh (object sums == beauty alpha, custom hero ==
+  sphere + cube, default == card, asset inheritance, material, file == live bit-exact) and
+  run_blender_crosscheck.sh (Blender's compositor decodes our EXR, CryptoObject and the custom
+  layer, identically). Note: the render node upsamples its native size to the project format,
+  the saved EXR is native.
+
 ## Order of work
 
 1. MurmurHash + hash_to_float + hash_to_rgb with unit checks against the Blender manifest.

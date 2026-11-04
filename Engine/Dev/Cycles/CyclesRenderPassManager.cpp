@@ -1421,6 +1421,8 @@ renderFrameForBatches(EffectInstance*                  effect,
         }
 
         std::map<std::string, std::vector<float>> passBuffers;
+        std::map<std::string, std::string> batchCryptoManifests;
+        reqBatch.outCryptoManifests = &batchCryptoManifests;
         std::string err;
         const bool rendered = renderCyclesPassesForEffect(
             effect, reqBatch, passBuffers, err);
@@ -1471,9 +1473,15 @@ renderFrameForBatches(EffectInstance*                  effect,
                 for (const auto& aov : spec.aovs) {
                     auto it = passBuffers.find(aov);
                     if (it != passBuffers.end()) filtered[aov] = it->second;
+                    // "CryptoObject" selects CryptoObject00, 01, ...
+                    if (aov.compare(0, 6, "Crypto") == 0) {
+                        for (const auto& pb : passBuffers) {
+                            if (pb.first.compare(0, aov.size(), aov) == 0) filtered[pb.first] = pb.second;
+                        }
+                    }
                 }
                 const bool saved = CyclesRenderer::saveMultiLayerEXR(
-                    outPath, filtered, reqBatch.width, reqBatch.height, opts);
+                    outPath, filtered, reqBatch.width, reqBatch.height, opts, &batchCryptoManifests);
                 if (saved) {
                     fprintf(stderr, "[PassManager]   WROTE EXR  %s\n", outPath.c_str());
                 } else {
@@ -1625,6 +1633,10 @@ ppmPassNameToPlane(const std::string& name)
         const std::string grp = name.substr(9);
         return ImagePlaneDesc("LightGroup_" + grp, "LightGroup " + grp, "", rgb3, 3);
     }
+    // Cryptomatte layers (CryptoObject00, CryptoMaterial01 ...): raw ID/coverage pairs.
+    if (name.size() > 6 && name.compare(0, 6, "Crypto") == 0) {
+        return ImagePlaneDesc(name, name, "", rgba4, 4);
+    }
     return ImagePlaneDesc::getRGBAComponents();
 }
 
@@ -1654,6 +1666,12 @@ ppmPreviewAovNames(const KnobIntWPtr& previewIdxKnob,
         const std::string nm = v.toString().toStdString();
         if (nm.empty() || nm[0] == '@') continue;   // skip magic tokens
         if (nm == "Combined") haveCombined = true;
+        if (nm == "CryptoObject" || nm == "CryptoMaterial" || nm == "CryptoAsset" || nm == "CryptoCustom") {
+            // A type token stands for its planes (default levels: 6 -> 3 RGBA planes).
+            const std::vector<std::string> planes = CyclesRenderer::expandCryptomattePassNames(std::vector<std::string>(1, nm), 6);
+            outAovs.insert(outAovs.end(), planes.begin(), planes.end());
+            continue;
+        }
         outAovs.push_back(nm);
     }
     if (!haveCombined) outAovs.insert(outAovs.begin(), std::string("Combined"));

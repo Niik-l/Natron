@@ -38,6 +38,7 @@
 #include "../../ViewIdx.h"
 #include "../DotUtils.h"
 #include "../Scene3D/GeoExtract.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -227,6 +228,7 @@ Scatter3D::initializeKnobs()
         k->setDefaultValue("Connect a geo to 'surface'.");
         page->addKnob(k); _imp->info = k;
     }
+    createCryptomatteKnobs(this);
 }
 
 void

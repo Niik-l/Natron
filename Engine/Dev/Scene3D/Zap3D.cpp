@@ -42,6 +42,7 @@
 #include "../../Project.h"
 #include "../../TimeLine.h"
 #include "../../ViewIdx.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -503,6 +504,7 @@ Zap3D::initializeKnobs()
                                       true, true, 0.0);
     _imp->lightRange = makeDouble(this, lightPage, tr("Light Range"), "lightRange", 0.5, 0.0, 5.0,
                                   tr("Half-intensity distance of each point light (0 = the volume's diagonal)."), true, true, 0.0);
+    createCryptomatteKnobs(this);
 }
 
 // ==================== Point editor (gizmo) ====================

@@ -51,6 +51,7 @@
 #include "../../NodeMetadata.h"
 #include "../../Node.h"
 #include "../../ViewIdx.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -577,6 +578,7 @@ ReadVDB::initializeKnobs()
         k->setHintToolTip(tr("Scattering direction. 0=isotropic, +1=forward, -1=backward."));
         renderPage->addKnob(k); _imp->anisotropy = k;
     }
+    createCryptomatteKnobs(this);
 }
 
 bool

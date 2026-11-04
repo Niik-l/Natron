@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdlib>
 #include <atomic>
 #include <cstring>
@@ -38,6 +39,7 @@
 #include "scene/light.h"
 #include "scene/mesh.h"
 #include "scene/object.h"
+#include "util/murmurhash.h"
 #include "scene/pointcloud.h"
 #include "scene/hair.h"
 #include "scene/volume.h"
@@ -74,6 +76,7 @@
 #include "Engine/Dev/Scene3D/SceneGraph.h"
 #include "Engine/Dev/Scene3D/Zap3D.h"
 #include "Engine/Dev/Scene3D/Light3D.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 #include "Engine/Dev/Scene3D/RotationConventions.h"
 #include "Engine/Dev/Scene3D/MaterialProvider.h"
 #include "Engine/Dev/Scene3D/Card3D.h"
@@ -337,6 +340,92 @@ static ccl::LightType mapLightType(Light3D::LightType lt)
 // Impl
 // ============================================================================
 
+// ---- Cryptomatte naming -------------------------------------------------------------------
+// Cycles hashes three strings per object (name, asset name, our custom name) and the shader's
+// name. The object name is the SceneNode name (script name, or node/entry/path for archive
+// parts); asset and custom come from the node's Cryptomatte knobs, inherited down the Group3D
+// chain (see CryptomatteKnobs.h).
+namespace {
+
+std::string
+cryptoInheritedString(const SceneGraph& sg, const SceneNode& sn, const NodePtr& srcNode, const char* knobName,
+                      std::string* topMostAncestorName)
+{
+    std::string v = getCryptomatteKnobValue(srcNode, knobName);
+    if (topMostAncestorName) {
+        topMostAncestorName->clear();
+    }
+    const std::vector<SceneNode>& nodes = sg.nodes();
+    int p = sn.parentIndex;
+    for (int hop = 0; p >= 0 && p < (int)nodes.size() && hop < 64; ++hop) {
+        const SceneNode& pn = nodes[p];
+        if (v.empty()) {
+            v = getCryptomatteKnobValue(pn.sourceNode.lock(), knobName);
+        }
+        if (topMostAncestorName) {
+            *topMostAncestorName = pn.name;
+        }
+        p = pn.parentIndex;
+    }
+    return v;
+}
+
+void
+applyCryptoNames(ccl::Object* obj, const SceneGraph& sg, const SceneNode& sn, const NodePtr& srcNode)
+{
+    if (!obj) {
+        return;
+    }
+    std::string topMost;
+    std::string asset = cryptoInheritedString(sg, sn, srcNode, kCryptomatteAssetKnobName, &topMost);
+    if (asset.empty()) {
+        asset = topMost.empty() ? sn.name : topMost;   // Blender: the top-most parent, else the object
+    }
+    std::string custom = cryptoInheritedString(sg, sn, srcNode, kCryptomatteCustomKnobName, NULL);
+    if (custom.empty()) {
+        custom = "default";
+    }
+    obj->name = ccl::ustring(sn.name);
+    obj->set_asset_name(ccl::ustring(asset));
+    obj->set_cryptomatte_custom_name(ccl::ustring(custom));
+}
+
+const char* const kCryptoTypeNames[4] = {"CryptoObject", "CryptoMaterial", "CryptoAsset", "CryptoCustom"};
+const int kCryptoTypeFlags[4] = {ccl::CRYPT_OBJECT, ccl::CRYPT_MATERIAL, ccl::CRYPT_ASSET, ccl::CRYPT_CUSTOM};
+
+int
+cryptoDepthForLevels(int levels)
+{
+    return (std::min(16, std::max(2, levels)) + 1) / 2;
+}
+
+} // anonymous namespace
+
+std::vector<std::string>
+CyclesRenderer::expandCryptomattePassNames(const std::vector<std::string>& passes, int levels)
+{
+    std::vector<std::string> out;
+    const int depth = cryptoDepthForLevels(levels);
+    for (size_t i = 0; i < passes.size(); ++i) {
+        bool isType = false;
+        for (int t = 0; t < 4; ++t) {
+            if (passes[i] == kCryptoTypeNames[t]) {
+                isType = true;
+                for (int d = 0; d < depth; ++d) {
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "%s%02d", kCryptoTypeNames[t], d);
+                    out.push_back(buf);
+                }
+            }
+        }
+        if (!isType) {
+            out.push_back(passes[i]);
+        }
+    }
+    return out;
+}
+
+
 struct CyclesRenderer::Impl
 {
     ccl::unique_ptr<ccl::Session> session;
@@ -350,6 +439,7 @@ struct CyclesRenderer::Impl
     int height = 0;
     int samples = 64;
     bool denoise = false;  // set per-render via setDenoise(); default off
+    int cryptomatteLevels = 6;   // ID/coverage pairs per pixel for the Crypto* layers
     bool initialized = false;
 
     // Pixel buffer for readback
@@ -833,6 +923,7 @@ static ccl::Shader*
 createEmissiveMatteShader(ccl::Scene* scene)
 {
     ccl::Shader* shader = scene->create_node<ccl::Shader>();
+    shader->name = ccl::ustring("reflection_matte");
     auto graph = ccl::make_unique<ccl::ShaderGraph>();
     ccl::EmissionNode* em = graph->create_node<ccl::EmissionNode>();
     em->set_color(ccl::make_float3(1.0f, 1.0f, 1.0f));
@@ -857,6 +948,12 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     }
 
     ccl::Shader* shader = scene->create_node<ccl::Shader>();
+    // Cryptomatte material ID: the Material3D (or the geo node's own material) by node name.
+    {
+        EffectInstance* matEffect = dynamic_cast<EffectInstance*>(mat);
+        NodePtr matNode = matEffect ? matEffect->getNode() : NodePtr();
+        shader->name = ccl::ustring(matNode ? matNode->getScriptName_mt_safe() : std::string("file_material"));
+    }
     auto graph = ccl::make_unique<ccl::ShaderGraph>();
 
     ccl::PrincipledBsdfNode* principled = graph->create_node<ccl::PrincipledBsdfNode>();
@@ -1435,6 +1532,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
     // --- Default material ---
     {
         ccl::Shader* defaultShader = scene->default_surface;
+        defaultShader->name = ccl::ustring("default_surface");
         auto graph = ccl::make_unique<ccl::ShaderGraph>();
         ccl::PrincipledBsdfNode* principled = graph->create_node<ccl::PrincipledBsdfNode>();
         principled->set_base_color(ccl::make_float3(0.8f, 0.2f, 0.2f));
@@ -1501,6 +1599,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             std::string envMap = light3d->getEnvironmentMap();
 
             ccl::Shader* bgShader = scene->default_background;
+            bgShader->name = ccl::ustring("default_background");
             auto bgGraph = ccl::make_unique<ccl::ShaderGraph>();
 
             if (!envMap.empty()) {
@@ -1609,6 +1708,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         // Default background: black (no dome light = only point/area lights illuminate)
         if (!hasDome) {
             ccl::Shader* bgShader = scene->default_background;
+            bgShader->name = ccl::ustring("default_background");
             auto bgGraph = ccl::make_unique<ccl::ShaderGraph>();
             ccl::BackgroundNode* bgNode = bgGraph->create_node<ccl::BackgroundNode>();
             bgNode->set_color(ccl::make_float3(0.0f, 0.0f, 0.0f));
@@ -1660,6 +1760,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             }
 
             ccl::Shader* lShader = scene->create_node<ccl::Shader>();
+            lShader->name = ccl::ustring("default_light");
             auto lGraph = ccl::make_unique<ccl::ShaderGraph>();
 
             // For dome lights with HDRI, use environment texture
@@ -1703,6 +1804,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
             ccl::Object* obj = scene->create_node<ccl::Object>();
             obj->set_geometry(light);
+            applyCryptoNames(obj, sg, sn, node);
             // Natural default: visible to all rays except camera (you don't see the
             // lamp directly). Per-light override (CyclesRenderPass Active Lights rows) is
             // subtractive: unticking Refl/Diff/Trans removes the lamp's visible SHAPE
@@ -1920,6 +2022,35 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             }
         }
 
+        // --- Cryptomatte passes ---
+        // "CryptoObject" / "CryptoMaterial" / "CryptoAsset" / "CryptoCustom" in the request turn
+        // on that layer type; each gets depth RGBA passes <Type>00.., in the order the kernel
+        // writes them (object, material, asset, custom).
+        {
+            int cryptoFlags = 0;
+            for (int t = 0; t < 4; ++t) {
+                if (passesToCreate.count(kCryptoTypeNames[t])) {
+                    cryptoFlags |= kCryptoTypeFlags[t];
+                }
+            }
+            const int depth = cryptoFlags ? cryptoDepthForLevels(_impl->cryptomatteLevels) : 0;
+            scene->film->set_cryptomatte_passes((ccl::CryptomatteType)cryptoFlags);
+            scene->film->set_cryptomatte_depth(depth);
+            for (int t = 0; t < 4; ++t) {
+                if (!(cryptoFlags & kCryptoTypeFlags[t])) continue;
+                for (int d = 0; d < depth; ++d) {
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "%s%02d", kCryptoTypeNames[t], d);
+                    ccl::Pass* pass = scene->create_node<ccl::Pass>();
+                    pass->set_name(ccl::ustring(buf));
+                    pass->set_type(ccl::PASS_CRYPTOMATTE);
+                }
+            }
+            if (cryptoFlags) {
+                printf("[Cycles AOV]   Cryptomatte flags=%d depth=%d\n", cryptoFlags, depth);
+            }
+        }
+
         // --- Light group passes ---
         // Collect unique light group names from all lights in the scene
         std::set<std::string> lightGroupNames;
@@ -2094,6 +2225,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                     }
                     if (!protoShader) {
                         protoShader = scene->create_node<ccl::Shader>();
+                        protoShader->name = ccl::ustring("default_surface");
                         auto pg = ccl::make_unique<ccl::ShaderGraph>();
                         ccl::PrincipledBsdfNode* bsdf = pg->create_node<ccl::PrincipledBsdfNode>();
                         bsdf->set_base_color(ccl::make_float3(0.6f, 0.6f, 0.6f));
@@ -2139,6 +2271,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
                     ccl::Object* instObj = scene->create_node<ccl::Object>();
                     instObj->set_geometry(proto);
+                    applyCryptoNames(instObj, sg, sn, srcNode);
                     instObj->set_tfm(buildInstTfm(0.0f)); // center (current frame)
 
                     if (mbEnabled) {
@@ -2364,6 +2497,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 const float metalVal     = pmat ? (float)pmat->getMetallic(time)         : 0.0f;
 
                 pShader = scene->create_node<ccl::Shader>();
+                pShader->name = ccl::ustring("particle_color");
                 auto pGraph = ccl::make_unique<ccl::ShaderGraph>();
                 ccl::PrincipledBsdfNode* pBsdf = pGraph->create_node<ccl::PrincipledBsdfNode>();
 
@@ -2439,6 +2573,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             // Create object
             ccl::Object* obj = scene->create_node<ccl::Object>();
             obj->set_geometry(particleGeom);
+            applyCryptoNames(obj, sg, sn, srcNode);
             obj->set_tfm(ccl::transform_identity());
 
             // Apply CyclesRenderPass visibility if provided
@@ -2477,6 +2612,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
                 // 1. PrincipledVolume shader — handles density, temperature, blackbody natively
                 ccl::Shader* volShader = scene->create_node<ccl::Shader>();
+                volShader->name = ccl::ustring("volume");
                 {
                     auto g = ccl::make_unique<ccl::ShaderGraph>();
                     ccl::PrincipledVolumeNode* pvol = g->create_node<ccl::PrincipledVolumeNode>();
@@ -2612,6 +2748,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
                 // 6. Create object
                 ccl::Object* obj = scene->create_node<ccl::Object>();
                 obj->set_geometry(volume);
+                applyCryptoNames(obj, sg, sn, srcNode);
                 obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix));
 
                 if (visibilityMap) {
@@ -2633,6 +2770,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
             ccl::Mesh* mesh = scene->create_node<ccl::Mesh>();
             ccl::Object* obj = scene->create_node<ccl::Object>();
             obj->set_geometry(mesh);
+            applyCryptoNames(obj, sg, sn, srcNode);
             obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix));
 
             // Unit cube vertices [-1,1]^3
@@ -2665,6 +2803,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
 
             // Procedural volume shader — shapes built from shader nodes (no VDB)
             ccl::Shader* volShader = scene->create_node<ccl::Shader>();
+            volShader->name = ccl::ustring("volume");
             if (stepSize > 0.001f) {
                 volShader->set_volume_step_rate(stepSize);
             }
@@ -3455,6 +3594,7 @@ CyclesRenderer::syncSceneWithCamera(const SceneGraph& sg,
         ccl::Object* obj = scene->create_node<ccl::Object>();
         obj->set_geometry(mesh);
         obj->set_tfm(natronMatrixToCyclesTransform(sn.worldMatrix));
+        applyCryptoNames(obj, sg, sn, srcNode);
 
         if (std::getenv("NATRON_DEBUG_GEOIO")) {
             std::fprintf(stderr,
@@ -3843,7 +3983,7 @@ CyclesRenderer::renderToBufferWithCameraMultiPass(const SceneGraph& sg,
 
     // Always include Combined
     allPassNames.push_back("Combined");
-    for (const auto& pn : effectiveRequested) {
+    for (const auto& pn : expandCryptomattePassNames(effectiveRequested, _impl->cryptomatteLevels)) {
         if (pn != "Combined") {
             allPassNames.push_back(pn);
         }
@@ -4136,6 +4276,36 @@ CyclesRenderer::setSamples(int samples)
 }
 
 void
+CyclesRenderer::setCryptomatteLevels(int levels)
+{
+    _impl->cryptomatteLevels = levels;
+}
+
+std::map<std::string, std::string>
+CyclesRenderer::getCryptomatteManifests() const
+{
+    std::map<std::string, std::string> out;
+    if (!_impl->session || !_impl->session->scene) {
+        return out;
+    }
+    ccl::Scene* scene = _impl->session->scene.get();
+    const int flags = (int)scene->film->get_cryptomatte_passes();
+    if (flags & ccl::CRYPT_OBJECT) {
+        out["CryptoObject"] = scene->object_manager->get_cryptomatte_objects(scene);
+    }
+    if (flags & ccl::CRYPT_MATERIAL) {
+        out["CryptoMaterial"] = scene->shader_manager->get_cryptomatte_materials(scene);
+    }
+    if (flags & ccl::CRYPT_ASSET) {
+        out["CryptoAsset"] = scene->object_manager->get_cryptomatte_assets(scene);
+    }
+    if (flags & ccl::CRYPT_CUSTOM) {
+        out["CryptoCustom"] = scene->object_manager->get_cryptomatte_custom(scene);
+    }
+    return out;
+}
+
+void
 CyclesRenderer::setDenoise(bool enabled)
 {
     _impl->denoise = enabled;
@@ -4243,7 +4413,8 @@ bool
 CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
                                     const std::map<std::string, std::vector<float>>& passBuffers,
                                     int width, int height,
-                                    const ExrOutputOptions& opts)
+                                    const ExrOutputOptions& opts,
+                                    const std::map<std::string, std::string>* cryptoManifests)
 {
     // Map pass names to EXR layer/channel names
     struct LayerDef { std::string passName; std::string prefix; int nCh; std::vector<std::string> chans; };
@@ -4279,6 +4450,15 @@ CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
             layers.push_back({entry.first, "LightGroup_" + grp, 3, {"R","G","B"}});
         }
     }
+    // Cryptomatte layers: <Type>NN with lowercase rgba channels (the spec's convention, which
+    // also keeps DWA compression lossless on them). std::map order keeps 00, 01, ... in sequence.
+    for (auto& entry : passBuffers) {
+        if (entry.first.size() > 8 && entry.first.compare(0, 6, "Crypto") == 0 &&
+            std::isdigit((unsigned char)entry.first[entry.first.size() - 1]) &&
+            std::isdigit((unsigned char)entry.first[entry.first.size() - 2])) {
+            layers.push_back({entry.first, entry.first, 4, {"r","g","b","a"}});
+        }
+    }
 
     if (layers.empty()) return false;
 
@@ -4310,6 +4490,22 @@ CyclesRenderer::saveMultiLayerEXR(const std::string& filepath,
         const std::string sceneLinear = getOcioSceneLinearName();
         if (!sceneLinear.empty()) {
             spec.attribute("oiio:ColorSpace", sceneLinear);
+        }
+    }
+
+    // Cryptomatte manifests: cryptomatte/<first 7 hex of MurmurHash3(layer name)>/{name,hash,
+    // conversion,manifest}, as Blender and the spec write them.
+    if (cryptoManifests) {
+        for (const auto& cm : *cryptoManifests) {
+            if (cm.second.empty()) continue;
+            const uint32_t h = ccl::util_murmur_hash3(cm.first.c_str(), (int)cm.first.size(), 0);
+            char hex[16];
+            std::snprintf(hex, sizeof(hex), "%08x", h);
+            const std::string prefix = std::string("cryptomatte/") + std::string(hex).substr(0, 7) + "/";
+            spec.attribute(prefix + "name", cm.first);
+            spec.attribute(prefix + "hash", "MurmurHash3_32");
+            spec.attribute(prefix + "conversion", "uint32_to_float32");
+            spec.attribute(prefix + "manifest", cm.second);
         }
     }
 

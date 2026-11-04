@@ -275,6 +275,7 @@ executeCyclesPasses(CyclesRenderer&            renderer,
     // render's matrices, so a stale set can't blur a static frame.
     renderer.setMotionTransforms(prepared.motionOpen, prepared.motionClose);
     renderer.setSubdivisionSettings(req.subdivision);
+    renderer.setCryptomatteLevels(req.cryptomatteLevels);
 
     bool ok = false;
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -298,6 +299,9 @@ executeCyclesPasses(CyclesRenderer&            renderer,
         req.deepMaxSamples,
         req.deepMergeThreshold,
         req.deepAlphaMergeThreshold);
+    if (ok && req.outCryptoManifests) {
+        *req.outCryptoManifests = renderer.getCryptomatteManifests();
+    }
     // a failed GPU render: once more, now on the CPU
     if ( ok || !renderer.gpuFailedLastRender() ) {
         break;

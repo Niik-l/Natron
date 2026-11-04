@@ -46,6 +46,7 @@
 #include "../../KnobTypes.h"
 #include "../../Node.h"
 #include "../../ViewIdx.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -399,6 +400,7 @@ GeoBuilder::initializeKnobs()
 
     // ---------------- Material page (same as ReadGeo) ----------------
     createSubdivisionKnobs(this, gridPage, _imp->subdKnobs);
+    createCryptomatteKnobs(this);
 
     KnobPagePtr matPage = AppManager::createKnob<KnobPage>(this, tr("Material"));
     {

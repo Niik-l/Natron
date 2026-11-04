@@ -34,6 +34,7 @@
 #include <sstream>
 #include <vector>
 
+#include <QtCore/QMetaObject>
 #include <QtCore/QMutex>
 #include <QtCore/QPointF>
 
@@ -51,6 +52,9 @@
 
 #ifdef NATRON_HAVE_OPENIMAGEIO
 #include <OpenImageIO/imageio.h>
+#endif
+#ifdef NATRON_CYCLES
+#include "../Cycles/CyclesRender.h"
 #endif
 
 NATRON_NAMESPACE_ENTER
@@ -286,12 +290,21 @@ parseManifest(const std::string& json, Manifest* m)
 
 // ---- the upstream file (same approach as LensDefocus's camera-from-header).
 
-// The nearest upstream node with a "filename" knob, through first inputs.
+// The nearest upstream node with a "filename" knob, through first inputs. Stops early at a
+// Cycles render node (which carries its own manifests), returning it in *cyclesNode.
 NodePtr
-upstreamRead(EffectInstance* self)
+upstreamRead(EffectInstance* self, NodePtr* cyclesNode)
 {
     NodePtr n = self->getNode() ? self->getNode()->getInput(0) : NodePtr();
     for (int hop = 0; n && hop < 32; ++hop) {
+#ifdef NATRON_CYCLES
+        if (dynamic_cast<CyclesRender*>(n->getEffectInstance().get())) {
+            if (cyclesNode) {
+                *cyclesNode = n;
+            }
+            return NodePtr();
+        }
+#endif
         if (std::dynamic_pointer_cast<KnobFile>(n->getKnobByName("filename"))) {
             return n;
         }
@@ -863,10 +876,19 @@ Cryptomatte::refreshManifest()
         time = getApp()->getTimeLine()->currentFrame();
     }
     std::string file;
+    NodePtr cyclesNode;
+    std::string cyclesJson;
     if (source == eManifestAuto && haveSet) {
-        NodePtr rd = upstreamRead(this);
+        NodePtr rd = upstreamRead(this, &cyclesNode);
         if (rd) {
             file = readFileAt(this, rd, (int)std::floor(time + 0.5));
+        } else if (cyclesNode) {
+#ifdef NATRON_CYCLES
+            // The render node's manifests change with every render: key on their content size.
+            CyclesRender* cr = dynamic_cast<CyclesRender*>(cyclesNode->getEffectInstance().get());
+            cyclesJson = cr ? cr->getCryptomatteManifest(set.prefix) : std::string();
+#endif
+            file = "cycles:" + cyclesNode->getScriptName_mt_safe() + ":" + std::to_string(cyclesJson.size());
         }
     } else if (source == eManifestSidecar) {
         KnobFilePtr f = _imp->manifestFile.lock();
@@ -902,6 +924,10 @@ Cryptomatte::refreshManifest()
         }
     } else if (!haveSet) {
         m.source = "no Cryptomatte layers on the Source";
+    } else if (cyclesNode) {
+        m.json = cyclesJson;
+        m.source = m.json.empty() ? "Cycles render has no manifest for this layer yet (render first)" : "Cycles render";
+        parseManifest(m.json, &m);
     } else if (file.empty()) {
         m.source = "no Read upstream: type names, or pick in the viewer (IDs are written as <hex>)";
     } else {
@@ -1034,6 +1060,16 @@ Cryptomatte::render(const RenderActionArgs& args)
                                                   "<prefix>00, <prefix>01... (CryptoObject00, crypto_material00 ...).");
     } else {
         clearPersistentMessage(false);
+        // An upstream Cycles render only has manifests once it has rendered, which is now: ask
+        // the main thread to look again (cheap when nothing changed).
+        bool noNames;
+        {
+            QMutexLocker l(&_imp->manifestMutex);
+            noNames = _imp->manifest.nameToHash.empty();
+        }
+        if (noNames) {
+            QMetaObject::invokeMethod(this, [this]() { refreshManifest(); }, Qt::QueuedConnection);
+        }
     }
 
     // The Source colour and the ID planes.

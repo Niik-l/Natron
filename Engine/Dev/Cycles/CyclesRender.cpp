@@ -122,6 +122,9 @@ struct CyclesRenderPrivate
     KnobBoolWPtr aovGlossDir, aovGlossInd, aovGlossCol, aovGlossy;
     KnobBoolWPtr aovEmission, aovEnv, aovAO;
     KnobBoolWPtr aovNormal, aovDepth, aovUV, aovMist;
+    KnobBoolWPtr aovCryptoObject, aovCryptoMaterial, aovCryptoAsset, aovCryptoCustom;
+    KnobIntWPtr cryptoLevels;
+    std::map<std::string, std::string> cachedCryptoManifests;   // from the last render
 
     // Focus helper
     KnobChoiceWPtr focusObject;
@@ -429,6 +432,45 @@ CyclesRender::initializeKnobs()
             "Uses Cycles' default Film mist range; expose Mist Start / Depth / "
             "Falloff knobs later if tuning is needed."));
         aovPage->addKnob(k); _imp->aovMist = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Cryptomatte Object"));
+        k->setName("aovCryptoObject"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("CryptoObject00.. planes: ID mattes per 3D node (archive parts by node/entry path). "
+                             "Decode with the Cryptomatte node, which also lists the names."));
+        aovPage->addKnob(k); _imp->aovCryptoObject = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Cryptomatte Material"));
+        k->setName("aovCryptoMaterial"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("CryptoMaterial00.. planes: ID mattes per material (Material3D node name, "
+                             "the geo node's own material, file_material, default_surface, volume...)."));
+        aovPage->addKnob(k); _imp->aovCryptoMaterial = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Cryptomatte Asset"));
+        k->setName("aovCryptoAsset"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("CryptoAsset00.. planes: ID mattes per asset. Each 3D node's Crypto Asset knob, "
+                             "else inherited from the nearest Group3D that sets one, else the top-most group's "
+                             "name, else the node itself (Blender's rule)."));
+        aovPage->addKnob(k); _imp->aovCryptoAsset = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Cryptomatte Custom"));
+        k->setName("aovCryptoCustom"); k->setDefaultValue(false);
+        k->setHintToolTip(tr("CryptoCustom00.. planes: ID mattes by the free Crypto Custom tag on each 3D node "
+                             "(inherited from groups; untagged objects are \"default\")."));
+        aovPage->addKnob(k); _imp->aovCryptoCustom = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Cryptomatte Levels"));
+        k->setName("cryptoLevels"); k->setDefaultValue(6);
+        k->setMinimum(2); k->setMaximum(16);
+        k->setDisplayMinimum(2); k->setDisplayMaximum(16);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("How many objects a pixel can keep per Cryptomatte layer (ID/coverage pairs). "
+                             "Two per RGBA plane: 6 levels = 3 planes, the usual choice."));
+        aovPage->addKnob(k); _imp->cryptoLevels = k;
     }
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Deep"));
@@ -750,7 +792,18 @@ getEnabledPasses(const CyclesRenderPrivate* imp)
     check(imp->aovDepth,    "Depth");
     check(imp->aovUV,       "UV");
     check(imp->aovMist,     "Mist");
+    check(imp->aovCryptoObject,   "CryptoObject");
+    check(imp->aovCryptoMaterial, "CryptoMaterial");
+    check(imp->aovCryptoAsset,    "CryptoAsset");
+    check(imp->aovCryptoCustom,   "CryptoCustom");
     return passes;
+}
+
+static int
+getCryptoLevels(const CyclesRenderPrivate* imp)
+{
+    KnobIntPtr k = imp->cryptoLevels.lock();
+    return k ? k->getValue() : 6;
 }
 
 // Helper: map pass name to an ImagePlaneDesc
@@ -788,6 +841,12 @@ passNameToPlane(const std::string& name)
         return ImagePlaneDesc("LightGroup_" + grpName, "LightGroup " + grpName, "", rgb3, 3);
     }
 
+    // Cryptomatte layers (CryptoObject00, CryptoMaterial01 ...): raw ID/coverage pairs, 4 channels.
+    if (name.size() > 6 && name.compare(0, 6, "Crypto") == 0) {
+        static const char* rgba4[] = {"R", "G", "B", "A"};
+        return ImagePlaneDesc(name, name, "", rgba4, 4);
+    }
+
     return ImagePlaneDesc::getRGBAComponents();
 }
 
@@ -799,7 +858,8 @@ CyclesRender::getComponentsNeededAndProduced(double /*time*/, ViewIdx /*view*/,
 {
     // Declare output planes for all enabled AOVs
     std::list<ImagePlaneDesc> produced;
-    std::vector<std::string> passes = getEnabledPasses(_imp.get());
+    std::vector<std::string> passes = CyclesRenderer::expandCryptomattePassNames(getEnabledPasses(_imp.get()),
+                                                                                  getCryptoLevels(_imp.get()));
     for (const std::string& p : passes) {
         produced.push_back(passNameToPlane(p));
     }
@@ -1034,6 +1094,8 @@ CyclesRender::render(const RenderActionArgs& args)
     req.height          = renderH;
     req.samples         = renderSamples;
     req.requestedPasses = requestedPasses;
+    req.cryptomatteLevels  = getCryptoLevels(_imp.get());
+    req.outCryptoManifests = &_imp->cachedCryptoManifests;
     req.transparentBg   = false;
     // Denoise: CyclesRenderSettings (when connected) wins over the local knob,
     // mirroring how samples are resolved above.
@@ -1127,6 +1189,7 @@ CyclesRender::render(const RenderActionArgs& args)
 
         // Hash enabled AOV passes so changing checkboxes triggers re-render
         sceneHash = hashCombine(sceneHash, (U64)requestedPasses.size());
+        sceneHash = hashCombine(sceneHash, (U64)getCryptoLevels(_imp.get()));
         for (const auto& pn : requestedPasses) {
             for (size_t ci = 0; ci < pn.size(); ++ci) {
                 sceneHash = hashCombine(sceneHash, (U64)pn[ci]);
@@ -1634,6 +1697,19 @@ CyclesRender::render(const RenderActionArgs& args)
     return eStatusOK;
 }
 
+std::string
+CyclesRender::getCryptomatteManifest(const std::string& prefix) const
+{
+    // cachedCryptoManifests is written under _renderMutex at the end of a render; a render in
+    // flight means there is nothing newer to hand out yet.
+    std::unique_lock<std::mutex> lock(_renderMutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return std::string();
+    }
+    std::map<std::string, std::string>::const_iterator it = _imp->cachedCryptoManifests.find(prefix);
+    return it == _imp->cachedCryptoManifests.end() ? std::string() : it->second;
+}
+
 bool
 CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
                            ViewSpec /*view*/, double time, bool /*originatedFromMainThread*/)
@@ -1831,7 +1907,9 @@ CyclesRender::knobChanged(KnobI* k, ValueChangedReasonEnum reason,
         }
 
         bool ok = CyclesRenderer::saveMultiLayerEXR(outPath, _imp->cachedPassBuffers,
-                                                      _imp->cachedWidth, _imp->cachedHeight);
+                                                      _imp->cachedWidth, _imp->cachedHeight,
+                                                      CyclesRenderer::ExrOutputOptions(),
+                                                      &_imp->cachedCryptoManifests);
         if (ok) {
             clearPersistentMessage(false);
         } else {

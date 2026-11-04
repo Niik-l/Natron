@@ -34,6 +34,7 @@
 #include "../../KnobTypes.h"
 #include "../../Node.h"
 #include "../../ViewIdx.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -266,6 +267,7 @@ ParticleInstance::initializeKnobs()
         k->setHintToolTip(tr("Maximum number of instances to render. Limits performance impact."));
         page->addKnob(k); _imp->maxInstances = k;
     }
+    createCryptomatteKnobs(this);
 }
 
 bool

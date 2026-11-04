@@ -120,6 +120,10 @@ public:
         return _lastDeepImage;
     }
 
+    /// The manifest JSON of a Cryptomatte layer ("CryptoObject", "CryptoCustom" ...) from the
+    /// last render, "" if that layer was not rendered. Read by the Cryptomatte decoder node.
+    std::string getCryptomatteManifest(const std::string& prefix) const;
+
 private:
 
     virtual void initializeKnobs() OVERRIDE FINAL;

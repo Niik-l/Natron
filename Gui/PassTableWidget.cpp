@@ -264,6 +264,10 @@ PassTableWidget::buildAovChecks(QFormLayout* form)
         { "Transmission Color",    "TransCol" },
         { "Emission",              "Emit" },
         { "Environment",           "Env" },
+        { "Crypto Object",         "CryptoObject" },
+        { "Crypto Material",       "CryptoMaterial" },
+        { "Crypto Asset",          "CryptoAsset" },
+        { "Crypto Custom",         "CryptoCustom" },
     };
 
     QGroupBox* box = new QGroupBox(tr("AOVs"), _detailBox);

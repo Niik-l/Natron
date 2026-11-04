@@ -35,6 +35,7 @@
 #include "../../KnobTypes.h"
 #include "../../Node.h"
 #include "../../ViewIdx.h"
+#include "Engine/Dev/Scene3D/CryptomatteKnobs.h"
 
 #ifdef NATRON_HAVE_ALEMBIC
 #include <Alembic/AbcGeom/All.h>
@@ -514,6 +515,7 @@ ReadAlembicArchive::initializeKnobs()
     // Read by name in Viewport3D::drawTransformNode (showLocators / locatorSize);
     // viewport-only (setEvaluateOnChange(false)) so changing them never re-renders.
     createSubdivisionKnobs(this, page, _imp->subdKnobs);
+    createCryptomatteKnobs(this);
 
     KnobPagePtr dispPage = AppManager::createKnob<KnobPage>(this, tr("Display"));
     {
