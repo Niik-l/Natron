@@ -48,7 +48,7 @@ Sketch, in three nodes sharing one flow engine:
 Quality tuning (edge handling, occlusions, flicker) is the long tail. Size: 2 to 3
 weeks for a credible v1, more to approach Kronos.
 
-## Cryptomatte
+## Cryptomatte — IN PROGRESS (decoder node DONE 2026-11-03, Cycles encoder next; see CRYPTOMATTE_PLAN.md)
 
 Requested 2026-11-03. The old community Python plugin was unusable. Cycles can produce
 Cryptomatte passes natively but the fork's RenderPass / CyclesRender nodes do not wire

@@ -182,6 +182,9 @@
 #include "Dev/PostFX/LensDefocus.h"
 #include "Dev/PostFX/PMask.h"
 
+// Dev nodes — Keyer
+#include "Dev/Keyer/Cryptomatte.h"
+
 // Dev nodes — Particles
 #include "Dev/Particles/ParticleEmitter.h"
 #include "Dev/Particles/ParticleGravity.h"
@@ -1813,6 +1816,9 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<ContentFill>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
     registerBuiltInPlugin<LensDefocus>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
     registerBuiltInPlugin<PMask>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/keyer_grouping_2.png"), false, false);
+
+    // Dev nodes — Keyer
+    registerBuiltInPlugin<Cryptomatte>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/keyer_grouping_2.png"), false, false);
 }
 
 bool

@@ -146,6 +146,14 @@ not shuffling crypto layers, FEATURE_REQUESTS.md entry -> done.
   16 spp); round-trip the saved EXR through the decoder and through Blender's compositor
   Cryptomatte node as the independent check.
 
+## Progress
+
+- 2026-11-03: steps 1-3 and 5 done. `Cryptomatte` node built and registered, headless check
+  `tools/cryptomatte-tests/run_check.sh` DONE_OK (9/9 against the Blender reference, which is
+  now rendered film-transparent so its alpha is the object coverage). Picker written, GUI pass
+  pending (project: tools/cryptomatte-tests/out/cryptomatte_gui.ntp). Preview knob merged into
+  Output. Next: step 4 GUI pass, then step 6 (Cycles encoder).
+
 ## Order of work
 
 1. MurmurHash + hash_to_float + hash_to_rgb with unit checks against the Blender manifest.

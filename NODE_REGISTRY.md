@@ -1,7 +1,7 @@
 # Natron Node Registry
 
 All custom built-in nodes added to Natron beyond the original upstream codebase.
-Updated: 2026-10-29 (ReadGeo universal loader merged; ReadGeoArchive kept as hidden alias)
+Updated: 2026-11-03 (Cryptomatte decoder node)
 
 ---
 
@@ -156,6 +156,12 @@ Updated: 2026-10-29 (ReadGeo universal loader merged; ReadGeoArchive kept as hid
 
 | **LensDefocus** | `fr.inria.built-in.LensDefocus` | Registered (2026-10-22) | Physically based depth of field from an image + depth pass (replaces the never-registered C++ ZDefocus; the community zDefocus PyPlug stays). Blur size from a thin lens (focal length, f-stop, focus distance, film back; from a **Camera** input per frame or typed), signed so near and far defocus differ; or Size at Infinity. Inputs Source (RGBA + any depth plane), Depth (optional separate image), Camera, **CleanBg** (background plate used behind blurred foreground edges), Mask. Depth Is: planar Z (ScanlineRender/Cycles), ray distance (FastVolume), 1/Z, normalized 0..1, or direct blur radius; Zero Is Infinity / Infinity Beyond handle Cycles (0) and ScanlineRender (camera far) backgrounds; Scene Units. **Engine (DefocusCore)**: aliased-Z edge pixels split into front/back by colour (Edge Reconstruction), samples bucketed into slices spaced in blur size, background filled behind nearer slices, then every sample scattered with its own convex bokeh shape as row spans (O(radius) per sample), large radii at reduced resolution with bright highlights kept at full res, slices composited back to front. Bokeh: blades + curvature + rotation, anamorphic squeeze, cat's eye, swirl, spherical aberration (bright rim behind focus / soft centre in front), onion rings, axial chromatic aberration; near-field kernels point-reflected. Focus Distance or **Point (autofocus)** with a viewer handle. Outputs Result / Focus Map / Blur Radius / Slices / Edge Split, optional **defocusError** plane (guessed background, clamped radius). Verified against a Monte Carlo thin-lens reference (complex_tools/zdefocus/testbed): edge error 2-10x lower than a receiver-radius gather, energy within 1.5%, disc radius within 0.8 px; 4K with 256 px blur ~3.5 s. |
 
+## Keyer (1 node)
+
+| Node | Plugin ID | Status | Description |
+|------|-----------|--------|-------------|
+| **Cryptomatte** | `fr.inria.built-in.Cryptomatte` | Registered (2026-11-03) | Cryptomatte decoder (spec 1.2: MurmurHash3 IDs, two ID/coverage pairs per RGBA plane). Reads every set of `<prefix>00, 01...` planes on the Source (Blender/Cycles CryptoObject / CryptoMaterial / CryptoAsset, Arnold crypto_object, Redshift, Houdini...) into a **Layer** menu; the **Matte List** takes object names (hashed, so they work without a manifest) or raw IDs as `<2ce615c5>`; **Pick in viewer** toggles the object under a click or every object inside a drag box (names resolved through the manifest). **Manifest** is read from the upstream Read's EXR header (`cryptomatte/<id>/manifest`, or the `manif_file` sidecar) and listed in Manifest Names. **Output**: matte in alpha with the Source's RGB, matte in RGBA, or the keyable-surface preview colours (selected objects lifted to white) with the matte in alpha; other planes pass through. Verified bit-exact against Blender 4.5 renders (tools/cryptomatte-tests: hex == name, material/asset mattes == unions of object mattes, all objects == coverage alpha). Keep the ID planes untouched upstream: the OFX Shuffle node corrupts them. |
+
 ## Matchmove / 3D Reconstruction (2 nodes)
 
 | Node | Plugin ID | Status | Description |
@@ -180,5 +186,6 @@ Updated: 2026-10-29 (ReadGeo universal loader merged; ReadGeoArchive kept as hid
 | Transform | 2 | 0 | 2 |
 | Color | 3 | 0 | 3 |
 | Filter | 3 | 0 | 3 |
+| Keyer | 1 | 0 | 1 |
 | Matchmove / 3D Reconstruction | 2 | 0 | 2 |
-| **Total** | **70** | **19** | **89** |
+| **Total** | **71** | **19** | **90** |

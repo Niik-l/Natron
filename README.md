@@ -28,6 +28,7 @@ If you've found this fork useful, consider buying me a beer :) **[Ko-fi](https:/
 | Volumes | in the geometry/render set | ReadVDB (fire / smoke), procedural Volume3D, **FastVolumeRender** real-time GPU preview |
 | Matchmove | 2 | CameraTracker (detect / track / solve) and PointCloudGenerator |
 | Depth of field | 2 | **LensDefocus** (physically based DOF: camera-driven blur, real lens designs ray traced through their glass, tilt-shift, GPU option) and DeepDefocus on deep images; Cycles can shoot through the same lenses |
+| Keying | 1 | **Cryptomatte** decoder: object / material / asset ID mattes from any renderer's EXR, pick objects by name or by clicking in the viewer, manifest read from the file |
 | Colour + transform | 5 | GPU OCIO ACES views in the viewer (tested on the ACES 2.0 reference config), ColorChartMatch, SphericalTransform (8 projections), LensWarp |
 
 Templates menu: ready-made graphs for a basic 3D scene, the Megascans loader, Fast Volume Render, particle presets, and an HDRI face-edit rig.
