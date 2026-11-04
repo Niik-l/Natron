@@ -26,6 +26,7 @@
 
 #include "../../../Global/Macros.h"
 
+#include <set>
 #include <vector>
 
 #include "../../EffectInstance.h"
@@ -127,6 +128,17 @@ public:
     bool getPrototypeMesh(int geoIdx, double time, TriMesh& out) const;
 
     bool getApplyPrototypeTransform() const;
+
+    /** Hide Instanced Geo (default on): the prototypes on the geo inputs are drawn
+     *  through their instances only, not at their own place in the scene. */
+    bool getHideInstancedGeo() const;
+
+    /** Adds the nodes on the geo inputs (through Dots) to `out` when Hide Instanced
+     *  Geo is on and this node is not disabled. Scene builders drop those nodes. */
+    void appendHiddenPrototypes(std::set<Node*>& out) const;
+
+    /** appendHiddenPrototypes() over every ParticleInstance in `nodes`. */
+    static void collectHiddenPrototypes(const NodesList& nodes, std::set<Node*>& out);
 
 private:
 

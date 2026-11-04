@@ -53,6 +53,7 @@ struct ParticleInstancePrivate
     KnobDoubleWPtr randomScale;      // 2 dims: min, max
     KnobIntWPtr    seed;
     KnobBoolWPtr   applyPrototypeTransform;
+    KnobBoolWPtr   hideInstancedGeo;
     KnobIntWPtr    maxInstances;
 };
 
@@ -261,6 +262,16 @@ ParticleInstance::initializeKnobs()
         page->addKnob(k); _imp->applyPrototypeTransform = k;
     }
     {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Hide Instanced Geo"));
+        k->setName("hideInstancedGeo"); k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Hide the source geometry connected to the geo inputs at its own place in the "
+                             "scene (3D viewport, ScanlineRender, Cycles) so only the instances show. Turn "
+                             "off to keep the source geo visible as well, e.g. when it is also part of the "
+                             "set. A disabled ParticleInstance hides nothing."));
+        page->addKnob(k); _imp->hideInstancedGeo = k;
+    }
+    {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Instances"));
         k->setName("maxInstances"); k->setDefaultValue(10000);
         k->setMinimum(1); k->setDisplayMinimum(100); k->setDisplayMaximum(200000);
@@ -275,6 +286,35 @@ ParticleInstance::getApplyPrototypeTransform() const
 {
     KnobBoolPtr k = _imp->applyPrototypeTransform.lock();
     return k ? k->getValue() : true;
+}
+
+bool
+ParticleInstance::getHideInstancedGeo() const
+{
+    KnobBoolPtr k = _imp->hideInstancedGeo.lock();
+    return k ? k->getValue() : true;
+}
+
+void
+ParticleInstance::appendHiddenPrototypes(std::set<Node*>& out) const
+{
+    if (!getHideInstancedGeo()) return;
+    NodePtr self = getNode();
+    if (self && self->isNodeDisabled()) return;
+    for (int i = 1; i <= 4; ++i) {
+        EffectInstancePtr geo = skipDots(getInput(i));
+        if (geo && geo->getNode()) out.insert(geo->getNode().get());
+    }
+}
+
+void
+ParticleInstance::collectHiddenPrototypes(const NodesList& nodes, std::set<Node*>& out)
+{
+    for (NodesList::const_iterator it = nodes.begin(); it != nodes.end(); ++it) {
+        if (!*it) continue;
+        ParticleInstance* pi = dynamic_cast<ParticleInstance*>((*it)->getEffectInstance().get());
+        if (pi) pi->appendHiddenPrototypes(out);
+    }
 }
 
 bool

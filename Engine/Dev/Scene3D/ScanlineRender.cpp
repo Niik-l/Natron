@@ -31,6 +31,7 @@
 #include <cstdio>   // fprintf/fflush — used by Phase 3 GLSL helpers
 #include <cstring>
 #include <vector>
+#include <set>
 #include <unordered_map>
 
 #include "RotationConventions.h"
@@ -2196,13 +2197,16 @@ findLightInGroup(Group3D* group, int depth = 0)
 }
 
 static void
-extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vector<GeoData>& out)
+extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vector<GeoData>& out,
+                  const std::set<Node*>* hidden = NULL)
 {
     if (!effect) return;
-    // Honor "D" disable: skip the whole branch under a disabled node.
+    // Honor "D" disable: skip the whole branch under a disabled node. Likewise a
+    // ParticleInstance prototype (Hide Instanced Geo): drawn through its instances only.
     {
         NodePtr n = effect->getNode();
         if (n && n->isNodeDisabled()) return;
+        if (n && hidden && hidden->count(n.get())) return;
     }
 
     // Group3D / Transform3D: extract every child, then parent each result
@@ -2218,7 +2222,7 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
             EffectInstancePtr child = skipDots(group->getInput(c));
             if (!child) continue;
             const size_t prevCount = out.size();
-            extractGeometries(child, time, view, out);
+            extractGeometries(child, time, view, out, hidden);
             for (size_t i = prevCount; i < out.size(); ++i) {
                 float w[16];
                 // multiply() applies its first argument first: local, then the group.
@@ -2236,7 +2240,7 @@ extractGeometries(EffectInstancePtr effect, double time, ViewIdx view, std::vect
         EffectInstancePtr upstream = uvProj->getGeoInput();
         if (!upstream) return;
         const size_t prevCount = out.size();
-        extractGeometries(upstream, time, view, out);
+        extractGeometries(upstream, time, view, out, hidden);
 
         // Optional projection-image override via UVProject's input 2 (img).
         ImagePtr projImg;
@@ -2785,6 +2789,19 @@ ScanlineRender::render(const RenderActionArgs& args)
         motionBlurPData = particleInstancer->getParticleData(args.time);
     }
 
+    // Hide Instanced Geo: the prototypes of the ParticleInstance nodes in this scene
+    // are drawn through their instances only, never at their own place.
+    std::set<Node*> hiddenProtos;
+    {
+        std::vector<EffectInstancePtr> cands(1, geoEffect);
+        if (Scene3D* sc = dynamic_cast<Scene3D*>(geoEffect.get())) {
+            for (int i = 0; i < SCENE3D_MAX_INPUTS; ++i) cands.push_back(sc->getInput(i));
+        }
+        for (size_t i = 0; i < cands.size(); ++i) {
+            if (ParticleInstance* pi = dynamic_cast<ParticleInstance*>(cands[i].get())) pi->appendHiddenPrototypes(hiddenProtos);
+        }
+    }
+
     // Light detection (declared early so Scene iteration can find lights)
     Light3D* light3d = dynamic_cast<Light3D*>(geoEffect.get());
 
@@ -2837,12 +2854,12 @@ ScanlineRender::render(const RenderActionArgs& args)
                     motionBlurPData = particleData;
                     trailProvider = sProvider;
                 } else {
-                    extractGeometries(sceneInput, args.time, args.view, geoObjects);
+                    extractGeometries(sceneInput, args.time, args.view, geoObjects, &hiddenProtos);
                 }
             }
         } else if (!particleInstancer) {
             // An instancer is drawn from its instance list, not as geometry.
-            extractGeometries(geoEffect, args.time, args.view, geoObjects);
+            extractGeometries(geoEffect, args.time, args.view, geoObjects, &hiddenProtos);
         }
     }
 
@@ -3146,10 +3163,10 @@ ScanlineRender::render(const RenderActionArgs& args)
                 if (dynamic_cast<Light3D*>(sceneInputPrev.get())) continue;
                 if (dynamic_cast<ParticleInstance*>(sceneInputPrev.get())) continue;
                 if (dynamic_cast<ParticleProvider*>(sceneInputPrev.get())) continue;
-                extractGeometries(sceneInputPrev, prevTime, args.view, prevGeoObjects);
+                extractGeometries(sceneInputPrev, prevTime, args.view, prevGeoObjects, &hiddenProtos);
             }
         } else {
-            extractGeometries(geoEffect, prevTime, args.view, prevGeoObjects);
+            extractGeometries(geoEffect, prevTime, args.view, prevGeoObjects, &hiddenProtos);
         }
         const size_t n = std::min(geoObjects.size(), prevGeoObjects.size());
         for (size_t i = 0; i < n; ++i) {
@@ -3267,10 +3284,10 @@ ScanlineRender::render(const RenderActionArgs& args)
                     if (dynamic_cast<Light3D*>(sceneInput.get())) continue;
                     if (dynamic_cast<ParticleInstance*>(sceneInput.get())) continue;
                     if (dynamic_cast<ParticleProvider*>(sceneInput.get())) continue;
-                    extractGeometries(sceneInput, sampleTime, args.view, geoObjects);
+                    extractGeometries(sceneInput, sampleTime, args.view, geoObjects, &hiddenProtos);
                 }
             } else {
-                extractGeometries(geoEffect, sampleTime, args.view, geoObjects);
+                extractGeometries(geoEffect, sampleTime, args.view, geoObjects, &hiddenProtos);
             }
         }
 

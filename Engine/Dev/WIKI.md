@@ -344,6 +344,7 @@ prototype up along it.
 | Random Scale | Double min/max | 1 / 1 | Per-instance uniform scale factor in the range. |
 | Seed | Int | 0 | Reshuffles Random Rotation / Random Scale / Random distribution. |
 | Apply Prototype Transform | Bool | true | Include each prototype node's own T/R/S (a ReadGeo scaled cm→m instances at the right size). Off = raw mesh. |
+| Hide Instanced Geo | Bool | true | Hide the source geo on the geo inputs at its own place in the scene (viewport, ScanlineRender, Cycles); only the instances show. Off = source geo visible too. A disabled ParticleInstance hides nothing. |
 | Max Instances | Int | 10000 | Performance limit |
 
 Random values are keyed on the particle ID, so an instance keeps its rotation and scale from

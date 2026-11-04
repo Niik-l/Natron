@@ -37,6 +37,7 @@
 #include "../Deep/DeepToPoints.h"
 #include "Light3D.h"
 #include "../Particles/ParticleProvider.h"
+#include "../Particles/ParticleInstance.h"
 #include "ReadVDB.h"
 #include "MeshProvider.h"
 #include "ReadGeoImport.h"   // geoArchiveMatMul (true column-major product)
@@ -989,12 +990,16 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
         }
     }
 
-    // ===== Direct-disable pass: mark SceneNodes whose source node is "D"-disabled.
-    // Ancestor propagation runs as part of the world-transform depth-first walk
-    // below, so a disabled Group3D / Scene3D collapses everything under it. =====
+    // ===== Direct-disable pass: mark SceneNodes whose source node is "D"-disabled,
+    // or is a ParticleInstance prototype (Hide Instanced Geo): it is drawn through its
+    // instances only, not at its own place. Ancestor propagation runs as part of the
+    // world-transform depth-first walk below, so a disabled Group3D / Scene3D (or a
+    // Group3D used as a prototype) collapses everything under it. =====
+    std::set<Node*> hiddenProtos;
+    ParticleInstance::collectHiddenPrototypes(allNodes, hiddenProtos);
     for (int i = 0; i < (int)_nodes.size(); ++i) {
         NodePtr src = _nodes[i].sourceNode.lock();
-        if (src && src->isNodeDisabled()) {
+        if (src && (src->isNodeDisabled() || hiddenProtos.count(src.get()))) {
             _nodes[i].visible = false;
         }
     }
