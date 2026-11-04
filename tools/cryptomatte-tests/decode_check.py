@@ -29,7 +29,7 @@ def writer(node, name):
     w.getParam("ocioOutputSpaceIndex").set("linear")
     return w
 
-def crypto(layer, matte, output="matteAlpha"):
+def crypto(layer, matte, preview=False, channel="alpha"):
     c = a.createNode("fr.inria.built-in.Cryptomatte")
     c.connectInput(0, read)
     lk = c.getParam("cryptoLayer")
@@ -38,7 +38,8 @@ def crypto(layer, matte, output="matteAlpha"):
         log("LAYER MISSING", layer, "options:", opts)
     lk.set(layer)
     c.getParam("matteList").set(matte)
-    c.getParam("output").set(output)
+    c.getParam("previewMattes").set(preview)
+    c.getParam("matteChannel").set(channel)
     return c, opts
 
 cases = []
@@ -49,12 +50,12 @@ log("manifest names", c.getParam("manifestNames").get().replace("\n", "|"))
 cases.append(writer(c, "all_objects"))
 cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left")[0], "cube"))
 cases.append(writer(crypto("ViewLayer.CryptoObject", "<2ce615c5>")[0], "cube_hex"))
-cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left", "matteRGBA")[0], "cube_rgba"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left", channel="red")[0], "cube_red"))
 cases.append(writer(crypto("ViewLayer.CryptoObject", "Sphere_Mid, Ground")[0], "sphere_ground"))
 cases.append(writer(crypto("ViewLayer.CryptoMaterial", "GreenMat")[0], "greenmat"))
 cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left\nSphere_Mid")[0], "cube_sphere"))
 cases.append(writer(crypto("ViewLayer.CryptoAsset", "HeroGroup")[0], "herogroup"))
-cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left", "preview")[0], "preview"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left", preview=True)[0], "preview"))
 cases.append(writer(crypto("ViewLayer.CryptoObject", "NoSuchObject")[0], "nothing"))
 
 for w in cases:

@@ -151,8 +151,13 @@ not shuffling crypto layers, FEATURE_REQUESTS.md entry -> done.
 - 2026-11-03: steps 1-3 and 5 done. `Cryptomatte` node built and registered, headless check
   `tools/cryptomatte-tests/run_check.sh` DONE_OK (9/9 against the Blender reference, which is
   now rendered film-transparent so its alpha is the object coverage). Picker written, GUI pass
-  pending (project: tools/cryptomatte-tests/out/cryptomatte_gui.ntp). Preview knob merged into
-  Output. Next: step 4 GUI pass, then step 6 (Cycles encoder).
+  pending (project: tools/cryptomatte-tests/out/cryptomatte_gui.ntp). First GUI pass by the user OK ("works great").
+- 2026-11-04: panel reworked to Nuke's Cryptomatte layout at the user's request: Layer Selection,
+  Manifest Source (Metadata Auto / Sidecar File / None + file), Preview Mattes, Picker Add /
+  Picker Remove modes, Matte List + Clear, Matte Output + rgba channel, Unpremultiply, Remove
+  Channels (dynamic pass-through block). Check still 9/9. Part 2 idea from the Blender
+  discussion: a per-node "Crypto Asset" string knob (default: top-level group name) gives a
+  user-defined layer through Cycles' asset hash without kernel changes.
 
 ## Order of work
 

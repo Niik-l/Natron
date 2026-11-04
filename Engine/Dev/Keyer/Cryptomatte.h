@@ -46,11 +46,11 @@ struct CryptomattePrivate;
  * crypto_object from Arnold, and so on). Each plane holds two (ID, coverage) pairs sorted by
  * coverage. The node sums the coverage of the IDs in its Matte List: object names (hashed with
  * MurmurHash3 as the spec says) or raw IDs written <hex>. Names are listed from the manifest in
- * the upstream EXR header; with Pick in viewer on, clicking an object in the viewer toggles it.
+ * the upstream EXR header; with Picker Add or Picker Remove on, clicking an object in the viewer edits the list.
  *
- * Output: the Color plane, with the matte in alpha (RGB from the Source), the matte in all
- * channels, or the keyable-surface preview colours in RGB with the matte in alpha. Other planes
- * pass through.
+ * Output: the Color plane with the matte in the chosen channel (alpha by default) and either the
+ * Source RGB or the keyable-surface preview colours; other planes pass through unless Remove
+ * Channels is on. The panel follows Nuke's Cryptomatte gizmo.
  */
 class Cryptomatte
     : public EffectInstance
@@ -101,8 +101,8 @@ public:
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
     virtual bool isMultiPlanar() const OVERRIDE FINAL WARN_UNUSED_RETURN { return true; }
-    virtual PassThroughEnum isPassThroughForNonRenderedPlanes() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return ePassThroughPassThroughNonRenderedPlanes; }
+    // Remove Channels blocks every plane but the Color output.
+    virtual PassThroughEnum isPassThroughForNonRenderedPlanes() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
     virtual void getComponentsNeededAndProduced(double time, ViewIdx view,
                                                 EffectInstance::ComponentsNeededMap* comps,
@@ -116,8 +116,8 @@ public:
     virtual bool knobChanged(KnobI* k, ValueChangedReasonEnum reason, ViewSpec view, double time,
                              bool originatedFromMainThread) OVERRIDE FINAL;
 
-    // Viewer: with Pick in viewer on, a left click toggles the object under the cursor in the
-    // Matte List, a left drag toggles every object inside the box.
+    // Viewer: with Picker Add / Picker Remove on, a left click adds / removes the object under the
+    // cursor, a left drag every object inside the box.
     virtual bool hasOverlay() const OVERRIDE FINAL { return true; }
     virtual void drawOverlay(double time, const RenderScale& renderScale, ViewIdx view) OVERRIDE FINAL;
     virtual bool onOverlayPenDown(double time, const RenderScale& renderScale, ViewIdx view,
@@ -144,7 +144,7 @@ private:
     void refreshLayerChoices();
     // Re-reads the manifest for the chosen layer from the upstream file (main thread).
     void refreshManifest();
-    // Toggles the IDs under a click (box empty) or inside a box in the Matte List.
+    // Adds or removes (per the picker mode) the IDs under a click or inside a box.
     void pickAt(double time, ViewIdx view, const QPointF& from, const QPointF& to);
 
     std::unique_ptr<CryptomattePrivate> _imp;

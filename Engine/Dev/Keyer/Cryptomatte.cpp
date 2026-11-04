@@ -57,11 +57,19 @@ NATRON_NAMESPACE_ENTER
 
 namespace {
 
-enum OutputModeEnum
+enum ManifestSourceEnum
 {
-    eOutputMatteAlpha = 0,   // RGB from the Source, matte in alpha
-    eOutputMatteRGBA,        // matte in every channel
-    eOutputPreview           // keyable-surface colours in RGB, matte in alpha
+    eManifestAuto = 0,   // the upstream file's EXR header (or the sidecar it names)
+    eManifestSidecar,    // a manifest JSON file chosen by the user
+    eManifestNone
+};
+
+enum MatteChannelEnum
+{
+    eMatteChannelAlpha = 0,
+    eMatteChannelRed,
+    eMatteChannelGreen,
+    eMatteChannelBlue
 };
 
 // One Cryptomatte set on the input: the planes <prefix>00, <prefix>01, ... in rank order.
@@ -312,6 +320,20 @@ readFileAt(EffectInstance* self, const NodePtr& rd, int frame)
     return f;
 }
 
+// Reads a whole file into `out`; false if it cannot be opened.
+bool
+slurp(const std::string& path, std::string* out)
+{
+    std::ifstream f(path.c_str(), std::ios::binary);
+    if (!f) {
+        return false;
+    }
+    std::stringstream ss;
+    ss << f.rdbuf();
+    *out = ss.str();
+    return true;
+}
+
 // Reads the manifest of the set `prefix` from the EXR header of `file` (or its sidecar).
 void
 manifestFromFile(const std::string& file, const std::string& prefix, Manifest* m)
@@ -358,11 +380,7 @@ manifestFromFile(const std::string& file, const std::string& prefix, Manifest* m
             std::string dir = file;
             const size_t slash = dir.find_last_of("/\\");
             dir = slash == std::string::npos ? std::string() : dir.substr(0, slash + 1);
-            std::ifstream f((dir + side).c_str(), std::ios::binary);
-            if (f) {
-                std::stringstream ss;
-                ss << f.rdbuf();
-                m->json = ss.str();
+            if (slurp(dir + side, &m->json)) {
                 m->source = "sidecar " + side;
             } else {
                 m->source = "sidecar " + side + " not found";
@@ -409,9 +427,17 @@ setLess(const CryptoSet& a, const CryptoSet& b)
 struct CryptomattePrivate
 {
     KnobChoiceWPtr layer;
+    KnobChoiceWPtr manifestSource;
+    KnobFileWPtr manifestFile;
+    KnobBoolWPtr previewMattes;
+    KnobBoolWPtr pickerAdd;
+    KnobBoolWPtr pickerRemove;
     KnobStringWPtr matteList;
-    KnobBoolWPtr pick;
-    KnobChoiceWPtr output;
+    KnobButtonWPtr clear;
+    KnobBoolWPtr matteOutput;
+    KnobChoiceWPtr matteChannel;
+    KnobBoolWPtr unpremultiply;
+    KnobBoolWPtr removeChannels;
     KnobStringWPtr manifestInfo;
     KnobStringWPtr manifestNames;
     KnobButtonWPtr reload;
@@ -421,11 +447,10 @@ struct CryptomattePrivate
 
     mutable QMutex manifestMutex;
     Manifest manifest;
-    std::string manifestKey;   // file + "|" + prefix the manifest was read for
+    std::string manifestKey;   // source mode + file + prefix the manifest was read for
 
     bool dragging;
     QPointF dragFrom, dragTo;
-    int outputBeforePick;
 
     CryptomattePrivate()
         : setsMutex()
@@ -436,7 +461,6 @@ struct CryptomattePrivate
         , dragging(false)
         , dragFrom()
         , dragTo()
-        , outputBeforePick(-1)
     {
     }
 
@@ -458,6 +482,19 @@ struct CryptomattePrivate
         *out = sets.front();
         return true;
     }
+
+    // 0 = off, 1 = add, 2 = remove.
+    int pickerMode() const
+    {
+        KnobBoolPtr a = pickerAdd.lock(), r = pickerRemove.lock();
+        if (a && a->getValue()) {
+            return 1;
+        }
+        if (r && r->getValue()) {
+            return 2;
+        }
+        return 0;
+    }
 };
 
 Cryptomatte::Cryptomatte(NodePtr node)
@@ -476,14 +513,15 @@ Cryptomatte::getPluginDescription() const
 {
     return "Decodes Cryptomatte ID mattes written by a renderer (Blender/Cycles, Arnold, Redshift, "
            "Houdini...).\n\n"
-           "Read a multi-layer EXR and connect it: the Layer menu lists every Cryptomatte set found "
+           "Read a multi-layer EXR and connect it: Layer Selection lists every Cryptomatte set found "
            "(object, material, asset). Type object names in the Matte List, separated by commas, or "
-           "turn on Pick in viewer and click objects in the viewer (click again to remove, drag a box "
-           "to add everything inside). Names come from the manifest in the EXR header; an object "
-           "without a name can be given as its hex ID in angle brackets, <2ce615c5>.\n\n"
-           "Output puts the matte in the alpha channel (RGB from the Source), in every channel, or "
-           "shows the preview colours of all objects with the matte in alpha. Other planes pass "
-           "through unchanged.\n\n"
+           "turn on Picker Add and click objects in the viewer (drag a box to add everything inside; "
+           "Picker Remove takes them out again). Names come from the manifest in the EXR header; an "
+           "object without a name can be given as its hex ID in angle brackets, <2ce615c5>.\n\n"
+           "Preview Mattes shows every object in its own colour, the ones in the matte lifted towards "
+           "white. Matte Output writes the matte into the chosen channel (alpha by default); "
+           "Unpremultiply divides the RGB by the incoming alpha first so a later Premult by the matte "
+           "gives clean edges; Remove Channels drops every other plane from the output.\n\n"
            "Keep the Cryptomatte layers untouched between the Read and this node: the IDs are raw "
            "bit patterns, and nodes that filter, premultiply or colour-convert them break the matte.";
 }
@@ -508,13 +546,24 @@ Cryptomatte::isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const
     return false;
 }
 
+EffectInstance::PassThroughEnum
+Cryptomatte::isPassThroughForNonRenderedPlanes() const
+{
+    KnobBoolPtr k = _imp->removeChannels.lock();
+    return (k && k->getValue()) ? ePassThroughBlockNonRenderedPlanes : ePassThroughPassThroughNonRenderedPlanes;
+}
+
 void
 Cryptomatte::initializeKnobs()
 {
     KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Cryptomatte"));
+    auto separator = [this, &page]() {
+        KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>(this, tr(""));
+        page->addKnob(sep);
+    };
 
     {
-        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Layer"));
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Layer Selection"));
         k->setName("cryptoLayer");
         k->setHintToolTip(tr("The Cryptomatte set to decode. Each set is a run of planes named <prefix>00, "
                              "<prefix>01... on the Source (object, material and asset IDs are separate sets)."));
@@ -522,49 +571,26 @@ Cryptomatte::initializeKnobs()
         _imp->layer = k;
     }
     {
-        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Matte List"));
-        k->setName("matteList");
-        k->setAsMultiLine();
-        k->setHintToolTip(tr("The objects in the matte: names separated by commas or new lines, as the "
-                             "renderer wrote them (see Manifest Names below). An object can also be given "
-                             "as its ID in angle brackets, <2ce615c5>. Pick in viewer adds and removes "
-                             "entries here."));
-        page->addKnob(k);
-        _imp->matteList = k;
-    }
-    {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Pick in viewer"));
-        k->setName("pick");
-        k->setDefaultValue(false);
-        k->setAnimationEnabled(false);
-        k->setIsPersistent(false);
-        k->setEvaluateOnChange(false);
-        k->setHintToolTip(tr("While on, a left click in the viewer adds the object under the cursor to the "
-                             "Matte List, or removes it if it is already there; a left drag adds every object "
-                             "inside the box (or removes them all if all were in). Switches the Output to "
-                             "the preview colours while on."));
-        page->addKnob(k);
-        _imp->pick = k;
-    }
-    {
-        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Output"));
-        k->setName("output");
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Manifest Source"));
+        k->setName("manifestSource");
         std::vector<ChoiceOption> o;
-        o.push_back(ChoiceOption("matteAlpha", "Matte in Alpha", "RGB from the Source's colour, the matte in alpha."));
-        o.push_back(ChoiceOption("matteRGBA", "Matte in RGBA", "The matte in every channel."));
-        o.push_back(ChoiceOption("preview", "Preview Colours", "Every object in its own colour (brighter when it is in the matte), the matte in alpha. The look other packages call keyable surface."));
+        o.push_back(ChoiceOption("auto", "Metadata Auto", "The manifest in the upstream file's EXR header (or the sidecar file it names)."));
+        o.push_back(ChoiceOption("sidecar", "Sidecar File", "A manifest JSON file you choose."));
+        o.push_back(ChoiceOption("none", "None", "No names: the Matte List takes names (hashed) and <hex> IDs only."));
         k->populateChoices(o);
-        k->setDefaultValue(eOutputMatteAlpha);
-        k->setHintToolTip(tr("What goes in the Color plane."));
+        k->setDefaultValue(eManifestAuto);
+        k->setAnimationEnabled(false);
+        k->setAddNewLine(false);
+        k->setHintToolTip(tr("Where the object names come from."));
         page->addKnob(k);
-        _imp->output = k;
+        _imp->manifestSource = k;
     }
     {
-        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Reload Manifest"));
-        k->setName("reloadManifest");
-        k->setHintToolTip(tr("Re-read the object names from the upstream file's header."));
+        KnobFilePtr k = AppManager::createKnob<KnobFile>(this, tr(""));
+        k->setName("manifestFile");
+        k->setHintToolTip(tr("The manifest JSON file, when Manifest Source is Sidecar File."));
         page->addKnob(k);
-        _imp->reload = k;
+        _imp->manifestFile = k;
     }
     {
         KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Manifest"));
@@ -572,19 +598,134 @@ Cryptomatte::initializeKnobs()
         k->setAsLabel();
         k->setIsPersistent(false);
         k->setEvaluateOnChange(false);
+        k->setAddNewLine(false);
         page->addKnob(k);
         _imp->manifestInfo = k;
     }
     {
-        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Manifest Names"));
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Reload"));
+        k->setName("reloadManifest");
+        k->setHintToolTip(tr("Re-read the object names."));
+        page->addKnob(k);
+        _imp->reload = k;
+    }
+    {
+        KnobGroupPtr grp = AppManager::createKnob<KnobGroup>(this, tr("Manifest Names"));
+        grp->setName("manifestNamesGroup");
+        grp->setDefaultValue(false);
+        grp->setAsTab();
+        page->addKnob(grp);
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr(""));
         k->setName("manifestNames");
         k->setAsMultiLine();
         k->setIsPersistent(false);
         k->setEvaluateOnChange(false);
-        k->setHintToolTip(tr("Every object the renderer listed for this layer, one per line, for copying into "
+        k->setHintToolTip(tr("Every object the manifest lists for this layer, one per line, for copying into "
                              "the Matte List. Read-only: edits here do nothing."));
-        page->addKnob(k);
+        grp->addKnob(k);
         _imp->manifestNames = k;
+    }
+    separator();
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Preview Mattes"));
+        k->setName("previewMattes");
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Show every object in its own colour in RGB, the objects in the matte lifted towards "
+                             "white (the keyable-surface look). Off: RGB comes from the Source."));
+        page->addKnob(k);
+        _imp->previewMattes = k;
+    }
+    separator();
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Picker Add"));
+        k->setName("pickerAdd");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setIsPersistent(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("While on, a left click in the viewer adds the object under the cursor to the Matte "
+                             "List; a left drag adds every object inside the box."));
+        page->addKnob(k);
+        _imp->pickerAdd = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Picker Remove"));
+        k->setName("pickerRemove");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setIsPersistent(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("While on, a left click in the viewer removes the object under the cursor from the "
+                             "Matte List; a left drag removes every object inside the box."));
+        page->addKnob(k);
+        _imp->pickerRemove = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Matte List"));
+        k->setName("matteList");
+        k->setAsMultiLine();
+        k->setHintToolTip(tr("The objects in the matte: names separated by commas or new lines, as the "
+                             "renderer wrote them (see Manifest Names). An object can also be given as its ID "
+                             "in angle brackets, <2ce615c5>. The pickers add and remove entries here."));
+        page->addKnob(k);
+        _imp->matteList = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Clear"));
+        k->setName("clear");
+        k->setHintToolTip(tr("Empty the Matte List."));
+        page->addKnob(k);
+        _imp->clear = k;
+    }
+    separator();
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Matte Output"));
+        k->setName("matteOutput");
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setAddNewLine(false);
+        k->setHintToolTip(tr("Write the matte into the channel on the right. Off: the Source's channels are kept "
+                             "(with the preview colours in RGB if Preview Mattes is on)."));
+        page->addKnob(k);
+        _imp->matteOutput = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr(""));
+        k->setName("matteChannel");
+        std::vector<ChoiceOption> o;
+        o.push_back(ChoiceOption("alpha", "rgba.alpha", ""));
+        o.push_back(ChoiceOption("red", "rgba.red", ""));
+        o.push_back(ChoiceOption("green", "rgba.green", ""));
+        o.push_back(ChoiceOption("blue", "rgba.blue", ""));
+        k->populateChoices(o);
+        k->setDefaultValue(eMatteChannelAlpha);
+        k->setAnimationEnabled(false);
+        k->setAddNewLine(false);
+        k->setHintToolTip(tr("The channel the matte goes into."));
+        page->addKnob(k);
+        _imp->matteChannel = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Unpremultiply"));
+        k->setName("unpremultiply");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Divide the Source RGB by the Source alpha before the matte replaces it, so that "
+                             "premultiplying by the matte afterwards gives clean edges. Not applied to the "
+                             "preview colours."));
+        page->addKnob(k);
+        _imp->unpremultiply = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Remove Channels"));
+        k->setName("removeChannels");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Output only the Color plane: the Cryptomatte layers and every other plane of the "
+                             "Source are dropped."));
+        page->addKnob(k);
+        _imp->removeChannels = k;
     }
 }
 
@@ -631,6 +772,11 @@ void
 Cryptomatte::onKnobsLoaded()
 {
     refreshLayerChoices();
+    KnobChoicePtr src = _imp->manifestSource.lock();
+    KnobFilePtr f = _imp->manifestFile.lock();
+    if (src && f) {
+        f->setSecret(src->getValue() != eManifestSidecar);
+    }
 }
 
 void
@@ -710,16 +856,30 @@ Cryptomatte::refreshManifest()
 {
     CryptoSet set;
     const bool haveSet = _imp->currentSet(&set);
-    std::string file;
-    NodePtr rd = haveSet ? upstreamRead(this) : NodePtr();
-    if (rd) {
-        double time = 0;
-        if (getApp() && getApp()->getTimeLine()) {
-            time = getApp()->getTimeLine()->currentFrame();
-        }
-        file = readFileAt(this, rd, (int)std::floor(time + 0.5));
+    KnobChoicePtr srcKnob = _imp->manifestSource.lock();
+    const int source = srcKnob ? srcKnob->getValue() : (int)eManifestAuto;
+    double time = 0;
+    if (getApp() && getApp()->getTimeLine()) {
+        time = getApp()->getTimeLine()->currentFrame();
     }
-    const std::string key = file + "|" + set.prefix;
+    std::string file;
+    if (source == eManifestAuto && haveSet) {
+        NodePtr rd = upstreamRead(this);
+        if (rd) {
+            file = readFileAt(this, rd, (int)std::floor(time + 0.5));
+        }
+    } else if (source == eManifestSidecar) {
+        KnobFilePtr f = _imp->manifestFile.lock();
+        if (f) {
+            file = f->getFileName((int)std::floor(time + 0.5), ViewIdx(0));
+            if (!file.empty() && getApp() && getApp()->getProject()) {
+                getApp()->getProject()->canonicalizePath(file);
+            }
+        }
+    }
+    std::ostringstream keyStream;
+    keyStream << source << "|" << file << "|" << set.prefix;
+    const std::string key = keyStream.str();
     {
         QMutexLocker l(&_imp->manifestMutex);
         if (key == _imp->manifestKey) {
@@ -729,7 +889,18 @@ Cryptomatte::refreshManifest()
     }
 
     Manifest m;
-    if (!haveSet) {
+    if (source == eManifestNone) {
+        m.source = "Manifest Source is None";
+    } else if (source == eManifestSidecar) {
+        if (file.empty()) {
+            m.source = "no sidecar file chosen";
+        } else if (slurp(file, &m.json)) {
+            m.source = "sidecar file";
+            parseManifest(m.json, &m);
+        } else {
+            m.source = "sidecar file not found";
+        }
+    } else if (!haveSet) {
         m.source = "no Cryptomatte layers on the Source";
     } else if (file.empty()) {
         m.source = "no Read upstream: type names, or pick in the viewer (IDs are written as <hex>)";
@@ -739,7 +910,7 @@ Cryptomatte::refreshManifest()
 
     std::ostringstream info, names;
     if (m.nameToHash.empty()) {
-        info << "No names (" << m.source << ")";
+        info << "no names (" << m.source << ")";
     } else {
         info << m.nameToHash.size() << " name" << (m.nameToHash.size() == 1 ? "" : "s") << " from the " << m.source;
         int n = 0;
@@ -776,7 +947,15 @@ bool
 Cryptomatte::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /*view*/, double /*time*/,
                          bool /*originatedFromMainThread*/)
 {
-    if (k == _imp->layer.lock().get()) {
+    if (k == _imp->layer.lock().get() || k == _imp->manifestFile.lock().get()) {
+        refreshManifest();
+        return true;
+    }
+    if (k == _imp->manifestSource.lock().get()) {
+        KnobFilePtr f = _imp->manifestFile.lock();
+        if (f) {
+            f->setSecret(_imp->manifestSource.lock()->getValue() != eManifestSidecar);
+        }
         refreshManifest();
         return true;
     }
@@ -788,23 +967,31 @@ Cryptomatte::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /
         refreshManifest();
         return true;
     }
-    if (k == _imp->pick.lock().get()) {
-        // Picking wants to see the objects: show the preview colours while it is on.
-        KnobChoicePtr out = _imp->output.lock();
-        if (out) {
-            if (_imp->pick.lock()->getValue()) {
-                _imp->outputBeforePick = out->getValue();
-                out->setValue(eOutputPreview);
-            } else if (_imp->outputBeforePick >= 0) {
-                out->setValue(_imp->outputBeforePick);
-                _imp->outputBeforePick = -1;
-            }
+    if (k == _imp->clear.lock().get()) {
+        KnobStringPtr lk = _imp->matteList.lock();
+        if (lk) {
+            lk->setValue(std::string());
         }
-        redrawOverlayInteract();
         return true;
     }
-    if (k == _imp->manifestNames.lock().get()) {
-        return true;   // read-only list: nothing to render
+    // The two pickers are modes: turning one on turns the other off.
+    if (k == _imp->pickerAdd.lock().get() && _imp->pickerAdd.lock()->getValue()) {
+        KnobBoolPtr other = _imp->pickerRemove.lock();
+        if (other && other->getValue()) {
+            other->setValue(false);
+        }
+        return true;
+    }
+    if (k == _imp->pickerRemove.lock().get() && _imp->pickerRemove.lock()->getValue()) {
+        KnobBoolPtr other = _imp->pickerAdd.lock();
+        if (other && other->getValue()) {
+            other->setValue(false);
+        }
+        return true;
+    }
+    if (k == _imp->pickerAdd.lock().get() || k == _imp->pickerRemove.lock().get() ||
+        k == _imp->manifestNames.lock().get()) {
+        return true;   // nothing to render
     }
     return false;
 }
@@ -818,7 +1005,7 @@ Cryptomatte::render(const RenderActionArgs& args)
     ImagePtr outImg;
     for (std::list<std::pair<ImagePlaneDesc, ImagePtr> >::const_iterator it = args.outputPlanes.begin();
          it != args.outputPlanes.end(); ++it) {
-        if (it->second && (it->first.isColorPlane() || it->first.getNumComponents() >= 1)) {
+        if (it->second) {
             outImg = it->second;
             break;
         }
@@ -828,7 +1015,17 @@ Cryptomatte::render(const RenderActionArgs& args)
     }
     const RectI outBounds = outImg->getBounds();
     const int outNComp = outImg->getComponents().getNumComponents();
-    const int mode = _imp->output.lock()->getValue();
+
+    const bool preview = _imp->previewMattes.lock()->getValue();
+    const bool matteOn = _imp->matteOutput.lock()->getValue();
+    const bool unpremult = _imp->unpremultiply.lock()->getValue();
+    int matteIdx = 3;
+    switch (_imp->matteChannel.lock()->getValue()) {
+    case eMatteChannelRed: matteIdx = 0; break;
+    case eMatteChannelGreen: matteIdx = 1; break;
+    case eMatteChannelBlue: matteIdx = 2; break;
+    default: matteIdx = 3; break;
+    }
 
     CryptoSet set;
     const bool haveSet = _imp->currentSet(&set);
@@ -839,11 +1036,8 @@ Cryptomatte::render(const RenderActionArgs& args)
         clearPersistentMessage(false);
     }
 
-    // The Source colour (for RGB pass-through) and the ID planes.
-    ImagePtr srcImg;
-    if (mode == eOutputMatteAlpha || !haveSet) {
-        srcImg = getImage(0, args.time, args.mappedScale, args.view, NULL, NULL, false, false, eStorageModeRAM, 0, NULL);
-    }
+    // The Source colour and the ID planes.
+    ImagePtr srcImg = getImage(0, args.time, args.mappedScale, args.view, NULL, NULL, false, false, eStorageModeRAM, 0, NULL);
     std::vector<ImagePtr> planeImgs;
     if (haveSet) {
         for (size_t i = 0; i < set.planes.size(); ++i) {
@@ -882,6 +1076,28 @@ Cryptomatte::render(const RenderActionArgs& args)
             if (!dst) {
                 continue;
             }
+            // The Source pixel (RGB broadcast from a single channel, alpha 1 when it has none).
+            float out[4] = {0.f, 0.f, 0.f, 1.f};
+            if (srcRa && srcBounds.contains(x, y)) {
+                const float* s = (const float*)srcRa->pixelAt(x, y);
+                if (s) {
+                    if (srcNComp >= 3) {
+                        out[0] = s[0];
+                        out[1] = s[1];
+                        out[2] = s[2];
+                        out[3] = srcNComp == 4 ? s[3] : 1.f;
+                    } else {
+                        out[0] = out[1] = out[2] = out[3] = s[0];
+                    }
+                }
+            }
+            if (!haveSet) {
+                for (int c = 0; c < outNComp && c < 4; ++c) {
+                    dst[c] = outNComp == 1 ? out[3] : out[c];
+                }
+                continue;
+            }
+
             float matte = 0.f, pr = 0.f, pg = 0.f, pb = 0.f;
             for (size_t p = 0; p < planeRa.size(); ++p) {
                 if (!planeBounds[p].contains(x, y)) {
@@ -900,7 +1116,7 @@ Cryptomatte::render(const RenderActionArgs& args)
                     if (selected.count(bits)) {
                         matte += cov;
                     }
-                    if (mode == eOutputPreview) {
+                    if (preview) {
                         float r, g, b;
                         CryptoHash::idToPreviewColor(bits, &r, &g, &b);
                         pr += cov * r;
@@ -911,28 +1127,18 @@ Cryptomatte::render(const RenderActionArgs& args)
             }
             matte = std::min(1.f, std::max(0.f, matte));
 
-            float out[4] = {0.f, 0.f, 0.f, matte};
-            if (mode == eOutputMatteRGBA) {
-                out[0] = out[1] = out[2] = matte;
-            } else if (mode == eOutputPreview) {
+            if (preview) {
                 // Objects in the matte are blended half-way to white so the pick reads at a glance.
                 out[0] = pr + (1.f - pr) * 0.5f * matte;
                 out[1] = pg + (1.f - pg) * 0.5f * matte;
                 out[2] = pb + (1.f - pb) * 0.5f * matte;
-            } else if (srcRa && srcBounds.contains(x, y)) {
-                const float* s = (const float*)srcRa->pixelAt(x, y);
-                if (s) {
-                    if (srcNComp >= 3) {
-                        out[0] = s[0];
-                        out[1] = s[1];
-                        out[2] = s[2];
-                    } else {
-                        out[0] = out[1] = out[2] = s[0];
-                    }
-                    if (!haveSet) {
-                        out[3] = srcNComp == 4 ? s[3] : (srcNComp == 1 ? s[0] : 1.f);
-                    }
-                }
+            } else if (unpremult && out[3] > 0.f && out[3] < 1.f) {
+                out[0] /= out[3];
+                out[1] /= out[3];
+                out[2] /= out[3];
+            }
+            if (matteOn) {
+                out[matteIdx] = matte;
             }
             if (outNComp == 1) {
                 dst[0] = out[3];
@@ -951,8 +1157,8 @@ Cryptomatte::render(const RenderActionArgs& args)
 void
 Cryptomatte::drawOverlay(double /*time*/, const RenderScale& /*renderScale*/, ViewIdx /*view*/)
 {
-    KnobBoolPtr pk = _imp->pick.lock();
-    if (!pk || !pk->getValue() || !_imp->dragging) {
+    const int mode = _imp->pickerMode();
+    if (!mode || !_imp->dragging) {
         return;
     }
     GLProtectAttrib a(GL_HINT_BIT | GL_ENABLE_BIT | GL_LINE_BIT | GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT);
@@ -960,7 +1166,11 @@ Cryptomatte::drawOverlay(double /*time*/, const RenderScale& /*renderScale*/, Vi
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_DONT_CARE);
-    glColor4f(1.f, 0.8f, 0.1f, 0.9f);
+    if (mode == 1) {
+        glColor4f(0.3f, 1.f, 0.3f, 0.9f);
+    } else {
+        glColor4f(1.f, 0.35f, 0.3f, 0.9f);
+    }
     glLineWidth(1.5f);
     glBegin(GL_LINE_LOOP);
     glVertex2d(_imp->dragFrom.x(), _imp->dragFrom.y());
@@ -975,8 +1185,7 @@ Cryptomatte::onOverlayPenDown(double /*time*/, const RenderScale& /*renderScale*
                               const QPointF& /*viewportPos*/, const QPointF& pos, double /*pressure*/,
                               double /*timestamp*/, PenType pen)
 {
-    KnobBoolPtr pk = _imp->pick.lock();
-    if (!pk || !pk->getValue() || pen != ePenTypeLMB) {
+    if (!_imp->pickerMode() || pen != ePenTypeLMB) {
         return false;
     }
     _imp->dragging = true;
@@ -1015,8 +1224,9 @@ Cryptomatte::onOverlayPenUp(double time, const RenderScale& /*renderScale*/, Vie
 void
 Cryptomatte::pickAt(double time, ViewIdx view, const QPointF& from, const QPointF& to)
 {
+    const int mode = _imp->pickerMode();
     CryptoSet set;
-    if (!_imp->currentSet(&set) || set.planes.empty()) {
+    if (!mode || !_imp->currentSet(&set) || set.planes.empty()) {
         return;
     }
     refreshManifest();
@@ -1071,24 +1281,9 @@ Cryptomatte::pickAt(double time, ViewIdx view, const QPointF& from, const QPoint
     if (!lk) {
         return;
     }
-    std::vector<std::string> tokens = splitTokens( lk->getValue() );
-    std::set<std::uint32_t> present;
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        std::uint32_t b;
-        if (tokenToBits(tokens[i], &b)) {
-            present.insert(b);
-        }
-    }
-    bool allPresent = true;
-    for (std::set<std::uint32_t>::const_iterator it = found.begin(); it != found.end(); ++it) {
-        if (!present.count(*it)) {
-            allPresent = false;
-            break;
-        }
-    }
-
+    const std::vector<std::string> tokens = splitTokens( lk->getValue() );
     std::vector<std::string> result;
-    if (allPresent) {
+    if (mode == 2) {
         // Remove every token that resolves to one of the picked IDs.
         for (size_t i = 0; i < tokens.size(); ++i) {
             std::uint32_t b;
@@ -1098,6 +1293,13 @@ Cryptomatte::pickAt(double time, ViewIdx view, const QPointF& from, const QPoint
             result.push_back(tokens[i]);
         }
     } else {
+        std::set<std::uint32_t> present;
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            std::uint32_t b;
+            if (tokenToBits(tokens[i], &b)) {
+                present.insert(b);
+            }
+        }
         result = tokens;
         QMutexLocker l(&_imp->manifestMutex);
         for (std::set<std::uint32_t>::const_iterator it = found.begin(); it != found.end(); ++it) {

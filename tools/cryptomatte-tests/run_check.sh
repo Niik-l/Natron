@@ -21,8 +21,8 @@ alpha_of_ref
 same "$O/all_objects.exr" "$O/ref_alpha.exr" 0.02 && ok "all objects == Combined alpha (tol 0.02)" || bad "all objects != Combined alpha"
 # 2. hex ID == name, bit exact
 same "$O/cube.exr" "$O/cube_hex.exr" 0 && ok "<2ce615c5> == Cube_Left" || bad "<2ce615c5> != Cube_Left"
-# 3. Matte in RGBA puts the same matte in R
-oiiotool "$O/cube.exr" --ch A --chnames R "$O/cube_rgba.exr" --ch R --diff --fail 0 --hardfail 0 >/dev/null 2>&1 && ok "Matte in RGBA" || bad "Matte in RGBA"
+# 3. Matte Output into rgba.red puts the same matte in R
+oiiotool "$O/cube.exr" --ch A --chnames R "$O/cube_red.exr" --ch R --diff --fail 0 --hardfail 0 >/dev/null 2>&1 && ok "Matte Output rgba.red" || bad "Matte Output rgba.red"
 # 4. material and asset layers are unions of object mattes
 same "$O/greenmat.exr" "$O/sphere_ground.exr" 1e-6 && ok "GreenMat == Sphere_Mid + Ground" || bad "GreenMat != Sphere_Mid + Ground"
 same "$O/herogroup.exr" "$O/cube_sphere.exr" 1e-6 && ok "HeroGroup == Cube_Left + Sphere_Mid" || bad "HeroGroup != Cube_Left + Sphere_Mid"
