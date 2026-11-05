@@ -39,6 +39,7 @@ Pruned 2026-10-13: finished items moved to **Done (2026)** at the end of this se
 
 ### Waiting on a GUI test
 
+- [ ] **Cryptomatte through the pass node (CyclesRenderPass / pass manager)** — wired 2026-11-04 with the CyclesRender work (Crypto* preview tokens, EXR filter, manifests via `reqBatch.outCryptoManifests`) but never rendered: tick the Crypto AOVs on a pass, render to EXR, check `exrheader` lists `cryptomatte/<id>/manifest` and a Cryptomatte node on a Read of the file decodes an object. CyclesRender itself is verified (encoder 16/16, Blender cross-check 2/2, user GUI passes for the decoder, custom layer, per-instance IDs and Hide Instanced Geo).
 - [ ] **TEST the FastVolumeRender particle light** (quick commit 2026-09-17, NOT GUI-tested; PARKED by user 2026-10-18 — unrelated to the geo work, revisit when touching particles+volumes): Particle Light knobs + Particles As Lights / Max Particle Lights / Intensity / Range; the light budget went 8 → 128 for every scene, so also re-check an ordinary lit VDB/Volume3D scene renders as before. Test rig: emitter → solver → Scene3D beside a Volume3D haze, camera in front; compare with a Light3D point light in the same fog.
 - [x] **Verify the two Cycles-render crash fixes in the GUI** (template 3D scene load repeated) — DONE 2026-10-18 by user: loads fine, no crashes. Covers `d070af460` (render-mutex race destroying the active renderer mid-render) and `2cd63abc8` (G1 copy-on-read against the in-place mesh mutation — the recurring template-load AV in `syncSceneWithCamera`).
 - [x] **Per-part color pass (merged meshes)** — DONE 2026-10-18 by user: merged-file colors are visible in the 3D viewport and Cycles. **ScanlineRender renders merged meshes single-material (one flat color) — known limitation**, documented below (face-color GLSL plumbing not built there; per-part materials also absent).
@@ -60,6 +61,7 @@ Pruned 2026-10-13: finished items moved to **Done (2026)** at the end of this se
 
 ### Reports and parked work
 
+- [ ] **Cryptomatte per-point IDs for Scatter3D rendered as points / hair** (noted 2026-11-04, not planned): the per-instance IDs cover ParticleInstance meshes only; bare points and hair strands from one Scatter3D stay one object ID because Cycles assigns IDs per object and a per-point ID would need a kernel attribute. Pick up only if someone asks for it.
 - [ ] **Camera3D keyframes land on the wrong frame** (user report 2026-09-08: keys set for f300 ended up on f50; unreproduced, deferred at the user's request — needs a repro: which knob, set via panel or viewport gizmo, timeline vs project frame range, autokey state).
 - [ ] **GeoBuilder slice 2 — bake** (PARKED by user 2026-10-18 — never intentionally planned): write a placed grid card out as OBJ → ReadGeo, and a one-button Project3D + FrameHold projection setup on the card. Slices 3–4 = vertex editing / multi-frame alignment. The card is already a usable mesh everywhere ReadGeo is.
 - [ ] DeepExpression 2.0 follow-up polish (2026-07-25): iterate on the Nuke-style expression node after first day of use
@@ -549,8 +551,9 @@ Remaining:
   PASS_MIST end-to-end via the now-canonical 5-step add-pass recipe: knob
   → `getEnabledPasses` → `passNameToPlane` → `standardPasses[]` table →
   per-pixel broadcast block. Proves the pattern is reusable for the ~33
-  remaining unwired Cycles passes (cryptomatte, motion vector, position,
-  denoising aux, volume direct/indirect, etc.).
+  remaining unwired Cycles passes (motion vector, position, denoising aux,
+  volume direct/indirect, etc.; cryptomatte was wired 2026-11-04, see
+  `CRYPTOMATTE_PLAN.md`).
 - **Display fix for single-value AOVs.** Depth / AO / Mist were defined as
   1-channel "A" planes, which Natron's viewer in default RGB mode renders
   as black (R/G/B undefined). Switched all three to 3-channel R/G/B

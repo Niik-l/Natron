@@ -2,7 +2,7 @@
 
 [![GPL2 License](http://img.shields.io/:license-gpl2-blue.svg?)](LICENSE.txt)
 
-A fork of [Natron](https://github.com/NatronGitHub/Natron), the open-source node-based compositor, that adds a 3D system, the Cycles renderer + Cycles deep, a deep-compositing pipeline, a particle system, volumes, and an early 3D camera tracker — **69 new built-in nodes** — on a Qt6 / Python 3.14 / OpenGL 4.3 base. Windows and Linux builds.
+A fork of [Natron](https://github.com/NatronGitHub/Natron), the open-source node-based compositor, that adds a 3D system, the Cycles renderer + Cycles deep, a deep-compositing pipeline, a particle system, volumes, and an early 3D camera tracker — **71 new built-in nodes** — on a Qt6 / Python 3.14 / OpenGL 4.3 base. Windows and Linux builds.
 
 - **Download:** [Releases](https://github.com/Niik-l/Natron/releases) — Windows portable archive (numbered releases), Linux AppImage attached to the same numbered releases; no installer either way
 - **Node list:** [wiki](https://github.com/Niik-l/Natron/wiki) · developer notes in [NODE_REGISTRY.md](NODE_REGISTRY.md)
@@ -24,7 +24,7 @@ If you've found this fork useful, consider buying me a beer :) **[Ko-fi](https:/
 | Cycles | in the scene/render set | Blender's Cycles path tracer as a node: materials, lights with **light-group AOVs**, HDRI domes, motion blur, DOF, AOV passes, shadow catcher and holdout, **CyclesRenderPass** that renders passes to versioned multi-layer EXR (deep EXR too) and builds the comp tree **Cryptomatte** output (object / material / asset plus a free custom tag per node), decoded by the Cryptomatte node or any other package |
 | ScanlineRender | in the scene/render set | GLSL scanline renderer with AOVs and particle modes, for fast previews |
 | Deep compositing | 17 (+19 unreleased) | DeepRead / Write / Merge / Recolor / Flatten / Reformat / Expression …, deep to point cloud and back (**Blast** editing), Cycles native deep output |
-| Particles | 18 | Emitter, solver, forces, spawn, collisions, ParticleMaterial, instancing on geo, rendered in ScanlineRender and Cycles |
+| Particles | 18 | Emitter, solver, forces, spawn, collisions, ParticleMaterial, instancing on geo (source geo hidden by default, per-instance Cryptomatte IDs), rendered in ScanlineRender and Cycles |
 | Volumes | in the geometry/render set | ReadVDB (fire / smoke), procedural Volume3D, **FastVolumeRender** real-time GPU preview |
 | Matchmove | 2 | CameraTracker (detect / track / solve) and PointCloudGenerator |
 | Depth of field | 2 | **LensDefocus** (physically based DOF: camera-driven blur, real lens designs ray traced through their glass, tilt-shift, GPU option) and DeepDefocus on deep images; Cycles can shoot through the same lenses |

@@ -48,23 +48,18 @@ Sketch, in three nodes sharing one flow engine:
 Quality tuning (edge handling, occlusions, flicker) is the long tail. Size: 2 to 3
 weeks for a credible v1, more to approach Kronos.
 
-## Cryptomatte — DONE 2026-11-04 (decoder node + Cycles encoder with object/material/asset/custom layers; see CRYPTOMATTE_PLAN.md)
+## Cryptomatte — DONE 2026-11-04 (decoder node + Cycles encoder; see CRYPTOMATTE_PLAN.md)
 
-Requested 2026-11-03. The old community Python plugin was unusable. Cycles can produce
-Cryptomatte passes natively but the fork's RenderPass / CyclesRender nodes do not wire
-them yet (noted in `Engine/Dev/TODO.md`), and nothing decodes them.
-
-Sketch:
-- Encoder side: expose Cryptomatte (object / material / asset, depth levels) on the
-  pass node so renders carry the `CryptoObject00..` layers plus the manifest in the EXR
-  header.
-- Decoder node `Cryptomatte`: input a multi-layer EXR; a layer selector; a matte list
-  of names (text) plus a viewer overlay where clicking or box-dragging adds/removes
-  IDs; output the combined coverage as alpha (and optionally the preview colours). The
-  manifest must come from the EXR header: Natron does not pass arbitrary metadata
-  through the graph, so the node either reads the header itself from the upstream
-  Read's filename (what the old plugin did) or we add a metadata side channel. ID
-  hashing is the standard MurmurHash3 of the name, so a name-only workflow works even
-  without a manifest.
-Size: about a week for the decoder with click-picking, plus a few days to wire the
-Cycles passes.
+Requested 2026-11-03; the old community Python plugin was unusable. Shipped in six commits
+(1356055b6 .. baa8cdf6a, pushed 2026-11-04):
+- `Cryptomatte` decoder node (Keyer): layer selector over the input's Crypto* planes, matte
+  list by name or `<hex>` ID, viewer picking (add / remove), preview colours, manifest from the
+  EXR header through the upstream Read (or a sidecar file), unpremultiply / remove-channels,
+  panel laid out like Nuke's gizmo. Verified against Blender's reference EXR (9/9).
+- CyclesRender / the pass node write CryptoObject / CryptoMaterial / CryptoAsset plus a free
+  **CryptoCustom** layer (Cycles fork 689977518); every 3D node has a Cryptomatte page
+  (Crypto Asset / Crypto Custom, inherited down Group3D); ParticleInstance can give every
+  instance its own ID (Crypto Per Instance). Manifests go in-graph and into the saved EXR
+  header; Blender's compositor decodes our files identically (encoder 16/16, Blender 2/2).
+- Still open: the pass node's Cryptomatte path is wired but untested; Scatter3D rendered as
+  points / hair stays one ID per node.

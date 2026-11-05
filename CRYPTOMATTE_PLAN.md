@@ -178,7 +178,15 @@ not shuffling crypto layers, FEATURE_REQUESTS.md entry -> done.
   Gotcha while testing: the scatter surface must sit inside the camera view, a wall wider than
   the frame put every point out of shot and looked like a render bug.
 
-## Order of work
+- 2026-11-04 (evening): user GUI pass OK for per-instance IDs. Follow-up from that pass:
+  ParticleInstance "Hide Instanced Geo" (default on) drops the source geo from the scene graph
+  (viewport / Cycles / pass node / FastVolume) and from ScanlineRender's geometry walk, so only
+  the instances show (baa8cdf6a, tools/particle-tests/run_hide_proto_check.sh 3/3). Everything
+  pushed: Natron 1356055b6..baa8cdf6a, Cycles fork 689977518, wiki ac21e12. At the next release
+  the v14 rebuild WANT sha for Cycles must move to 689977518. Remaining: pass-node Cryptomatte
+  path untested; Scatter3D points / hair one ID per node.
+
+## Order of work (all done 2026-11-03/04)
 
 1. MurmurHash + hash_to_float + hash_to_rgb with unit checks against the Blender manifest.
 2. Node skeleton: plane discovery, Layer knob, Matte List with names + hex, render path,

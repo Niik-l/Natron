@@ -346,12 +346,15 @@ prototype up along it.
 | Apply Prototype Transform | Bool | true | Include each prototype node's own T/R/S (a ReadGeo scaled cm→m instances at the right size). Off = raw mesh. |
 | Hide Instanced Geo | Bool | true | Hide the source geo on the geo inputs at its own place in the scene (viewport, ScanlineRender, Cycles); only the instances show. Off = source geo visible too. A disabled ParticleInstance hides nothing. |
 | Max Instances | Int | 10000 | Performance limit |
+| Crypto Asset / Crypto Custom | String | empty | Cryptomatte page (every 3D node has it): the CryptoAsset name (inherited from a parent Group3D when empty, else the node) and the free CryptoCustom tag ("default" when empty). |
+| Crypto Per Instance | Bool | false | Cryptomatte page: one CryptoObject ID per instance, named `<node>/<index>` (listed in the manifest); off = all instances share the node's ID. The asset layer keeps the whole system as one matte. |
 
 Random values are keyed on the particle ID, so an instance keeps its rotation and scale from
 frame to frame. CyclesRender shares one mesh (and BVH) between all instances of a prototype, so
 tens of thousands of instances cost little more than one. ScanlineRender and the 3D viewport
 show the prototype with its Material3D diffuse texture; the viewport falls back to bounding
-boxes above 1.5M triangles in total.
+boxes above 1.5M triangles in total. With Hide Instanced Geo on (default) the source geo on
+the geo inputs is not drawn at its own place anywhere, only its instances are.
 
 **Pipelines:**
 ```
