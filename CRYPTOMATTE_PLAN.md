@@ -186,6 +186,13 @@ not shuffling crypto layers, FEATURE_REQUESTS.md entry -> done.
   the v14 rebuild WANT sha for Cycles must move to 689977518. Remaining: pass-node Cryptomatte
   path untested; Scatter3D points / hair one ID per node.
 
+- 2026-11-05: Matte List wildcards (`*` / `?`, expanded through the manifest, so a pattern selects
+  nothing without one; Picker Remove replaces a pattern by its matches minus the picked object) and
+  a read-only Expression tab holding the Nuke-gizmo-style keying expression for the current list,
+  layer and manifest (asked for after a look at Fusion, whose Cryptomatte has no expression of its
+  own, only Fusion's generic per-input expression field; Nuke's gizmo has the generated one).
+  run_check.sh grew from 9 to 17 checks.
+
 ## Order of work (all done 2026-11-03/04)
 
 1. MurmurHash + hash_to_float + hash_to_rgb with unit checks against the Blender manifest.

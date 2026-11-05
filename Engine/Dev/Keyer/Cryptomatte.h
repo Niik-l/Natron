@@ -144,6 +144,8 @@ private:
     void refreshLayerChoices();
     // Re-reads the manifest for the chosen layer from the upstream file (main thread).
     void refreshManifest();
+    // Rewrites the read-only Expression knob from the Matte List, layer and manifest (main thread).
+    void updateExpression();
     // Adds or removes (per the picker mode) the IDs under a click or inside a box.
     void pickAt(double time, ViewIdx view, const QPointF& from, const QPointF& to);
 

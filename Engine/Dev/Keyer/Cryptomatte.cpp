@@ -27,7 +27,9 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <set>
@@ -160,18 +162,82 @@ tokenToBits(const std::string& token, std::uint32_t* bits)
     return true;
 }
 
+// A token with * or ? (and not a <hex> ID) is a pattern matched against the manifest names.
+bool
+isGlob(const std::string& token)
+{
+    if (token.size() >= 2 && token[0] == '<' && token[token.size() - 1] == '>') {
+        return false;
+    }
+    return token.find_first_of("*?") != std::string::npos;
+}
+
+// Case-sensitive glob: * matches any run (including none), ? one character.
+bool
+globMatch(const std::string& pattern, const std::string& name)
+{
+    size_t p = 0, n = 0, starP = std::string::npos, starN = 0;
+    while (n < name.size()) {
+        if (p < pattern.size() && (pattern[p] == '?' || pattern[p] == name[n])) {
+            ++p; ++n;
+        } else if (p < pattern.size() && pattern[p] == '*') {
+            starP = p++; starN = n;
+        } else if (starP != std::string::npos) {
+            p = starP + 1; n = ++starN;
+        } else {
+            return false;
+        }
+    }
+    while (p < pattern.size() && pattern[p] == '*') {
+        ++p;
+    }
+    return p == pattern.size();
+}
+
+// The manifest names a pattern matches, with their layer bits.
+void
+expandGlob(const std::string& pattern, const Manifest& m, std::vector<std::pair<std::string, std::uint32_t> >* out)
+{
+    for (std::map<std::string, std::uint32_t>::const_iterator it = m.nameToHash.begin(); it != m.nameToHash.end(); ++it) {
+        if (globMatch(pattern, it->first)) {
+            out->push_back(std::make_pair(it->first, layerBits(it->second)));
+        }
+    }
+}
+
+// Every layer ID the Matte List selects: names hashed, <hex> IDs, patterns expanded through the
+// manifest (a pattern selects nothing without one).
 std::set<std::uint32_t>
-selectedBits(const std::string& list)
+selectedBits(const std::string& list, const Manifest& m)
 {
     std::set<std::uint32_t> s;
     const std::vector<std::string> toks = splitTokens(list);
     for (size_t i = 0; i < toks.size(); ++i) {
+        if (isGlob(toks[i])) {
+            std::vector<std::pair<std::string, std::uint32_t> > hits;
+            expandGlob(toks[i], m, &hits);
+            for (size_t j = 0; j < hits.size(); ++j) {
+                s.insert(hits[j].second);
+            }
+            continue;
+        }
         std::uint32_t b;
         if (tokenToBits(toks[i], &b)) {
             s.insert(b);
         }
     }
     return s;
+}
+
+// The float an ID has in the layer, printed so it round-trips (what a Nuke expression compares).
+std::string
+bitsToExprFloat(std::uint32_t bits)
+{
+    float f;
+    std::memcpy(&f, &bits, sizeof f);
+    char buf[48];
+    std::snprintf(buf, sizeof buf, "%.9g", (double)f);
+    return buf;
 }
 
 // ---- a small JSON reader for the manifest: a flat object of string -> string.
@@ -453,6 +519,7 @@ struct CryptomattePrivate
     KnobBoolWPtr removeChannels;
     KnobStringWPtr manifestInfo;
     KnobStringWPtr manifestNames;
+    KnobStringWPtr expression;
     KnobButtonWPtr reload;
 
     mutable QMutex setsMutex;
@@ -530,7 +597,9 @@ Cryptomatte::getPluginDescription() const
            "(object, material, asset). Type object names in the Matte List, separated by commas, or "
            "turn on Picker Add and click objects in the viewer (drag a box to add everything inside; "
            "Picker Remove takes them out again). Names come from the manifest in the EXR header; an "
-           "object without a name can be given as its hex ID in angle brackets, <2ce615c5>.\n\n"
+           "object without a name can be given as its hex ID in angle brackets, <2ce615c5>; a name "
+           "may hold wildcards (car_*, ?_glass), matched against the manifest. The Expression tab "
+           "shows the keying expression the list amounts to, in the form Nuke's gizmo generates.\n\n"
            "Preview Mattes shows every object in its own colour, the ones in the matte lifted towards "
            "white. Matte Output writes the matte into the chosen channel (alpha by default); "
            "Unpremultiply divides the RGB by the incoming alpha first so a later Premult by the matte "
@@ -680,7 +749,9 @@ Cryptomatte::initializeKnobs()
         k->setAsMultiLine();
         k->setHintToolTip(tr("The objects in the matte: names separated by commas or new lines, as the "
                              "renderer wrote them (see Manifest Names). An object can also be given as its ID "
-                             "in angle brackets, <2ce615c5>. The pickers add and remove entries here."));
+                             "in angle brackets, <2ce615c5>. A name may hold wildcards, * for any run of "
+                             "characters and ? for one (car_*, *_glass), matched against the manifest names, "
+                             "so wildcards need a manifest. The pickers add and remove entries here."));
         page->addKnob(k);
         _imp->matteList = k;
     }
@@ -690,6 +761,25 @@ Cryptomatte::initializeKnobs()
         k->setHintToolTip(tr("Empty the Matte List."));
         page->addKnob(k);
         _imp->clear = k;
+    }
+    {
+        KnobGroupPtr grp = AppManager::createKnob<KnobGroup>(this, tr("Expression"));
+        grp->setName("expressionGroup");
+        grp->setDefaultValue(false);
+        grp->setAsTab();
+        page->addKnob(grp);
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr(""));
+        k->setName("expression");
+        k->setAsMultiLine();
+        k->setIsPersistent(false);
+        k->setEvaluateOnChange(false);
+        k->setHintToolTip(tr("The keying expression the Matte List amounts to, in the form Nuke's Cryptomatte "
+                             "gizmo generates: for every ID in the matte and every rank plane of the layer, "
+                             "coverage where the ID channel equals the ID's float value. Wildcards are expanded "
+                             "through the manifest. For reading and copying into an Expression node elsewhere; "
+                             "this node keys the IDs directly, so edits here do nothing."));
+        grp->addKnob(k);
+        _imp->expression = k;
     }
     separator();
     {
@@ -785,6 +875,7 @@ void
 Cryptomatte::onKnobsLoaded()
 {
     refreshLayerChoices();
+    updateExpression();
     KnobChoicePtr src = _imp->manifestSource.lock();
     KnobFilePtr f = _imp->manifestFile.lock();
     if (src && f) {
@@ -905,6 +996,8 @@ Cryptomatte::refreshManifest()
     {
         QMutexLocker l(&_imp->manifestMutex);
         if (key == _imp->manifestKey) {
+            l.unlock();
+            updateExpression();
             return;
         }
         _imp->manifestKey = key;
@@ -959,6 +1052,48 @@ Cryptomatte::refreshManifest()
     KnobStringPtr nk = _imp->manifestNames.lock();
     if (nk) {
         nk->setValue(names.str());
+    }
+    updateExpression();
+}
+
+void
+Cryptomatte::updateExpression()
+{
+    KnobStringPtr ek = _imp->expression.lock();
+    KnobStringPtr lk = _imp->matteList.lock();
+    if (!ek || !lk) {
+        return;
+    }
+    CryptoSet set;
+    const bool haveSet = _imp->currentSet(&set);
+    std::set<std::uint32_t> selected;
+    {
+        QMutexLocker l(&_imp->manifestMutex);
+        selected = selectedBits(lk->getValue(), _imp->manifest);
+    }
+    std::ostringstream e;
+    if (selected.empty() || !haveSet) {
+        e << "0";
+    } else {
+        // Nuke gizmo form: (({layer}.red == id) ? {layer}.green : 0) + (({layer}.blue == id) ? {layer}.alpha : 0)
+        // per ID per rank plane; one line per ID so long lists stay readable.
+        bool first = true;
+        for (std::set<std::uint32_t>::const_iterator it = selected.begin(); it != selected.end(); ++it) {
+            const std::string v = bitsToExprFloat(*it);
+            for (size_t p = 0; p < set.planes.size(); ++p) {
+                const std::string L = set.planes[p].getPlaneID();
+                if (!first) {
+                    e << " +" << (p == 0 ? "\n" : " ");
+                }
+                first = false;
+                e << "((" << L << ".red == " << v << ") ? " << L << ".green : 0) + "
+                  << "((" << L << ".blue == " << v << ") ? " << L << ".alpha : 0)";
+            }
+        }
+    }
+    const std::string s = e.str();
+    if (ek->getValue() != s) {
+        ek->setValue(s);
     }
 }
 
@@ -1016,8 +1151,12 @@ Cryptomatte::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /
         return true;
     }
     if (k == _imp->pickerAdd.lock().get() || k == _imp->pickerRemove.lock().get() ||
-        k == _imp->manifestNames.lock().get()) {
+        k == _imp->manifestNames.lock().get() || k == _imp->expression.lock().get()) {
         return true;   // nothing to render
+    }
+    if (k == _imp->matteList.lock().get()) {
+        updateExpression();
+        return false;  // and render the new matte
     }
     return false;
 }
@@ -1085,7 +1224,11 @@ Cryptomatte::render(const RenderActionArgs& args)
         }
     }
 
-    const std::set<std::uint32_t> selected = selectedBits( _imp->matteList.lock()->getValue() );
+    std::set<std::uint32_t> selected;
+    {
+        QMutexLocker l(&_imp->manifestMutex);
+        selected = selectedBits(_imp->matteList.lock()->getValue(), _imp->manifest);
+    }
 
     std::vector<std::unique_ptr<Image::ReadAccess> > planeRa;
     std::vector<RectI> planeBounds;
@@ -1319,9 +1462,29 @@ Cryptomatte::pickAt(double time, ViewIdx view, const QPointF& from, const QPoint
     }
     const std::vector<std::string> tokens = splitTokens( lk->getValue() );
     std::vector<std::string> result;
+    QMutexLocker l(&_imp->manifestMutex);
     if (mode == 2) {
-        // Remove every token that resolves to one of the picked IDs.
+        // Remove every token that resolves to one of the picked IDs. A pattern that covers a
+        // picked object is replaced by the names it matched, minus the picked ones.
         for (size_t i = 0; i < tokens.size(); ++i) {
+            if (isGlob(tokens[i])) {
+                std::vector<std::pair<std::string, std::uint32_t> > hits;
+                expandGlob(tokens[i], _imp->manifest, &hits);
+                bool covers = false;
+                for (size_t j = 0; j < hits.size() && !covers; ++j) {
+                    covers = found.count(hits[j].second) > 0;
+                }
+                if (!covers) {
+                    result.push_back(tokens[i]);
+                    continue;
+                }
+                for (size_t j = 0; j < hits.size(); ++j) {
+                    if (!found.count(hits[j].second)) {
+                        result.push_back(hits[j].first);
+                    }
+                }
+                continue;
+            }
             std::uint32_t b;
             if (tokenToBits(tokens[i], &b) && found.count(b)) {
                 continue;
@@ -1329,15 +1492,8 @@ Cryptomatte::pickAt(double time, ViewIdx view, const QPointF& from, const QPoint
             result.push_back(tokens[i]);
         }
     } else {
-        std::set<std::uint32_t> present;
-        for (size_t i = 0; i < tokens.size(); ++i) {
-            std::uint32_t b;
-            if (tokenToBits(tokens[i], &b)) {
-                present.insert(b);
-            }
-        }
+        const std::set<std::uint32_t> present = selectedBits(lk->getValue(), _imp->manifest);
         result = tokens;
-        QMutexLocker l(&_imp->manifestMutex);
         for (std::set<std::uint32_t>::const_iterator it = found.begin(); it != found.end(); ++it) {
             if (present.count(*it)) {
                 continue;
@@ -1346,6 +1502,7 @@ Cryptomatte::pickAt(double time, ViewIdx view, const QPointF& from, const QPoint
             result.push_back(n != _imp->manifest.bitsToName.end() ? n->second : "<" + CryptoHash::hashToHex(*it) + ">");
         }
     }
+    l.unlock();
     std::string joined;
     for (size_t i = 0; i < result.size(); ++i) {
         if (i) {

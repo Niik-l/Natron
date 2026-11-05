@@ -57,6 +57,20 @@ cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left\nSphere_Mid")[0]
 cases.append(writer(crypto("ViewLayer.CryptoAsset", "HeroGroup")[0], "herogroup"))
 cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left", preview=True)[0], "preview"))
 cases.append(writer(crypto("ViewLayer.CryptoObject", "NoSuchObject")[0], "nothing"))
+# wildcards expand through the manifest
+cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_*")[0], "glob_cube"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "?ube_Left")[0], "glob_q_cube"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "*")[0], "glob_all"))
+cg, _ = crypto("ViewLayer.CryptoObject", "S*")
+cases.append(writer(cg, "glob_s"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "Sphere_Mid, Suzanne_Right, Sun")[0], "s_names"))
+# the generated expression: one term pair per ID per rank plane, the glob expanded to 3 IDs
+import struct
+cube_f = "%.9g" % struct.unpack(">f", bytes.fromhex("2ce615c5"))[0]
+log("expr cube |", crypto("ViewLayer.CryptoObject", "Cube_Left")[0].getParam("expression").get().replace("\n", " "))
+log("expr cube float", cube_f)
+log("expr glob terms", cg.getParam("expression").get().count("ViewLayer.CryptoObject00.red =="))
+log("expr empty |", crypto("ViewLayer.CryptoObject", "")[0].getParam("expression").get())
 
 for w in cases:
     a.render(w, 1, 1)

@@ -8,7 +8,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RENDERER="${1:?path to NatronRenderer}"
 export CRYPTO_TEST_DIR="$HERE"
 mkdir -p "$HERE/out"; rm -f "$HERE/out"/*.exr
-"$RENDERER" -t "$HERE/decode_check.py" 2>&1 | grep -a "^CHECK\|Rendering\|rror" | grep -v "Rendering started"
+"$RENDERER" -t "$HERE/decode_check.py" > "$HERE/out/_run.log" 2>&1
+grep -a "^CHECK\|Rendering\|rror" "$HERE/out/_run.log" | grep -v "Rendering started"
 REF="$HERE/ref/blender_crypto_0001.exr"; O="$HERE/out"; fail=0
 ok()   { echo "  OK   $1"; }
 bad()  { echo "  FAIL $1"; fail=1; }
@@ -36,5 +37,17 @@ nmax=$(oiiotool "$O/nothing.exr" --ch A --printstats 2>/dev/null | grep "Stats M
 [ "${nmax:-1}" = "0.000000" ] && ok "unknown name -> empty matte" || bad "unknown name matte max=$nmax"
 pmax=$(oiiotool "$O/preview.exr" --ch R,G,B --printstats 2>/dev/null | grep "Stats Max" | awk '{print $3}')
 awk -v m="${pmax:-0}" 'BEGIN{exit !(m>0.1)}' && ok "preview colours present (max R $pmax)" || bad "preview max R = $pmax"
+# 7. wildcards: Cube_* and ?ube_Left == Cube_Left, * == every object, S* == the three S names
+same "$O/glob_cube.exr" "$O/cube.exr" 0 && ok "Cube_* == Cube_Left" || bad "Cube_* != Cube_Left"
+same "$O/glob_q_cube.exr" "$O/cube.exr" 0 && ok "?ube_Left == Cube_Left" || bad "?ube_Left != Cube_Left"
+same "$O/glob_all.exr" "$O/all_objects.exr" 0 && ok "* == all manifest objects" || bad "* != all manifest objects"
+same "$O/glob_s.exr" "$O/s_names.exr" 0 && ok "S* == Sphere_Mid + Suzanne_Right + Sun" || bad "S* != the three S names"
+# 8. the Expression knob holds the Nuke-style terms for the layer's three planes
+cube_f=$(grep -a "^CHECK expr cube float" "$HERE/out/_run.log" | awk '{print $NF}')
+expr=$(grep -a "^CHECK expr cube |" "$HERE/out/_run.log")
+echo "$expr" | grep -q "((ViewLayer.CryptoObject00.red == $cube_f) ? ViewLayer.CryptoObject00.green : 0) + ((ViewLayer.CryptoObject00.blue == $cube_f) ? ViewLayer.CryptoObject00.alpha : 0)" && ok "expression term for Cube_Left ($cube_f)" || bad "expression term for Cube_Left missing: $expr"
+echo "$expr" | grep -q "CryptoObject02.alpha" && ok "expression covers plane 02" || bad "expression lacks plane 02"
+[ "$(grep -a "^CHECK expr glob terms" "$HERE/out/_run.log" | awk '{print $NF}')" = "3" ] && ok "S* expression has 3 IDs" || bad "S* expression ID count: $(grep -a "^CHECK expr glob terms" "$HERE/out/_run.log")"
+[ "$(grep -a "^CHECK expr empty |" "$HERE/out/_run.log" | awk '{print $NF}')" = "0" ] && ok "empty list -> expression 0" || bad "empty list expression"
 [ $fail = 0 ] && echo "CRYPTOMATTE_CHECK DONE_OK" || echo "CRYPTOMATTE_CHECK FAILED"
 exit $fail
