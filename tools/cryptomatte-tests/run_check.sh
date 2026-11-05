@@ -56,5 +56,11 @@ echo "$expr" | grep -q "((ViewLayer.CryptoObject00.red == $cube_f) ? ViewLayer.C
 echo "$expr" | grep -q "CryptoObject02.alpha" && ok "expression covers plane 02" || bad "expression lacks plane 02"
 [ "$(grep -a "^CHECK expr glob terms" "$HERE/out/_run.log" | awk '{print $NF}')" = "3" ] && ok "S* expression has 3 IDs" || bad "S* expression ID count: $(grep -a "^CHECK expr glob terms" "$HERE/out/_run.log")"
 [ "$(grep -a "^CHECK expr empty |" "$HERE/out/_run.log" | awk '{print $NF}')" = "0" ] && ok "empty list -> expression 0" || bad "empty list expression"
+# 10. the manifest list's picks (secret manifestPick) make the matte exactly the picked names
+same "$O/pick_sphere_sun.exr" "$O/sphere_sun.exr" 0 && ok "pick Sphere_Mid + Sun over Cube_* == Sphere_Mid, Sun" || bad "pick over a pattern"
+same "$O/pick_cube_sun.exr" "$O/cube_sun.exr" 0 && ok "pick Cube_Left + Sun over *, -Sun == Cube_Left, Sun (exclusion lifted)" || bad "pick narrowing * / lifting -Sun"
+grep -aq "^CHECK pick narrowed | Cube_Left, Sun | expr | *$" "$HERE/out/_run.log" && ok "pick rewrote the list to Cube_Left, Sun and emptied the Expression (no duplicates)" || bad "pick list text: $(grep -a '^CHECK pick narrowed' "$HERE/out/_run.log")"
+psel=$(grep -a "^CHECK pick selected |" "$HERE/out/_run.log")
+echo "$psel" | grep -q "Sphere_Mid" && echo "$psel" | grep -q "Sun" && ok "manifestSelected lists the picked names" || bad "manifestSelected: $psel"
 [ $fail = 0 ] && echo "CRYPTOMATTE_CHECK DONE_OK" || echo "CRYPTOMATTE_CHECK FAILED"
 exit $fail

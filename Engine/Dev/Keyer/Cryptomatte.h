@@ -28,7 +28,9 @@
 
 #include "../../../Global/Macros.h"
 
+#include <cstdint>
 #include <memory>
+#include <set>
 
 #include "../../EffectInstance.h"
 #include "../../ViewIdx.h"
@@ -148,6 +150,12 @@ private:
     void updateExpression();
     // Adds or removes (per the picker mode) the IDs under a click or inside a box.
     void pickAt(double time, ViewIdx view, const QPointF& from, const QPointF& to);
+    // Rewrites the Matte List (and the Expression's exclusions) so the matte gains `add` and loses
+    // `remove`: a pattern covering a removed object becomes its other matches, an added object the
+    // Expression excludes has the exclusion lifted. Shared by the viewer pickers and the manifest list.
+    void editSelection(const std::set<std::uint32_t>& add, const std::set<std::uint32_t>& remove);
+    // Applies the manifest list's selection (the secret manifestPick knob) through editSelection.
+    void applyManifestPick();
 
     std::unique_ptr<CryptomattePrivate> _imp;
 };

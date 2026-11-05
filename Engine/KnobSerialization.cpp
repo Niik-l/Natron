@@ -28,6 +28,7 @@
 #include "Engine/Dev/Particles/KnobGradient.h"
 #include "Engine/Dev/Channel/KnobShuffle.h"
 #include "Engine/Dev/Cycles/KnobPassTable.h"
+#include "Engine/Dev/Keyer/KnobCryptoNames.h"
 
 #include <algorithm> // min, max
 #include <cassert>
@@ -190,6 +191,8 @@ KnobSerialization::createKnob(const std::string & typeName,
         ret = std::make_shared<KnobShuffle>((KnobHolder*)NULL, std::string(), dimension, false);
     } else if ( typeName == KnobPassTable::typeNameStatic() ) {
         ret = std::make_shared<KnobPassTable>((KnobHolder*)NULL, std::string(), dimension, false);
+    } else if ( typeName == KnobCryptoNames::typeNameStatic() ) {
+        ret = std::make_shared<KnobCryptoNames>((KnobHolder*)NULL, std::string(), dimension, false);
     }
 
     if (ret) {

@@ -36,6 +36,7 @@
 #include "Dev/Channel/KnobShuffle.h"
 #include "Dev/Particles/KnobGradient.h"
 #include "Dev/Cycles/KnobPassTable.h"
+#include "Dev/Keyer/KnobCryptoNames.h"
 
 #include "Engine/AppManager.h"
 #include "Engine/LibraryBinary.h"
@@ -100,6 +101,7 @@ KnobFactory::loadBultinKnobs()
     _loadedKnobs.insert( knobFactoryEntry<KnobShuffle>() );
     _loadedKnobs.insert( knobFactoryEntry<KnobGradient>() );
     _loadedKnobs.insert( knobFactoryEntry<KnobPassTable>() );
+    _loadedKnobs.insert( knobFactoryEntry<KnobCryptoNames>() );
 }
 
 KnobHelperPtr KnobFactory::createKnob(const std::string &id,

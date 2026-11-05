@@ -72,6 +72,19 @@ cases.append(writer(crypto("ViewLayer.CryptoObject", "Suzanne_Right, Ground, Sun
 cases.append(writer(crypto("ViewLayer.CryptoObject", "", expr="S*\n-Sun")[0], "x_glob_excl"))
 cases.append(writer(crypto("ViewLayer.CryptoObject", "Sphere_Mid, Suzanne_Right")[0], "sphere_suzanne"))
 cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left, -Cube_Left")[0], "x_self_cancel"))
+# the manifest list's selection (GUI) arrives through the secret manifestPick knob: the matte
+# becomes exactly the picked names (a pattern covering a dropped object becomes its other matches)
+cp, _ = crypto("ViewLayer.CryptoObject", "Cube_*")
+cp.getParam("manifestPick").set("1\nSphere_Mid\nSun")
+log("pick list |", cp.getParam("matteList").get())
+log("pick selected |", cp.getParam("manifestSelected").get().replace("\n", "|"))
+cases.append(writer(cp, "pick_sphere_sun"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "Sphere_Mid, Sun")[0], "sphere_sun"))
+cq, _ = crypto("ViewLayer.CryptoObject", "*", expr="-Sun")
+cq.getParam("manifestPick").set("1\nCube_Left\nSun")
+log("pick narrowed |", cq.getParam("matteList").get(), "| expr |", cq.getParam("matteExpression").get())
+cases.append(writer(cq, "pick_cube_sun"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left, Sun")[0], "cube_sun"))
 # the generated expression: one term pair per ID per rank plane, the glob expanded to 3 IDs
 import struct
 cube_f = "%.9g" % struct.unpack(">f", bytes.fromhex("2ce615c5"))[0]

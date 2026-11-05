@@ -32,6 +32,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <set>
 #include <sstream>
@@ -42,6 +43,7 @@
 #include <QtCore/QPointF>
 
 #include "CryptomatteHash.h"
+#include "KnobCryptoNames.h"
 
 #include "../../../Global/GLIncludes.h"
 #include "Engine/AppInstance.h"
@@ -604,6 +606,9 @@ struct CryptomattePrivate
     KnobStringWPtr matteExpression;
     KnobStringWPtr generatedExpression;
     KnobButtonWPtr reload;
+    KnobCryptoNamesWPtr manifestList;   // the manifest as a clickable list (GUI only, same text as manifestNames)
+    KnobStringWPtr manifestSelected;    // secret: the names the matte includes, one per line, for the list's highlight
+    KnobStringWPtr manifestPick;        // secret: the list's selection coming back ("<seq>\n" + names)
 
     mutable QMutex setsMutex;
     std::vector<CryptoSet> sets;
@@ -782,15 +787,57 @@ Cryptomatte::initializeKnobs()
         grp->setDefaultValue(false);
         grp->setAsTab();
         page->addKnob(grp);
-        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr(""));
-        k->setName("manifestNames");
-        k->setAsMultiLine();
-        k->setIsPersistent(false);
-        k->setEvaluateOnChange(false);
-        k->setHintToolTip(tr("Every object the manifest lists for this layer, one per line, for copying into "
-                             "the Matte List. Read-only: edits here do nothing."));
-        grp->addKnob(k);
-        _imp->manifestNames = k;
+        {
+            KnobCryptoNamesPtr k = AppManager::createKnob<KnobCryptoNames>(this, tr(""));
+            k->setName("manifestList");
+            k->setIsPersistent(false);
+            k->setEvaluateOnChange(false);
+            k->setAnimationEnabled(false);
+            k->setHintToolTip(tr("Every object the manifest lists for this layer. Highlighted rows are the objects "
+                                 "the matte includes. Click a row to matte just that object, shift-click for a "
+                                 "range, ctrl-click to add or remove one: the Matte List follows. The filter box "
+                                 "narrows the list; rows it hides keep their state."));
+            grp->addKnob(k);
+            _imp->manifestList = k;
+        }
+        {
+            // The same names as plain text, for scripts (getParam("manifestNames")).
+            KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Manifest Names"));
+            k->setName("manifestNames");
+            k->setAsMultiLine();
+            k->setSecret(true);
+            k->setIsPersistent(false);
+            k->setEvaluateOnChange(false);
+            k->setHintToolTip(tr("Every object the manifest lists for this layer, one per line. Read-only."));
+            page->addKnob(k);
+            _imp->manifestNames = k;
+        }
+        {
+            // The list's highlight: the names the matte includes right now, one per line.
+            KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Manifest Selected"));
+            k->setName("manifestSelected");
+            k->setAsMultiLine();
+            k->setSecret(true);
+            k->setIsPersistent(false);
+            k->setEvaluateOnChange(false);
+            k->setAnimationEnabled(false);
+            page->addKnob(k);
+            _imp->manifestSelected = k;
+        }
+        {
+            // The list's selection coming back: a sequence number, then the wanted names, one per
+            // line. Applying it rewrites the Matte List (and lifts Expression exclusions) the way
+            // the viewer pickers do.
+            KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Manifest Pick"));
+            k->setName("manifestPick");
+            k->setAsMultiLine();
+            k->setSecret(true);
+            k->setIsPersistent(false);
+            k->setEvaluateOnChange(false);
+            k->setAnimationEnabled(false);
+            page->addKnob(k);
+            _imp->manifestPick = k;
+        }
     }
     {
         // Wildcards and the pickers' names resolve through the manifest, so the render depends
@@ -1173,6 +1220,10 @@ Cryptomatte::refreshManifest()
     if (nk) {
         nk->setValue(names.str());
     }
+    KnobCryptoNamesPtr mk = _imp->manifestList.lock();
+    if (mk && mk->getValue() != names.str()) {
+        mk->setValue(names.str());
+    }
     updateExpression();
 }
 
@@ -1188,9 +1239,21 @@ Cryptomatte::updateExpression()
     CryptoSet set;
     const bool haveSet = _imp->currentSet(&set);
     std::set<std::uint32_t> selected;
+    std::string selectedNames;
     {
         QMutexLocker l(&_imp->manifestMutex);
         selected = selectedBits(lk->getValue(), xk->getValue(), _imp->manifest);
+        for (std::set<std::uint32_t>::const_iterator it = selected.begin(); it != selected.end(); ++it) {
+            std::map<std::uint32_t, std::string>::const_iterator n = _imp->manifest.bitsToName.find(*it);
+            if (n != _imp->manifest.bitsToName.end()) {
+                selectedNames += n->second + "\n";
+            }
+        }
+    }
+    if (KnobStringPtr sk = _imp->manifestSelected.lock()) {
+        if (sk->getValue() != selectedNames) {
+            sk->setValue(selectedNames);
+        }
     }
     std::ostringstream e;
     if (selected.empty() || !haveSet) {
@@ -1271,8 +1334,13 @@ Cryptomatte::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /
         }
         return true;
     }
+    if (k == _imp->manifestPick.lock().get()) {
+        applyManifestPick();   // rewrites the Matte List, which renders
+        return true;
+    }
     if (k == _imp->pickerAdd.lock().get() || k == _imp->pickerRemove.lock().get() ||
-        k == _imp->manifestNames.lock().get() || k == _imp->generatedExpression.lock().get()) {
+        k == _imp->manifestNames.lock().get() || k == _imp->generatedExpression.lock().get() ||
+        k == _imp->manifestList.lock().get() || k == _imp->manifestSelected.lock().get()) {
         return true;   // nothing to render
     }
     if (k == _imp->manifestStamp.lock().get()) {
@@ -1581,46 +1649,60 @@ Cryptomatte::pickAt(double time, ViewIdx view, const QPointF& from, const QPoint
     if (found.empty()) {
         return;
     }
+    if (mode == 2) {
+        editSelection(std::set<std::uint32_t>(), found);
+    } else {
+        editSelection(found, std::set<std::uint32_t>());
+    }
+}
 
+void
+Cryptomatte::editSelection(const std::set<std::uint32_t>& add, const std::set<std::uint32_t>& remove)
+{
     KnobStringPtr lk = _imp->matteList.lock();
     KnobStringPtr xk = _imp->matteExpression.lock();
     if (!lk || !xk) {
         return;
     }
-    const std::string exprText = xk->getValue();
-    const std::vector<std::string> tokens = splitTokens( lk->getValue() );
-    std::vector<std::string> xtokens = splitTokens(exprText);
+    std::vector<std::string> result = splitTokens( lk->getValue() );
+    std::vector<std::string> xtokens = splitTokens( xk->getValue() );
     const std::string xBefore = joinTokens(xtokens);
-    std::vector<std::string> result;
     QMutexLocker l(&_imp->manifestMutex);
     const Manifest& m = _imp->manifest;
     auto nameOf = [&m](std::uint32_t id) {
         std::map<std::uint32_t, std::string>::const_iterator n = m.bitsToName.find(id);
         return n != m.bitsToName.end() ? n->second : "<" + CryptoHash::hashToHex(id) + ">";
     };
-    if (mode == 2) {
-        // Remove every list token that resolves to a picked ID (a pattern covering one becomes its
+    if (!remove.empty()) {
+        // Remove every list token that resolves to a dropped ID (a pattern covering one becomes its
         // other matches). An object the Expression still includes gets an explicit -name there.
-        result = withoutIds(tokens, found, m, false);
-        const std::set<std::uint32_t> still = selectedBits(joinTokens(result), exprText, m);
-        for (std::set<std::uint32_t>::const_iterator it = found.begin(); it != found.end(); ++it) {
+        result = withoutIds(result, remove, m, false);
+        const std::set<std::uint32_t> still = selectedBits(joinTokens(result), joinTokens(xtokens), m);
+        for (std::set<std::uint32_t>::const_iterator it = remove.begin(); it != remove.end(); ++it) {
             if (still.count(*it)) {
                 xtokens.push_back("-" + nameOf(*it));
             }
         }
-    } else {
-        // Add every picked object the matte lacks. One the Expression excludes gets its exclusion
-        // lifted (a -pattern covering it becomes its other matches).
-        const std::set<std::uint32_t> present = selectedBits(lk->getValue(), exprText, m);
-        result = tokens;
-        for (std::set<std::uint32_t>::const_iterator it = found.begin(); it != found.end(); ++it) {
+    }
+    if (!add.empty()) {
+        // Add every wanted object the list and the Expression's includes lack (exclusions are
+        // ignored here, or an object a -name hides would be listed twice). One the Expression
+        // excludes then gets its exclusion lifted (a -pattern covering it becomes its other matches).
+        std::vector<std::string> xIncludes;
+        for (size_t i = 0; i < xtokens.size(); ++i) {
+            if (!isExclusion(xtokens[i])) {
+                xIncludes.push_back(xtokens[i]);
+            }
+        }
+        const std::set<std::uint32_t> present = selectedBits(joinTokens(result), joinTokens(xIncludes), m);
+        for (std::set<std::uint32_t>::const_iterator it = add.begin(); it != add.end(); ++it) {
             if (!present.count(*it)) {
                 result.push_back( nameOf(*it) );
             }
         }
-        const std::set<std::uint32_t> after = selectedBits(joinTokens(result), exprText, m);
+        const std::set<std::uint32_t> after = selectedBits(joinTokens(result), joinTokens(xtokens), m);
         std::set<std::uint32_t> excluded;
-        for (std::set<std::uint32_t>::const_iterator it = found.begin(); it != found.end(); ++it) {
+        for (std::set<std::uint32_t>::const_iterator it = add.begin(); it != add.end(); ++it) {
             if (!after.count(*it)) {
                 excluded.insert(*it);
             }
@@ -1635,6 +1717,45 @@ Cryptomatte::pickAt(double time, ViewIdx view, const QPointF& from, const QPoint
         xk->setValue(xAfter);
     }
     lk->setValue( joinTokens(result) );
+}
+
+void
+Cryptomatte::applyManifestPick()
+{
+    KnobStringPtr pk = _imp->manifestPick.lock();
+    KnobStringPtr lk = _imp->matteList.lock();
+    KnobStringPtr xk = _imp->matteExpression.lock();
+    if (!pk || !lk || !xk) {
+        return;
+    }
+    refreshManifest();
+    // "<seq>\n" then the names the list wants in the matte, one per line. The matte becomes
+    // exactly those: objects not listed are removed, listed ones the matte lacks are added.
+    std::vector<std::string> lines;
+    {
+        std::istringstream in( pk->getValue() );
+        std::string line;
+        while (std::getline(in, line)) {
+            lines.push_back(line);
+        }
+    }
+    std::set<std::uint32_t> wanted, current;
+    {
+        QMutexLocker l(&_imp->manifestMutex);
+        for (size_t i = 1; i < lines.size(); ++i) {
+            if (!lines[i].empty()) {
+                tokenBits(lines[i], _imp->manifest, &wanted);
+            }
+        }
+        current = selectedBits(lk->getValue(), xk->getValue(), _imp->manifest);
+    }
+    std::set<std::uint32_t> add, remove;
+    std::set_difference(wanted.begin(), wanted.end(), current.begin(), current.end(), std::inserter(add, add.begin()));
+    std::set_difference(current.begin(), current.end(), wanted.begin(), wanted.end(), std::inserter(remove, remove.begin()));
+    if (add.empty() && remove.empty()) {
+        return;
+    }
+    editSelection(add, remove);
 }
 
 NATRON_NAMESPACE_EXIT

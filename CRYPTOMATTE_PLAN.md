@@ -208,6 +208,15 @@ not shuffling crypto layers, FEATURE_REQUESTS.md entry -> done.
   render hash), so the node now carries a hidden manifestStamp knob (fingerprint of the manifest,
   evaluate-on-change) that re-renders the matte when a manifest lands. run_encode_check.sh grew
   a tracked four-part glTF (ref/parts.gltf from make_parts_gltf.py): 16 -> 32 checks.
+- 2026-11-05 manifest list: the Manifest Names tab is a KnobCryptoNames (Engine/Dev/Keyer) drawn
+  by Gui/KnobGuiCryptoNames as a filter box + multi-select QListWidget. The engine publishes the
+  names the matte includes in the secret `manifestSelected` knob (updateExpression) for the
+  highlight; the widget sends its selection back through the secret `manifestPick` knob
+  ("<seq>
+" + names) and Cryptomatte::applyManifestPick diffs it against the current matte and
+  calls editSelection (the pickers' add/remove logic, now shared), so click = that object only,
+  shift-click = range, ctrl-click = toggle; rows the filter hides keep their state. The old
+  `manifestNames` string stays (secret) for scripts. run_check.sh 22 -> 26.
 
 ## Order of work (all done 2026-11-03/04)
 

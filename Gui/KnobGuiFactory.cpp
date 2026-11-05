@@ -51,6 +51,7 @@
 #include "Gui/KnobGuiShuffle.h"
 #include "Gui/KnobGuiGradient.h"
 #include "Gui/KnobGuiPassTable.h"
+#include "Gui/KnobGuiCryptoNames.h"
 #include "Gui/KnobGuiTracksTable.h"
 #include "Gui/DockablePanel.h"
 
@@ -113,6 +114,7 @@ KnobGuiFactory::loadBultinKnobs()
     _loadedKnobs.insert( knobGuiFactoryEntry<KnobShuffle, KnobGuiShuffle>() );
     _loadedKnobs.insert( knobGuiFactoryEntry<KnobGradient, KnobGuiGradient>() );
     _loadedKnobs.insert( knobGuiFactoryEntry<KnobPassTable, KnobGuiPassTable>() );
+    _loadedKnobs.insert( knobGuiFactoryEntry<KnobCryptoNames, KnobGuiCryptoNames>() );
     _loadedKnobs.insert( knobGuiFactoryEntry<KnobTracksTable, KnobGuiTracksTable>() );
 }
 
