@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <set>
 #include <sstream>
@@ -599,6 +600,7 @@ struct CryptomattePrivate
     KnobBoolWPtr removeChannels;
     KnobStringWPtr manifestInfo;
     KnobStringWPtr manifestNames;
+    KnobIntWPtr manifestStamp;      // hidden: a fingerprint of the manifest, so a new manifest re-renders
     KnobStringWPtr matteExpression;
     KnobStringWPtr generatedExpression;
     KnobButtonWPtr reload;
@@ -789,6 +791,19 @@ Cryptomatte::initializeKnobs()
                              "the Matte List. Read-only: edits here do nothing."));
         grp->addKnob(k);
         _imp->manifestNames = k;
+    }
+    {
+        // Wildcards and the pickers' names resolve through the manifest, so the render depends
+        // on it: this hidden knob carries a fingerprint of the manifest into the render hash and
+        // re-renders when a new one arrives (an upstream Cycles render has none until it ran).
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Manifest Stamp"));
+        k->setName("manifestStamp");
+        k->setSecret(true);
+        k->setIsPersistent(false);
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(true);
+        page->addKnob(k);
+        _imp->manifestStamp = k;
     }
     separator();
     {
@@ -1143,6 +1158,13 @@ Cryptomatte::refreshManifest()
         QMutexLocker l(&_imp->manifestMutex);
         _imp->manifest = m;
     }
+    KnobIntPtr sk = _imp->manifestStamp.lock();
+    if (sk) {
+        const int stamp = (int)(std::hash<std::string>()(m.json + "|" + m.source) & 0x7fffffff);
+        if (sk->getValue() != stamp) {
+            sk->setValue(stamp);
+        }
+    }
     KnobStringPtr ik = _imp->manifestInfo.lock();
     if (ik) {
         ik->setValue(info.str());
@@ -1252,6 +1274,10 @@ Cryptomatte::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /
     if (k == _imp->pickerAdd.lock().get() || k == _imp->pickerRemove.lock().get() ||
         k == _imp->manifestNames.lock().get() || k == _imp->generatedExpression.lock().get()) {
         return true;   // nothing to render
+    }
+    if (k == _imp->manifestStamp.lock().get()) {
+        updateExpression();   // wildcards expand through the new manifest
+        return false;         // and the matte re-renders
     }
     if (k == _imp->matteList.lock().get() || k == _imp->matteExpression.lock().get()) {
         updateExpression();

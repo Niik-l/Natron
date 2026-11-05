@@ -197,6 +197,17 @@ not shuffling crypto layers, FEATURE_REQUESTS.md entry -> done.
   pickers write the list and typed rules survive picking (Picker Remove appends `-name` when the
   Expression includes the object, Picker Add lifts an exclusion). The read-only tab became
   Generated Expression. run_check.sh 17 -> 22.
+  DeLorean glb test (43 parts): per-piece object IDs need ReadGeo's Output Single Mesh OFF (the
+  merged mesh is one Cycles object with no per-part data). Two fixes from that test: archive
+  entries are now named `<node>/<leaf>` in the manifest (SceneNode::cryptoName, parent / full path
+  only on collisions, Blender's convention) instead of 150-character file paths, and glTF / FBX
+  materials carry their file name (GeoImportMaterial::name -> MaterialProvider::getMaterialName)
+  into the Cycles shader name, so the material layer keys per file material instead of one
+  shared "file_material". Found on the way: a wildcard typed before the upstream Cycles render
+  had produced a manifest rendered empty and stayed empty (the manifest was not part of the
+  render hash), so the node now carries a hidden manifestStamp knob (fingerprint of the manifest,
+  evaluate-on-change) that re-renders the matte when a manifest lands. run_encode_check.sh grew
+  a tracked four-part glTF (ref/parts.gltf from make_parts_gltf.py): 16 -> 32 checks.
 
 ## Order of work (all done 2026-11-03/04)
 
