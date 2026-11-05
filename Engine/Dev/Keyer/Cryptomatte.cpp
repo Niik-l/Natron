@@ -205,28 +205,108 @@ expandGlob(const std::string& pattern, const Manifest& m, std::vector<std::pair<
     }
 }
 
-// Every layer ID the Matte List selects: names hashed, <hex> IDs, patterns expanded through the
+// The IDs one token stands for: a name hashed, a <hex> ID, or a pattern expanded through the
 // manifest (a pattern selects nothing without one).
-std::set<std::uint32_t>
-selectedBits(const std::string& list, const Manifest& m)
+void
+tokenBits(const std::string& token, const Manifest& m, std::set<std::uint32_t>* out)
 {
-    std::set<std::uint32_t> s;
-    const std::vector<std::string> toks = splitTokens(list);
-    for (size_t i = 0; i < toks.size(); ++i) {
-        if (isGlob(toks[i])) {
+    if (isGlob(token)) {
+        std::vector<std::pair<std::string, std::uint32_t> > hits;
+        expandGlob(token, m, &hits);
+        for (size_t j = 0; j < hits.size(); ++j) {
+            out->insert(hits[j].second);
+        }
+        return;
+    }
+    std::uint32_t b;
+    if (tokenToBits(token, &b)) {
+        out->insert(b);
+    }
+}
+
+// A token led by '-' takes its objects out of the matte; everything else puts them in.
+bool
+isExclusion(const std::string& token)
+{
+    return !token.empty() && token[0] == '-';
+}
+
+std::string
+tokenBody(const std::string& token)
+{
+    return isExclusion(token) ? trim(token.substr(1)) : token;
+}
+
+// Every layer ID the Matte List and the Expression select together: the union of what both
+// include, minus what either excludes.
+std::set<std::uint32_t>
+selectedBits(const std::string& list, const std::string& expr, const Manifest& m)
+{
+    std::set<std::uint32_t> in, out;
+    for (int f = 0; f < 2; ++f) {
+        const std::vector<std::string> toks = splitTokens(f == 0 ? list : expr);
+        for (size_t i = 0; i < toks.size(); ++i) {
+            tokenBits(tokenBody(toks[i]), m, isExclusion(toks[i]) ? &out : &in);
+        }
+    }
+    for (std::set<std::uint32_t>::const_iterator it = out.begin(); it != out.end(); ++it) {
+        in.erase(*it);
+    }
+    return in;
+}
+
+// Takes the IDs in `drop` out of the tokens of one sign (plain ones when `exclusions` is false,
+// '-' ones when true): a token naming one goes, a pattern covering one becomes its other matches.
+std::vector<std::string>
+withoutIds(const std::vector<std::string>& tokens, const std::set<std::uint32_t>& drop, const Manifest& m,
+           bool exclusions)
+{
+    std::vector<std::string> result;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (isExclusion(tokens[i]) != exclusions) {
+            result.push_back(tokens[i]);
+            continue;
+        }
+        const std::string body = tokenBody(tokens[i]);
+        const std::string sign = exclusions ? "-" : "";
+        if (isGlob(body)) {
             std::vector<std::pair<std::string, std::uint32_t> > hits;
-            expandGlob(toks[i], m, &hits);
+            expandGlob(body, m, &hits);
+            bool covers = false;
+            for (size_t j = 0; j < hits.size() && !covers; ++j) {
+                covers = drop.count(hits[j].second) > 0;
+            }
+            if (!covers) {
+                result.push_back(tokens[i]);
+                continue;
+            }
             for (size_t j = 0; j < hits.size(); ++j) {
-                s.insert(hits[j].second);
+                if (!drop.count(hits[j].second)) {
+                    result.push_back(sign + hits[j].first);
+                }
             }
             continue;
         }
         std::uint32_t b;
-        if (tokenToBits(toks[i], &b)) {
-            s.insert(b);
+        if (tokenToBits(body, &b) && drop.count(b)) {
+            continue;
         }
+        result.push_back(tokens[i]);
     }
-    return s;
+    return result;
+}
+
+std::string
+joinTokens(const std::vector<std::string>& tokens)
+{
+    std::string joined;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (i) {
+            joined += ", ";
+        }
+        joined += tokens[i];
+    }
+    return joined;
 }
 
 // The float an ID has in the layer, printed so it round-trips (what a Nuke expression compares).
@@ -519,7 +599,8 @@ struct CryptomattePrivate
     KnobBoolWPtr removeChannels;
     KnobStringWPtr manifestInfo;
     KnobStringWPtr manifestNames;
-    KnobStringWPtr expression;
+    KnobStringWPtr matteExpression;
+    KnobStringWPtr generatedExpression;
     KnobButtonWPtr reload;
 
     mutable QMutex setsMutex;
@@ -598,8 +679,10 @@ Cryptomatte::getPluginDescription() const
            "turn on Picker Add and click objects in the viewer (drag a box to add everything inside; "
            "Picker Remove takes them out again). Names come from the manifest in the EXR header; an "
            "object without a name can be given as its hex ID in angle brackets, <2ce615c5>; a name "
-           "may hold wildcards (car_*, ?_glass), matched against the manifest. The Expression tab "
-           "shows the keying expression the list amounts to, in the form Nuke's gizmo generates.\n\n"
+           "may hold wildcards (car_*, ?_glass), matched against the manifest, and a leading - "
+           "excludes. The Expression field takes the same grammar for hand-written rules that "
+           "combine with the picked list; the Generated Expression tab shows what both amount to "
+           "in the form Nuke's gizmo generates.\n\n"
            "Preview Mattes shows every object in its own colour, the ones in the matte lifted towards "
            "white. Matte Output writes the matte into the chosen channel (alpha by default); "
            "Unpremultiply divides the RGB by the incoming alpha first so a later Premult by the matte "
@@ -751,7 +834,8 @@ Cryptomatte::initializeKnobs()
                              "renderer wrote them (see Manifest Names). An object can also be given as its ID "
                              "in angle brackets, <2ce615c5>. A name may hold wildcards, * for any run of "
                              "characters and ? for one (car_*, *_glass), matched against the manifest names, "
-                             "so wildcards need a manifest. The pickers add and remove entries here."));
+                             "so wildcards need a manifest; a leading - takes an object out (-car_glass). "
+                             "The pickers add and remove entries here; the Expression below is combined with it."));
         page->addKnob(k);
         _imp->matteList = k;
     }
@@ -763,23 +847,37 @@ Cryptomatte::initializeKnobs()
         _imp->clear = k;
     }
     {
-        KnobGroupPtr grp = AppManager::createKnob<KnobGroup>(this, tr("Expression"));
-        grp->setName("expressionGroup");
+        KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr("Expression"));
+        k->setName("matteExpression");
+        k->setAsMultiLine();
+        k->setHintToolTip(tr("Hand-written terms combined with the Matte List, in the same grammar: names, "
+                             "<hex> IDs and wildcards separated by commas or new lines include objects, a "
+                             "leading - excludes them (*_glass, -window_glass). The matte is everything "
+                             "either field includes minus everything either excludes. The pickers leave this "
+                             "field alone, apart from adding -name when you remove an object it includes and "
+                             "lifting an exclusion when you add one it excludes, so picked selections and "
+                             "typed rules can live side by side."));
+        page->addKnob(k);
+        _imp->matteExpression = k;
+    }
+    {
+        KnobGroupPtr grp = AppManager::createKnob<KnobGroup>(this, tr("Generated Expression"));
+        grp->setName("generatedExpressionGroup");
         grp->setDefaultValue(false);
         grp->setAsTab();
         page->addKnob(grp);
         KnobStringPtr k = AppManager::createKnob<KnobString>(this, tr(""));
-        k->setName("expression");
+        k->setName("generatedExpression");
         k->setAsMultiLine();
         k->setIsPersistent(false);
         k->setEvaluateOnChange(false);
-        k->setHintToolTip(tr("The keying expression the Matte List amounts to, in the form Nuke's Cryptomatte "
-                             "gizmo generates: for every ID in the matte and every rank plane of the layer, "
-                             "coverage where the ID channel equals the ID's float value. Wildcards are expanded "
-                             "through the manifest. For reading and copying into an Expression node elsewhere; "
-                             "this node keys the IDs directly, so edits here do nothing."));
+        k->setHintToolTip(tr("The keying expression the Matte List and Expression amount to, in the form Nuke's "
+                             "Cryptomatte gizmo generates: for every ID in the matte and every rank plane of the "
+                             "layer, coverage where the ID channel equals the ID's float value. Wildcards and "
+                             "exclusions are resolved. For reading and copying into an Expression node "
+                             "elsewhere; this node keys the IDs directly, so edits here do nothing."));
         grp->addKnob(k);
-        _imp->expression = k;
+        _imp->generatedExpression = k;
     }
     separator();
     {
@@ -1059,9 +1157,10 @@ Cryptomatte::refreshManifest()
 void
 Cryptomatte::updateExpression()
 {
-    KnobStringPtr ek = _imp->expression.lock();
+    KnobStringPtr ek = _imp->generatedExpression.lock();
     KnobStringPtr lk = _imp->matteList.lock();
-    if (!ek || !lk) {
+    KnobStringPtr xk = _imp->matteExpression.lock();
+    if (!ek || !lk || !xk) {
         return;
     }
     CryptoSet set;
@@ -1069,7 +1168,7 @@ Cryptomatte::updateExpression()
     std::set<std::uint32_t> selected;
     {
         QMutexLocker l(&_imp->manifestMutex);
-        selected = selectedBits(lk->getValue(), _imp->manifest);
+        selected = selectedBits(lk->getValue(), xk->getValue(), _imp->manifest);
     }
     std::ostringstream e;
     if (selected.empty() || !haveSet) {
@@ -1151,10 +1250,10 @@ Cryptomatte::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /
         return true;
     }
     if (k == _imp->pickerAdd.lock().get() || k == _imp->pickerRemove.lock().get() ||
-        k == _imp->manifestNames.lock().get() || k == _imp->expression.lock().get()) {
+        k == _imp->manifestNames.lock().get() || k == _imp->generatedExpression.lock().get()) {
         return true;   // nothing to render
     }
-    if (k == _imp->matteList.lock().get()) {
+    if (k == _imp->matteList.lock().get() || k == _imp->matteExpression.lock().get()) {
         updateExpression();
         return false;  // and render the new matte
     }
@@ -1227,7 +1326,8 @@ Cryptomatte::render(const RenderActionArgs& args)
     std::set<std::uint32_t> selected;
     {
         QMutexLocker l(&_imp->manifestMutex);
-        selected = selectedBits(_imp->matteList.lock()->getValue(), _imp->manifest);
+        selected = selectedBits(_imp->matteList.lock()->getValue(), _imp->matteExpression.lock()->getValue(),
+                                _imp->manifest);
     }
 
     std::vector<std::unique_ptr<Image::ReadAccess> > planeRa;
@@ -1457,60 +1557,58 @@ Cryptomatte::pickAt(double time, ViewIdx view, const QPointF& from, const QPoint
     }
 
     KnobStringPtr lk = _imp->matteList.lock();
-    if (!lk) {
+    KnobStringPtr xk = _imp->matteExpression.lock();
+    if (!lk || !xk) {
         return;
     }
+    const std::string exprText = xk->getValue();
     const std::vector<std::string> tokens = splitTokens( lk->getValue() );
+    std::vector<std::string> xtokens = splitTokens(exprText);
+    const std::string xBefore = joinTokens(xtokens);
     std::vector<std::string> result;
     QMutexLocker l(&_imp->manifestMutex);
+    const Manifest& m = _imp->manifest;
+    auto nameOf = [&m](std::uint32_t id) {
+        std::map<std::uint32_t, std::string>::const_iterator n = m.bitsToName.find(id);
+        return n != m.bitsToName.end() ? n->second : "<" + CryptoHash::hashToHex(id) + ">";
+    };
     if (mode == 2) {
-        // Remove every token that resolves to one of the picked IDs. A pattern that covers a
-        // picked object is replaced by the names it matched, minus the picked ones.
-        for (size_t i = 0; i < tokens.size(); ++i) {
-            if (isGlob(tokens[i])) {
-                std::vector<std::pair<std::string, std::uint32_t> > hits;
-                expandGlob(tokens[i], _imp->manifest, &hits);
-                bool covers = false;
-                for (size_t j = 0; j < hits.size() && !covers; ++j) {
-                    covers = found.count(hits[j].second) > 0;
-                }
-                if (!covers) {
-                    result.push_back(tokens[i]);
-                    continue;
-                }
-                for (size_t j = 0; j < hits.size(); ++j) {
-                    if (!found.count(hits[j].second)) {
-                        result.push_back(hits[j].first);
-                    }
-                }
-                continue;
+        // Remove every list token that resolves to a picked ID (a pattern covering one becomes its
+        // other matches). An object the Expression still includes gets an explicit -name there.
+        result = withoutIds(tokens, found, m, false);
+        const std::set<std::uint32_t> still = selectedBits(joinTokens(result), exprText, m);
+        for (std::set<std::uint32_t>::const_iterator it = found.begin(); it != found.end(); ++it) {
+            if (still.count(*it)) {
+                xtokens.push_back("-" + nameOf(*it));
             }
-            std::uint32_t b;
-            if (tokenToBits(tokens[i], &b) && found.count(b)) {
-                continue;
-            }
-            result.push_back(tokens[i]);
         }
     } else {
-        const std::set<std::uint32_t> present = selectedBits(lk->getValue(), _imp->manifest);
+        // Add every picked object the matte lacks. One the Expression excludes gets its exclusion
+        // lifted (a -pattern covering it becomes its other matches).
+        const std::set<std::uint32_t> present = selectedBits(lk->getValue(), exprText, m);
         result = tokens;
         for (std::set<std::uint32_t>::const_iterator it = found.begin(); it != found.end(); ++it) {
-            if (present.count(*it)) {
-                continue;
+            if (!present.count(*it)) {
+                result.push_back( nameOf(*it) );
             }
-            std::map<std::uint32_t, std::string>::const_iterator n = _imp->manifest.bitsToName.find(*it);
-            result.push_back(n != _imp->manifest.bitsToName.end() ? n->second : "<" + CryptoHash::hashToHex(*it) + ">");
+        }
+        const std::set<std::uint32_t> after = selectedBits(joinTokens(result), exprText, m);
+        std::set<std::uint32_t> excluded;
+        for (std::set<std::uint32_t>::const_iterator it = found.begin(); it != found.end(); ++it) {
+            if (!after.count(*it)) {
+                excluded.insert(*it);
+            }
+        }
+        if (!excluded.empty()) {
+            xtokens = withoutIds(xtokens, excluded, m, true);
         }
     }
     l.unlock();
-    std::string joined;
-    for (size_t i = 0; i < result.size(); ++i) {
-        if (i) {
-            joined += ", ";
-        }
-        joined += result[i];
+    const std::string xAfter = joinTokens(xtokens);
+    if (xAfter != xBefore) {
+        xk->setValue(xAfter);
     }
-    lk->setValue(joined);
+    lk->setValue( joinTokens(result) );
 }
 
 NATRON_NAMESPACE_EXIT

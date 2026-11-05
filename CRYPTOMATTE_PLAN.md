@@ -192,6 +192,11 @@ not shuffling crypto layers, FEATURE_REQUESTS.md entry -> done.
   layer and manifest (asked for after a look at Fusion, whose Cryptomatte has no expression of its
   own, only Fusion's generic per-input expression field; Nuke's gizmo has the generated one).
   run_check.sh grew from 9 to 17 checks.
+  Same day, the user's follow-up: a second editable **Expression** field in the same grammar
+  (names, <hex>, wildcards, and a leading `-` to exclude) combined with the Matte List, so the
+  pickers write the list and typed rules survive picking (Picker Remove appends `-name` when the
+  Expression includes the object, Picker Add lifts an exclusion). The read-only tab became
+  Generated Expression. run_check.sh 17 -> 22.
 
 ## Order of work (all done 2026-11-03/04)
 

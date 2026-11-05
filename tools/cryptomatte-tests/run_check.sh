@@ -42,7 +42,14 @@ same "$O/glob_cube.exr" "$O/cube.exr" 0 && ok "Cube_* == Cube_Left" || bad "Cube
 same "$O/glob_q_cube.exr" "$O/cube.exr" 0 && ok "?ube_Left == Cube_Left" || bad "?ube_Left != Cube_Left"
 same "$O/glob_all.exr" "$O/all_objects.exr" 0 && ok "* == all manifest objects" || bad "* != all manifest objects"
 same "$O/glob_s.exr" "$O/s_names.exr" 0 && ok "S* == Sphere_Mid + Suzanne_Right + Sun" || bad "S* != the three S names"
-# 8. the Expression knob holds the Nuke-style terms for the layer's three planes
+# 8. the Expression field: union with the list, '-' exclusions, patterns with exclusions
+same "$O/x_union.exr" "$O/cube_sphere.exr" 0 && ok "list Cube_Left + expr Sphere_Mid == both" || bad "list + expr union"
+same "$O/x_excl.exr" "$O/rest_names.exr" 0 && ok "* minus -Cube_Left -Sphere_Mid == the other three" || bad "exclusions"
+same "$O/x_glob_excl.exr" "$O/sphere_suzanne.exr" 0 && ok "expr S*, -Sun == Sphere_Mid + Suzanne_Right" || bad "pattern with exclusion"
+xmax=$(oiiotool "$O/x_self_cancel.exr" --ch A --printstats 2>/dev/null | grep "Stats Max" | awk '{print $3}')
+[ "${xmax:-1}" = "0.000000" ] && ok "Cube_Left, -Cube_Left -> empty" || bad "self-cancel max=$xmax"
+[ "$(grep -a "^CHECK expr excl terms" "$HERE/out/_run.log" | awk '{print $NF}')" = "4" ] && ok "generated expression for * minus Sun has 4 IDs" || bad "generated expression exclusion count: $(grep -a "^CHECK expr excl terms" "$HERE/out/_run.log")"
+# 9. the Generated Expression knob holds the Nuke-style terms for the layer's three planes
 cube_f=$(grep -a "^CHECK expr cube float" "$HERE/out/_run.log" | awk '{print $NF}')
 expr=$(grep -a "^CHECK expr cube |" "$HERE/out/_run.log")
 echo "$expr" | grep -q "((ViewLayer.CryptoObject00.red == $cube_f) ? ViewLayer.CryptoObject00.green : 0) + ((ViewLayer.CryptoObject00.blue == $cube_f) ? ViewLayer.CryptoObject00.alpha : 0)" && ok "expression term for Cube_Left ($cube_f)" || bad "expression term for Cube_Left missing: $expr"

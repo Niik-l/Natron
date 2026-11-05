@@ -29,7 +29,7 @@ def writer(node, name):
     w.getParam("ocioOutputSpaceIndex").set("linear")
     return w
 
-def crypto(layer, matte, preview=False, channel="alpha"):
+def crypto(layer, matte, preview=False, channel="alpha", expr=""):
     c = a.createNode("fr.inria.built-in.Cryptomatte")
     c.connectInput(0, read)
     lk = c.getParam("cryptoLayer")
@@ -38,6 +38,7 @@ def crypto(layer, matte, preview=False, channel="alpha"):
         log("LAYER MISSING", layer, "options:", opts)
     lk.set(layer)
     c.getParam("matteList").set(matte)
+    c.getParam("matteExpression").set(expr)
     c.getParam("previewMattes").set(preview)
     c.getParam("matteChannel").set(channel)
     return c, opts
@@ -64,13 +65,21 @@ cases.append(writer(crypto("ViewLayer.CryptoObject", "*")[0], "glob_all"))
 cg, _ = crypto("ViewLayer.CryptoObject", "S*")
 cases.append(writer(cg, "glob_s"))
 cases.append(writer(crypto("ViewLayer.CryptoObject", "Sphere_Mid, Suzanne_Right, Sun")[0], "s_names"))
+# the Expression field combines with the list: includes add, a leading - excludes
+cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left", expr="Sphere_Mid")[0], "x_union"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "*", expr="-Cube_Left, -Sphere_Mid")[0], "x_excl"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "Suzanne_Right, Ground, Sun")[0], "rest_names"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "", expr="S*\n-Sun")[0], "x_glob_excl"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "Sphere_Mid, Suzanne_Right")[0], "sphere_suzanne"))
+cases.append(writer(crypto("ViewLayer.CryptoObject", "Cube_Left, -Cube_Left")[0], "x_self_cancel"))
 # the generated expression: one term pair per ID per rank plane, the glob expanded to 3 IDs
 import struct
 cube_f = "%.9g" % struct.unpack(">f", bytes.fromhex("2ce615c5"))[0]
-log("expr cube |", crypto("ViewLayer.CryptoObject", "Cube_Left")[0].getParam("expression").get().replace("\n", " "))
+log("expr cube |", crypto("ViewLayer.CryptoObject", "Cube_Left")[0].getParam("generatedExpression").get().replace("\n", " "))
 log("expr cube float", cube_f)
-log("expr glob terms", cg.getParam("expression").get().count("ViewLayer.CryptoObject00.red =="))
-log("expr empty |", crypto("ViewLayer.CryptoObject", "")[0].getParam("expression").get())
+log("expr glob terms", cg.getParam("generatedExpression").get().count("ViewLayer.CryptoObject00.red =="))
+log("expr empty |", crypto("ViewLayer.CryptoObject", "")[0].getParam("generatedExpression").get())
+log("expr excl terms", crypto("ViewLayer.CryptoObject", "*", expr="-Sun")[0].getParam("generatedExpression").get().count("ViewLayer.CryptoObject00.red =="))
 
 for w in cases:
     a.render(w, 1, 1)
