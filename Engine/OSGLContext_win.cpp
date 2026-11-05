@@ -25,6 +25,8 @@
 
 #include "OSGLContext_win.h"
 
+#include <cstdio>
+
 #ifdef __NATRON_WIN32__
 #include <iostream> // std::cerr
 #include <sstream> // stringstream
@@ -64,7 +66,15 @@ bool makeDCAndContextCurrent(HDC dc, HGLRC context)
     const OSGLContext_wgl_data* wglInfo = appPTR->getWGLData();
 
     assert(wglInfo);
-    return wglInfo->MakeCurrent(dc, context);
+    const bool ok = wglInfo->MakeCurrent(dc, context);
+    if (!ok && context) {
+        // ERROR_BUSY (170) = the context is current on another thread; ERROR_INVALID_HANDLE (6) =
+        // the DC or context is gone. Printed because callers only see a bool.
+        std::fprintf(stderr, "[OSGLContext_win] wglMakeCurrent(dc=%p, rc=%p) failed: Win32 error %lu\n",
+                     (void*)dc, (void*)context, (unsigned long)GetLastError());
+        std::fflush(stderr);
+    }
+    return ok;
 }
 
 }  // namespace
