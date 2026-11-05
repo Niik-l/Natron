@@ -43,6 +43,10 @@ public:
     virtual double getMaterialIOR(double time) const = 0;
     virtual std::string getMaterialTextureFile() const = 0;
 
+    // The material's own name when it came from a file (glTF / FBX material name), for the
+    // Cryptomatte material layer. Empty: a node material, named after its node instead.
+    virtual std::string getMaterialName() const { return std::string(); }
+
     /**
      * @brief Hash of the connected 2D input chains (Read -> Grade -> ... into
      * the Diffuse/Roughness/... inputs) at `time`. 0 when nothing is connected.

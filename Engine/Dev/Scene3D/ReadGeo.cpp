@@ -367,6 +367,7 @@ struct RGEntryMaterialAdapter : public MaterialProvider
     double getMaterialTransmission(double) const OVERRIDE { return mat->transmission; }
     double getMaterialIOR(double) const OVERRIDE { return mat->ior; }
     std::string getMaterialTextureFile() const OVERRIDE { return mat->diffuseMapPath; }
+    std::string getMaterialName() const OVERRIDE { return mat->name; }
     std::string getMaterialRoughnessMapFile() const OVERRIDE { return mat->metallicRoughnessMapPath; }
     std::string getMaterialMetallicMapFile() const OVERRIDE
     { return mat->ormMetallicEnabled ? mat->metallicRoughnessMapPath : std::string(); }
@@ -401,6 +402,9 @@ struct RGMergedSlotMaterialAdapter : public MaterialProvider
 
     bool live(double time) const { return node && node->materialKnobsOverrideActive(time); }
     bool texLive() const { return node && node->textureKnobOverrideActive(); }
+
+    // The slot stays the file's material for Cryptomatte even while the node knobs retint it.
+    std::string getMaterialName() const OVERRIDE { return file.getMaterialName(); }
 
     void getMaterialBaseColor(double time, double& r, double& g, double& b) const OVERRIDE
     {

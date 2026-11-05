@@ -88,6 +88,12 @@ struct SceneNode {
     // motion-blur path to re-query upstream at sub-frame times.
     int archiveEntryIdx;
 
+    // Cryptomatte object name of an archive entry: "<node>/<leaf>" the way Blender names
+    // imported objects, lengthened to "<node>/<parent>/<leaf>" when two entries share a
+    // leaf and left empty (= `name`, the full path) when even that collides. Set by
+    // SceneGraph::rebuild for mesh entries; empty for everything else.
+    std::string cryptoName;
+
     // Per-part material override (GeoMaterialOverride). When non-null, the
     // renderer shades this node with this node's material instead of the source
     // node's own material. Null = use the source node's material. Set during

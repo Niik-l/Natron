@@ -108,6 +108,7 @@ mapUfbxMaterialArc(const ufbx_material* m, const std::string& dir,
     GeoImportMaterial out;
     if (!m) return out;
     out.present = true;
+    out.name = arcUfbxToString(m->name);
 
     // Shading model class: FBX builtin (Lambert/Phong/Blender-Phong) materials
     // follow the LEGACY transparency convention (below) and ship no PBR

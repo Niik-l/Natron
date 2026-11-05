@@ -720,6 +720,50 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
                 _nodes[sn.parentIndex].childIndices.push_back((int)_nodes.size());
                 _nodes.push_back(sn);
             }
+            // Cryptomatte names for the mesh entries: the leaf node name under the Natron node
+            // ("ReadGeo1/Paint_Geo"), as Blender names imported objects, instead of the whole
+            // file path. A leaf two entries share gets its parent in front; still shared, the
+            // entry keeps the full path (cryptoName empty).
+            {
+                const int end = (int)_nodes.size();
+                auto tail = [](const std::string& full, int segments) {
+                    size_t pos = full.size();
+                    for (int k = 0; k < segments && pos != std::string::npos && pos > 0; ++k) {
+                        pos = full.find_last_of('/', pos - 1);
+                    }
+                    return pos == std::string::npos ? full : full.substr(pos + 1);
+                };
+                for (int depth = 1; depth <= 2; ++depth) {
+                    std::map<std::string, int> uses;
+                    for (int j = baseSgIdx; j < end; ++j) {
+                        if (_nodes[j].type == eSceneNodeMesh && _nodes[j].cryptoName.empty()) {
+                            ++uses[tail(_nodes[j].name, depth)];
+                        }
+                    }
+                    for (int j = baseSgIdx; j < end; ++j) {
+                        if (_nodes[j].type != eSceneNodeMesh || !_nodes[j].cryptoName.empty()) {
+                            continue;
+                        }
+                        const std::string s = tail(_nodes[j].name, depth);
+                        if (uses[s] == 1) {
+                            _nodes[j].cryptoName = nodeName + "/" + s;
+                        }
+                    }
+                }
+                // Entries with the very same path (a glTF mesh split into primitives of one
+                // material) share an ID whatever the name, so they take the short one too.
+                std::map<std::string, int> same;
+                for (int j = baseSgIdx; j < end; ++j) {
+                    if (_nodes[j].type == eSceneNodeMesh && _nodes[j].cryptoName.empty()) {
+                        ++same[_nodes[j].name];
+                    }
+                }
+                for (int j = baseSgIdx; j < end; ++j) {
+                    if (_nodes[j].type == eSceneNodeMesh && _nodes[j].cryptoName.empty() && same[_nodes[j].name] > 1) {
+                        _nodes[j].cryptoName = nodeName + "/" + tail(_nodes[j].name, 1);
+                    }
+                }
+            }
             // Record this archive's node range [rootSgIdx, end) + its world-space user
             // transform, to be post-multiplied after the world-transform pass.
             {

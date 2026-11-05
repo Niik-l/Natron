@@ -7,8 +7,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RENDERER="${1:?path to NatronRenderer}"
 export CRYPTO_TEST_DIR="$HERE"
 O="$HERE/out"; mkdir -p "$O"
-rm -f "$O"/obj_*.exr "$O"/custom_*.exr "$O"/asset_*.exr "$O"/mat_*.exr "$O"/beauty.exr "$O"/file_*.exr "$O"/cycles_crypto.exr
-"$RENDERER" -t "$HERE/encode_check.py" 2>&1 | grep -a "^ENC\|rror\|Cryptomatte flags" | grep -v "Rendering started"
+rm -f "$O"/obj_*.exr "$O"/custom_*.exr "$O"/asset_*.exr "$O"/mat_*.exr "$O"/beauty.exr "$O"/file_*.exr "$O"/cycles_crypto.exr \
+      "$O"/part_*.exr "$O"/parts_*.exr "$O"/dup_*.exr
+[ -s "$HERE/ref/parts.gltf" ] || python "$HERE/make_parts_gltf.py"
+LOG="$O/_encode_run.log"
+"$RENDERER" -t "$HERE/encode_check.py" > "$LOG" 2>&1
+grep -a "^ENC\|rror\|Cryptomatte flags" "$LOG" | grep -v "Rendering started" | cut -c1-400
 fail=0
 ok()  { echo "  OK   $1"; }
 bad() { echo "  FAIL $1"; fail=1; }
@@ -16,7 +20,7 @@ same() { oiiotool "$1" --ch A "$2" --ch A --diff --fail "$3" --failpercent 0 --h
 amax() { oiiotool "$1" --ch A --printstats 2>/dev/null | grep "Stats Max" | awk '{print $3}'; }
 # sum of two mattes == a third (A channels)
 sum2() { oiiotool "$1" --ch A "$2" --ch A --add -o "$O/_sum.exr" >/dev/null 2>&1 && same "$O/_sum.exr" "$3" "$4"; }
-for f in obj_sphere obj_cube obj_card obj_all custom_hero custom_default asset_hero asset_cube mat_cube inst_0 inst_union inst_asset beauty; do
+for f in obj_sphere obj_cube obj_card obj_all custom_hero custom_default asset_hero asset_cube mat_cube inst_0 inst_union inst_asset beauty part_a part_b dup_l dup_r parts_all parts_asset mat_a mat_b; do
   [ -s "$O/$f.exr" ] || { bad "missing output $f.exr"; }
 done
 [ $fail = 1 ] && { echo "CYCLES_CRYPTO_CHECK FAILED (renders missing)"; exit 1; }
@@ -26,8 +30,9 @@ m=$(amax "$O/obj_cube.exr");   awk -v m="$m" 'BEGIN{exit !(m>0.9)}' && ok "cube 
 m=$(amax "$O/obj_card.exr");   awk -v m="$m" 'BEGIN{exit !(m>0.9)}' && ok "card matte present (max $m)"   || bad "card matte max=$m"
 oiiotool "$O/obj_sphere.exr" --ch A "$O/obj_cube.exr" --ch A --add "$O/obj_card.exr" --ch A --add -o "$O/_sum3.exr" >/dev/null 2>&1
 same "$O/_sum3.exr" "$O/obj_all.exr" 1e-5 && ok "sphere + cube + card == all objects" || bad "object mattes do not sum to all objects"
-# 2. all objects + the instances == beauty alpha (same samples; lights are not hit)
-sum2 "$O/obj_all.exr" "$O/inst_asset.exr" "$O/beauty.exr" 0.02 && ok "all objects + instances == beauty alpha (tol 0.02)" || bad "all objects + instances != beauty alpha"
+# 2. all objects + the instances + the glTF parts == beauty alpha (same samples; lights are not hit)
+oiiotool "$O/obj_all.exr" --ch A "$O/inst_asset.exr" --ch A --add "$O/parts_all.exr" --ch A --add -o "$O/_sumall.exr" >/dev/null 2>&1
+same "$O/_sumall.exr" "$O/beauty.exr" 0.02 && ok "all objects + instances + parts == beauty alpha (tol 0.02)" || bad "all objects + instances + parts != beauty alpha"
 # 2b. per-instance IDs: one instance has a matte, the five together == the node's asset matte,
 #     and instance 0 alone is clearly smaller than all five
 m=$(amax "$O/inst_0.exr"); awk -v m="$m" 'BEGIN{exit !(m>0.9)}' && ok "instance 0 matte present (max $m)" || bad "instance 0 matte max=$m"
@@ -41,6 +46,26 @@ same "$O/asset_hero.exr" "$O/obj_sphere.exr" 1e-5 && ok "asset HeroAsset == sphe
 same "$O/asset_cube.exr" "$O/obj_cube.exr" 1e-5 && ok "asset Cube3D == cube" || bad "asset Cube3D != cube"
 # 5. material layer: the Material3D on the cube
 same "$O/mat_cube.exr" "$O/obj_cube.exr" 1e-5 && ok "material Material3D == cube" || bad "material Material3D != cube"
+# 5b. glTF parts (ReadGeo, Output Single Mesh off): one ID per part named <node>/<leaf>, the two
+#     "Dup" leaves told apart by their parent, no full file paths in the manifest; the material
+#     layer keys per file material (MatA = PartA + L/Dup, MatB = PartB + R/Dup)
+PN=$(grep -a "^ENC parts node" "$LOG" | awk '{print $NF}')
+OM=$(grep -a "^ENC manifest part_a" "$LOG")
+for want in "$PN/PartA" "$PN/PartB" "$PN/L/Dup" "$PN/R/Dup"; do
+  echo "$OM" | grep -q "[,|] *$want," && ok "object manifest lists $want" || bad "object manifest lacks $want: $OM"
+done
+echo "$OM" | grep -q "$PN/parts/" && bad "object manifest still has full paths ($PN/parts/...)" || ok "object manifest has no full paths"
+MM=$(grep -a "^ENC manifest mat_a" "$LOG")
+echo "$MM" | grep -q "MatA," && echo "$MM" | grep -q "MatB," && ok "material manifest lists MatA and MatB" || bad "material manifest lacks MatA / MatB: $MM"
+echo "$MM" | grep -q "file_material" && bad "material manifest still has file_material" || ok "no shared file_material ID"
+for f in part_a part_b dup_l dup_r; do
+  m=$(amax "$O/$f.exr"); awk -v m="$m" 'BEGIN{exit !(m>0.9)}' && ok "$f matte present (max $m)" || bad "$f matte max=$m"
+done
+m=$(oiiotool "$O/dup_l.exr" --ch A "$O/dup_r.exr" --ch A --absdiff --printstats 2>/dev/null | grep "Stats Max" | awk '{print $3}'); awk -v m="$m" 'BEGIN{exit !(m>0.9)}' && ok "L/Dup and R/Dup are different objects" || bad "L/Dup == R/Dup (max diff $m)"
+sum2 "$O/part_a.exr" "$O/dup_l.exr" "$O/mat_a.exr" 1e-5 && ok "material MatA == PartA + L/Dup" || bad "material MatA != PartA + L/Dup"
+sum2 "$O/part_b.exr" "$O/dup_r.exr" "$O/mat_b.exr" 1e-5 && ok "material MatB == PartB + R/Dup" || bad "material MatB != PartB + R/Dup"
+sum2 "$O/mat_a.exr" "$O/mat_b.exr" "$O/parts_all.exr" 1e-5 && ok "$PN/* == MatA + MatB (wildcard over the parts)" || bad "$PN/* != MatA + MatB"
+same "$O/parts_asset.exr" "$O/parts_all.exr" 1e-5 && ok "asset $PN == all four parts" || bad "asset $PN != all parts"
 # 6. the saved multi-layer EXR: manifests in the header, layers decode identically through a Read
 if [ -s "$O/cycles_crypto.exr" ]; then
   n=$(exrheader "$O/cycles_crypto.exr" 2>/dev/null | grep -c "cryptomatte/.*/manifest")

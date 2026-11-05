@@ -58,6 +58,9 @@ NATRON_NAMESPACE_ENTER
 struct GeoImportMaterial
 {
     bool present = false;   // the part actually had a material in the file
+    std::string name;       // the file's own material name ("Paint"); empty when it has none.
+                            // Cycles names the shader after it, so the Cryptomatte material
+                            // layer keys per file material instead of one "file_material".
     double baseColor[3] = { 0.8, 0.8, 0.8 };
     double roughness = 0.5;
     double metallic = 0.0;

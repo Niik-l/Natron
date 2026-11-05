@@ -4,7 +4,8 @@
 
 Builds a small Cycles scene: a Sphere3D inside a Group3D (Crypto Asset "HeroAsset", Crypto Custom
 "hero"), a Cube3D with its own Material3D and Crypto Custom "hero", an untagged Card3D as ground,
-a light and a camera. CyclesRender renders the four Cryptomatte layer types; Cryptomatte nodes on
+five ParticleInstance spheres, a ReadGeo on ref/parts.gltf (four parts, two file materials; Output
+Single Mesh off, so one object per part named <node>/<leaf>), a light and a camera. CyclesRender renders the four Cryptomatte layer types; Cryptomatte nodes on
 its output decode object / material / asset / custom mattes to out/*.exr (alpha), the render node
 saves its multi-layer EXR (out/cycles_crypto.exr) and that file is decoded again through a Read.
 run_encode_check.sh compares the results with oiiotool and checks the EXR header.
@@ -69,13 +70,22 @@ setp(inst, "scaleMultiplier", 0.35)
 setp(inst, "cryptoCustom", "dots")
 setp(inst, "cryptoPerInstance", True)
 
+# four glTF parts, one object ID each named after the leaf node (PartA, PartB, L/Dup, R/Dup),
+# materials MatA / MatB named after the file's materials
+parts = a.createNode("fr.inria.built-in.ReadGeo")
+setp(parts, "filename", HERE + "/ref/parts.gltf")
+setp(parts, "outputSingleMesh", False)
+setp(parts, "cryptoCustom", "parts")   # keeps the custom layer's "default" == the card
+P = parts.getScriptName()
+log("parts node", P)
+
 light = a.createNode("fr.inria.built-in.Light3D")
 setp(light, "intensity", 25.0); setp(light, "translateX", 3.0); setp(light, "translateY", 4.0); setp(light, "translateZ", 5.0)
 camera = a.createNode("fr.inria.built-in.Camera3D")
 setp(camera, "translateY", 0.5); setp(camera, "translateZ", 6.0)
 
 scene = a.createNode("fr.inria.built-in.Scene3D")
-for i, n in enumerate([group, cube, card, inst, light]):
+for i, n in enumerate([group, cube, card, inst, light, parts]):
     log("scene input", i, n.getScriptName(), scene.connectInput(i, n))
 
 cyc = a.createNode("fr.inria.built-in.CyclesRender")
@@ -122,16 +132,29 @@ instNames = [inst.getScriptName() + "/" + str(i) for i in range(5)]
 cases.append(("inst_0", crypto("CryptoObject", instNames[0])[0]))
 cases.append(("inst_union", crypto("CryptoObject", ", ".join(instNames))[0]))
 cases.append(("inst_asset", crypto("CryptoAsset", inst.getScriptName())[0]))
+cases.append(("part_a", crypto("CryptoObject", P + "/PartA")[0]))
+cases.append(("part_b", crypto("CryptoObject", P + "/PartB")[0]))
+cases.append(("dup_l", crypto("CryptoObject", P + "/L/Dup")[0]))
+cases.append(("dup_r", crypto("CryptoObject", P + "/R/Dup")[0]))
+cases.append(("parts_all", crypto("CryptoObject", P + "/*")[0]))
+cases.append(("parts_asset", crypto("CryptoAsset", P)[0]))
+cases.append(("mat_a", crypto("CryptoMaterial", "MatA")[0]))
+cases.append(("mat_b", crypto("CryptoMaterial", "MatB")[0]))
 writers = [(name, writer(c, name)) for name, c in cases]
 # the beauty alpha, for the all-objects comparison
 writers.append(("beauty", writer(cyc, "beauty")))
+nodeFor = dict(cases)
 for name, w in writers:
+    if name in nodeFor:
+        # the manifest only exists once the render node has rendered (the first case): refresh
+        # before rendering so wildcard tokens expand (the GUI re-renders by itself when it lands)
+        nodeFor[name].getParam("reloadManifest").trigger()
     a.render(w, 1, 1)
     log("rendered", name)
 
 # manifests the decoders got from the render node
 for name, c in cases:
-    if name in ("obj_sphere", "custom_hero", "asset_hero", "mat_cube", "inst_0"):
+    if name in ("obj_sphere", "custom_hero", "asset_hero", "mat_cube", "inst_0", "part_a", "mat_a"):
         c.getParam("reloadManifest").trigger()   # the render just produced the manifests
         log("manifest", name, "|", c.getParam("manifestInfo").get(), "|", c.getParam("manifestNames").get().replace("\n", ","))
 

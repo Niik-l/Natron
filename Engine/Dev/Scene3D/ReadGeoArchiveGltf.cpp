@@ -292,6 +292,7 @@ loadGltfArchiveImport(const std::string& path)
         GeoImportMaterial& mat = result.materials[m];
         const cgltf_material* cm = &data->materials[m];
         mat.present = true;
+        mat.name = cm->name ? cm->name : "";
         const cgltf_pbr_metallic_roughness& pbr = cm->pbr_metallic_roughness;
         mat.baseColor[0] = pbr.base_color_factor[0];
         mat.baseColor[1] = pbr.base_color_factor[1];

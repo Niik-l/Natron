@@ -342,9 +342,9 @@ static ccl::LightType mapLightType(Light3D::LightType lt)
 
 // ---- Cryptomatte naming -------------------------------------------------------------------
 // Cycles hashes three strings per object (name, asset name, our custom name) and the shader's
-// name. The object name is the SceneNode name (script name, or node/entry/path for archive
-// parts); asset and custom come from the node's Cryptomatte knobs, inherited down the Group3D
-// chain (see CryptomatteKnobs.h).
+// name. The object name is the SceneNode name (script name; archive parts use the short
+// SceneNode::cryptoName, "<node>/<leaf>"); asset and custom come from the node's Cryptomatte
+// knobs, inherited down the Group3D chain (see CryptomatteKnobs.h).
 namespace {
 
 std::string
@@ -376,16 +376,17 @@ applyCryptoNames(ccl::Object* obj, const SceneGraph& sg, const SceneNode& sn, co
     if (!obj) {
         return;
     }
+    const std::string objName = sn.cryptoName.empty() ? sn.name : sn.cryptoName;   // archive entries: short
     std::string topMost;
     std::string asset = cryptoInheritedString(sg, sn, srcNode, kCryptomatteAssetKnobName, &topMost);
     if (asset.empty()) {
-        asset = topMost.empty() ? sn.name : topMost;   // Blender: the top-most parent, else the object
+        asset = topMost.empty() ? objName : topMost;   // Blender: the top-most parent, else the object
     }
     std::string custom = cryptoInheritedString(sg, sn, srcNode, kCryptomatteCustomKnobName, NULL);
     if (custom.empty()) {
         custom = "default";
     }
-    obj->name = ccl::ustring(sn.name);
+    obj->name = ccl::ustring(objName);
     obj->set_asset_name(ccl::ustring(asset));
     obj->set_cryptomatte_custom_name(ccl::ustring(custom));
 }
@@ -948,11 +949,17 @@ createMaterialShader(ccl::Scene* scene, MaterialProvider* matProvider, double ti
     }
 
     ccl::Shader* shader = scene->create_node<ccl::Shader>();
-    // Cryptomatte material ID: the Material3D (or the geo node's own material) by node name.
+    // Cryptomatte material ID: the Material3D (or the geo node's own material) by node name, a
+    // material from a glTF / FBX file by its name there (Blender does the same), else a shared
+    // "file_material".
     {
         EffectInstance* matEffect = dynamic_cast<EffectInstance*>(mat);
         NodePtr matNode = matEffect ? matEffect->getNode() : NodePtr();
-        shader->name = ccl::ustring(matNode ? matNode->getScriptName_mt_safe() : std::string("file_material"));
+        std::string shaderName = matNode ? matNode->getScriptName_mt_safe() : mat->getMaterialName();
+        if (shaderName.empty()) {
+            shaderName = "file_material";
+        }
+        shader->name = ccl::ustring(shaderName);
     }
     auto graph = ccl::make_unique<ccl::ShaderGraph>();
 
