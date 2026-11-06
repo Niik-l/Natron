@@ -102,6 +102,12 @@ ViewportVR::ViewportVR(Gui* gui, QWidget* parent)
         _slots[i].time = -1;
     }
     _pboIndex = 0;
+    // Automated QA hook (MCP sessions): start pitched up so the zenith area is
+    // visible in a window screenshot without user interaction.
+    if (getenv("NATRON_DEBUG_VR_STARTPITCH") != NULL) {
+        _pitchDeg = 75.;
+        _fovDeg = 100.;
+    }
 }
 
 ViewportVR::~ViewportVR()
