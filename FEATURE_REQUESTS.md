@@ -62,6 +62,18 @@ node cannot inform them; an optional validate-only Ingest node stays on the futu
 Size: ~8–10 working days at 8 h/day. Not in scope: the CaraVR stitching/solver/tracking
 class (future work).
 
+## ReadMask + MaskToGeo (vector-mask import, 3D conversion) — scheduled, plan in READMASK_PLAN.md
+
+Requested 2026-11-06 by the user: a native vector-mask importer based on vectorNuke
+(https://github.com/erinwnash/vectorNuke — GPL-2.0), ported to Natron C++ sources with no
+Python bridge and no dialog/menu work, plus a MaskToGeo node that turns Roto/ReadMask
+shapes into Scene3D geometry (MeshProvider). Ordered mask→3D loop first (ReadMask SVG,
+bake, MaskToGeo), media-format parsers (AI/EPS/PDF, DXF/OBJ/Maya/Houdini/GeoJSON)
+back-ported at lowest priority.
+
+Sketch + established integration points + build order live in `READMASK_PLAN.md`.
+Size: ~10–15 working days for the core loop; parser phases extra when pulled.
+
 ## Cryptomatte — DONE 2026-11-04 (decoder node + Cycles encoder; see CRYPTOMATTE_PLAN.md)
 
 Requested 2026-11-03; the old community Python plugin was unusable. Shipped in six commits
