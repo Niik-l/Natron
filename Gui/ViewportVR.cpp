@@ -730,32 +730,34 @@ ViewportVR::transferBufferFromRAMtoGPU(const unsigned char* ramBuffer,
     {
         QMutexLocker k(&_slotsMutex);
         VRSlot& slot = _slots[textureIndex];
-        textureRectangle = tileRect;
+        // The texture spans the WHOLE rounded ROI of this viewer (ViewerGL
+        // pattern); the buffer handed over here belongs to ONE tile, uploaded
+        // into its own sub-rectangle below. Formatting the big rect from the
+        // passed rounded-ROI guarantees a matching byte stride.
+        textureRectangle.par = tileRect.par;
+        textureRectangle.closestPo2 = tileRect.closestPo2;
+        textureRectangle.set(roiRoundedToTileSize);
         tex = slot.texture;
         if (!tex || (tex->type() != Texture::eDataTypeByte)) {
             int format, internalFormat, glType;
             Texture::getRecommendedTexParametersForRGBAByteTexture(&format, &internalFormat, &glType);
             tex.reset( new Texture(GL_TEXTURE_2D, GL_LINEAR, GL_NEAREST, GL_CLAMP_TO_EDGE,
                                    Texture::eDataTypeByte, format, internalFormat, glType) );
+            slot.texture = tex;
         }
         slot.roiRounded = roiRoundedToTileSize;
         slot.roi = roi;
-        textureRectangle.closestPo2 = tileRect.closestPo2;
-        textureRectangle.par = tileRect.par;
     }
 
-    if (!isPartialRect) {
+    if (!isPartialRect && tex) {
         if (isFirstTile) {
-            tex->ensureTextureHasSize(textureRectangle, ramBuffer);
+            tex->ensureTextureHasSize(textureRectangle, 0);
         }
-        // updateOnlyRoi=false uploads the whole texture from the engine bytes
-        // (they cover the FULL roi-rounded rectangle, exactly like the PBO
-        // path ViewerGL uses this API with).
-        tex->fillOrAllocateTexture(textureRectangle, roi, false, ramBuffer);
-        {
-            QMutexLocker k(&_slotsMutex);
-            _slots[textureIndex].texture = tex;
-        }
+        // The call's "roi" is the TILE's own rectangle: its bytes are uploaded
+        // into the tile-sized sub-rect of the big texture (updateOnlyRoi=true),
+        // exactly like ViewerGL's twin — the byte stride then matches the
+        // engine's per-tile buffer.
+        tex->fillOrAllocateTexture(textureRectangle, tileRect, true, ramBuffer);
     }
     *texture = tex;
 }
