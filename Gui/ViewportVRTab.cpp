@@ -901,9 +901,16 @@ ViewportVRTab::onFrameChanged(SequenceTime frame, int)
         _frameSpin->setValue((double)frame);
         _frameSpin->blockSignals(false);
     }
-    // Scrub = re-render at the new frame, exactly the 2D viewer's path.
+    // Scrub = re-render at the new frame — but NEVER while a render is already
+    // working: the engine advances the timeline itself during playback, and
+    // re-posting a canAbort render request per tick aborted the playback right
+    // after its first frame. When nothing is running (plain scrub), the posted
+    // request renders the new frame.
     if (_viewerNode) {
-        _viewerNode->renderCurrentFrame(true);
+        RenderEnginePtr engine = _viewerNode->getRenderEngine();
+        if ( engine && !engine->hasThreadsWorking() ) {
+            _viewerNode->renderCurrentFrame(true);
+        }
     }
 }
 
