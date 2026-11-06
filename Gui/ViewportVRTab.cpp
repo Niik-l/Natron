@@ -135,10 +135,6 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         connect(_fovSpin, SIGNAL(valueChanged(double)), this, SLOT(onFovChanged(double)));
         toolbarLayout->addWidget(_fovSpin);
     }
-    if (_viewport) {
-        // Wheel/reset FOV changes on the canvas mirror into the spin box.
-        connect(_viewport, SIGNAL(fovChanged(double)), this, SLOT(onViewportFovChanged(double)));
-    }
 
     // Recenter (the plus button in the viewer) — recenter + reset FOV.
     QToolButton* resetBtn = new QToolButton(toolbar);
@@ -541,7 +537,12 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         _lookRefreshTimer->setSingleShot(true);
         connect(_lookRefreshTimer, SIGNAL(timeout()), this, SLOT(onLookRefreshTimeout()));
         connect(_viewport, SIGNAL(lookChanged()), this, SLOT(onViewportLookChanged()));
-        _lastLookRefreshValid = false;    }
+        // Wheel/reset FOV changes on the canvas mirror into the spin box
+        // (placed after _viewport creation — the toolbar section runs before
+        // the widget exists).
+        connect(_viewport, SIGNAL(fovChanged(double)), this, SLOT(onViewportFovChanged(double)));
+        _lastLookRefreshValid = false;
+    }
 
     setFocusPolicy(Qt::ClickFocus);
 }
