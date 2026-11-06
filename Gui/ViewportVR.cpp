@@ -430,19 +430,40 @@ ViewportVR::drawVRImage()
     }
 
     // Compose the eye crop with the engine's rendered window (UV per slot).
+    // Half-texel inset per texture: the image edge inside the tile-rounded
+    // texture must land on the CENTER of its edge texel, otherwise GL_LINEAR
+    // at the image border blends the last/first texel with the padded
+    // garbage region around it — a thin vertical seam at the wrap line (and a
+    // zenith/nadir smear when the height is not a tile multiple).
     float uva0[2], uva1[2], uvb0[2], uvb1[2];
-    const float wa0 = (float)winA.x1, wa1 = (float)winA.x2;
-    const float wa0y = (float)winA.y1, wa1y = (float)winA.y2;
-    uva0[0] = wa0 + uv0[0] * (wa1 - wa0);
-    uva1[0] = wa0 + uv1[0] * (wa1 - wa0);
-    uva0[1] = wa0y + uv0[1] * (wa1y - wa0y);
-    uva1[1] = wa0y + uv1[1] * (wa1y - wa0y);
-    const float wb0 = (float)winB.x1, wb1 = (float)winB.x2;
-    const float wb0y = (float)winB.y1, wb1y = (float)winB.y2;
-    uvb0[0] = wb0 + uv0[0] * (wb1 - wb0);
-    uvb1[0] = wb0 + uv1[0] * (wb1 - wb0);
-    uvb0[1] = wb0y + uv0[1] * (wb1y - wb0y);
-    uvb1[1] = wb0y + uv1[1] * (wb1y - wb0y);
+    {
+        float wa0 = (float)winA.x1, wa1 = (float)winA.x2;
+        float wa0y = (float)winA.y1, wa1y = (float)winA.y2;
+        if (texA && (texA->getTextureRect().width() > 1) && (texA->getTextureRect().height() > 1)) {
+            const float ha = 0.5f * (float)winA.width() / (float)texA->getTextureRect().width();
+            const float va = 0.5f * (float)winA.height() / (float)texA->getTextureRect().height();
+            wa0 += ha; wa1 -= ha;
+            wa0y += va; wa1y -= va;
+        }
+        uva0[0] = wa0 + uv0[0] * (wa1 - wa0);
+        uva1[0] = wa0 + uv1[0] * (wa1 - wa0);
+        uva0[1] = wa0y + uv0[1] * (wa1y - wa0y);
+        uva1[1] = wa0y + uv1[1] * (wa1y - wa0y);
+    }
+    {
+        float wb0 = (float)winB.x1, wb1 = (float)winB.x2;
+        float wb0y = (float)winB.y1, wb1y = (float)winB.y2;
+        if (texB && (texB->getTextureRect().width() > 1) && (texB->getTextureRect().height() > 1)) {
+            const float hb = 0.5f * (float)winB.width() / (float)texB->getTextureRect().width();
+            const float vb = 0.5f * (float)winB.height() / (float)texB->getTextureRect().height();
+            wb0 += hb; wb1 -= hb;
+            wb0y += vb; wb1y -= vb;
+        }
+        uvb0[0] = wb0 + uv0[0] * (wb1 - wb0);
+        uvb1[0] = wb0 + uv1[0] * (wb1 - wb0);
+        uvb0[1] = wb0y + uv0[1] * (wb1y - wb0y);
+        uvb1[1] = wb0y + uv1[1] * (wb1y - wb0y);
+    }
 
     glUseProgram(_program);
 
