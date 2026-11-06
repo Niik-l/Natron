@@ -602,6 +602,10 @@ ViewportVR::getImageRectangleDisplayedRoundedToTileSize(int texIndex,
     const RectI bounds = rod.toPixelEnclosing(mipmapLevel, par);
     const RectI roi = getImageRectangleDisplayed(bounds, par, mipmapLevel);
 
+    if (roiNotRounded) {
+        *roiNotRounded = roi;
+    }
+
     int tileSizeLocal = ipow( 2, appPTR->getCurrentSettings()->getViewerTilesPowerOf2() );
     RectI texRect;
     texRect.x1 = (int)std::floor( ( (double)roi.x1 ) / tileSizeLocal ) * (double)tileSizeLocal;
@@ -609,16 +613,30 @@ ViewportVR::getImageRectangleDisplayedRoundedToTileSize(int texIndex,
     texRect.x2 = (int)std::ceil( ( (double)roi.x2 ) / tileSizeLocal ) * (double)tileSizeLocal;
     texRect.y2 = (int)std::ceil( ( (double)roi.y2 ) / tileSizeLocal ) * (double)tileSizeLocal;
 
-    if (roiNotRounded) {
-        *roiNotRounded = roi;
-    }
+    // CRITICAL contract: the engine sizes each cached tile's byte buffer to a
+    // full tileSize² (ViewereInstance.cpp "the internal buffer is rounded to
+    // the tile size anyway"), so the tiles handed out here MUST tile the viewer
+    // ROI at tileSize steps. One big tile made the engine allocate buffers for
+    // only a fraction of the pano (the black-chunk/blade artifact). Same loop
+    // as ViewerGL's twin.
     if (tilesRounded) {
-        // VR renders the ROI as a single tile: one transfer, no tile bookkeeping.
-        tilesRounded->push_back(texRect);
-        if (tiles) {
-            tiles->push_back(texRect.intersect(bounds));
+        for (int y = texRect.y1; y < texRect.y2; y += tileSizeLocal) {
+            int y2 = std::min(y + tileSizeLocal, texRect.y2);
+            for (int x = texRect.x1; x < texRect.x2; x += tileSizeLocal) {
+                tilesRounded->resize(tilesRounded->size() + 1);
+                RectI& tile = tilesRounded->back();
+                tile.x1 = x;
+                tile.x2 = std::min(x + tileSizeLocal, texRect.x2);
+                tile.y1 = y;
+                tile.y2 = y2;
+                assert( texRect.contains(tile) );
+                if (tiles) {
+                    tiles->push_back(tile.intersect(bounds)); // cacheable part
+                }
+            }
         }
     }
+
     if (tileSize) {
         *tileSize = tileSizeLocal;
     }
