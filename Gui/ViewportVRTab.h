@@ -29,6 +29,7 @@
 #include "Global/GlobalDefines.h"
 
 #include <QWidget>
+#include <map>
 
 #include "Gui/PanelWidget.h"
 #include "Gui/GuiFwd.h"
@@ -42,6 +43,8 @@ NATRON_NAMESPACE_ENTER
 
 class TimeLineGui;
 class ViewportVR;
+class ComboBox;
+class ScaleSliderQWidget;
 
 /**
  * @brief Wrapper panel for the VR / 360 viewport: the pane of a "Viewer VR"
@@ -115,9 +118,23 @@ public Q_SLOTS:
     /** Comparison operator dropdown (A/B ops, applied in the VR sampler). */
     void onCompareOperatorSelected();
 
-    /** Gain + gamma spins, wired to the viewer node's color pipeline. */
-    void onGainChanged(double gain);
-    void onGammaChanged(double gamma);
+    /** Input A/B selectors (the viewer's A:/B: comboboxes over the Inspector
+     *  node's unfolded inputs). */
+    void onInputChanged(int inputNb);
+    void onInputNameChanged(int inputNb, const QString& name);
+    void onFirstInputNameChanged(const QString& text);
+    void onSecondInputNameChanged(const QString& text);
+
+    /** Gain + gamma spins/sliders, wired to the viewer node's color pipeline.
+     *  The spins/sliders are in f-stops for gain (gain = 2^x); the toggle
+     *  buttons snap between neutral and the last used value. */
+    void onGainSpinChanged(double fstop);
+    void onGammaSpinChanged(double gamma);
+    void onGainToggled(bool on);
+    void onGammaToggled(bool on);
+
+    /** Playback mode button: loop / bounce / once (engine's setPlaybackMode). */
+    void onPlaybackModeClicked();
 
     /** Play/stop — the viewer's render engine (renderFromCurrentFrame), fps
      *  via setDesiredFPS, loop via the engine's playback mode. */
@@ -144,6 +161,12 @@ public Q_SLOTS:
 
     void onFrameChanged(SequenceTime frame, int reason);
 
+    /** Timeline in/out set-at-current-frame buttons (viewer player). */
+    void onPlaybackInButtonClicked();
+    void onPlaybackOutButtonClicked();
+    void onRangeInChanged(double value);
+    void onRangeOutChanged(double value);
+
 protected:
 
     virtual void keyPressEvent(QKeyEvent* e) OVERRIDE;
@@ -152,12 +175,23 @@ private:
 
     TimeLinePtr getTimeline() const;
     void refreshTransportState();
+    void refreshInputCombos();
 
     NodeWPtr _boundNode;
     ViewerInstancePtr _viewerNode;
 
     ViewportVR* _viewport;
     TimeLineGui* _timelineGui;
+
+    // input A/B selector state (ViewerTab's inputNamesMap equivalent):
+    // viewer input index -> node label; the InspectorNode unfolds inputs as
+    // they connect and the comboboxes pick the active A/B pair.
+    struct InputName
+    {
+        QString name;
+        NodeWPtr input;
+    };
+    std::map<int, InputName> _inputNamesMap;
 
     // top bar
     QToolButton* _channelsDropdown;
@@ -168,11 +202,24 @@ private:
     QToolButton* _roiBtn;
     QToolButton* _proxyBtn;
     QToolButton* _proxyScaleDropdown;
+    QLabel* _aLabel;
+    ComboBox* _aInput;
+    QLabel* _bLabel;
+    ComboBox* _bInput;
     QToolButton* _compareDropdown;
     QDoubleSpinBox* _gainSpin;
+    ScaleSliderQWidget* _gainSlider;
+    bool _gainOn;
+    double _lastFstop;
     QDoubleSpinBox* _gammaSpin;
+    ScaleSliderQWidget* _gammaSlider;
+    bool _gammaOn;
+    double _lastGamma;
     // bottom bar (transport)
     QToolButton* _playBtn;
+    QToolButton* _playModeBtn;
+    QToolButton* _setInBtn;
+    QToolButton* _setOutBtn;
     QTimer* _lookRefreshTimer;
     bool _lastLookRefreshValid;
     qint64 _userStoppedMs; //!< when Stop was last pressed (grace window vs queued renders)

@@ -40,16 +40,18 @@
 
 #include "Gui/Gui.h"
 #include "Gui/GuiAppInstance.h"
-#include "Gui/GuiAppInstance.h"
 #include "Gui/GuiApplicationManager.h"
+#include "Gui/Button.h"
+#include "Gui/ComboBox.h"
 #include "Gui/GuiDefines.h"
+#include "Gui/ScaleSliderQWidget.h"
 #include "Gui/TimeLineGui.h"
 #include "Gui/ViewportVR.h"
 #include "Engine/AppManager.h"
 #include "Engine/EffectInstance.h"
+#include "Engine/Node.h" // InspectorNode
 #include "Engine/TimeLine.h"
 #include "Engine/Project.h"
-#include "Engine/Node.h"
 #include "Engine/KnobTypes.h"
 #include "Engine/Node.h"
 #include "Engine/ViewerInstance.h"
@@ -63,6 +65,19 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
     , PanelWidget(this, gui)
     , _viewport(NULL)
     , _timelineGui(NULL)
+    , _aLabel(NULL)
+    , _aInput(NULL)
+    , _bLabel(NULL)
+    , _bInput(NULL)
+    , _gainSlider(NULL)
+    , _gainOn(false)
+    , _lastFstop(0.)
+    , _gammaSlider(NULL)
+    , _gammaOn(false)
+    , _lastGamma(1.)
+    , _playModeBtn(NULL)
+    , _setInBtn(NULL)
+    , _setOutBtn(NULL)
     , _proxyScaleActive(0)
     , _proxyActive(false)
 {
@@ -100,7 +115,8 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
             "Channels: RGB / Red / Green / Blue / Alpha / Luminance / Matte — the "
             "same display channels the 2D viewer offers, rendered by the viewer "
             "pipeline."));
-        _channelsDropdown->setFixedHeight(22);
+        _channelsDropdown->setFixedSize(btnSize);
+        _channelsDropdown->setIconSize(btnIconSize);
         _channelsDropdown->setPopupMode(QToolButton::InstantPopup);
         QMenu* menu = new QMenu(_channelsDropdown);
         const char* labels[7] = { "RGB", "Red", "Green", "Blue", "Alpha", "Luminance", "Matte" };
@@ -111,6 +127,22 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         }
         _channelsDropdown->setMenu(menu);
         toolbarLayout->addWidget(_channelsDropdown);
+    }
+
+    // ---- Input A selector (the viewer's "A:" combobox over the inspector ----
+    // ---- inputs) + comparison B selector + operator dropdown.          ----
+    {
+        _aLabel = new QLabel(QString::fromUtf8("A:"), toolbar);
+        _aLabel->setStyleSheet(QString::fromUtf8("color: rgb(150, 150, 150);"));
+        toolbarLayout->addWidget(_aLabel);
+        _aInput = new ComboBox(toolbar);
+        _aInput->addItem( QString::fromUtf8(" - ") );
+        _aInput->setMaximumWidthFromText( QString::fromUtf8("Transform1") );
+        _aInput->setToolTip(QString::fromUtf8(
+            "Input A: pick which node the VR viewport renders. The list fills "
+            "with the nodes connected to the Viewer VR node in the graph."));
+        QObject::connect( _aInput, SIGNAL(currentIndexChanged(QString)), this, SLOT(onFirstInputNameChanged(QString)) );
+        toolbarLayout->addWidget(_aInput);
     }
 
     QFrame* sep1 = new QFrame(toolbar);
@@ -136,9 +168,17 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         toolbarLayout->addWidget(_fovSpin);
     }
 
-    // Recenter (the plus button in the viewer) — recenter + reset FOV.
+    // Recenter (the viewer's center button) — recenter + reset FOV.
     QToolButton* resetBtn = new QToolButton(toolbar);
-    resetBtn->setText(QString::fromUtf8("+"));
+    {
+        QPixmap pixCenter;
+        appPTR->getIcon(NATRON_PIXMAP_VIEWER_CENTER, &pixCenter);
+        if ( !pixCenter.isNull() ) {
+            resetBtn->setIcon( QIcon(pixCenter) );
+        } else {
+            resetBtn->setText(QString::fromUtf8("+"));
+        }
+    }
     resetBtn->setToolTip(QString::fromUtf8("Recenter: look back at the pano center and reset the FOV"));
     resetBtn->setFixedSize(btnSize);
     resetBtn->setIconSize(btnIconSize);
@@ -168,13 +208,24 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
     // ---- ROI windowing toggle — VR form of the user ROI: render only the ----
     // ---- pano slice visible through the FOV.                          ----
     {
+        QPixmap pixRoiOn, pixRoiOff;
+        appPTR->getIcon(NATRON_PIXMAP_VIEWER_ROI_ENABLED, &pixRoiOn);
+        appPTR->getIcon(NATRON_PIXMAP_VIEWER_ROI_DISABLED, &pixRoiOff);
         _roiBtn = new QToolButton(toolbar);
-        _roiBtn->setText(QString::fromUtf8("ROI"));
+        if ( !pixRoiOn.isNull() ) {
+            QIcon icRoi;
+            icRoi.addPixmap(pixRoiOff, QIcon::Normal, QIcon::Off);
+            icRoi.addPixmap(pixRoiOn, QIcon::Normal, QIcon::On);
+            _roiBtn->setIcon(icRoi);
+        } else {
+            _roiBtn->setText(QString::fromUtf8("ROI"));
+        }
         _roiBtn->setToolTip(QString::fromUtf8(
             "Render only the slice of the panorama visible through the current "
             "FOV (like the 2D viewer's Region of Interest): much faster. Turn "
             "off to always render the whole panorama."));
-        _roiBtn->setFixedHeight(22);
+        _roiBtn->setFixedSize(btnSize);
+        _roiBtn->setIconSize(btnIconSize);
         _roiBtn->setCheckable(true);
         _roiBtn->setChecked(true);
         _roiBtn->setDown(true);
@@ -184,8 +235,18 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
 
     // ---- proxy group (viewer render-scale activate + scale combo) ---------
     {
+        QPixmap pixRs, pixRsChecked;
+        appPTR->getIcon(NATRON_PIXMAP_VIEWER_RENDER_SCALE, &pixRs);
+        appPTR->getIcon(NATRON_PIXMAP_VIEWER_RENDER_SCALE_CHECKED, &pixRsChecked);
         _proxyBtn = new QToolButton(toolbar);
-        _proxyBtn->setText(QString::fromUtf8("P"));
+        if ( !pixRs.isNull() ) {
+            QIcon icRs;
+            icRs.addPixmap(pixRs, QIcon::Normal, QIcon::Off);
+            icRs.addPixmap(pixRsChecked, QIcon::Normal, QIcon::On);
+            _proxyBtn->setIcon(icRs);
+        } else {
+            _proxyBtn->setText(QString::fromUtf8("P"));
+        }
         _proxyBtn->setToolTip(QString::fromUtf8("Proxy mode: renders at a downscale factor to accelerate the VR preview."));
         _proxyBtn->setFixedSize(btnSize);
         _proxyBtn->setIconSize(btnIconSize);
@@ -212,8 +273,20 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
 
     // ---- comparison (A/B) + operator — feeds the same viewer inputs -------
     {
+        QPixmap pixMerge;
+        appPTR->getIcon(NATRON_PIXMAP_MERGE_GROUPING, &pixMerge);
+        QLabel* opLabel = new QLabel(toolbar);
+        if ( !pixMerge.isNull() ) {
+            opLabel->setPixmap(pixMerge);
+        } else {
+            opLabel->setText(QString::fromUtf8("A/B"));
+        }
+        opLabel->setToolTip(QString::fromUtf8(
+            "Operation applied between the viewer inputs A and B."));
+        toolbarLayout->addWidget(opLabel);
+
         _compareDropdown = new QToolButton(toolbar);
-        _compareDropdown->setText(QString::fromUtf8("A/B"));
+        _compareDropdown->setText(QString::fromUtf8(" - "));
         _compareDropdown->setToolTip(QString::fromUtf8(
             "Comparison between inputs of the Viewer VR node: Difference / "
             "Minus / Onion-skin. The 2D viewer's A/B machinery renders both "
@@ -221,12 +294,18 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         _compareDropdown->setFixedHeight(22);
         _compareDropdown->setPopupMode(QToolButton::InstantPopup);
         QMenu* menu = new QMenu(_compareDropdown);
-        const char* opLabels[4] = { "A only", "B", "Difference/Minus", "Onion skin" };
-        const int ops[4] = { (int)eViewerCompositingOperatorNone,
+        const char* opLabels[9] = { " - ", "W-Under", "W-Over", "W-Minus", "W-OnionSkin",
+                                    "S-Under", "S-Over", "S-Minus", "S-OnionSkin" };
+        const int ops[9] = { (int)eViewerCompositingOperatorNone,
+                             (int)eViewerCompositingOperatorWipeUnder,
+                             (int)eViewerCompositingOperatorWipeOver,
+                             (int)eViewerCompositingOperatorWipeMinus,
+                             (int)eViewerCompositingOperatorWipeOnionSkin,
                              (int)eViewerCompositingOperatorStackUnder,
+                             (int)eViewerCompositingOperatorStackOver,
                              (int)eViewerCompositingOperatorStackMinus,
                              (int)eViewerCompositingOperatorStackOnionSkin };
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 9; ++i) {
             QAction* a = menu->addAction(QString::fromUtf8(opLabels[i]));
             a->setData(ops[i]);
             connect(a, SIGNAL(triggered()), this, SLOT(onCompareOperatorSelected()));
@@ -235,26 +314,83 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         toolbarLayout->addWidget(_compareDropdown);
     }
 
-    // ---- Gain / Gamma spins (the viewer's f-stop boxes, gain = 2^stops) ----
+    // ---- Input B selector (the viewer's "B:" combobox; feeds the compare) --
     {
-        QLabel* gainLabel = new QLabel(QString::fromUtf8("Gain"), toolbar);
-        gainLabel->setStyleSheet(QString::fromUtf8("color: rgb(150, 150, 150);"));
-        toolbarLayout->addWidget(gainLabel);
+        _bLabel = new QLabel(QString::fromUtf8("B:"), toolbar);
+        _bLabel->setStyleSheet(QString::fromUtf8("color: rgb(150, 150, 150);"));
+        toolbarLayout->addWidget(_bLabel);
+        _bInput = new ComboBox(toolbar);
+        _bInput->addItem( QString::fromUtf8(" - ") );
+        _bInput->setMaximumWidthFromText( QString::fromUtf8("Transform1") );
+        _bInput->setEnabled_natron(false);
+        _bInput->setToolTip(QString::fromUtf8(
+            "Input B: the second image for the A/B comparison (enabled once a "
+            "comparison operator is picked)."));
+        QObject::connect( _bInput, SIGNAL(currentIndexChanged(QString)), this, SLOT(onSecondInputNameChanged(QString)) );
+        toolbarLayout->addWidget(_bInput);
+    }
+
+    // ---- Gain / Gamma (the viewer's f-stop boxes + scale sliders) ----------
+    {
+        QPixmap pixGainOn, pixGainOff;
+        appPTR->getIcon(NATRON_PIXMAP_VIEWER_GAIN_ENABLED, &pixGainOn);
+        appPTR->getIcon(NATRON_PIXMAP_VIEWER_GAIN_DISABLED, &pixGainOff);
+        QToolButton* gainToggle = new QToolButton(toolbar);
+        if ( !pixGainOn.isNull() ) {
+            QIcon icGain;
+            icGain.addPixmap(pixGainOff, QIcon::Normal, QIcon::Off);
+            icGain.addPixmap(pixGainOn, QIcon::Normal, QIcon::On);
+            gainToggle->setIcon(icGain);
+        } else {
+            gainToggle->setText(QString::fromUtf8("G"));
+        }
+        gainToggle->setCheckable(true);
+        gainToggle->setChecked(false);
+        gainToggle->setFixedSize(btnSize);
+        gainToggle->setIconSize(btnIconSize);
+        gainToggle->setToolTip(QString::fromUtf8("Gain: switch between the neutral gain (1.0) and the last value used. The spin/slider are in f-stops (gain = 2^x)."));
+        connect(gainToggle, SIGNAL(toggled(bool)), this, SLOT(onGainToggled(bool)));
+        toolbarLayout->addWidget(gainToggle);
+
         _gainSpin = new QDoubleSpinBox(toolbar);
-        _gainSpin->setRange(0.01, 64.);
+        _gainSpin->setRange(-6., 6.);
         _gainSpin->setSingleStep(0.25);
         _gainSpin->setDecimals(2);
-        _gainSpin->setValue(1.0);
+        _gainSpin->setValue(0.);
         _gainSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
         _gainSpin->setFixedWidth(56);
         _gainSpin->setFixedHeight(22);
-        _gainSpin->setToolTip(QString::fromUtf8("Viewer gain (multiplies colors before the display transform; the 2D viewer spells it in f-stops)."));
-        connect(_gainSpin, SIGNAL(valueChanged(double)), this, SLOT(onGainChanged(double)));
+        _gainSpin->setToolTip(QString::fromUtf8("Viewer gain in f-stops (gain = 2^x)."));
+        connect(_gainSpin, SIGNAL(valueChanged(double)), this, SLOT(onGainSpinChanged(double)));
         toolbarLayout->addWidget(_gainSpin);
 
-        QLabel* gammaLabel = new QLabel(QString::fromUtf8("Gamma"), toolbar);
-        gammaLabel->setStyleSheet(QString::fromUtf8("color: rgb(150, 150, 150);"));
-        toolbarLayout->addWidget(gammaLabel);
+        _gainSlider = new ScaleSliderQWidget(-6., 6., 0., false, ScaleSliderQWidget::eDataTypeDouble, gui, eScaleTypeLinear, toolbar);
+        _gainSlider->setMinimumHeight(22);
+        _gainSlider->setMaximumWidth(110);
+        _gainSlider->setToolTip(QString::fromUtf8("Viewer gain in f-stops (drag; gain = 2^x)."));
+        QObject::connect( _gainSlider, SIGNAL(positionChanged(double)), this, SLOT(onGainSpinChanged(double)) );
+        toolbarLayout->addWidget(_gainSlider);
+
+        QPixmap pixGammaOn, pixGammaOff;
+        appPTR->getIcon(NATRON_PIXMAP_VIEWER_GAMMA_ENABLED, &pixGammaOn);
+        appPTR->getIcon(NATRON_PIXMAP_VIEWER_GAMMA_DISABLED, &pixGammaOff);
+        QToolButton* gammaToggle = new QToolButton(toolbar);
+        if ( !pixGammaOn.isNull() ) {
+            QIcon icGamma;
+            icGamma.addPixmap(pixGammaOff, QIcon::Normal, QIcon::Off);
+            icGamma.addPixmap(pixGammaOn, QIcon::Normal, QIcon::On);
+            gammaToggle->setIcon(icGamma);
+        } else {
+            gammaToggle->setText(QString::fromUtf8("γ"));
+        }
+        gammaToggle->setCheckable(true);
+        gammaToggle->setChecked(false);
+        gammaToggle->setFixedSize(btnSize);
+        gammaToggle->setIconSize(btnIconSize);
+        gammaToggle->setToolTip(QString::fromUtf8("Gamma: switch between the neutral gamma (1.0) and the last value used."));
+        connect(gammaToggle, SIGNAL(toggled(bool)), this, SLOT(onGammaToggled(bool)));
+        toolbarLayout->addWidget(gammaToggle);
+
         _gammaSpin = new QDoubleSpinBox(toolbar);
         _gammaSpin->setRange(0.05, 10.);
         _gammaSpin->setSingleStep(0.05);
@@ -264,8 +400,15 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         _gammaSpin->setFixedWidth(56);
         _gammaSpin->setFixedHeight(22);
         _gammaSpin->setToolTip(QString::fromUtf8("Viewer gamma (the 2D viewer's Gamma)."));
-        connect(_gammaSpin, SIGNAL(valueChanged(double)), this, SLOT(onGammaChanged(double)));
+        connect(_gammaSpin, SIGNAL(valueChanged(double)), this, SLOT(onGammaSpinChanged(double)));
         toolbarLayout->addWidget(_gammaSpin);
+
+        _gammaSlider = new ScaleSliderQWidget(0., 4., 1., false, ScaleSliderQWidget::eDataTypeDouble, gui, eScaleTypeLinear, toolbar);
+        _gammaSlider->setMinimumHeight(22);
+        _gammaSlider->setMaximumWidth(110);
+        _gammaSlider->setToolTip(QString::fromUtf8("Viewer gamma (drag)."));
+        QObject::connect( _gammaSlider, SIGNAL(positionChanged(double)), this, SLOT(onGammaSpinChanged(double)) );
+        toolbarLayout->addWidget(_gammaSlider);
     }
 
     // ---- VR-specific: stereo packing + eye (VR settings group) ------------
@@ -335,6 +478,23 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         playerLayout->setSpacing(4);
 
         // Playback in-point spin (bottom-left of the viewer's player bar)
+        _setInBtn = new QToolButton(playerBar);
+        {
+            QPixmap pixIn;
+            appPTR->getIcon(NATRON_PIXMAP_PLAYER_TIMELINE_IN, &pixIn);
+            if ( !pixIn.isNull() ) {
+                _setInBtn->setIcon( QIcon(pixIn) );
+            } else {
+                _setInBtn->setText(QString::fromUtf8("["));
+            }
+        }
+        _setInBtn->setFocusPolicy(Qt::NoFocus);
+        _setInBtn->setFixedSize(btnSize);
+        _setInBtn->setIconSize(btnIconSize);
+        _setInBtn->setToolTip(QString::fromUtf8("Set the playback in point at the current frame"));
+        connect(_setInBtn, SIGNAL(clicked()), this, SLOT(onPlaybackInButtonClicked()));
+        playerLayout->addWidget(_setInBtn);
+
         _rangeIn = new QDoubleSpinBox(playerBar);
         _rangeIn->setRange(std::numeric_limits<double>::min(), std::numeric_limits<double>::max());
         _rangeIn->setDecimals(0);
@@ -456,7 +616,7 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
 
         QLabel* incrLabel = new QLabel(QString::fromUtf8("5"), playerBar);
         incrLabel->setStyleSheet(QString::fromUtf8("color: rgb(150, 150, 150);"));
-        incrLabel->setToolTip(QString::fromUtf8("Increment step (fixed 5 in the first cut; editable increment arrives with the 2D-viewer toolbar parity pass)"));
+        incrLabel->setToolTip(QString::fromUtf8("Increment step (fixed 5 in the VR pane; the 2D viewer's player has the editable increment)."));
         playerLayout->addWidget(incrLabel);
 
         QToolButton* incrNext = new QToolButton(playerBar);
@@ -489,6 +649,41 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         _rangeOut->setToolTip(QString::fromUtf8("Playback last frame (out point)"));
         playerLayout->addWidget(_rangeOut);
 
+        _setOutBtn = new QToolButton(playerBar);
+        {
+            QPixmap pixOut;
+            appPTR->getIcon(NATRON_PIXMAP_PLAYER_TIMELINE_OUT, &pixOut);
+            if ( !pixOut.isNull() ) {
+                _setOutBtn->setIcon( QIcon(pixOut) );
+            } else {
+                _setOutBtn->setText(QString::fromUtf8("]"));
+            }
+        }
+        _setOutBtn->setFocusPolicy(Qt::NoFocus);
+        _setOutBtn->setFixedSize(btnSize);
+        _setOutBtn->setIconSize(btnIconSize);
+        _setOutBtn->setToolTip(QString::fromUtf8("Set the playback out point at the current frame"));
+        connect(_setOutBtn, SIGNAL(clicked()), this, SLOT(onPlaybackOutButtonClicked()));
+        playerLayout->addWidget(_setOutBtn);
+
+        // Playback mode: loop / bounce / once (engine's setPlaybackMode).
+        _playModeBtn = new QToolButton(playerBar);
+        {
+            QPixmap pixLoop;
+            appPTR->getIcon(NATRON_PIXMAP_PLAYER_LOOP_MODE, &pixLoop);
+            if ( !pixLoop.isNull() ) {
+                _playModeBtn->setIcon( QIcon(pixLoop) );
+            } else {
+                _playModeBtn->setText(QString::fromUtf8("L"));
+            }
+        }
+        _playModeBtn->setFocusPolicy(Qt::NoFocus);
+        _playModeBtn->setFixedSize(btnSize);
+        _playModeBtn->setIconSize(btnIconSize);
+        _playModeBtn->setToolTip(QString::fromUtf8("Behaviour when the playback hits the end of the range: loop / bounce / stop."));
+        connect(_playModeBtn, SIGNAL(clicked()), this, SLOT(onPlaybackModeClicked()));
+        playerLayout->addWidget(_playModeBtn);
+
         playerLayout->addStretch();
         mainLayout->addWidget(playerBar);
     }
@@ -516,10 +711,14 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
                 _viewport->setVRPlaybackRange( (int)firstFrame, (int)lastFrame );
             }
             if (_rangeIn) {
+                _rangeIn->blockSignals(true);
                 _rangeIn->setValue( (double)firstFrame );
+                _rangeIn->blockSignals(false);
             }
             if (_rangeOut) {
+                _rangeOut->blockSignals(true);
                 _rangeOut->setValue( (double)lastFrame );
+                _rangeOut->blockSignals(false);
             }
         }
     }
@@ -529,6 +728,16 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         RenderEnginePtr engine = _viewerNode->getRenderEngine();
         connect( engine.get(), SIGNAL(renderFinished(int)), this, SLOT(onEngineStopped(int)) );
         connect( engine.get(), SIGNAL(renderStarted(bool)), this, SLOT(onEngineStarted(bool)) );
+
+        // Graph edits on the Viewer VR node (inputs connect/disconnect) refill
+        // the A/B comboboxes — the same wiring ViewerTab uses for its A:/B:
+        // selectors.
+        NodePtr wrapper = _viewerNode->getNode();
+        if (wrapper) {
+            QObject::connect( wrapper.get(), SIGNAL(inputChanged(int)), this, SLOT(onInputChanged(int)) );
+            QObject::connect( wrapper.get(), SIGNAL(inputLabelChanged(int,QString)), this, SLOT(onInputNameChanged(int,QString)) );
+            refreshInputCombos();
+        }
 
         // After look changes: schedule one cheap re-render — completes any tile
         // an aborted render pass left out (full-pano renders don't depend on
@@ -542,6 +751,15 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         // the widget exists).
         connect(_viewport, SIGNAL(fovChanged(double)), this, SLOT(onViewportFovChanged(double)));
         _lastLookRefreshValid = false;
+    }
+
+    // In/out spinboxes drive the timeline boundaries (the engine reads them
+    // back through getViewerFrameRange at playback start).
+    if (_rangeIn) {
+        QObject::connect( _rangeIn, SIGNAL(valueChanged(double)), this, SLOT(onRangeInChanged(double)) );
+    }
+    if (_rangeOut) {
+        QObject::connect( _rangeOut, SIGNAL(valueChanged(double)), this, SLOT(onRangeOutChanged(double)) );
     }
 
     setFocusPolicy(Qt::ClickFocus);
@@ -572,7 +790,241 @@ ViewportVRTab::onDisplayChannelsSelected()
     case eDisplayChannelsY:   label = QString::fromUtf8("Luminance"); break;
     case eDisplayChannelsMatte: label = QString::fromUtf8("Matte"); break;
     }
-    _channelsDropdown->setText(label);
+    if (_channelsDropdown) {
+        _channelsDropdown->setText(label);
+    }
+}
+
+// ==================== slots: input A/B selectors ====================
+
+void
+ViewportVRTab::refreshInputCombos()
+{
+    // Rebuild the A/B comboboxes from the InspectorNode's connected inputs,
+    // preserving the current selection (ViewerTab's inputNamesMap model).
+    if (!_viewerNode) {
+        return;
+    }
+    NodePtr wrapper = _viewerNode->getNode();
+    if (!wrapper) {
+        return;
+    }
+    const std::vector<NodeWPtr>& inputs = wrapper->getGuiInputs();
+
+    // remember current selections by input index
+    int curA = -1, curB = -1;
+    {
+        const InspectorNode* inspector = dynamic_cast<const InspectorNode*>(wrapper.get());
+        if (inspector) {
+            inspector->getActiveInputs(curA, curB);
+        }
+    }
+
+    _inputNamesMap.clear();
+    if (_aInput) {
+        _aInput->blockSignals(true);
+        _aInput->clear();
+        _aInput->addItem( QString::fromUtf8(" - ") );
+    }
+    if (_bInput) {
+        _bInput->blockSignals(true);
+        _bInput->clear();
+        _bInput->addItem( QString::fromUtf8(" - ") );
+    }
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        NodePtr inp = inputs[i].lock();
+        if (!inp) {
+            continue;
+        }
+        InputName entry;
+        entry.input = inp;
+        entry.name = QString::fromUtf8( inp->getLabel().c_str() );
+        _inputNamesMap.insert( std::make_pair( (int)i, entry ) );
+        if (_aInput) {
+            _aInput->addItem(entry.name);
+        }
+        if (_bInput) {
+            _bInput->addItem(entry.name);
+        }
+    }
+
+    // select the engine's active inputs
+    if ( (curA != -1) && _aInput) {
+        std::map<int, InputName>::const_iterator found = _inputNamesMap.find(curA);
+        if ( found != _inputNamesMap.end() ) {
+            const int idx = _aInput->itemIndex(found->second.name);
+            if (idx != -1) {
+                _aInput->setCurrentIndex_no_emit(idx);
+            }
+        }
+    } else if (_aInput) {
+        // no A: fall back to the first connected input
+        for (std::map<int, InputName>::const_iterator it = _inputNamesMap.begin(); it != _inputNamesMap.end(); ++it) {
+            const int idx = _aInput->itemIndex(it->second.name);
+            if (idx != -1) {
+                _aInput->setCurrentIndex_no_emit(idx);
+            }
+            break;
+        }
+    }
+    if ( (curB != -1) && _bInput) {
+        std::map<int, InputName>::const_iterator found = _inputNamesMap.find(curB);
+        if ( found != _inputNamesMap.end() ) {
+            const int idx = _bInput->itemIndex(found->second.name);
+            if (idx != -1) {
+                _bInput->setCurrentIndex_no_emit(idx);
+            }
+        }
+    }
+    if (_aInput) {
+        _aInput->blockSignals(false);
+    }
+    if (_bInput) {
+        _bInput->blockSignals(false);
+    }
+}
+
+void
+ViewportVRTab::onInputChanged(int inputNb)
+{
+    // A node connected/disconnected on the Viewer VR node in the graph: rebuild
+    // the combobox entries (same as ViewerTab::onInputChanged).
+    if (!_viewerNode) {
+        return;
+    }
+    NodePtr wrapper = _viewerNode->getNode();
+    if (!wrapper) {
+        return;
+    }
+    const std::vector<NodeWPtr>& inputs = wrapper->getGuiInputs();
+    NodePtr inp;
+    if ( (inputNb >= 0) && ( inputNb < (int)inputs.size() ) ) {
+        inp = inputs[inputNb].lock();
+    }
+
+    if (inp) {
+        std::map<int, InputName>::iterator found = _inputNamesMap.find(inputNb);
+        if ( found != _inputNamesMap.end() ) {
+            found->second.input = inp;
+            found->second.name = QString::fromUtf8( inp->getLabel().c_str() );
+            if (_aInput) {
+                const int idx = _aInput->itemIndex(found->second.name);
+                if (idx != -1) {
+                    _aInput->setItemText(idx, found->second.name);
+                }
+            }
+            if (_bInput) {
+                const int idx = _bInput->itemIndex(found->second.name);
+                if (idx != -1) {
+                    _bInput->setItemText(idx, found->second.name);
+                }
+            }
+        } else {
+            InputName entry;
+            entry.input = inp;
+            entry.name = QString::fromUtf8( inp->getLabel().c_str() );
+            _inputNamesMap.insert( std::make_pair(inputNb, entry) );
+            if (_aInput) {
+                _aInput->addItem(entry.name);
+            }
+            if (_bInput) {
+                _bInput->addItem(entry.name);
+            }
+            // First connected input auto-selects as A and starts a render.
+            InspectorNode* inspector = dynamic_cast<InspectorNode*>(wrapper.get());
+            int a = -1, b = -1;
+            if (inspector) {
+                inspector->getActiveInputs(a, b);
+            }
+            if ( (a == -1) && _aInput ) {
+                const int idx = _aInput->itemIndex(entry.name);
+                if (idx != -1) {
+                    _aInput->setCurrentIndex(idx); // emits onFirstInputNameChanged
+                }
+            }
+        }
+    } else {
+        std::map<int, InputName>::iterator found = _inputNamesMap.find(inputNb);
+        if ( found != _inputNamesMap.end() ) {
+            if (_aInput) {
+                _aInput->blockSignals(true);
+                _aInput->removeItem(found->second.name);
+                _aInput->blockSignals(false);
+            }
+            if (_bInput) {
+                _bInput->blockSignals(true);
+                _bInput->removeItem(found->second.name);
+                _bInput->blockSignals(false);
+            }
+            _inputNamesMap.erase(found);
+        }
+    }
+}
+
+void
+ViewportVRTab::onInputNameChanged(int inputNb, const QString& name)
+{
+    std::map<int, InputName>::iterator found = _inputNamesMap.find(inputNb);
+
+    if ( found == _inputNamesMap.end() ) {
+        return;
+    }
+    if (_aInput) {
+        const int idx = _aInput->itemIndex(found->second.name);
+        if (idx != -1) {
+            _aInput->setItemText(idx, name);
+        }
+    }
+    if (_bInput) {
+        const int idx = _bInput->itemIndex(found->second.name);
+        if (idx != -1) {
+            _bInput->setItemText(idx, name);
+        }
+    }
+    found->second.name = name;
+}
+
+void
+ViewportVRTab::onFirstInputNameChanged(const QString& text)
+{
+    if (!_viewerNode) {
+        return;
+    }
+    int inputIndex = -1;
+    for (std::map<int, InputName>::iterator it = _inputNamesMap.begin(); it != _inputNamesMap.end(); ++it) {
+        if (it->second.name == text) {
+            inputIndex = it->first;
+            break;
+        }
+    }
+    _viewerNode->setInputA(inputIndex);
+    // A real input change must refresh: the previous frame came from another node.
+    if (inputIndex != -1) {
+        _viewerNode->forceFullComputationOnNextFrame();
+        _viewerNode->renderCurrentFrame(true);
+    } else if (_viewport) {
+        _viewport->clearVRTextures();
+    }
+}
+
+void
+ViewportVRTab::onSecondInputNameChanged(const QString& text)
+{
+    if (!_viewerNode) {
+        return;
+    }
+    int inputIndex = -1;
+    for (std::map<int, InputName>::iterator it = _inputNamesMap.begin(); it != _inputNamesMap.end(); ++it) {
+        if (it->second.name == text) {
+            inputIndex = it->first;
+            break;
+        }
+    }
+    _viewerNode->setInputB(inputIndex);
+    if (inputIndex != -1) {
+        _viewerNode->forceFullComputationOnNextFrame();
+        _viewerNode->renderCurrentFrame(true);
+    }
 }
 
 void
@@ -632,9 +1084,6 @@ ViewportVRTab::onResetView()
 {
     if (_viewport) {
         _viewport->resetLook();
-        if (_fovSpin) {
-            _fovSpin->setValue(70.);
-        }
     }
 }
 
@@ -698,33 +1147,135 @@ ViewportVRTab::onCompareOperatorSelected()
     // The engine reads getCompositingOperator() off the uiContext (our
     // ViewportVR), so the B input renders only when an op is active — same
     // mechanism as the 2D viewer's compare.
+    if (_bInput) {
+        _bInput->setEnabled_natron(op != eViewerCompositingOperatorNone);
+    }
     QString label;
     switch (op) {
-    case eViewerCompositingOperatorNone: label = QString::fromUtf8("A/B"); break;
-    case eViewerCompositingOperatorStackUnder: label = QString::fromUtf8("B"); break;
-    case eViewerCompositingOperatorStackMinus: label = QString::fromUtf8("Diff"); break;
-    case eViewerCompositingOperatorStackOnionSkin: label = QString::fromUtf8("Onion"); break;
-    case eViewerCompositingOperatorWipeUnder: label = QString::fromUtf8("B"); break;
-    case eViewerCompositingOperatorWipeMinus: label = QString::fromUtf8("Diff"); break;
-    case eViewerCompositingOperatorWipeOnionSkin: label = QString::fromUtf8("Onion"); break;
-    default: label = QString::fromUtf8("A/B"); break;
+    case eViewerCompositingOperatorNone: label = QString::fromUtf8(" - "); break;
+    case eViewerCompositingOperatorStackUnder: label = QString::fromUtf8("S-Under"); break;
+    case eViewerCompositingOperatorStackMinus: label = QString::fromUtf8("S-Minus"); break;
+    case eViewerCompositingOperatorStackOnionSkin: label = QString::fromUtf8("S-OnionSkin"); break;
+    case eViewerCompositingOperatorWipeUnder: label = QString::fromUtf8("W-Under"); break;
+    case eViewerCompositingOperatorWipeOver: label = QString::fromUtf8("W-Over"); break;
+    case eViewerCompositingOperatorWipeMinus: label = QString::fromUtf8("W-Minus"); break;
+    case eViewerCompositingOperatorWipeOnionSkin: label = QString::fromUtf8("W-OnionSkin"); break;
+    default: label = QString::fromUtf8(" - "); break;
     }
-    _compareDropdown->setText(label);
+    if (_compareDropdown) {
+        _compareDropdown->setText(label);
+    }
 }
 
 void
-ViewportVRTab::onGainChanged(double gain)
+ViewportVRTab::onGainSpinChanged(double fstop)
 {
+    // Sliders/spin drive the same value; keep them + the toggle in sync.
+    _lastFstop = fstop;
+    if (!_gainOn) {
+        _gainOn = true;
+    }
+    if (_gainSpin && (_gainSpin->value() != fstop)) {
+        _gainSpin->blockSignals(true);
+        _gainSpin->setValue(fstop);
+        _gainSpin->blockSignals(false);
+    }
+    if (_gainSlider) {
+        _gainSlider->seekScalePosition(fstop);
+    }
     if (_viewerNode) {
-        _viewerNode->onGainChanged(gain);
+        _viewerNode->onGainChanged( std::pow(2., fstop) );
     }
 }
 
 void
-ViewportVRTab::onGammaChanged(double gamma)
+ViewportVRTab::onGammaSpinChanged(double gamma)
 {
+    _lastGamma = gamma;
+    if (!_gammaOn) {
+        _gammaOn = true;
+    }
+    if (_gammaSpin && (_gammaSpin->value() != gamma)) {
+        _gammaSpin->blockSignals(true);
+        _gammaSpin->setValue(gamma);
+        _gammaSpin->blockSignals(false);
+    }
+    if (_gammaSlider) {
+        _gammaSlider->seekScalePosition(gamma);
+    }
     if (_viewerNode) {
         _viewerNode->onGammaChanged(gamma);
+    }
+}
+
+void
+ViewportVRTab::onGainToggled(bool on)
+{
+    // The viewer's f-stop toggle: off = neutral gain (1.0), on = last value.
+    _gainOn = on;
+    const double fstop = on ? _lastFstop : 0.;
+    if (_gainSpin) {
+        _gainSpin->blockSignals(true);
+        _gainSpin->setValue(fstop);
+        _gainSpin->blockSignals(false);
+    }
+    if (_gainSlider) {
+        _gainSlider->seekScalePosition(fstop);
+    }
+    if (_viewerNode) {
+        _viewerNode->onGainChanged( std::pow(2., fstop) );
+    }
+}
+
+void
+ViewportVRTab::onGammaToggled(bool on)
+{
+    // The viewer's gamma toggle: off = 1.0, on = last value.
+    _gammaOn = on;
+    const double gamma = on ? _lastGamma : 1.;
+    if (_gammaSpin) {
+        _gammaSpin->blockSignals(true);
+        _gammaSpin->setValue(gamma);
+        _gammaSpin->blockSignals(false);
+    }
+    if (_gammaSlider) {
+        _gammaSlider->seekScalePosition(gamma);
+    }
+    if (_viewerNode) {
+        _viewerNode->onGammaChanged(gamma);
+    }
+}
+
+void
+ViewportVRTab::onPlaybackModeClicked()
+{
+    if (!_viewerNode) {
+        return;
+    }
+    // Cycle loop -> bounce -> once, like the 2D viewer's playback-mode button.
+    RenderEnginePtr engine = _viewerNode->getRenderEngine();
+    if (!engine) {
+        return;
+    }
+    PlaybackModeEnum mode = engine->getPlaybackMode();
+    mode = (PlaybackModeEnum)( ( (int)mode + 1 ) % 3 );
+    engine->setPlaybackMode(mode);
+    QPixmap pix;
+    switch (mode) {
+    case ePlaybackModeLoop:
+        appPTR->getIcon(NATRON_PIXMAP_PLAYER_LOOP_MODE, &pix);
+        break;
+    case ePlaybackModeBounce:
+        appPTR->getIcon(NATRON_PIXMAP_PLAYER_BOUNCE, &pix);
+        break;
+    case ePlaybackModeOnce:
+        appPTR->getIcon(NATRON_PIXMAP_PLAYER_PLAY_ONCE, &pix);
+        break;
+    default:
+        break;
+    }
+    if (_playModeBtn && !pix.isNull()) {
+        _playModeBtn->setIcon( QIcon(pix) );
     }
 }
 
@@ -761,10 +1312,14 @@ ViewportVRTab::refreshTransportState()
         _viewport->setVRPlaybackRange( (int)firstFrame, (int)lastFrame );
     }
     if (_rangeIn) {
+        _rangeIn->blockSignals(true);
         _rangeIn->setValue( firstFrame );
+        _rangeIn->blockSignals(false);
     }
     if (_rangeOut) {
+        _rangeOut->blockSignals(true);
         _rangeOut->setValue( lastFrame );
+        _rangeOut->blockSignals(false);
     }
 }
 
@@ -783,6 +1338,58 @@ ViewportVRTab::onSeekLast()
     TimeLinePtr timeline = getTimeline();
     if (timeline && _rangeOut) {
         timeline->seekFrame( (SequenceTime)_rangeOut->value(), true, NULL, eTimelineChangeReasonUserSeek );
+    }
+}
+
+void
+ViewportVRTab::onPlaybackInButtonClicked()
+{
+    // Set the in point at the current frame (the viewer's [ button).
+    TimeLinePtr timeline = getTimeline();
+    if (!timeline || !_rangeIn || !_rangeOut) {
+        return;
+    }
+    double in = (double)timeline->currentFrame();
+    if (in > _rangeOut->value()) {
+        in = _rangeOut->value();
+    }
+    _rangeIn->setValue(in); // onRangeInChanged propagates to viewport + timeline
+}
+
+void
+ViewportVRTab::onPlaybackOutButtonClicked()
+{
+    // Set the out point at the current frame (the viewer's ] button).
+    TimeLinePtr timeline = getTimeline();
+    if (!timeline || !_rangeIn || !_rangeOut) {
+        return;
+    }
+    double out = (double)timeline->currentFrame();
+    if (out < _rangeIn->value()) {
+        out = _rangeIn->value();
+    }
+    _rangeOut->setValue(out); // onRangeOutChanged propagates to viewport + timeline
+}
+
+void
+ViewportVRTab::onRangeInChanged(double value)
+{
+    if (_viewport && _rangeOut) {
+        _viewport->setVRPlaybackRange( (int)value, (int)_rangeOut->value() );
+    }
+    if (_timelineGui && _rangeOut) {
+        _timelineGui->setBoundaries( (SequenceTime)value, (SequenceTime)_rangeOut->value() );
+    }
+}
+
+void
+ViewportVRTab::onRangeOutChanged(double value)
+{
+    if (_viewport && _rangeIn) {
+        _viewport->setVRPlaybackRange( (int)_rangeIn->value(), (int)value );
+    }
+    if (_timelineGui && _rangeIn) {
+        _timelineGui->setBoundaries( (SequenceTime)_rangeIn->value(), (SequenceTime)value );
     }
 }
 
@@ -959,3 +1566,4 @@ ViewportVRTab::onForceRefresh()
 }
 
 NATRON_NAMESPACE_EXIT
+
