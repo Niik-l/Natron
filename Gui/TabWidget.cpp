@@ -784,11 +784,21 @@ TabWidget::newViewport3DHere()
 void
 TabWidget::newViewportVRHere()
 {
-    ViewportVRTab* v = _imp->gui->addNewViewportVR();
+    // Same as "New viewer": create a VR Viewer node in the graph; the
+    // createNodeGui hook opens the VR viewport pane bound to it, placed in
+    // this pane via the next-viewer anchor.
+    _imp->gui->setNextViewerAnchor(this);
 
-    appendTab(v, v);
-
-    _imp->gui->getApp()->triggerAutoSave();
+    NodeGraph* lastFocusedGraph = _imp->gui->getLastSelectedGraph();
+    NodeGraph* graph = lastFocusedGraph ? lastFocusedGraph : _imp->gui->getNodeGraph();
+    if (!graph) {
+        graph = _imp->gui->getNodeGraph();
+    }
+    if (!graph) {
+        return;
+    }
+    CreateNodeArgs args(PLUGINID_NATRON_VRVIEWER, graph->getGroup() );
+    _imp->gui->getApp()->createNode(args);
 }
 
 /*Get the header name of the tab at index "index".*/

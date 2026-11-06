@@ -100,6 +100,10 @@ public:
 
     void createViewerGui(NodePtr viewer);
 
+    /** A VR Viewer node was created: open a VR viewport pane bound to it
+     *  (the VR counterpart of createViewerGui). */
+    void createVRViewerGui(NodePtr node);
+
     void createGroupGui(const NodePtr& group, const CreateNodeArgs& args);
 
     void addGroupGui(NodeGraph* tab, TabWidget* where);

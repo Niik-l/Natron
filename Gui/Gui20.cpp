@@ -77,7 +77,7 @@
 
 #include <SequenceParsing.h> // for removePath
 
-#define NAMED_PLUGIN_GROUP_NO 15
+#define NAMED_PLUGIN_GROUP_NO 16
 
 #define PLUGIN_GROUP_DEFAULT_ICON_PATH NATRON_IMAGES_PATH "GroupingIcons/Set" NATRON_ICON_SET_NUMBER "/other_grouping_" NATRON_ICON_SET_NUMBER ".png"
 
@@ -97,6 +97,7 @@ static std::string namedGroupsOrdered[NAMED_PLUGIN_GROUP_NO] = {
     PLUGIN_GROUP_3D,
     PLUGIN_GROUP_DEEP,
     PLUGIN_GROUP_MULTIVIEW,
+    PLUGIN_GROUP_VR,
     PLUGIN_GROUP_TOOLSETS,
     PLUGIN_GROUP_OTHER,
     PLUGIN_GROUP_DEFAULT
@@ -135,6 +136,8 @@ getPixmapForGrouping(QPixmap* pixmap,
         e = NATRON_PIXMAP_DEEP_GROUPING;
     } else if ( grouping == QString::fromUtf8(PLUGIN_GROUP_MULTIVIEW) ) {
         e = NATRON_PIXMAP_MULTIVIEW_GROUPING;
+    } else if ( grouping == QString::fromUtf8(PLUGIN_GROUP_VR) ) {
+        e = NATRON_PIXMAP_VR_GROUPING;
     } else if ( grouping == QString::fromUtf8(PLUGIN_GROUP_TOOLSETS) ) {
         e = NATRON_PIXMAP_TOOLSETS_GROUPING;
     } else if ( grouping == QString::fromUtf8(PLUGIN_GROUP_OTHER) ) {

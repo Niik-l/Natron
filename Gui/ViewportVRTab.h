@@ -45,14 +45,20 @@ class TimeLineGui;
 class ViewportVR;
 
 /**
- * @brief Wrapper panel for the dedicated VR / 360 viewport, matching the 3D
- * viewport tab layout.
+ * @brief Wrapper panel for the dedicated VR / 360 viewport.
  *
- * Layout:
- *   Top toolbar — attached-node chooser, stereo layout + eye, gamma, channels,
- *                 play/stop, reset view, force refresh
- *   ViewportVR  — the equirectangular look-around widget
- *   Bottom bar  — timeline strip
+ * The pane is bound to exactly one `VR Viewer` node (the VRViewport's sink in
+ * the node graph, the way a 2D viewer pane belongs to a Viewer node): creating
+ * a VR Viewer node opens a bound pane automatically, the pane created from the
+ * pane corner menu binds to the first VR Viewer node in the project, and the
+ * binding is restored from saved projects via the parallel ViewportVRNodes
+ * serialization list.
+ *
+ * Controls follow the standard viewer layout (uff-reviewed against the 2D
+ * viewer bars): the top bar carries the channel display, gamma and the
+ * VR-specific packing settings (Layout / Eye) plus refresh; the bottom player
+ * bar carries the playback transport (first/prev/play/next/last, frame counter,
+ * in/out range, fps readout) and the timeline.
  */
 class ViewportVRTab
     : public QWidget
@@ -69,13 +75,16 @@ public:
 
     ViewportVR* getViewport() const { return _viewport; }
 
-public Q_SLOTS:
+    /** Bind the pane to a VR Viewer node (its iframe stream feeds the pane). */
+    void setNodeBinding(const NodePtr& node);
 
-    /** Build the attached-node dropdown by enumerating every node in the project
-     *  right now (on aboutToShow, so the list is always fresh — same pattern as
-     *  the 3D viewport's camera menu). */
-    void onAttachMenuAboutToShow();
-    void onAttachSelected();
+    /** The bound node (weak) — NULL when unbound. */
+    NodeWPtr getNodeBinding() const { return _boundNode; }
+
+    /** If unbound, bind the FIRST VRViewer node in the project. */
+    void autoBindToVRViewer();
+
+public Q_SLOTS:
 
     /** Stereo packing dropdown: Mono / Over-Under / Side-by-Side. */
     void onLayoutSelected();
@@ -96,6 +105,14 @@ public Q_SLOTS:
      *  listens follows, like a scrub). Loop over the project range. */
     void onPlayToggled(bool playing);
     void onPlayTick();
+    void onStopClicked();
+
+    void onSeekFirst();
+    void onSeekPrev();
+    void onSeekNext();
+    void onSeekLast();
+
+    void onFrameSpinChanged(int frame);
 
     void onFrameChanged(SequenceTime frame, int reason);
 
@@ -105,9 +122,10 @@ protected:
 
 private:
 
+    TimeLinePtr getTimeline() const;
+
     ViewportVR* _viewport;
     TimeLineGui* _timelineGui;
-    QToolButton* _attachDropdown;
     QToolButton* _layoutDropdown;
     QToolButton* _eyeDropdown;
     QToolButton* _channelsDropdown;
@@ -115,6 +133,11 @@ private:
     QToolButton* _playBtn;
     QDoubleSpinBox* _gammaSpin;
     QTimer* _playTimer;
+    QSpinBox* _frameSpin;
+    QSpinBox* _rangeIn;
+    QSpinBox* _rangeOut;
+    QLabel* _fpsLabel;
+    NodeWPtr _boundNode;
 };
 
 NATRON_NAMESPACE_EXIT

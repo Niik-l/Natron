@@ -240,6 +240,7 @@
 #include "Dev/Scene3D/GeoMaterialOverride.h"
 #include "Dev/Scene3D/DevStamp.h"
 #include "Dev/Scene3D/CyclesRenderPass.h"
+#include "Dev/VR/VRViewer.h"
 
 #include "sbkversion.h" // shiboken/pyside version
 
@@ -1776,6 +1777,9 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<GeoMaterialOverride>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<DevStamp>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<CyclesRenderPass>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+
+    // Dev nodes — VR / 360
+    registerBuiltInPlugin<VRViewer>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
 
     // Dev nodes — Channel
     registerBuiltInPlugin<DevShuffle>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/channel_grouping_2.png"), false, false);

@@ -593,20 +593,13 @@ ProjectGui::load<boost::archive::xml_iarchive>(bool isAutosave,  boost::archive:
         ///relocate each viewport3d{N} tab into its saved split pane (wipeLayout conserves
         ///registered tabs rather than deleting them). Without this, the saved layout
         ///references a viewport3d tab that doesn't exist and the split is dropped.
+        ///NOTE: the VR viewports do NOT need this — a VRViewer node opens its bound
+        ///pane through the createNodeGui hook while the project's nodes are loaded.
         const std::list<std::string> & viewport3Ds = obj.getViewport3Ds();
         for (std::list<std::string>::const_iterator it = viewport3Ds.begin(); it != viewport3Ds.end(); ++it) {
             Viewport3DTab* v = _gui->addNewViewport3D();
             v->setScriptName(*it);
             ///append to the anchor pane so it gets registered; restoreLayout relocates it next.
-            _gui->appendTabToDefaultViewerPane(v, v);
-        }
-
-        ///Same for the VR viewports: recreate before the layout restore so the
-        ///saved split panes can relocate each viewportv{N} tab.
-        const std::list<std::string> & viewportVRs = obj.getViewportVRs();
-        for (std::list<std::string>::const_iterator it = viewportVRs.begin(); it != viewportVRs.end(); ++it) {
-            ViewportVRTab* v = _gui->addNewViewportVR();
-            v->setScriptName(*it);
             _gui->appendTabToDefaultViewerPane(v, v);
         }
 

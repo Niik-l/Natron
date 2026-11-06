@@ -302,6 +302,9 @@ GuiApplicationManager::getIcon(PixmapEnum e,
         case NATRON_PIXMAP_MULTIVIEW_GROUPING:
             path = NATRON_IMAGES_PATH "GroupingIcons/Set" + iconSetStr + "/multiview_grouping_" + iconSetStr + ".png";
             break;
+        case NATRON_PIXMAP_VR_GROUPING:
+            path = NATRON_IMAGES_PATH "GroupingIcons/Set" + iconSetStr + "/vr_grouping_" + iconSetStr + ".png";
+            break;
         case NATRON_PIXMAP_MISC_GROUPING:
             path = NATRON_IMAGES_PATH "GroupingIcons/Set" + iconSetStr + "/misc_grouping_" + iconSetStr + ".png";
             break;

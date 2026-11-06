@@ -507,6 +507,14 @@ GuiAppInstance::createNodeGui(const NodePtr &node,
         _imp->_gui->createViewerGui(node);
     }
 
+    // A VR Viewer node opens a bound VR viewport pane the same way a Viewer
+    // node opens a 2D viewer — one pane per node, created here for interactive
+    // creation AND project load (the VR pane's layout relocation then happens
+    // through the saved layout's tab lookup, like the 3D viewport tabs).
+    if ( !isViewer && (node->getPluginID() == PLUGINID_NATRON_VRVIEWER) ) {
+        _imp->_gui->createVRViewerGui(node);
+    }
+
     // Must be done after the viewer gui has been created
     _imp->_gui->createNodeViewerInterface(nodegui);
 

@@ -56,8 +56,10 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include "Gui/Menu.h"
 #include "Gui/NodeGraph.h"
 #include "Gui/ProjectGui.h"
+#include "Gui/TabWidget.h"
 #include "Gui/ToolButton.h"
 #include "Gui/RenderStatsDialog.h"
+#include "Gui/ViewportVRTab.h"
 #include "Gui/ViewerTab.h"
 
 NATRON_NAMESPACE_ENTER
@@ -393,6 +395,26 @@ Gui::createViewerGui(NodePtr viewer)
         throw std::logic_error("");
     }
     graph->setLastSelectedViewer(tab);
+}
+
+void
+Gui::createVRViewerGui(NodePtr node)
+{
+    // Same "next viewer place" preference as the 2D viewer; the pane binds to
+    // the VR Viewer node it was created for (node-tree wire, no selector).
+    TabWidget* where = _imp->_nextViewerTabPlace;
+
+    if (!where) {
+        where = getAnchor();
+    } else {
+        _imp->_nextViewerTabPlace = NULL;
+    }
+    assert(where);
+
+    ViewportVRTab* tab = addNewViewportVR();
+    assert(tab);
+    tab->setNodeBinding(node);
+    where->appendTab(tab, tab);
 }
 
 const NodesGuiList &
