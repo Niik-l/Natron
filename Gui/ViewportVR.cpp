@@ -72,6 +72,7 @@ ViewportVR::ViewportVR(Gui* gui, QWidget* parent)
     , _lastEmittedYaw(0)
     , _lastEmittedPitch(0)
     , _lookEmittedOnce(false)
+    , _lastRodH(2048)
     , _roisEnabled(true)
     , _compositingOp(eViewerCompositingOperatorNone)
     , _lut(eViewerColorSpaceLinear)
@@ -577,9 +578,24 @@ ViewportVR::getTimeline() const
 double
 ViewportVR::getZoomFactor() const
 {
-    // The VR view has no zoom: it always shows everything the engines sends,
-    // and mip levels are picked from the ROI size.
-    return 1;
+    // The engine picks the render mip level from this zoom. Rendering the
+    // full-res pano every scrub step is wasteful: the sampler eats roughly
+    // (panoH * fov / pi) texels to fill the widget's height, so report the
+    // display-derived zoom (screen rows per pano row) — the GPU LINEAR filter
+    // upscales, preview quality is unaffected and the clamped zoom stays <= 1
+    // so nothing renders beyond full res.
+    const double fovRad = _fovDeg * M_PI / 180.;
+    const double displayRows = (double)_lastRodH * fovRad / M_PI;
+    if (displayRows < 1. || height() < 1) {
+        return 1.;
+    }
+    double zoom = (double)height() / displayRows;
+    if (zoom > 1.) {
+        zoom = 1.;
+    } else if (zoom < 0.01) {
+        zoom = 0.01; // never request absurd mips
+    }
+    return zoom;
 }
 
 void
@@ -924,6 +940,7 @@ ViewportVR::endTransferBufferFromRAMToGPU(int textureIndex,
         slot.isVisible = true;
         slot.time = time;
         slot.rod = rod;
+        _lastRodH = (int)std::lround( rod.height() );
         slot.par = par;
         // The GL texture spans the STAGED (tile-rounded) rect — which is larger
         // than the image whenever the image dims are not tile multiples (e.g.

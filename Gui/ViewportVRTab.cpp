@@ -507,6 +507,10 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
                 mainLayout->addWidget(_timelineGui);
                 connect(timeline.get(), SIGNAL(frameChanged(SequenceTime,int)),
                         this, SLOT(onFrameChanged(SequenceTime,int)));
+                // Cache color marks on the timeline, like the 2D viewer's: the
+                // render engine populates the shared viewer cache; these slots
+                // just repaint the marks.
+                _timelineGui->connectSlotsToViewerCache();
             }
             if (_viewport) {
                 _viewport->setVRPlaybackRange( (int)firstFrame, (int)lastFrame );
@@ -533,8 +537,7 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         _lookRefreshTimer->setSingleShot(true);
         connect(_lookRefreshTimer, SIGNAL(timeout()), this, SLOT(onLookRefreshTimeout()));
         connect(_viewport, SIGNAL(lookChanged()), this, SLOT(onViewportLookChanged()));
-        _lastLookRefreshValid = false;
-    }
+        _lastLookRefreshValid = false;    }
 
     setFocusPolicy(Qt::ClickFocus);
 }
@@ -845,9 +848,9 @@ ViewportVRTab::onPlayToggled(bool playing)
                                                                viewsToRender,
                                                                eRenderDirectionForward);
     } else {
-        // Stop: abort + remember when (queued scrub-refresh renders in flight
-        // would otherwise re-signal renderStarted and fight the button back on).
-        _userStoppedMs = QDateTime::currentMSecsSinceEpoch();
+        // Stop: pure user intent — the button carries the state; abort the
+        // engine's playback. (Queued scrub-refresh renders still re-render the
+        // current frame once; that is the 2D viewer's behavior too.)
         _viewerNode->getRenderEngine()->abortRenderingNoRestart();
     }
 }
@@ -855,11 +858,11 @@ ViewportVRTab::onPlayToggled(bool playing)
 void
 ViewportVRTab::onViewportLookChanged()
 {
-    // Debounce drags: one re-render max per debounce window.
-    _lastLookRefreshValid = true;
-    if (_lookRefreshTimer && !_lookRefreshTimer->isActive()) {
-        _lookRefreshTimer->start(250);
-    }
+    // Deliberately NOT re-rendering on look changes: with full-pano rendering
+    // the look does not change the frame, and the continuous re-render was
+    // stampeding the engine queue (the perceived "sticky" play/stop during
+    // drags). The look only concerns the sampler now.
+    _lastLookRefreshValid = false;
 }
 
 void
@@ -874,23 +877,19 @@ ViewportVRTab::onLookRefreshTimeout()
 void
 ViewportVRTab::onEngineStarted(bool forward)
 {
+    // Deliberately does NOT touch the play button: the button is pure user
+    // intent. ViewerTab's engine-signal→button feedback loop made Stop feel
+    // stuck (queued renders re-signal started and re-launch playback, while
+    // machine-driven setChecked re-enters toggled and re-aborts).
     Q_UNUSED(forward);
-    if (_playBtn && !_playBtn->isChecked()) {
-        // A render (re)started on its own: only mirror it onto the button when
-        // the user did not just stop within the grace window.
-        const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        if ( (now - _userStoppedMs) > 1200 ) {
-            _playBtn->setChecked(true);
-        }
-    }
 }
 
 void
 ViewportVRTab::onEngineStopped(int)
 {
-    if (_playBtn && _playBtn->isChecked()) {
-        _playBtn->setChecked(false);
-    }
+    // Same policy: the button follows the user only. If the engine ran out of
+    // frames (playback "once" mode), the button stays down; the next Play
+    // press aborts & re-requests, which is also ViewerTab's practical flow.
 }
 
 void

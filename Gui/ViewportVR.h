@@ -239,6 +239,9 @@ private:
     double _lastEmittedYaw, _lastEmittedPitch;
     bool _lookEmittedOnce;
 
+    // last committed image height in pixels (drives the render mip choice)
+    int _lastRodH;
+
     // ROI render mode (user face of the interface's isUserRegionOfInterestEnabled)
     mutable QMutex _roimutex;
     bool _roisEnabled;
