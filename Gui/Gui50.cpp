@@ -94,6 +94,8 @@ GCC_DIAG_UNUSED_PRIVATE_FIELD_ON
 #include "Gui/GuiPrivate.h"
 #include "Gui/Viewport3D.h"
 #include "Gui/Viewport3DTab.h"
+#include "Gui/ViewportVR.h"
+#include "Gui/ViewportVRTab.h"
 #include "Gui/KnobWidgetDnD.h"
 #include "Gui/GuiMacros.h"
 #include "Gui/LogWindow.h"
@@ -839,6 +841,17 @@ Gui::redrawAllViewers()
     // use, so any UI action that refreshes a 2D viewer also repaints the 3D view — no
     // 30fps polling. requestRedraw() is a no-op when that viewport is paused.
     redraw3DViewports();
+
+    // Same for the VR viewports: mark any open one stale, its next paint re-fetches
+    // the attached node (throttled there, so knob-edit storms cannot slam renders).
+    {
+        const std::list<ViewportVRTab*> viewportVRs = getViewportVRs_mt_safe();
+        for (std::list<ViewportVRTab*>::const_iterator it = viewportVRs.begin(); it != viewportVRs.end(); ++it) {
+            if ( (*it)->isVisible() && (*it)->getViewport() ) {
+                (*it)->getViewport()->forceRefresh();
+            }
+        }
+    }
 }
 
 void

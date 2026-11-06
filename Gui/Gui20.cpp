@@ -57,6 +57,7 @@
 #include "Gui/GuiPrivate.h"
 #include "Gui/Histogram.h"
 #include "Gui/Viewport3DTab.h"
+#include "Gui/ViewportVRTab.h"
 #include "Gui/Menu.h"
 #include "Gui/NodeGraph.h"
 #include "Gui/NodeGui.h"
@@ -654,6 +655,35 @@ Gui::removeViewport3D(Viewport3DTab* v)
     _imp->_viewport3Ds.erase(it);
 }
 
+ViewportVRTab*
+Gui::addNewViewportVR()
+{
+    ViewportVRTab* v = new ViewportVRTab(this);
+    QMutexLocker l(&_imp->_viewportVRMutex);
+    std::stringstream ss;
+
+    ss << _imp->_nextViewportVRIndex;
+
+    v->setScriptName( "viewportv" + ss.str() );
+    v->setLabel( "VR Viewport" + ss.str() );
+    ++_imp->_nextViewportVRIndex;
+    _imp->_viewportVRs.push_back(v);
+
+    return v;
+}
+
+void
+Gui::removeViewportVR(ViewportVRTab* v)
+{
+    unregisterTab(v);
+    QMutexLocker l(&_imp->_viewportVRMutex);
+    std::list<ViewportVRTab*>::iterator it = std::find(_imp->_viewportVRs.begin(), _imp->_viewportVRs.end(), v);
+
+    assert( it != _imp->_viewportVRs.end() );
+    delete *it;
+    _imp->_viewportVRs.erase(it);
+}
+
 const std::list<Histogram*> &
 Gui::getHistograms() const
 {
@@ -676,6 +706,14 @@ Gui::getViewport3Ds_mt_safe() const
     QMutexLocker l(&_imp->_viewport3DMutex);
 
     return _imp->_viewport3Ds;
+}
+
+std::list<ViewportVRTab*>
+Gui::getViewportVRs_mt_safe() const
+{
+    QMutexLocker l(&_imp->_viewportVRMutex);
+
+    return _imp->_viewportVRs;
 }
 
 void

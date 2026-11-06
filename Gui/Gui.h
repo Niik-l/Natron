@@ -151,6 +151,10 @@ public:
     void removeViewport3D(Viewport3DTab* v);
     std::list<Viewport3DTab*> getViewport3Ds_mt_safe() const;
 
+    ViewportVRTab* addNewViewportVR();
+    void removeViewportVR(ViewportVRTab* v);
+    std::list<ViewportVRTab*> getViewportVRs_mt_safe() const;
+
     void maximize(TabWidget* what);
 
     void minimize();

@@ -296,6 +296,8 @@ public Q_SLOTS:
 
     void newViewport3DHere();
 
+    void newViewportVRHere();
+
     void movePropertiesBinHere();
 
     void moveScriptEditorHere();

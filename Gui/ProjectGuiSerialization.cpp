@@ -58,6 +58,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Gui/ViewerGL.h"
 #include "Gui/ViewerTab.h"
 #include "Gui/Viewport3DTab.h"
+#include "Gui/ViewportVRTab.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -144,6 +145,12 @@ ProjectGuiSerialization::initialize(const ProjectGui* projectGui)
     std::list<Viewport3DTab*> viewport3Ds = projectGui->getGui()->getViewport3Ds_mt_safe();
     for (std::list<Viewport3DTab*>::const_iterator it = viewport3Ds.begin(); it != viewport3Ds.end(); ++it) {
         _viewport3Ds.push_back( (*it)->getScriptName() );
+    }
+
+    ///save VR viewports (by tab script name, same relocation scheme as the 3D ones)
+    std::list<ViewportVRTab*> viewportVRs = projectGui->getGui()->getViewportVRs_mt_safe();
+    for (std::list<ViewportVRTab*>::const_iterator it = viewportVRs.begin(); it != viewportVRs.end(); ++it) {
+        _viewportVRs.push_back( (*it)->getScriptName() );
     }
 
     ///save opened panels by order

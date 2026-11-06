@@ -76,6 +76,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Gui/ViewerGL.h"
 #include "Gui/ViewerTab.h"
 #include "Gui/Viewport3DTab.h"
+#include "Gui/ViewportVRTab.h"
 
 //Remove when serialization is gone from this file
 #include "Engine/RectISerialization.h"
@@ -597,6 +598,15 @@ ProjectGui::load<boost::archive::xml_iarchive>(bool isAutosave,  boost::archive:
             Viewport3DTab* v = _gui->addNewViewport3D();
             v->setScriptName(*it);
             ///append to the anchor pane so it gets registered; restoreLayout relocates it next.
+            _gui->appendTabToDefaultViewerPane(v, v);
+        }
+
+        ///Same for the VR viewports: recreate before the layout restore so the
+        ///saved split panes can relocate each viewportv{N} tab.
+        const std::list<std::string> & viewportVRs = obj.getViewportVRs();
+        for (std::list<std::string>::const_iterator it = viewportVRs.begin(); it != viewportVRs.end(); ++it) {
+            ViewportVRTab* v = _gui->addNewViewportVR();
+            v->setScriptName(*it);
             _gui->appendTabToDefaultViewerPane(v, v);
         }
 

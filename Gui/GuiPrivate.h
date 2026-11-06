@@ -169,6 +169,10 @@ public:
     std::list<Viewport3DTab*> _viewport3Ds;
     int _nextViewport3DIndex;
 
+    mutable QMutex _viewportVRMutex;
+    std::list<ViewportVRTab*> _viewportVRs;
+    int _nextViewportVRIndex;
+
     ///The node graph (i.e: the view of the scene)
     NodeGraph* _nodeGraphArea;
     NodeGraph* _lastFocusedGraph;
