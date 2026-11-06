@@ -695,9 +695,10 @@ ViewportVR::getUserRegionOfInterest() const
     // "User ROI" in VR = the FOV window; the engine bounds the rod with the
     // pixel-space ROI computed from getImageRectangleDisplayed() instead, so
     // the canonical rect spans the full pano (the full rect intersected with
-    // the rendered pixel ROI is applied there already).
+    // the rendered pixel ROI is applied there already). RectD order is
+    // (x1, y1, x2, y2) — completely open in every direction.
     const double inf = std::numeric_limits<double>::infinity();
-    return RectD(-inf, inf, inf, -inf);
+    return RectD(-inf, -inf, inf, inf);
 }
 
 void
