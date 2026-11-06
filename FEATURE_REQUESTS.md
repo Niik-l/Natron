@@ -48,6 +48,20 @@ Sketch, in three nodes sharing one flow engine:
 Quality tuning (edge handling, occlusions, flicker) is the long tail. Size: 2 to 3
 weeks for a credible v1, more to approach Kronos.
 
+## VR / 360 feature family (CaraVR-inspired) — scheduled, plan in VR_PLAN.md
+
+Requested 2026-11-06 by the user: a dedicated VR viewport (like the dedicated 3D viewport),
+a set of VR effect nodes (VR Blur etc., the CaraVR analog; SphericalTransform already
+exists and stays), a VR node group with its own icon in the left vertical tool box, and
+spherical (YouTube/GPano) metadata — on video (WriteFFmpeg) AND image-sequence outputs.
+
+Sketch + established integration points + build order live in `VR_PLAN.md`
+(viewport-first so the user's own VR footage is the test rig). The graph carries no
+per-image metadata, so the knobs live on the writers (an IngestVRMetaData-before-Write
+node cannot inform them; an optional validate-only Ingest node stays on the future list).
+Size: ~8–10 working days at 8 h/day. Not in scope: the CaraVR stitching/solver/tracking
+class (future work).
+
 ## Cryptomatte — DONE 2026-11-04 (decoder node + Cycles encoder; see CRYPTOMATTE_PLAN.md)
 
 Requested 2026-11-03; the old community Python plugin was unusable. Shipped in six commits
