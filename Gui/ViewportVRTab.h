@@ -90,6 +90,10 @@ public Q_SLOTS:
     /** FOV spin box (the VR counterpart of the 2D viewer's Zoom). */
     void onFovChanged(double fov);
 
+    /** Wheel/reset-driven FOV changes coming from the canvas, mirrored into
+     *  the spin box (no re-emit loop — the spin signal is blocked during it). */
+    void onViewportFovChanged(double fov);
+
     void onResetView();
     void onForceRefresh();
 

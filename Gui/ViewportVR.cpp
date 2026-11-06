@@ -159,8 +159,13 @@ ViewportVR::setLook(double yawDeg, double pitchDeg, double fovDeg)
     } else if (fovDeg > 130) {
         fovDeg = 130;
     }
+    const bool fovChangedNow = (fovDeg != _fovDeg);
     _fovDeg = fovDeg;
     update();
+    if (fovChangedNow) {
+        // Keep the pane's FOV spin box in sync with wheel/reset-driven changes.
+        Q_EMIT fovChanged(_fovDeg);
+    }
     if (mustEmitLook) {
         // Full-pano renders do not depend on the look, so the only reason to
         // re-render is to complete tiles the engine never delivered (aborted

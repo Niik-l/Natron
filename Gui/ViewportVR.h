@@ -123,6 +123,10 @@ Q_SIGNALS:
      *  render, so this is the only trigger that re-completes missing tiles). */
     void lookChanged();
 
+    /** Emitted whenever the (clamped) FOV changes — the pane's spin box
+     *  mirrors it so wheel-driven zoom reflects in the toolbar. */
+    void fovChanged(double fovDegrees);
+
 public:
 
     /*******************************************/
