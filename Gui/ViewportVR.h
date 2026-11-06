@@ -5,7 +5,7 @@
  *
  * Natron is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
+ * the Free Software Foundation; only version 2 of the License, or
  * (at your option) any later version.
  *
  * Natron is distributed in the hope that it will be useful,
@@ -36,7 +36,11 @@
 
 #include "Gui/GuiFwd.h"
 
+class QString;
+
 NATRON_NAMESPACE_ENTER
+
+class VRFetchThread;
 
 /**
  * @brief The dedicated VR / 360 viewport widget.
@@ -44,14 +48,16 @@ NATRON_NAMESPACE_ENTER
  * Renders the frame of an attached node as an equirectangular (latitude/longitude,
  * 2:1) panorama the user can look around in: mouse-drag turns the virtual camera,
  * the wheel changes the field of view. The image comes from the attached node's
- * own render pipeline at the current frame, through Node::makePreviewImage (the
- * same blocking GUI-thread render the node thumbnail uses, Node.cpp), converted
- * to a GL texture and cached — orbit-only repaints never re-render the node.
+ * own render pipeline at the current frame, through Node::makePreviewImage, and
+ * the fetch runs on a dedicated worker thread (VRFetchThread) like the engine's
+ * own node-thumbnail worker — the GUI thread never blocks, the displayed GL
+ * texture is the last completed render, and stale frames are skipped (newest
+ * request wins) which is what makes scrubbing behave like the 2D viewer.
  *
  * Stereo packing is handled at sample time: an Over/Under (left eye = top half,
  * the Google "top-bottom" convention) or Side-by-Side (left eye = left half)
  * source is cropped to the selected eye's sub-rectangle; the engine fetch is
- * always the full frame (a true per-view stereoscopic fetch is a later step).
+ * always the full frame.
  */
 
 class ViewportVR
@@ -69,6 +75,16 @@ public:
         eLayoutMono = 0,   //!< full frame, both eyes see the whole pano
         eLayoutOverUnder,  //!< left eye = top half, right eye = bottom half
         eLayoutSideBySide  //!< left eye = left half, right eye = right half
+    };
+
+    /** Channel display modes (applied in the shader, over the RGBA texture). */
+    enum ChannelsMode
+    {
+        eChannelsRGB = 0, //!< the color plane as-is
+        eChannelsRed,
+        eChannelsGreen,
+        eChannelsBlue,
+        eChannelsLuminance //!< Rec709 luminance of the RGB shown grey
     };
 
     explicit ViewportVR(Gui* gui, QWidget* parent = NULL);
@@ -96,11 +112,19 @@ public:
     void getLook(double* yawDeg, double* pitchDeg, double* fovDeg) const;
     void resetLook();
 
+    // ---- image display knobs (applied in the shader, no re-render) ----------
+
+    /** Display gamma: color^(1/gamma), 1 = identity. */
+    void setGammaDebug(double gamma);
+    double getGammaDebug() const { return _gamma; }
+
+    void setChannelsMode(ChannelsMode m);
+    ChannelsMode getChannelsMode() const { return _channels; }
+
     // ---- refresh ------------------------------------------------------------
 
-    /** Re-render the attached node and re-upload at the next paint, even if the
-     *  frame and node did not change and the throttle would normally skip. The
-     *  fetch itself runs at paint time so we are always on the GUI thread. */
+    /** Re-render the attached node at the next paint, even if the frame and node
+     *  did not change. The fetch itself runs on the worker thread. */
     void forceRefresh();
 
     QSize sizeHint() const OVERRIDE;
@@ -118,16 +142,17 @@ protected:
 
 private:
 
-    /** Render the attached node into _pixels and upload the GL texture.
-     *  Returns true if the node produced an image. Call only on the GUI thread
-     *  with the GL context current. */
-    bool fetchAndUploadImage(double time);
+    /** Resolve the attached node and queue a render request on the worker. */
+    void scheduleFetch(GuiAppInstancePtr app);
+
+    /** Bind the texture + all display uniforms and draw the fullscreen quad
+     *  (call only from paintGL with the program ready). */
+    void applyDisplayUniforms();
 
     Gui* _gui;
 
-    // Attached node: script name is the persistent identity (it survives save/
-    // load and node renames are re-resolved lazily); the weak pointer is the
-    // fast-hold so a dead node cannot be kept alive by the viewport.
+    // Attached node: script name is the persistent identity; the weak pointer
+    // is the fast-hold so a dead node cannot be kept alive by the viewport.
     QString _attachedScriptName;
     NodeWPtr _attachedNode;
 
@@ -142,21 +167,26 @@ private:
     int _lastMouseX, _lastMouseY;
     bool _dragging;
 
-    // image cache / GL texture
-    std::vector<unsigned int> _pixels; //!< BGRA ints from makePreviewImage (line0 = image top)
+    // image display knobs
+    double _gamma;
+    ChannelsMode _channels;
+
+    // fetch state
+    VRFetchThread* _fetchThread;   //!< owns the async makePreviewImage worker
+    double _scheduledTime;         //!< frame the current schedule is for
+    bool _scheduledOnce;
+    bool _forceNextFetch;          //!< set by forceRefresh(), consumed by the next paint
+
+    // upload state (GL texture)
+    std::vector<unsigned int> _uploadBuffer; //!< copy-out of the worker's result
     int _texWidth, _texHeight;
     GLuint _tex;
-    SequenceTime _fetchedTime;
-    bool _fetchedOnce;
-    bool _forceNextFetch; //!< set by forceRefresh(), consumed by the next paint
+    int _lastUploadedGen;          //!< last image generation uploaded to GL
 
     // shader program (per context — rebuilt whenever the GL context is recreated)
     GLuint _program;
     bool _programReady;
-    GLint _uTex, _uSize, _uTanHalfFov, _uAspect, _uYaw, _uPitch, _uUv0, _uUv1;
-
-    // paint-time fetch throttle (one node render per kBildFetchIntervalMs max)
-    qint64 _lastFetchMs;
+    GLint _uTex, _uSize, _uTanHalfFov, _uAspect, _uYaw, _uPitch, _uUv0, _uUv1, _uChan, _uGamma;
 };
 
 NATRON_NAMESPACE_EXIT

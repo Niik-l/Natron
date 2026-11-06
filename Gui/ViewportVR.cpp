@@ -29,6 +29,8 @@
 
 #include <QDateTime>
 #include <QMouseEvent>
+#include <QThread>
+#include <QWaitCondition>
 #include <QWheelEvent>
 
 #include "Engine/AppManager.h"
@@ -50,11 +52,6 @@ NATRON_NAMESPACE_ENTER
 static const int kVRPreviewMaxW = 2048;
 static const int kVRPreviewMaxH = 1024;
 
-/// Paint-time fetch throttle: at most one node render per this many
-/// milliseconds per widget (paintGL runs on every orbit frame; the node only
-/// re-renders when the throttled fetch picks it up).
-static const qint64 kVRFetchIntervalMs = 80;
-
 static const double kVRPitchClampDeg = 87.5;
 
 #ifndef M_PI
@@ -62,7 +59,170 @@ static const double kVRPitchClampDeg = 87.5;
 #endif
 
 // ============================================================================
-// Section 2: constructor / view state
+// Section 2: the async fetch worker
+//
+// Node::makePreviewImage is engine-sanctioned off the GUI thread: the engine's
+// own PreviewThread (Gui/PreviewThread.cpp) runs exactly this call on a worker
+// and it cleans up TLS for the calling thread itself. Running it here keeps
+// scrubbing responsive — the GUI paints the LAST completed texture while the
+// worker refreshes, and pending requests are REPLACED (newest wins), so a fast
+// scrub never queues up a backlog of stale renders the way the 2D viewer does
+// not either.
+// ============================================================================
+
+class VRFetchThread
+    : public QThread
+{
+public:
+
+    explicit VRFetchThread(QObject* notifier)
+        : QThread()
+        , _notifier(notifier)
+        , _quitting(false)
+        , _pendingHas(false)
+        , _pendingNode()
+        , _pendingTime(0)
+        , _pendingGen(1)
+        , _renderedGen(0)
+        , _scratch(kVRPreviewMaxW * kVRPreviewMaxH)
+        , _out(kVRPreviewMaxW * kVRPreviewMaxH)
+        , _outGen(0)
+        , _outW(0)
+        , _outH(0)
+    {
+        setObjectName(QString::fromUtf8("ViewportVRFetch"));
+        start(QThread::LowPriority);
+    }
+
+    virtual ~VRFetchThread()
+    {
+        stopAndJoin();
+    }
+
+    /** The node and frame the worker should be rendering. Replacing a pending
+     *  request is free (it has not started); a request identical to one already
+     *  queued is not re-queued. The widget re-queues explicitly on scrub so a
+     *  frame revisited gets its (engine-cache-cheap) re-render. */
+    void schedule(const NodePtr& node, double time)
+    {
+        QMutexLocker k(&_mutex);
+        if (_quitting) {
+            return;
+        }
+        if (_pendingHas && (_pendingNode == node) && (_pendingTime == time)) {
+            return; // already queued
+        }
+        _pendingNode = node;
+        _pendingTime = time;
+        ++_pendingGen;
+        _pendingHas = true;
+        _cond.wakeOne();
+    }
+
+    /** Stop the loop and drop everything further. */
+    void stopAndJoin()
+    {
+        {
+            QMutexLocker k(&_mutex);
+            _quitting = true;
+            _cond.wakeOne();
+        }
+        if ( QThread::isRunning() ) {
+            wait();
+        }
+    }
+
+    /** Read the newest finished image into dst. Returns the generation or the
+     *  last known one when nothing new. dst must be at least maxW*maxH ints. */
+    int acquireResult(int lastUploadedGen, std::vector<unsigned int>& dst, int* w, int* h)
+    {
+        QMutexLocker k(&_mutex);
+        if (_outGen == lastUploadedGen) {
+            return lastUploadedGen;
+        }
+        std::memcpy( &dst.front(), &_out.front(), sizeof(unsigned int) * _out.size() );
+        *w = _outW;
+        *h = _outH;
+        return _outGen;
+    }
+
+protected:
+
+    virtual void run() OVERRIDE
+    {
+        for (;;) {
+            NodePtr node;
+            double time = 0;
+            int gen;
+            {
+                QMutexLocker k(&_mutex);
+                while (!_quitting && !_pendingHas) {
+                    _cond.wait(&_mutex);
+                }
+                if (_quitting) {
+                    return;
+                }
+                node = _pendingNode;
+                time = _pendingTime;
+                gen = _pendingGen;
+                _pendingHas = false;
+            }
+
+            bool ok = false;
+            int w = 0, h = 0;
+            if (node) {
+                w = kVRPreviewMaxW;
+                h = kVRPreviewMaxH;
+                SequenceTime t = (SequenceTime)time;
+                ok = node->makePreviewImage(t, &w, &h, &_scratch.front());
+                if ( !ok || (w <= 0) || (h <= 0) ) {
+                    ok = false;
+                    w = 0;
+                    h = 0;
+                }
+            }
+            {
+                QMutexLocker k(&_mutex);
+                if (ok) {
+                    std::memcpy( &_out.front(), &_scratch.front(), sizeof(unsigned int) * _out.size() );
+                    _outW = w;
+                    _outH = h;
+                    // Retire older published generations: only the newest
+                    // result matters (same ask the 2D viewer makes).
+                    _outGen = gen;
+                }
+                _pendingNode.reset();
+                // Rendered even on failure so the schedule state advances.
+                _renderedGen = gen;
+            }
+            // Nudge the GUI thread to repaint/upload (queued — we are NOT the
+            // GUI thread; the queued call is dropped safely if the widget dies).
+            if (_notifier) {
+                QMetaObject::invokeMethod(_notifier, "update", Qt::QueuedConnection);
+            }
+        }
+    }
+
+private:
+
+    QObject* _notifier; //!< the ViewportVR widget (queued update only)
+    QMutex _mutex;
+    QWaitCondition _cond;
+
+    bool _quitting;
+    bool _pendingHas;
+    NodePtr _pendingNode;
+    double _pendingTime;
+    int _pendingGen;
+    int _renderedGen;
+
+    std::vector<unsigned int> _scratch;
+    std::vector<unsigned int> _out;
+    int _outGen, _outW, _outH;
+};
+
+// ============================================================================
+// Section 3: constructor / view state
 // ============================================================================
 
 ViewportVR::ViewportVR(Gui* gui, QWidget* parent)
@@ -76,12 +236,16 @@ ViewportVR::ViewportVR(Gui* gui, QWidget* parent)
     , _lastMouseX(-1)
     , _lastMouseY(-1)
     , _dragging(false)
+    , _gamma(1.0)
+    , _channels(eChannelsRGB)
+    , _fetchThread(NULL)
+    , _scheduledTime(-1)
+    , _scheduledOnce(false)
+    , _forceNextFetch(false)
     , _texWidth(0)
     , _texHeight(0)
     , _tex(0)
-    , _fetchedTime(-1)
-    , _fetchedOnce(false)
-    , _forceNextFetch(false)
+    , _lastUploadedGen(0)
     , _program(0)
     , _programReady(false)
     , _uTex(-1)
@@ -92,19 +256,27 @@ ViewportVR::ViewportVR(Gui* gui, QWidget* parent)
     , _uPitch(-1)
     , _uUv0(-1)
     , _uUv1(-1)
-    , _lastFetchMs(0)
+    , _uChan(-1)
+    , _uGamma(-1)
 {
     setMouseTracking(true);
     setFocusPolicy(Qt::ClickFocus);
-    _pixels.resize( (std::size_t)kVRPreviewMaxW * (std::size_t)kVRPreviewMaxH );
+
+    _fetchThread = new VRFetchThread(this);
 }
 
 ViewportVR::~ViewportVR()
 {
+    // Stop the worker first: it holds the node and calls engine APIs; the Qt
+    // object tree may be torn down before this destructor finishes.
+    if (_fetchThread) {
+        _fetchThread->stopAndJoin();
+        delete _fetchThread;
+        _fetchThread = NULL;
+    }
     // GL resources are owned by the QOpenGLWidget context; if it still exists,
-    // release them against it. QOpenGLWidget::initializeGL re-runs whenever the
-    // context is recreated (e.g. reparenting during a layout restore), and the
-    // stale handles must not leak there either.
+    // release them against it. initializeGL re-runs whenever the context is
+    // recreated, so the stale handles must not leak there either.
     if ( isValid() ) {
         makeCurrent();
         if (_tex) {
@@ -134,7 +306,8 @@ ViewportVR::setNodeScriptName(const QString& scriptName)
     }
     _attachedScriptName = scriptName;
     _attachedNode.reset();
-    _fetchedOnce = false;
+    _scheduledOnce = false;
+    _forceNextFetch = true;
     update();
 }
 
@@ -199,6 +372,27 @@ ViewportVR::resetLook()
 }
 
 void
+ViewportVR::setGammaDebug(double gamma)
+{
+    if (gamma <= 0) {
+        gamma = 1;
+    }
+    if (_gamma != gamma) {
+        _gamma = gamma;
+        update();
+    }
+}
+
+void
+ViewportVR::setChannelsMode(ChannelsMode m)
+{
+    if (_channels != m) {
+        _channels = m;
+        update();
+    }
+}
+
+void
 ViewportVR::forceRefresh()
 {
     _forceNextFetch = true;
@@ -206,7 +400,7 @@ ViewportVR::forceRefresh()
 }
 
 // ============================================================================
-// Section 3: OpenGL
+// Section 4: OpenGL
 // ============================================================================
 
 void
@@ -226,7 +420,8 @@ ViewportVR::initializeGL()
     }
     _programReady = false;
     _texWidth = _texHeight = 0;
-    _fetchedOnce = false;
+    _lastUploadedGen = 0;
+    _scheduledOnce = false; // context restored fresh: re-schedule the frame
 
     glClearColor(0.08f, 0.08f, 0.09f, 1.f);
     glDisable(GL_DEPTH_TEST);
@@ -246,6 +441,8 @@ ViewportVR::initializeGL()
         "uniform float u_pitch;\n"       // radians, + = look up (north)
         "uniform vec2  u_uv0;\n"         // sub-rect low corner (stereo crop)
         "uniform vec2  u_uv1;\n"         // sub-rect high corner
+        "uniform int   u_chan;\n"        // channel mode 0..4
+        "uniform float u_gamma;\n"       // display gamma (color ^ (1/gamma))
         "void main() {\n"
         "    vec2 c = (gl_FragCoord.xy / u_size) * 2.0 - 1.0;\n"
         "    vec3 d = normalize(vec3(c.x * u_tanHalfFov * u_aspect, c.y * u_tanHalfFov, -1.0));\n"
@@ -259,7 +456,22 @@ ViewportVR::initializeGL()
         "    const float kPi = 3.1415926535897932;\n"
         "    vec2 uv = vec2(0.5 + lon / k2Pi, 0.5 - lat / kPi);\n"
         "    vec2 uvCrop = u_uv0 + uv * (u_uv1 - u_uv0);\n"
-        "    gl_FragColor = texture2D(u_tex, uvCrop);\n"
+        "    vec4 tex = texture2D(u_tex, uvCrop);\n"
+        "    vec3 col = tex.rgb;\n"
+        "    if (u_chan == 1) {\n"
+        "        col = vec3(tex.r);\n"
+        "    } else if (u_chan == 2) {\n"
+        "        col = vec3(tex.g);\n"
+        "    } else if (u_chan == 3) {\n"
+        "        col = vec3(tex.b);\n"
+        "    } else if (u_chan == 4) {\n"
+        "        float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));\n"
+        "        col = vec3(lum);\n"
+        "    }\n"
+        "    if (u_gamma != 1.0) {\n"
+        "        col = pow(max(col, 0.0), vec3(1.0 / u_gamma));\n"
+        "    }\n"
+        "    gl_FragColor = vec4(col, 1.0);\n"
         "}\n";
 
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
@@ -294,6 +506,8 @@ ViewportVR::initializeGL()
         _uPitch        = glGetUniformLocation(_program, "u_pitch");
         _uUv0          = glGetUniformLocation(_program, "u_uv0");
         _uUv1          = glGetUniformLocation(_program, "u_uv1");
+        _uChan         = glGetUniformLocation(_program, "u_chan");
+        _uGamma        = glGetUniformLocation(_program, "u_gamma");
         _programReady = true;
     } else {
         char log[1024] = {0};
@@ -330,25 +544,51 @@ ViewportVR::paintGL()
     GuiAppInstancePtr app = _gui ? _gui->getApp() : GuiAppInstancePtr();
     double time = app ? app->getTimeLine()->currentFrame() : 0;
 
-    // Fetch when needed: first paint, changed frame, changed node, or the
-    // panel/central refresh funnel marked us stale. Throttled to one render per
-    // kVRFetchIntervalMs, matching the 2D viewer's per-frame render cadence but
-    // skipping bursts within a single drag.
-    qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    bool needsFetch = !_fetchedOnce || (_fetchedTime != time) || _forceNextFetch;
-    if (needsFetch && (nowMs - _lastFetchMs >= kVRFetchIntervalMs)) {
-        _forceNextFetch = false;
-        fetchAndUploadImage(time);
-        _lastFetchMs = nowMs;
-    } else if (needsFetch && _forceNextFetch) {
-        // Throttle held: keep the force pending rather than losing it.
-        _forceNextFetch = true;
+    // Queue a fetch when needed: first paint, changed frame, changed new node,
+    // or the panel/central refresh funnel marked us stale. The worker thread
+    // replaces pending requests (newest wins) so a fast scrub coalesces.
+    bool needsSchedule = !_scheduledOnce || (_scheduledTime != time) || _forceNextFetch;
+    if (needsSchedule) {
+        scheduleFetch(app);
+    }
+
+    // Upload whenever the worker published something we have not shown yet.
+    if (_fetchThread) {
+        std::vector<unsigned int>& buf = _uploadBuffer;
+        if (buf.size() < (std::size_t)kVRPreviewMaxW * (std::size_t)kVRPreviewMaxH) {
+            buf.resize( (std::size_t)kVRPreviewMaxW * (std::size_t)kVRPreviewMaxH );
+        }
+        int gen = _fetchThread->acquireResult(_lastUploadedGen, buf, &_texWidth, &_texHeight);
+        if ( (gen != _lastUploadedGen) && (_texWidth > 0) && (_texHeight > 0) ) {
+            if (!_tex) {
+                glGenTextures(1, &_tex);
+            }
+            glBindTexture(GL_TEXTURE_2D, _tex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            // The engine buffer is BGRA uint32 little-endian, line 0 = image top,
+            // alpha always 255 (Node.cpp toBGRA). GL_BGRA with
+            // GL_UNSIGNED_INT_8_8_8_8_REV maps those bytes exactly (the same
+            // packing the preview consumers use to paint these buffers).
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, _texWidth, _texHeight, 0, GL_BGRA,
+                         GL_UNSIGNED_INT_8_8_8_8_REV, &buf.front());
+            _lastUploadedGen = gen;
+        }
     }
 
     if (!_tex || _texWidth <= 0 || _texHeight <= 0) {
         return;
     }
 
+    applyDisplayUniforms();
+}
+
+void
+ViewportVR::applyDisplayUniforms()
+{
     // ---- stereo crop -----------------------------------------------------
     // s = 0 at the pano's left edge, t = 0 at the pano's TOP row (the makePreview
     // buffer is top-down, line 0 = image top = north pole).
@@ -383,6 +623,8 @@ ViewportVR::paintGL()
     glUniform1f(_uPitch, (GLfloat)(_pitchDeg * M_PI / 180.));
     glUniform2f(_uUv0, uv0[0], uv0[1]);
     glUniform2f(_uUv1, uv1[0], uv1[1]);
+    glUniform1i(_uChan, (GLint)_channels);
+    glUniform1f(_uGamma, (GLfloat)_gamma);
 
     // Fullscreen quad; the vertex shader merely passes gl_Vertex through.
     glBegin(GL_QUADS);
@@ -395,7 +637,7 @@ ViewportVR::paintGL()
 }
 
 // ============================================================================
-// Section 4: image acquisition
+// Section 5: fetch scheduling
 // ============================================================================
 
 static NodePtr
@@ -415,58 +657,34 @@ findNodeByScriptName(const ProjectPtr& project, const QString& scriptName)
     return NodePtr();
 }
 
-bool
-ViewportVR::fetchAndUploadImage(double time)
+void
+ViewportVR::scheduleFetch(GuiAppInstancePtr app)
 {
-    GuiAppInstancePtr app = _gui ? _gui->getApp() : GuiAppInstancePtr();
+    if (!_fetchThread) {
+        return;
+    }
     ProjectPtr project = app ? app->getProject() : ProjectPtr();
     if (!project || _attachedScriptName.isEmpty()) {
-        return false;
+        return;
     }
-
     NodePtr node = _attachedNode.lock();
     if (!node || node->getScriptName() != _attachedScriptName.toStdString()) {
         node = findNodeByScriptName(project, _attachedScriptName);
         _attachedNode = node;
     }
     if (!node || !node->isActivated()) {
-        return false;
+        return;
     }
 
-    int w = kVRPreviewMaxW;
-    int h = kVRPreviewMaxH;
-    const bool ok = node->makePreviewImage( (SequenceTime)time, &w, &h, &_pixels.front() );
-    if (!ok || (w <= 0) || (h <= 0) || ( (std::size_t)w * (std::size_t)h > _pixels.size() )) {
-        // Back off — a failed render (plugin error, group empty, etc.) must not
-        // be retried at the full paint cadence.
-        _lastFetchMs += 4 * kVRFetchIntervalMs;
-        return false;
-    }
-    _fetchedTime = (SequenceTime)time;
-    _fetchedOnce = true;
-
-    // The engine buffer is BGRA uint32 little-endian, line 0 = image top,
-    // alpha always 255 (Node.cpp toBGRA). GL_BGRA with
-    // GL_UNSIGNED_INT_8_8_8_8_REV maps those bytes exactly (the same packing
-    // the preview consumers use to paint these buffers).
-    if (!_tex) {
-        glGenTextures(1, &_tex);
-    }
-    glBindTexture(GL_TEXTURE_2D, _tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, &_pixels.front());
-    _texWidth = w;
-    _texHeight = h;
-
-    return true;
+    double time = app->getTimeLine()->currentFrame();
+    _fetchThread->schedule(node, time);
+    _scheduledTime = time;
+    _scheduledOnce = true;
+    _forceNextFetch = false;
 }
 
 // ============================================================================
-// Section 5: mouse interaction
+// Section 6: mouse interaction
 // ============================================================================
 
 void

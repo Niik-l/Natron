@@ -36,6 +36,8 @@
 class QLabel;
 class QSpinBox;
 class QToolButton;
+class QTimer;
+class QDoubleSpinBox;
 
 NATRON_NAMESPACE_ENTER
 
@@ -47,8 +49,8 @@ class ViewportVR;
  * viewport tab layout.
  *
  * Layout:
- *   Top toolbar — attached-node chooser, stereo layout + eye, reset view,
- *                 force refresh
+ *   Top toolbar — attached-node chooser, stereo layout + eye, gamma, channels,
+ *                 play/stop, reset view, force refresh
  *   ViewportVR  — the equirectangular look-around widget
  *   Bottom bar  — timeline strip
  */
@@ -78,12 +80,28 @@ public Q_SLOTS:
     /** Stereo packing dropdown: Mono / Over-Under / Side-by-Side. */
     void onLayoutSelected();
 
-    /** Eye dropdown: Left / Right (checked items enable only for O/U + SbS). */
+    /** Eye dropdown: Left / Right (no-op in Mono). */
     void onEyeSelected();
+
+    /** Display-gamma spin box. */
+    void onGammaChanged(double gamma);
+
+    /** Channel-display dropdown: RGB / Red / Green / Blue / Luminance. */
+    void onChannelsSelected();
 
     void onResetView();
     void onForceRefresh();
+
+    /** Soft playback: drives the shared project timeline (everything that
+     *  listens follows, like a scrub). Loop over the project range. */
+    void onPlayToggled(bool playing);
+    void onPlayTick();
+
     void onFrameChanged(SequenceTime frame, int reason);
+
+protected:
+
+    virtual void keyPressEvent(QKeyEvent* e) OVERRIDE;
 
 private:
 
@@ -92,7 +110,11 @@ private:
     QToolButton* _attachDropdown;
     QToolButton* _layoutDropdown;
     QToolButton* _eyeDropdown;
+    QToolButton* _channelsDropdown;
     QToolButton* _refreshBtn;
+    QToolButton* _playBtn;
+    QDoubleSpinBox* _gammaSpin;
+    QTimer* _playTimer;
 };
 
 NATRON_NAMESPACE_EXIT

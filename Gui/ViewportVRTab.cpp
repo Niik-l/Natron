@@ -30,6 +30,9 @@
 #include <QFrame>
 #include <QMenu>
 #include <QAction>
+#include <QKeyEvent>
+#include <QTimer>
+#include <QDoubleSpinBox>
 
 #include "Gui/Gui.h"
 #include "Gui/GuiAppInstance.h"
@@ -41,6 +44,7 @@
 #include "Engine/TimeLine.h"
 #include "Engine/Project.h"
 #include "Engine/Node.h"
+#include "Engine/KnobTypes.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -52,7 +56,11 @@ ViewportVRTab::ViewportVRTab(Gui* gui, QWidget* parent)
     , _attachDropdown(NULL)
     , _layoutDropdown(NULL)
     , _eyeDropdown(NULL)
+    , _channelsDropdown(NULL)
     , _refreshBtn(NULL)
+    , _playBtn(NULL)
+    , _gammaSpin(NULL)
+    , _playTimer(NULL)
 {
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
@@ -129,11 +137,90 @@ ViewportVRTab::ViewportVRTab(Gui* gui, QWidget* parent)
         toolbarLayout->addWidget(_eyeDropdown);
     }
 
-    // ---- Separator + reset + refresh ----
+    // ---- Separator + gamma ----
+    QFrame* sepGamma = new QFrame(toolbar);
+    sepGamma->setFrameShape(QFrame::VLine);
+    sepGamma->setFrameShadow(QFrame::Sunken);
+    toolbarLayout->addWidget(sepGamma);
+
+    {
+        QLabel* gammaLabel = new QLabel(QString::fromUtf8("Gamma"), toolbar);
+        gammaLabel->setStyleSheet(QString::fromUtf8("color: rgb(150, 150, 150);"));
+        toolbarLayout->addWidget(gammaLabel);
+
+        _gammaSpin = new QDoubleSpinBox(toolbar);
+        _gammaSpin->setRange(0.05, 10.0);
+        _gammaSpin->setSingleStep(0.05);
+        _gammaSpin->setDecimals(2);
+        _gammaSpin->setValue(1.0);
+        _gammaSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        _gammaSpin->setFixedWidth(58);
+        _gammaSpin->setFixedHeight(22);
+        _gammaSpin->setToolTip(QString::fromUtf8(
+            "Display gamma of the VR viewport (color^(1/gamma)). Matches the 2D "
+            "viewer's Gamma slider; 1.0 = identity."));
+        connect(_gammaSpin, SIGNAL(valueChanged(double)), this, SLOT(onGammaChanged(double)));
+        toolbarLayout->addWidget(_gammaSpin);
+    }
+
+    // ---- Channels dropdown ----
+    {
+        _channelsDropdown = new QToolButton(toolbar);
+        _channelsDropdown->setText(QString::fromUtf8("Ch: RGB"));
+        _channelsDropdown->setToolTip(QString::fromUtf8("Channel display of the VR viewport (applied on the GPU, no re-render)."));
+        _channelsDropdown->setFixedHeight(22);
+        _channelsDropdown->setPopupMode(QToolButton::InstantPopup);
+        QMenu* menu = new QMenu(_channelsDropdown);
+        const char* chanLabels[5] = { "RGB", "Red", "Green", "Blue", "Luminance" };
+        const int modes[5] = { (int)ViewportVR::eChannelsRGB,
+                               (int)ViewportVR::eChannelsRed,
+                               (int)ViewportVR::eChannelsGreen,
+                               (int)ViewportVR::eChannelsBlue,
+                               (int)ViewportVR::eChannelsLuminance };
+        for (int i = 0; i < 5; ++i) {
+            QAction* a = menu->addAction(QString::fromUtf8(chanLabels[i]));
+            a->setData(modes[i]);
+            connect(a, SIGNAL(triggered()), this, SLOT(onChannelsSelected()));
+        }
+        _channelsDropdown->setMenu(menu);
+        toolbarLayout->addWidget(_channelsDropdown);
+    }
+
+    // ---- Separator + play/stop + reset + refresh ----
     QFrame* sep1 = new QFrame(toolbar);
     sep1->setFrameShape(QFrame::VLine);
     sep1->setFrameShadow(QFrame::Sunken);
     toolbarLayout->addWidget(sep1);
+
+    const QSize btnSize( TO_DPIX(NATRON_MEDIUM_BUTTON_SIZE), TO_DPIY(NATRON_MEDIUM_BUTTON_SIZE) );
+    const QSize btnIconSize( TO_DPIX(NATRON_MEDIUM_BUTTON_ICON_SIZE), TO_DPIY(NATRON_MEDIUM_BUTTON_ICON_SIZE) );
+
+    // Play button: same icon trick as the 2D viewer's play button — when the
+    // button is down it shows the stop square, up it shows the play triangle.
+    {
+        QPixmap pixPlayDisabled, pixStop;
+        appPTR->getIcon(NATRON_PIXMAP_PLAYER_PLAY_DISABLED, &pixPlayDisabled);
+        appPTR->getIcon(NATRON_PIXMAP_PLAYER_STOP_ENABLED, &pixStop);
+
+        _playBtn = new QToolButton(toolbar);
+        _playBtn->setFocusPolicy(Qt::NoFocus);
+        _playBtn->setFixedSize(btnSize);
+        _playBtn->setIconSize(btnIconSize);
+        _playBtn->setCheckable(true);
+        _playBtn->setDown(false);
+        QIcon icPlay;
+        icPlay.addPixmap(pixStop, QIcon::Normal, QIcon::On);
+        icPlay.addPixmap(pixPlayDisabled, QIcon::Normal, QIcon::Off);
+        _playBtn->setIcon(icPlay);
+        _playBtn->setToolTip(QString::fromUtf8(
+            "Play / stop the project timeline in this VR viewport (Space). The "
+            "timeline is shared, so the 2D viewers follow like with a scrub."));
+        connect(_playBtn, SIGNAL(toggled(bool)), this, SLOT(onPlayToggled(bool)));
+        toolbarLayout->addWidget(_playBtn);
+
+        _playTimer = new QTimer(this);
+        connect(_playTimer, SIGNAL(timeout()), this, SLOT(onPlayTick()));
+    }
 
     QToolButton* resetBtn = new QToolButton(toolbar);
     resetBtn->setText(QString::fromUtf8("Reset"));
@@ -142,8 +229,6 @@ ViewportVRTab::ViewportVRTab(Gui* gui, QWidget* parent)
     connect(resetBtn, SIGNAL(clicked()), this, SLOT(onResetView()));
     toolbarLayout->addWidget(resetBtn);
 
-    const QSize btnSize( TO_DPIX(NATRON_MEDIUM_BUTTON_SIZE), TO_DPIY(NATRON_MEDIUM_BUTTON_SIZE) );
-    const QSize btnIconSize( TO_DPIX(NATRON_MEDIUM_BUTTON_ICON_SIZE), TO_DPIY(NATRON_MEDIUM_BUTTON_ICON_SIZE) );
     QPixmap pixRefresh;
     appPTR->getIcon(NATRON_PIXMAP_VIEWER_REFRESH, &pixRefresh);
 
@@ -310,6 +395,100 @@ ViewportVRTab::onForceRefresh()
     if (_viewport) {
         _viewport->forceRefresh();
     }
+}
+
+void
+ViewportVRTab::onGammaChanged(double gamma)
+{
+    if (_viewport) {
+        _viewport->setGammaDebug(gamma);
+    }
+}
+
+void
+ViewportVRTab::onChannelsSelected()
+{
+    QAction* a = qobject_cast<QAction*>(sender());
+    if (!a || !_viewport) {
+        return;
+    }
+    const ViewportVR::ChannelsMode m = (ViewportVR::ChannelsMode)a->data().toInt();
+    _viewport->setChannelsMode(m);
+    QString label;
+    switch (m) {
+    case ViewportVR::eChannelsRGB:       label = QString::fromUtf8("RGB"); break;
+    case ViewportVR::eChannelsRed:       label = QString::fromUtf8("Red"); break;
+    case ViewportVR::eChannelsGreen:     label = QString::fromUtf8("Green"); break;
+    case ViewportVR::eChannelsBlue:      label = QString::fromUtf8("Blue"); break;
+    case ViewportVR::eChannelsLuminance: label = QString::fromUtf8("Luminance"); break;
+    }
+    _channelsDropdown->setText(QString::fromUtf8("Ch: ") + label);
+}
+
+void
+ViewportVRTab::onPlayToggled(bool playing)
+{
+    if (!_playTimer || !getGui()) {
+        return;
+    }
+    if (playing) {
+        // Interval from the project's frame rate knob.
+        double fps = 24;
+        GuiAppInstancePtr app = getGui()->getApp();
+        if (app) {
+            ProjectPtr proj = app->getProject();
+            if (proj) {
+                KnobDoublePtr fpsKnob = std::dynamic_pointer_cast<KnobDouble>(
+                    proj->getKnobByName(std::string("frameRate")));
+                if (fpsKnob) {
+                    fps = fpsKnob->getValue();
+                }
+            }
+        }
+        if (fps <= 1e-6) {
+            fps = 24;
+        }
+        _playTimer->start( (int)std::lround(1000. / fps) );
+    } else {
+        _playTimer->stop();
+    }
+}
+
+void
+ViewportVRTab::onPlayTick()
+{
+    Gui* gui = getGui();
+    if (!gui) {
+        return;
+    }
+    GuiAppInstancePtr app = gui->getApp();
+    if (!app) {
+        return;
+    }
+    double firstFrame = 1, lastFrame = 250;
+    app->getFrameRange(&firstFrame, &lastFrame);
+
+    TimeLinePtr timeline = app->getTimeLine();
+    if (!timeline) {
+        return;
+    }
+    SequenceTime next = timeline->currentFrame() + 1;
+    if (next > (SequenceTime)lastFrame) {
+        next = (SequenceTime)firstFrame; // loop
+    }
+    timeline->seekFrame(next, true, NULL, eTimelineChangeReasonPlaybackSeek);
+}
+
+void
+ViewportVRTab::keyPressEvent(QKeyEvent* e)
+{
+    // Space toggles play/stop, same as the 2D viewer's player.
+    if ( (e->key() == Qt::Key_Space) && _playBtn ) {
+        _playBtn->setChecked( !_playBtn->isChecked() );
+        e->accept();
+        return;
+    }
+    QWidget::keyPressEvent(e);
 }
 
 void
