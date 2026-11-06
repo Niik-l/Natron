@@ -925,13 +925,21 @@ ViewportVR::endTransferBufferFromRAMToGPU(int textureIndex,
         slot.time = time;
         slot.rod = rod;
         slot.par = par;
+        // The GL texture spans the STAGED (tile-rounded) rect — which is larger
+        // than the image whenever the image dims are not tile multiples (e.g.
+        // a 1920x1080 source inside a 2048x2048 texture). The usable sphere
+        // content is the IMAGE region inside that texture, so winUV maps the
+        // unit square onto the image extent RELATIVE TO THE TEXTURE SIZE:
+        // uvCrop.y = winUV.y2 lands exactly on the image's top row.
         const RectI rodPx = rod.toPixelEnclosing(mipmapLevel, par);
-        const RectI& r = stagedRect; // committed = whole staged rect
-        if ( (rodPx.width() > 0) && (rodPx.height() > 0) ) {
-            slot.winUV.x1 = (double)(r.x1 - rodPx.x1) / (double)rodPx.width();
-            slot.winUV.x2 = (double)(r.x2 - rodPx.x1) / (double)rodPx.width();
-            slot.winUV.y1 = (double)(r.y1 - rodPx.y1) / (double)rodPx.height();
-            slot.winUV.y2 = (double)(r.y2 - rodPx.y1) / (double)rodPx.height();
+        const RectI imgPx = stagedRect.intersect(rodPx);
+        const double texW = (double)stagedRect.width();
+        const double texH = (double)stagedRect.height();
+        if ( (texW > 0.) && (texH > 0.) ) {
+            slot.winUV.x1 = (double)(imgPx.x1 - stagedRect.x1) / texW;
+            slot.winUV.x2 = (double)(imgPx.x2 - stagedRect.x1) / texW;
+            slot.winUV.y1 = (double)(imgPx.y1 - stagedRect.y1) / texH;
+            slot.winUV.y2 = (double)(imgPx.y2 - stagedRect.y1) / texH;
         } else {
             slot.winUV = RectD(0, 0, 1, 1);
         }
