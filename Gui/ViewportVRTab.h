@@ -34,7 +34,6 @@
 #include "Gui/GuiFwd.h"
 
 class QLabel;
-class QSpinBox;
 class QToolButton;
 class QTimer;
 class QDoubleSpinBox;
@@ -45,20 +44,22 @@ class TimeLineGui;
 class ViewportVR;
 
 /**
- * @brief Wrapper panel for the dedicated VR / 360 viewport.
+ * @brief Wrapper panel for the VR / 360 viewport: the pane of a "Viewer VR"
+ * node.
  *
- * The pane is bound to exactly one `VR Viewer` node (the VRViewport's sink in
- * the node graph, the way a 2D viewer pane belongs to a Viewer node): creating
- * a VR Viewer node opens a bound pane automatically, the pane created from the
- * pane corner menu binds to the first VR Viewer node in the project, and the
- * binding is restored from saved projects via the parallel ViewportVRNodes
- * serialization list.
+ * The pane is bound to one VRViewer node (ViewerInstance-derived, created as
+ * an InspectorNode so the A/B inputs work exactly like a 2D viewer's). Every
+ * control drives the same ViewerInstance/render-engine API the 2D viewer's
+ * bars use — so channels, gain/gamma, colorspace, A/B + comparison operator,
+ * proxy scale, ROI-windowing (which in VR means "render only the slice of the
+ * pano visible through the FOV") and the playback engine (play through the
+ * in/out points at the desired fps) behave exactly like the 2D viewer.
  *
- * Controls follow the standard viewer layout (uff-reviewed against the 2D
- * viewer bars): the top bar carries the channel display, gamma and the
- * VR-specific packing settings (Layout / Eye) plus refresh; the bottom player
- * bar carries the playback transport (first/prev/play/next/last, frame counter,
- * in/out range, fps readout) and the timeline.
+ * The viewer bar is rebuilt here as a compact equivalent: the top row carries
+ * the display controls (channels, FOV, recenter, pause updates, ROI/proxy,
+ * compare) plus VR packing (Layout/Eye); the bottom row carries the playback
+ * transport (first/prev/next/last, keyframe and increment steppers, play,
+ * frame counter, in/out points, fps) and the timeline.
  */
 class ViewportVRTab
     : public QWidget
@@ -70,19 +71,13 @@ GCC_DIAG_SUGGEST_OVERRIDE_ON
 
 public:
 
-    explicit ViewportVRTab(Gui* gui, QWidget* parent = NULL);
+    explicit ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent = NULL);
     virtual ~ViewportVRTab();
 
     ViewportVR* getViewport() const { return _viewport; }
 
-    /** Bind the pane to a VR Viewer node (its iframe stream feeds the pane). */
-    void setNodeBinding(const NodePtr& node);
-
-    /** The bound node (weak) — NULL when unbound. */
+    /** The bound "Viewer VR" node (weak). */
     NodeWPtr getNodeBinding() const { return _boundNode; }
-
-    /** If unbound, bind the FIRST VRViewer node in the project. */
-    void autoBindToVRViewer();
 
 public Q_SLOTS:
 
@@ -92,27 +87,51 @@ public Q_SLOTS:
     /** Eye dropdown: Left / Right (no-op in Mono). */
     void onEyeSelected();
 
-    /** Display-gamma spin box. */
-    void onGammaChanged(double gamma);
-
-    /** Channel-display dropdown: RGB / Red / Green / Blue / Luminance. */
-    void onChannelsSelected();
+    /** FOV spin box (the VR counterpart of the 2D viewer's Zoom). */
+    void onFovChanged(double fov);
 
     void onResetView();
     void onForceRefresh();
 
-    /** Soft playback: drives the shared project timeline (everything that
-     *  listens follows, like a scrub). Loop over the project range. */
+    /** Display channels: RGB / R / G / B / A / Luminance / Matte, via the
+     *  viewer node's setDisplayChannels (both inputs). */
+    void onDisplayChannelsSelected();
+
+    /** Pause Updates — viewerNode->setViewerPaused, same as the 2D viewer. */
+    void onPauseToggled(bool paused);
+
+    /** ROI windowing toggle: renders only the pano slice visible through the
+     *  FOV (much faster) — the VR counterpart of the 2D user-ROI button. */
+    void onRoiToggled(bool on);
+
+    /** Proxy scale toggle + factor combo, via viewerNode->onMipmapLevelChanged. */
+    void onProxyToggled(bool on);
+    void onProxyScaleChanged();
+
+    /** Comparison operator dropdown (A/B ops, applied in the VR sampler). */
+    void onCompareOperatorSelected();
+
+    /** Gain + gamma spins, wired to the viewer node's color pipeline. */
+    void onGainChanged(double gain);
+    void onGammaChanged(double gamma);
+
+    /** Play/stop — the viewer's render engine (renderFromCurrentFrame), fps
+     *  via setDesiredFPS, loop via the engine's playback mode. */
     void onPlayToggled(bool playing);
-    void onPlayTick();
-    void onStopClicked();
+    void onFpsSpinChanged(double fps);
+    void onEngineStarted(bool forward);
+    void onEngineStopped(int retCode);
 
     void onSeekFirst();
     void onSeekPrev();
     void onSeekNext();
     void onSeekLast();
+    void onSeekPrevKey();
+    void onSeekNextKey();
+    void onSeekPrevIncr();
+    void onSeekNextIncr();
 
-    void onFrameSpinChanged(int frame);
+    void onFrameSpinChanged(double frame);
 
     void onFrameChanged(SequenceTime frame, int reason);
 
@@ -123,21 +142,34 @@ protected:
 private:
 
     TimeLinePtr getTimeline() const;
+    void refreshTransportState();
+
+    NodeWPtr _boundNode;
+    ViewerInstancePtr _viewerNode;
 
     ViewportVR* _viewport;
     TimeLineGui* _timelineGui;
+
+    // top bar
+    QToolButton* _channelsDropdown;
     QToolButton* _layoutDropdown;
     QToolButton* _eyeDropdown;
-    QToolButton* _channelsDropdown;
-    QToolButton* _refreshBtn;
-    QToolButton* _playBtn;
+    QDoubleSpinBox* _fovSpin;
+    QToolButton* _pauseBtn;
+    QToolButton* _roiBtn;
+    QToolButton* _proxyBtn;
+    QToolButton* _proxyScaleDropdown;
+    QToolButton* _compareDropdown;
+    QDoubleSpinBox* _gainSpin;
     QDoubleSpinBox* _gammaSpin;
-    QTimer* _playTimer;
-    QSpinBox* _frameSpin;
-    QSpinBox* _rangeIn;
-    QSpinBox* _rangeOut;
+    // bottom bar (transport)
+    QToolButton* _playBtn;
+    QDoubleSpinBox* _frameSpin;
+    QDoubleSpinBox* _rangeIn;
+    QDoubleSpinBox* _rangeOut;
     QLabel* _fpsLabel;
-    NodeWPtr _boundNode;
+    int _proxyScaleActive;
+    bool _proxyActive;
 };
 
 NATRON_NAMESPACE_EXIT

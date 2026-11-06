@@ -1779,6 +1779,9 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<CyclesRenderPass>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
 
     // Dev nodes — VR / 360
+    // The "Viewer VR" node: a real ViewerInstance whose pane is the VR canvas
+    // (Gui::createVRViewerGui routes it there). Same cache/engine as the 2D
+    // viewer; the pane presents the texture equirectangularly.
     registerBuiltInPlugin<VRViewer>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
 
     // Dev nodes — Channel

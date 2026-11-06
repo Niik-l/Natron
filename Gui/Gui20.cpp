@@ -659,15 +659,15 @@ Gui::removeViewport3D(Viewport3DTab* v)
 }
 
 ViewportVRTab*
-Gui::addNewViewportVR()
+Gui::addNewViewportVR(NodePtr viewerNode)
 {
-    ViewportVRTab* v = new ViewportVRTab(this);
+    ViewportVRTab* v = new ViewportVRTab(viewerNode, this);
     QMutexLocker l(&_imp->_viewportVRMutex);
     std::stringstream ss;
 
     ss << _imp->_nextViewportVRIndex;
 
-    v->setScriptName( "viewportv" + ss.str() );
+    v->setScriptName( "viewportvr" + ss.str() );
     v->setLabel( "VR Viewport" + ss.str() );
     ++_imp->_nextViewportVRIndex;
     _imp->_viewportVRs.push_back(v);

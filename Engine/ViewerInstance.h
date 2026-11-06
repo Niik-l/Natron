@@ -397,18 +397,23 @@ private:
         return 0;
     }
 
-    virtual std::string getPluginID() const OVERRIDE FINAL
+    // Not FINAL: the VR "Viewer VR" node subclasses ViewerInstance and returns
+    // a different plugin ID / label (same effect machinery, separate plugin
+    // registration so its panes can be told apart from the 2D ones).
+    virtual std::string getPluginID() const OVERRIDE
     {
         return PLUGINID_NATRON_VIEWER;
     }
 
-    virtual std::string getPluginLabel() const OVERRIDE FINAL
+    virtual std::string getPluginLabel() const OVERRIDE
     {
         return "Viewer";
     }
 
-    virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL;
-    virtual std::string getPluginDescription() const OVERRIDE FINAL
+    // Not FINAL either: the VR "Viewer VR" node groups itself under the VR
+    // category instead of the multiview/views default.
+    virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE;
+    virtual std::string getPluginDescription() const OVERRIDE
     {
         return "The Viewer node can display the output of a node graph.";
     }

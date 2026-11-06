@@ -5,7 +5,7 @@
  *
  * Natron is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; only version 2 of the License, or
+ * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
  * Natron is distributed in the hope that it will be useful,
@@ -27,41 +27,46 @@
 #include "Global/Macros.h"
 #include "Global/GLIncludes.h" //!< must be included before QGlWidget because of gl.h and glew.h
 #include "Global/GlobalDefines.h"
+#include "Global/Enums.h"
 
-#include <vector>
+#include "Engine/OpenGLViewerI.h"
+#include "Engine/Texture.h"
+#include "Engine/EngineFwd.h"
 
 #include "Global/QtCompat.h"
 #include <QOpenGLWidget>
+#include <QMutex>
 #include <QString>
 
 #include "Gui/GuiFwd.h"
 
 class QString;
+class TimeLineGui;
 
 NATRON_NAMESPACE_ENTER
 
-class VRFetchThread;
+class ViewerInstance;
 
 /**
- * @brief The dedicated VR / 360 viewport widget.
+ * @brief The dedicated VR / 360 viewport: the OpenGL canvas of the "Viewer VR"
+ * node's pane.
  *
- * Renders the frame of an attached node as an equirectangular (latitude/longitude,
- * 2:1) panorama the user can look around in: mouse-drag turns the virtual camera,
- * the wheel changes the field of view. The image comes from the attached node's
- * own render pipeline at the current frame, through Node::makePreviewImage, and
- * the fetch runs on a dedicated worker thread (VRFetchThread) like the engine's
- * own node-thumbnail worker — the GUI thread never blocks, the displayed GL
- * texture is the last completed render, and stale frames are skipped (newest
- * request wins) which is what makes scrubbing behave like the 2D viewer.
+ * This is a real ViewerGL counterpart: it implements OpenGLViewerI, so the
+ * VT15 ViewerInstance render engine renders INTO it — the image cache, the
+ * async renders, the color pipeline (channels / gain / gamma / colorspace-LUT
+ * or CPU-baked OCIO) are all the same machinery the 2D viewer uses; the pane
+ * samples the finished display-ready texture equirectangularly (spherical→
+ * planar is simple GLSL, VR_PLAN.md), with mouse-drag look-around and
+ * wheel-FOV. An optional ROI mode renders only the horizontal window visible
+ * through the current FOV (turned on by the pane's ROI button) which makes
+ * scrubbing as fast as the 2D viewer.
  *
- * Stereo packing is handled at sample time: an Over/Under (left eye = top half,
- * the Google "top-bottom" convention) or Side-by-Side (left eye = left half)
- * source is cropped to the selected eye's sub-rectangle; the engine fetch is
- * always the full frame.
+ * The A/B textures come through the same two texture indices the 2D viewer
+ * uses; the pane's comparison operator is applied at sample time.
  */
-
 class ViewportVR
     : public QOpenGLWidget
+    , public OpenGLViewerI
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -77,57 +82,121 @@ public:
         eLayoutSideBySide  //!< left eye = left half, right eye = right half
     };
 
-    /** Channel display modes (applied in the shader, over the RGBA texture). */
-    enum ChannelsMode
-    {
-        eChannelsRGB = 0, //!< the color plane as-is
-        eChannelsRed,
-        eChannelsGreen,
-        eChannelsBlue,
-        eChannelsLuminance //!< Rec709 luminance of the RGB shown grey
-    };
-
     explicit ViewportVR(Gui* gui, QWidget* parent = NULL);
     virtual ~ViewportVR();
 
-    // ---- attached node ------------------------------------------------------
+    // ---- attached preview (VR Viewer node plumbing, moved to the tab) ------
 
-    /** Attach the node with this script name (empty = none attached). A fresh
-     *  fetch is scheduled for the next paint. */
-    void setNodeScriptName(const QString& scriptName);
+    QSize sizeHint() const OVERRIDE;
 
-    /** The script name of the attached node (empty = none). */
-    QString getAttachedNodeName() const { return _attachedScriptName; }
-
-    // ---- view state ---------------------------------------------------------
-
-    void setLayoutMode(Layout l);
-    Layout getLayoutMode() const { return _layout; }
-
-    /** 0 = left eye, 1 = right eye (no effect for eLayoutMono). */
-    void setEye(int eye);
-    int getEye() const { return _eye; }
+    // ---- look-around & VR options ------------------------------------------
 
     void setLook(double yawDeg, double pitchDeg, double fovDeg);
     void getLook(double* yawDeg, double* pitchDeg, double* fovDeg) const;
     void resetLook();
 
-    // ---- image display knobs (applied in the shader, no re-render) ----------
+    void setLayoutMode(Layout l);
+    Layout getLayoutMode() const { return _layout; }
+    void setEye(int eye);
 
-    /** Display gamma: color^(1/gamma), 1 = identity. */
-    void setGammaDebug(double gamma);
-    double getGammaDebug() const { return _gamma; }
+    /** ROI mode: only render the slice of the pano visible through the current
+     *  FOV (much faster). Same knob as the 2D viewer's user-ROI button. */
+    void setUserRoIEnabled(bool on);
+    bool isUserRegionOfInterestEnabled_VR() const { QMutexLocker k(&_roimutex); return _roisEnabled; }
 
-    void setChannelsMode(ChannelsMode m);
-    ChannelsMode getChannelsMode() const { return _channels; }
+    void setCompositingOperator( ViewerCompositingOperatorEnum o) OVERRIDE FINAL;
+    ViewerCompositingOperatorEnum getCompositingOperator() const OVERRIDE FINAL { return _compositingOp; }
 
-    // ---- refresh ------------------------------------------------------------
+    /** The pane feeds the getViewerFrameRange contract (playback bounds). */
+    void setVRPlaybackRange(int first, int last);
+    void clearVRTextures();
 
-    /** Re-render the attached node at the next paint, even if the frame and node
-     *  did not change. The fetch itself runs on the worker thread. */
-    void forceRefresh();
+public Q_SLOTS:
 
-    QSize sizeHint() const OVERRIDE;
+    void requestRedrawVR();
+
+    /*******************************************/
+    /***OVERRIDDEN FROM OverlaySupport (GL glue) ***/
+    /*******************************************/
+
+    void swapOpenGLBuffers() OVERRIDE FINAL;
+    void redraw() OVERRIDE FINAL;
+    void getViewportSize(double &width, double &height) const OVERRIDE FINAL;
+    void getPixelScale(double & xScale, double & yScale) const OVERRIDE FINAL;
+    double getScreenPixelRatio() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    void getBackgroundColour(double &r, double &g, double &b) const OVERRIDE FINAL;
+    virtual RectD getViewportRect() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    void getCursorPosition(double& x, double& y) const OVERRIDE FINAL;
+
+    /*******************************************/
+    /******OVERRIDDEN FROM OpenGLViewerI ******/
+    /*******************************************/
+
+    bool isViewerUIVisible() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    double getZoomFactor() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    void fitImageToFormat() OVERRIDE FINAL;
+    bool isClippingImageToFormat() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    RectI getImageRectangleDisplayed(const RectI & imageRoDPixel, const double par, unsigned int mipmapLevel) OVERRIDE FINAL;
+    RectI getImageRectangleDisplayedRoundedToTileSize(int texIndex,
+                                                      const RectD & rod,
+                                                      const double par,
+                                                      unsigned int mipmapLevel,
+                                                      std::vector<RectI>* tiles,
+                                                      std::vector<RectI>* tilesRounded,
+                                                      int *tileSize,
+                                                      RectI* roiNotRounded) OVERRIDE FINAL;
+    RectI getExactImageRectangleDisplayed(int texIndex, const RectD & rod, const double par,
+                                          unsigned int mipmapLevel) OVERRIDE FINAL;
+    ImageBitDepthEnum getBitDepth() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    bool isUserRegionOfInterestEnabled() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    RectD getUserRegionOfInterest() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    void clearPartialUpdateTextures() OVERRIDE FINAL;
+    void transferBufferFromRAMtoGPU(const unsigned char* ramBuffer,
+                                    size_t bytesCount,
+                                    const RectI &roiRoundedToTileSize,
+                                    const RectI& roi,
+                                    const TextureRect & tileRect,
+                                    int textureIndex,
+                                    bool isPartialRect,
+                                    bool isFirstTile,
+                                    TexturePtr* texture) OVERRIDE FINAL;
+    void endTransferBufferFromRAMToGPU(int textureIndex,
+                                       const TexturePtr& texture,
+                                       const ImagePtr& image,
+                                       int time,
+                                       const RectD& rod,
+                                       double par,
+                                       ImageBitDepthEnum depth,
+                                       unsigned int mipmapLevel,
+                                       ImagePremultiplicationEnum premult,
+                                       double gain,
+                                       double gamma,
+                                       double offset,
+                                       int lut,
+                                       bool recenterViewer,
+                                       const Point& viewportCenter,
+                                       bool isPartialRect) OVERRIDE FINAL;
+
+    void disconnectInputTexture(int textureIndex, bool clearRoD) OVERRIDE FINAL;
+    void updateColorPicker(int textureIndex, int x = std::numeric_limits<int>::max(), int y = std::numeric_limits<int>::max()) OVERRIDE FINAL;
+    void getTextureColorAt(int x, int y, double* r, double *g, double *b, double *a) OVERRIDE FINAL;
+    void makeOpenGLcontextCurrent() OVERRIDE FINAL;
+    void removeGUI() OVERRIDE FINAL;
+    ViewIdx getCurrentView() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    int getCurrentlyDisplayedTime() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    void getViewerFrameRange(int* first, int* last) const OVERRIDE FINAL;
+    /** Must return a pointer to the current timeline used by the Viewer */
+    virtual TimeLinePtr getTimeline() const OVERRIDE FINAL WARN_UNUSED_RETURN;
+
+    void saveOpenGLContext() OVERRIDE FINAL;
+    void restoreOpenGLContext() OVERRIDE FINAL;
+    void clearLastRenderedImage() OVERRIDE FINAL;
+    void redrawNow() OVERRIDE FINAL;
+    void toWidgetCoordinates(double *x, double *y) const OVERRIDE FINAL;
+    void toCanonicalCoordinates(double *x, double *y) const OVERRIDE FINAL;
+    int getWidgetFontHeight() const OVERRIDE FINAL;
+    int getStringWidthForCurrentFont(const std::string& string) const OVERRIDE FINAL;
+    /*******************************************/
 
 protected:
 
@@ -142,19 +211,10 @@ protected:
 
 private:
 
-    /** Resolve the attached node and queue a render request on the worker. */
-    void scheduleFetch(GuiAppInstancePtr app);
-
-    /** Bind the texture + all display uniforms and draw the fullscreen quad
-     *  (call only from paintGL with the program ready). */
-    void applyDisplayUniforms();
+    /** Bind the A/B slot textures + the op and draw the fullscreen quad. */
+    void drawVRImage();
 
     Gui* _gui;
-
-    // Attached node: script name is the persistent identity; the weak pointer
-    // is the fast-hold so a dead node cannot be kept alive by the viewport.
-    QString _attachedScriptName;
-    NodeWPtr _attachedNode;
 
     // view state
     double _yawDeg;   //!< 0 = looking at the center of the pano; + = turn east (right)
@@ -167,26 +227,43 @@ private:
     int _lastMouseX, _lastMouseY;
     bool _dragging;
 
-    // image display knobs
-    double _gamma;
-    ChannelsMode _channels;
+    // ROI render mode (user face of the interface's isUserRegionOfInterestEnabled)
+    mutable QMutex _roimutex;
+    bool _roisEnabled;
 
-    // fetch state
-    VRFetchThread* _fetchThread;   //!< owns the async makePreviewImage worker
-    double _scheduledTime;         //!< frame the current schedule is for
-    bool _scheduledOnce;
-    bool _forceNextFetch;          //!< set by forceRefresh(), consumed by the next paint
+    // op applied in shader between the A and B textures
+    ViewerCompositingOperatorEnum _compositingOp;
 
-    // upload state (GL texture)
-    std::vector<unsigned int> _uploadBuffer; //!< copy-out of the worker's result
-    int _texWidth, _texHeight;
-    GLuint _tex;
-    int _lastUploadedGen;          //!< last image generation uploaded to GL
+    /** Colorspace state tracked for the interface contract (the CPU pipeline
+     *  bakes it, we only report). */
+    ViewerColorSpaceEnum _lut;
+
+    // playback bounds reported to the engine through getViewerFrameRange
+    int _rangeFirst, _rangeLast;
+
+    // engine-side comparison op requested by the pane
+    ViewerCompositingOperatorEnum _requestedOp; // unused currently, kept for 5b A/B parity
+
+    // per-texture-index slots (A and B), metadata received from the engine
+    struct VRSlot
+    {
+        TexturePtr texture;
+        RectI roiRounded;            //!< exact texture rectangle, in pixels
+        RectI roi;                   //!< exact display rectangle
+        RectD rod;                   //!< the rendered rod
+        RectD winUV;                 //!< rendered window mapped into pano UV
+        double par;
+        bool isVisible;
+        int time;                    //!< the frame when this slot was rendered
+        unsigned int mipmapLevel;
+    };
+    VRSlot _slots[2];
+    mutable QMutex _slotsMutex;
 
     // shader program (per context — rebuilt whenever the GL context is recreated)
     GLuint _program;
     bool _programReady;
-    GLint _uTex, _uSize, _uTanHalfFov, _uAspect, _uYaw, _uPitch, _uUv0, _uUv1, _uChan, _uGamma;
+    GLint _uTexA, _uTexB, _uSize, _uTanHalfFov, _uAspect, _uYaw, _uPitch, _uUvA0, _uUvA1, _uUvB0, _uUvB1, _uOp, _uHaveB;
 };
 
 NATRON_NAMESPACE_EXIT

@@ -1069,6 +1069,7 @@ isEntitledForInspector(Plugin* plugin,
                        OFX::Host::ImageEffect::Descriptor* ofxDesc)
 {
     if ( ( plugin->getPluginID() == QString::fromUtf8(PLUGINID_NATRON_VIEWER) ) ||
+         ( plugin->getPluginID() == QString::fromUtf8(PLUGINID_NATRON_VRVIEWER) ) ||
          ( plugin->getPluginID() == QString::fromUtf8(PLUGINID_NATRON_ROTOPAINT) ) ||
          ( plugin->getPluginID() == QString::fromUtf8(PLUGINID_NATRON_ROTO) ) ) {
         return true;

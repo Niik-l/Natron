@@ -25,27 +25,25 @@
 // ***** END PYTHON BLOCK *****
 
 #include "Global/Macros.h"
-#include "Engine/EffectInstance.h"
+
+#include "Engine/ViewerInstance.h"
 
 NATRON_NAMESPACE_ENTER
 
 /**
- * @brief The VR Viewer node: the graph-side sink of the VR viewport.
+ * @brief The "Viewer VR" node: a real Viewer (ViewerInstance) dedicated to the
+ * VR / 360 viewport.
  *
- * Wire the (processed) equirectangular footage into its input and create a VR
- * viewport pane (pane corner menu > "New VR viewport"); creating the node in
- * the GUI opens a bound pane automatically, the same way creating a Viewer
- * node opens a 2D viewer. Multiple VR Viewer nodes can coexist, each with its
- * own pane, exactly like viewers.
- *
- * The node is a transparent identity pass-through to input 0 (VR_PLAN.md:
- * "spherical-to-planar is simple math") — it never alters data; it exists so
- * the VR viewport has a proper node-tree wire to attach to instead of a
- * free-floating selector, and so upstream connections survive save/load and
- * reorganize like any other node.
+ * Wire the equirectangular footage into its inputs (it is an InspectorNode, so
+ * A/B comparison inputs work like a regular viewer) and a VR viewport pane
+ * bound to it opens automatically. Because it IS a viewer, everything comes
+ * from the same machinery the 2D viewer uses: the image cache, the parallel
+ * render engine, the channel/gain/gamma/colorspace pipeline, proxy scale,
+ * playback with in/out points — the pane's pane just presents the rendered
+ * texture equirectangularly (VR_PLAN.md: "spherical-to-planar is simple math").
  */
 class VRViewer
-    : public EffectInstance
+    : public ViewerInstance
 {
 GCC_DIAG_SUGGEST_OVERRIDE_OFF
     Q_OBJECT
@@ -62,38 +60,6 @@ public:
     virtual std::string getPluginLabel() const OVERRIDE FINAL;
     virtual std::string getPluginDescription() const OVERRIDE FINAL;
     virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL;
-
-    // NOTE: deliberately NOT isOutput(). getWriters() (the headless render-all
-    // path) collects isOutput() nodes and asserts they are OutputEffectInstances
-    // (AppInstance.cpp) — true Viewers dodge that via background-mode eviction,
-    // which does not apply to this node. The pane renders it through the preview
-    // path, which never checks isOutput.
-    virtual bool isInputOptional(int inputNb) const OVERRIDE FINAL { Q_UNUSED(inputNb); return true; }
-
-    virtual int getMajorVersion() const OVERRIDE FINAL { return 1; }
-    virtual int getMinorVersion() const OVERRIDE FINAL { return 0; }
-
-    virtual int getNInputs() const OVERRIDE FINAL { return 1; }
-    virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL;
-
-    virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE FINAL
-    { return false; }
-    virtual bool getCreateChannelSelectorKnob() const OVERRIDE FINAL { return false; }
-
-    virtual void addAcceptedComponents(int inputNb, std::list<ImagePlaneDesc>* comps) OVERRIDE FINAL;
-    virtual void addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const OVERRIDE FINAL;
-
-    virtual RenderSafetyEnum renderThreadSafety() const OVERRIDE FINAL
-    { return eRenderSafetyFullySafe; }
-
-    /** Pure pass-through to input 0, the DevStamp way. */
-    virtual bool isIdentity(double time,
-                            const RenderScale& scale,
-                            const RectI& roi,
-                            ViewIdx view,
-                            double* inputTime,
-                            ViewIdx* inputView,
-                            int* inputNb) OVERRIDE;
 };
 
 NATRON_NAMESPACE_EXIT

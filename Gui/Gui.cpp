@@ -411,9 +411,8 @@ Gui::createVRViewerGui(NodePtr node)
     }
     assert(where);
 
-    ViewportVRTab* tab = addNewViewportVR();
+    ViewportVRTab* tab = addNewViewportVR(node);
     assert(tab);
-    tab->setNodeBinding(node);
     where->appendTab(tab, tab);
 }
 

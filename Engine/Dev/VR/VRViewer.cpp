@@ -24,15 +24,12 @@
 #include "VRViewer.h"
 
 #include "../../AppManager.h"
-#include "../../ImagePlaneDesc.h"
 
 NATRON_NAMESPACE_ENTER
 
 VRViewer::VRViewer(NodePtr node)
-    : EffectInstance(node)
+    : ViewerInstance(node)
 {
-    // Default render-scale support keeps makePreviewImage's mipmapped fetches
-    // legal; with the identity pass-through the upstream scales anyway.
 }
 
 VRViewer::~VRViewer()
@@ -48,15 +45,7 @@ VRViewer::getPluginID() const
 std::string
 VRViewer::getPluginLabel() const
 {
-    return "VR Viewer";
-}
-
-std::string
-VRViewer::getPluginDescription() const
-{
-    return tr("The VR viewport's sink node. Wire your equirectangular footage "
-              "(or any processed node) into it; creating it opens a bound VR "
-              "viewport pane. It never alters the image — a pure pass-through.").toStdString();
+    return "Viewer VR";
 }
 
 void
@@ -66,39 +55,14 @@ VRViewer::getPluginGrouping(std::list<std::string>* grouping) const
 }
 
 std::string
-VRViewer::getInputLabel(int /*inputNb*/) const
+VRViewer::getPluginDescription() const
 {
-    return "src";
-}
-
-void
-VRViewer::addAcceptedComponents(int /*inputNb*/, std::list<ImagePlaneDesc>* comps)
-{
-    comps->push_back(ImagePlaneDesc::getRGBAComponents());
-}
-
-void
-VRViewer::addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const
-{
-    depths->push_back(eImageBitDepthFloat);
-}
-
-bool
-VRViewer::isIdentity(double time,
-                     const RenderScale& /*scale*/,
-                     const RectI& /*roi*/,
-                     ViewIdx view,
-                     double* inputTime,
-                     ViewIdx* inputView,
-                     int* inputNb)
-{
-    if (getInput(0)) {
-        *inputTime = time;
-        *inputView = view;
-        *inputNb = 0;
-        return true;
-    }
-    return false;
+    return tr("The VR viewport's viewer: a real Viewer dedicated to the "
+              "equirectangular / 360 presentation. Wire footage into its "
+              "inputs and a VR viewport pane opens bound to it. Everything "
+              "works exactly like the 2D Viewer (image cache, channels, "
+              "gain/gamma, color transform, A/B inputs, proxy scale, playback) "
+              "— the pane samples the rendered texture on a sphere.").toStdString();
 }
 
 NATRON_NAMESPACE_EXIT
