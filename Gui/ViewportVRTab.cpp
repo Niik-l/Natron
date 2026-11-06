@@ -858,6 +858,10 @@ ViewportVRTab::onFrameChanged(SequenceTime frame, int)
         _frameSpin->setValue((double)frame);
         _frameSpin->blockSignals(false);
     }
+    // Scrub = re-render at the new frame, exactly the 2D viewer's path.
+    if (_viewerNode) {
+        _viewerNode->renderCurrentFrame(true);
+    }
 }
 
 void

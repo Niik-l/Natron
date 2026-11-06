@@ -577,54 +577,16 @@ ViewportVR::getImageRectangleDisplayed(const RectI & imageRoDPixel,
                                        const double par,
                                        unsigned int mipmapLevel)
 {
-    // Without ROI mode the whole (2:1) pano is rendered; with ROI mode, only
-    // the horizontal slice visible through the current FOV (full vertical):
-    // that is what makes scrubbing cheap like the 2D viewer's ROI.
-    bool roiEnabled;
-    {
-        QMutexLocker l(&_roimutex);
-        roiEnabled = _roisEnabled;
-    }
-    if (!roiEnabled) {
-        return imageRoDPixel;
-    }
-
-    double yawDeg;
-    double fovDeg;
-    double pitchDeg;
-    getLook(&yawDeg, &pitchDeg, &fovDeg);
-    const double hfovRad = 2. * std::atan( std::tan(fovDeg * 0.5 * M_PI / 180.) * ( (double)width() / (double)height() ) );
-
-    double yawCenter = std::fmod(yawDeg * M_PI / 180., 2. * M_PI);
-    if (yawCenter < -M_PI) {
-        yawCenter += 2. * M_PI;
-    } else if (yawCenter > M_PI) {
-        yawCenter -= 2. * M_PI;
-    }
-
-    double lonLo = yawCenter - hfovRad * 0.5;
-    double lonHi = yawCenter + hfovRad * 0.5;
-    if ( (lonLo < -M_PI) || (lonHi > M_PI) ) {
-        // Window crosses the vertical wrap: rendering the full width is the
-        // only valid single-rectangle answer.
-        return imageRoDPixel;
-    }
-
-    // lon -> pano u in [0,1] (u = 0.5 + lon/2Pi); u -> pixel x on the rod.
-    RectI roi;
-    const double u0 = 0.5 + lonLo / (2. * M_PI);
-    const double u1 = 0.5 + lonHi / (2. * M_PI);
-    roi.x1 = (int)std::floor( imageRoDPixel.x1 + u0 * (imageRoDPixel.x2 - imageRoDPixel.x1) );
-    roi.x2 = (int)std::ceil(  imageRoDPixel.x1 + u1 * (imageRoDPixel.x2 - imageRoDPixel.x1) );
-    roi.y1 = imageRoDPixel.y1;
-    roi.y2 = imageRoDPixel.y2;
-    // The view is level-invariant vertically (the pitch comes from the same
-    // full-height texture): rendering the full vertical is both correct and
-    // keeps the pano reusable between pitch changes.
+    // The whole (2:1) pano is always rendered, exactly like the 2D viewer's
+    // full-frame mode: an equirect sub-window cannot be sampled with spherical
+    // math while the look direction changes (the rendered slice would drift
+    // against the camera — the double-pano-with-a-seam artifact seen in the
+    // first GUI passes). The ROI knob stays as a UI placeholder until a true
+    // user-ROI interaction (drag a rect over the pano) lands in 5b; the
+    // isUserRegionOfInterestEnabled() contract therefore reports disabled.
     Q_UNUSED(par);
     Q_UNUSED(mipmapLevel);
-    roi = roi.intersect(imageRoDPixel);
-    return roi;
+    return imageRoDPixel;
 }
 
 RectI
@@ -685,8 +647,10 @@ ViewportVR::getBitDepth() const
 bool
 ViewportVR::isUserRegionOfInterestEnabled() const
 {
+    // deliberately disabled while the FOV-window ROI mode is parked (VR_PLAN
+    // 5b may re-introduce it with a drag-to-select rect over the pano).
     QMutexLocker k(&_roimutex);
-    return _roisEnabled;
+    return false;
 }
 
 RectD
