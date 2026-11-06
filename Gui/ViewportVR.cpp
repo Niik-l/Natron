@@ -852,6 +852,8 @@ ViewportVR::endTransferBufferFromRAMToGPU(int textureIndex,
     }
 
     // ---- upload through the double-buffered PBO pool (ViewerGL scheme) ----
+    // Context FIRST: PBO handles are context resources.
+    makeCurrent();
     if ( _pboIds.size() < 2 ) {
         while ( _pboIds.size() < 2 ) {
             GLuint id = 0;
@@ -877,10 +879,20 @@ ViewportVR::endTransferBufferFromRAMToGPU(int textureIndex,
     }
     stagedCopy = flat.empty() ? 0 : &flat.front();
 
-    makeCurrent();
     glBindBufferARB(GL_PIXEL_UNPACK_BUFFER_ARB, pboId);
     glBufferDataARB(GL_PIXEL_UNPACK_BUFFER_ARB, bytes, stagedCopy, GL_STREAM_DRAW_ARB);
     uploadPtr = 0; // read from the bound PBO at offset 0
+
+    // Allocate storage for freshly created textures (Texture only generates the
+    // canvas name; without ensureTextureHasSize the glTexSubImage2D lands on an
+    // unsized texture and silently draws nothing).
+    {
+        TextureRect allocRect;
+        allocRect.set(0, 0, w, h);
+        allocRect.par = 1.;
+        allocRect.closestPo2 = 1;
+        tex->ensureTextureHasSize(allocRect, 0);
+    }
 
     glBindTexture(GL_TEXTURE_2D, tex->getTexID());
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
