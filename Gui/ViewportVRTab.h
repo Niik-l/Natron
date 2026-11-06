@@ -171,6 +171,7 @@ private:
     QToolButton* _playBtn;
     QTimer* _lookRefreshTimer;
     bool _lastLookRefreshValid;
+    qint64 _userStoppedMs; //!< when Stop was last pressed (grace window vs queued renders)
     QDoubleSpinBox* _frameSpin;
     QDoubleSpinBox* _rangeIn;
     QDoubleSpinBox* _rangeOut;

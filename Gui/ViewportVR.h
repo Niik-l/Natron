@@ -256,21 +256,41 @@ private:
     // engine-side comparison op requested by the pane
     ViewerCompositingOperatorEnum _requestedOp; // unused currently, kept for 5b A/B parity
 
-    // per-texture-index slots (A and B), metadata received from the engine
+    // per-texture-index slots (A and B). Staging is CPU-side; the engine calls
+    // transferBufferFromRAMtoGPU per tile (pure memcpy now) and
+    // endTransferBufferFromRAMToGPU exactly ONCE per frame per index — that is
+    // the atomic commit point: the frame goes to the GL texture (through the
+    // PBO pool) only when the staged tiles cover the whole render ROI; an
+    // incomplete set is dropped and the previous frame stays on screen (no
+    // mixed-frame artifacts, and aborted passes are simply re-rendered). The
+    // GL-swap state machine mirrors ViewerGL's displayTextures model.
     struct VRSlot
     {
-        TexturePtr texture;
-        RectI roiRounded;            //!< exact texture rectangle, in pixels
-        RectI roi;                   //!< exact display rectangle
-        RectD rod;                   //!< the rendered rod
-        RectD winUV;                 //!< rendered window mapped into pano UV
+        TexturePtr texture;          //!< committed GL texture
+        RectI roi;                   //!< committed display rect (pixels)
+        RectD rod;                   //!< committed rod
+        RectD winUV;                 //!< committed window mapped into pano UV
         double par;
         bool isVisible;
-        int time;                    //!< the frame when this slot was rendered
-        unsigned int mipmapLevel;
+        int time;                    //!< the committed frame
+
+        // staging (only valid between a transfer frame's first tile and its
+        // matching endTransfer call)
+        std::vector<unsigned char> staged;
+        RectI stagedRect;            //!< the staged texture rect (full rounded ROI)
+        std::vector<RectI> stagedTiles;
+        unsigned long long stagedArea;
+        bool stagedValid;
     };
     VRSlot _slots[2];
     mutable QMutex _slotsMutex;
+
+    /** Commit the staged frame of one slot (GL upload through the PBO pool). */
+    void commitStagedSlot(int textureIndex);
+
+    // double-buffered PBO pool for async uploads (ViewerGL's scheme)
+    std::vector<GLuint> _pboIds;
+    int _pboIndex;
 
     // shader program (per context — rebuilt whenever the GL context is recreated)
     GLuint _program;

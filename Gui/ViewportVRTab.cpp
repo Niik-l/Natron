@@ -34,6 +34,7 @@
 #include <QMenu>
 #include <QAction>
 #include <QKeyEvent>
+#include <QDateTime>
 #include <QTimer>
 #include <QDoubleSpinBox>
 
@@ -69,6 +70,8 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
     _boundNode = viewerNode;
     _viewerNode = std::dynamic_pointer_cast<ViewerInstance>(viewerNode->getEffectInstance());
     assert(_viewerNode);
+    _lastLookRefreshValid = false;
+    _userStoppedMs = 0;
 
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
@@ -827,7 +830,11 @@ ViewportVRTab::onPlayToggled(bool playing)
         return;
     }
     if (playing) {
-        GuiAppInstancePtr app = getGui()->getApp();
+        Gui* gui = getGui();
+        if (!gui) {
+            return;
+        }
+        GuiAppInstancePtr app = gui->getApp();
         if ( !app || app->checkAllReadersModificationDate(true) ) {
             return;
         }
@@ -838,6 +845,9 @@ ViewportVRTab::onPlayToggled(bool playing)
                                                                viewsToRender,
                                                                eRenderDirectionForward);
     } else {
+        // Stop: abort + remember when (queued scrub-refresh renders in flight
+        // would otherwise re-signal renderStarted and fight the button back on).
+        _userStoppedMs = QDateTime::currentMSecsSinceEpoch();
         _viewerNode->getRenderEngine()->abortRenderingNoRestart();
     }
 }
@@ -866,7 +876,12 @@ ViewportVRTab::onEngineStarted(bool forward)
 {
     Q_UNUSED(forward);
     if (_playBtn && !_playBtn->isChecked()) {
-        _playBtn->setChecked(true);
+        // A render (re)started on its own: only mirror it onto the button when
+        // the user did not just stop within the grace window.
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if ( (now - _userStoppedMs) > 1200 ) {
+            _playBtn->setChecked(true);
+        }
     }
 }
 

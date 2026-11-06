@@ -100,8 +100,8 @@ ViewportVR::ViewportVR(Gui* gui, QWidget* parent)
     for (int i = 0; i < 2; ++i) {
         _slots[i].isVisible = false;
         _slots[i].time = -1;
-        _slots[i].mipmapLevel = 0;
     }
+    _pboIndex = 0;
 }
 
 ViewportVR::~ViewportVR()
@@ -716,56 +716,58 @@ ViewportVR::transferBufferFromRAMtoGPU(const unsigned char* ramBuffer,
                                        bool isFirstTile,
                                        TexturePtr* texture)
 {
-    Q_UNUSED(bytesCount);
+    Q_UNUSED(isFirstTile);
+    Q_UNUSED(isPartialRect);
+    Q_UNUSED(roi);
     assert(textureIndex == 0 || textureIndex == 1);
     assert(ramBuffer);
-    // Engine calls this on the main thread (see the asserts in ViewerGL's twin).
-    if ( QOpenGLContext::currentContext() != context() ) {
-        makeCurrent();
-    }
+    // CPU staging only — NO GL here: the atomic commit happens in
+    // endTransferBufferFromRAMtoGPU (exactly once per frame per A/B index),
+    // so a partially delivered frame can never reach the canvas, and no GL
+    // lock is held on the per-tile path (scrub keeps the UI fluid).
 
-    TexturePtr tex;
     TextureRect textureRectangle;
+    textureRectangle.par = tileRect.par;
+    textureRectangle.closestPo2 = tileRect.closestPo2;
+    textureRectangle.set(roiRoundedToTileSize);
+
     {
         QMutexLocker k(&_slotsMutex);
         VRSlot& slot = _slots[textureIndex];
-        // The texture spans the WHOLE rounded ROI of this viewer (ViewerGL
-        // pattern); the buffer handed over here belongs to ONE tile, uploaded
-        // into its own sub-rectangle below. Formatting the big rect from the
-        // passed rounded-ROI guarantees a matching byte stride.
-        textureRectangle.par = tileRect.par;
-        textureRectangle.closestPo2 = tileRect.closestPo2;
-        textureRectangle.set(roiRoundedToTileSize);
-        tex = slot.texture;
-        if (!tex || (tex->type() != Texture::eDataTypeByte)) {
-            int format, internalFormat, glType;
-            Texture::getRecommendedTexParametersForRGBAByteTexture(&format, &internalFormat, &glType);
-            tex.reset( new Texture(GL_TEXTURE_2D, GL_LINEAR, GL_NEAREST, GL_CLAMP_TO_EDGE,
-                                   Texture::eDataTypeByte, format, internalFormat, glType) );
-            slot.texture = tex;
+
+        if ( !slot.stagedValid ||
+             (slot.stagedRect.x1 != textureRectangle.x1) || (slot.stagedRect.y1 != textureRectangle.y1) ||
+             (slot.stagedRect.x2 != textureRectangle.x2) || (slot.stagedRect.y2 != textureRectangle.y2) ) {
+            // New frame / new ROI: reset staging.
+            slot.stagedValid = true;
+            slot.stagedRect.set(textureRectangle);
+            slot.stagedTiles.clear();
+            slot.stagedArea = 0;
+            slot.staged.assign( (std::size_t)textureRectangle.width() * (std::size_t)textureRectangle.height() * 4, 0 );
         }
-        slot.roiRounded = roiRoundedToTileSize;
-        slot.roi = roi;
+
+        // Copy this tile into its sub-rect of the staging buffer. The engine's
+        // cached tiles round rows/cols to the tile size, so the tile's byte
+        // rows are tileRect.width()-strided — exactly matching the memcpy.
+        const std::size_t rowBytes = (std::size_t)textureRectangle.width() * 4;
+        const std::size_t dstY = (std::size_t)(tileRect.y1 - textureRectangle.y1);
+        const std::size_t dstXBytes = (std::size_t)(tileRect.x1 - textureRectangle.x1) * 4;
+        const std::size_t tileRows = (std::size_t)tileRect.height();
+        const std::size_t srcRowBytes = (std::size_t)tileRect.width() * 4;
+        for (std::size_t row = 0; row < tileRows; ++row) {
+            std::memcpy( &slot.staged[ dstY * rowBytes + dstXBytes + row * rowBytes ],
+                         ramBuffer + row * srcRowBytes,
+                         srcRowBytes );
+        }
+        slot.stagedTiles.push_back( RectI(tileRect.x1, tileRect.y1, tileRect.x2, tileRect.y2) );
+        slot.stagedArea += (unsigned long long)tileRect.width() * (unsigned long long)tileRect.height();
     }
 
-    if (!isPartialRect && tex) {
-        if (isFirstTile) {
-            tex->ensureTextureHasSize(textureRectangle, 0);
-        }
-#ifdef NATRON_DEBUG_VR
-        static const bool dbg = getenv("NATRON_DEBUG_VR") != NULL;
-        if (dbg) {
-            std::fprintf(stderr, "[ViewportVR] tile tex=%d idx=%d first=%d texRect=%d,%d,%dx%d bytes=%llu\n",
-                         textureIndex, tileRect.x1, tileRect.y1, tileRect.width(), tileRect.height(),
-                         (unsigned long long)bytesCount);
-        }
-#endif
-        // The call's "roi" is the TILE's own rectangle: its bytes are uploaded
-        // into the tile-sized sub-rect of the big texture (updateOnlyRoi=true),
-        // exactly like ViewerGL's twin — the byte stride then matches the
-        // engine's per-tile buffer.
-        tex->fillOrAllocateTexture(textureRectangle, tileRect, true, ramBuffer);
-    }
+    // Legacy API surface: the engine reuses whatever texture object the
+    // previous transfers produced; the true commit happens below.
+    QMutexLocker k(&_slotsMutex);
+    TexturePtr tex = _slots[textureIndex].texture;
+    k.unlock();
     *texture = tex;
 }
 
@@ -787,6 +789,7 @@ ViewportVR::endTransferBufferFromRAMToGPU(int textureIndex,
                                           const Point& viewportCenter,
                                           bool isPartialRect)
 {
+    Q_UNUSED(texture);
     Q_UNUSED(image);
     Q_UNUSED(depth);
     Q_UNUSED(premult);
@@ -797,24 +800,118 @@ ViewportVR::endTransferBufferFromRAMToGPU(int textureIndex,
     Q_UNUSED(recenterViewer);
     Q_UNUSED(viewportCenter);
     Q_UNUSED(isPartialRect);
+    assert( QThread::currentThread() == qApp->thread() );
+
+    // ---- atomic commit (called once per frame per A/B index) --------------
+    // The engine made the GL context current before updateViewer, so GL calls
+    // are legal on this thread. Only commit when the staged tiles cover the
+    // whole staged rectangle — an aborted/incomplete pass is dropped and the
+    // previous frame stays on screen (no mixed-frame artifacts, no holes; the
+    // next complete pass re-renders them).
+    bool complete = false;
+    RectI stagedRect;
     {
         QMutexLocker k(&_slotsMutex);
         VRSlot& slot = _slots[textureIndex];
-        slot.texture = texture;
+        if (slot.stagedValid) {
+            stagedRect = slot.stagedRect;
+            unsigned long long full = (unsigned long long)stagedRect.width() * (unsigned long long)stagedRect.height();
+            complete = (slot.stagedArea >= full);
+        }
+        if (!complete) {
+            // drop the partial staging: next pass restarts it
+            slot.stagedValid = false;
+            slot.stagedTiles.clear();
+            slot.stagedArea = 0;
+        }
+    }
+    if (!complete) {
+        return;
+    }
+
+    if ( QOpenGLContext::currentContext() != context() ) {
+        makeCurrent();
+    }
+
+    // slot texture: (re)create on size change
+    TexturePtr tex;
+    int w, h;
+    {
+        QMutexLocker k(&_slotsMutex);
+        VRSlot& slot = _slots[textureIndex];
+        w = stagedRect.width();
+        h = stagedRect.height();
+        tex = slot.texture;
+        if (!tex || (tex->type() != Texture::eDataTypeByte) || (tex->w() != w) || (tex->h() != h)) {
+            int format, internalFormat, glType;
+            Texture::getRecommendedTexParametersForRGBAByteTexture(&format, &internalFormat, &glType);
+            tex.reset( new Texture(GL_TEXTURE_2D, GL_LINEAR, GL_LINEAR /*mip off*/, GL_CLAMP_TO_EDGE,
+                                   Texture::eDataTypeByte, format, internalFormat, glType) );
+            slot.texture = tex;
+        }
+    }
+
+    // ---- upload through the double-buffered PBO pool (ViewerGL scheme) ----
+    if ( _pboIds.size() < 2 ) {
+        while ( _pboIds.size() < 2 ) {
+            GLuint id = 0;
+            glGenBuffers(1, &id);
+            _pboIds.push_back(id);
+        }
+    }
+    const GLuint pboId = _pboIds[_pboIndex];
+    _pboIndex = (_pboIndex + 1) % 2;
+
+    const std::size_t bytes = (std::size_t)w * (std::size_t)h * 4;
+    const GLvoid* uploadPtr = 0;
+    std::vector<unsigned char> flat; // released after the upload
+    unsigned char* stagedCopy = 0;
+    {
+        QMutexLocker k(&_slotsMutex);
+        VRSlot& slot = _slots[textureIndex];
+        slot.staged.swap(flat); // steal the staged bytes
+        slot.staged.clear();
+        slot.stagedValid = false;
+        slot.stagedTiles.clear();
+        slot.stagedArea = 0;
+    }
+    stagedCopy = flat.empty() ? 0 : &flat.front();
+
+    makeCurrent();
+    glBindBufferARB(GL_PIXEL_UNPACK_BUFFER_ARB, pboId);
+    glBufferDataARB(GL_PIXEL_UNPACK_BUFFER_ARB, bytes, stagedCopy, GL_STREAM_DRAW_ARB);
+    uploadPtr = 0; // read from the bound PBO at offset 0
+
+    glBindTexture(GL_TEXTURE_2D, tex->getTexID());
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexSubImage2D(GL_TEXTURE_2D, 0,
+                    0, 0, w, h,
+                    tex->getFormat(), tex->getGLType(),
+                    uploadPtr);
+    glBindBufferARB(GL_PIXEL_UNPACK_BUFFER_ARB, 0);
+
+    GLint currentBoundPBO = 0;
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING_ARB, &currentBoundPBO);
+    Q_UNUSED(currentBoundPBO);
+
+    // ---- commit the slot metadata + winUV ----------------------------------
+    {
+        QMutexLocker k(&_slotsMutex);
+        VRSlot& slot = _slots[textureIndex];
         slot.isVisible = true;
         slot.time = time;
         slot.rod = rod;
         slot.par = par;
-        slot.mipmapLevel = mipmapLevel;
-
-        // Map the rendered pixel ROI back to pano UV space so the sampler can
-        // address the little window inside the full panorama.
         const RectI rodPx = rod.toPixelEnclosing(mipmapLevel, par);
-        const RectI& r = slot.roi;
+        const RectI& r = stagedRect; // committed = whole staged rect
         if ( (rodPx.width() > 0) && (rodPx.height() > 0) ) {
             slot.winUV.x1 = (double)(r.x1 - rodPx.x1) / (double)rodPx.width();
             slot.winUV.x2 = (double)(r.x2 - rodPx.x1) / (double)rodPx.width();
-            // GL texture layout: row 0 = image BOTTOM; Natron rows grow with y.
             slot.winUV.y1 = (double)(r.y1 - rodPx.y1) / (double)rodPx.height();
             slot.winUV.y2 = (double)(r.y2 - rodPx.y1) / (double)rodPx.height();
         } else {
@@ -827,11 +924,13 @@ ViewportVR::endTransferBufferFromRAMToGPU(int textureIndex,
 void
 ViewportVR::disconnectInputTexture(int textureIndex, bool clearRoD)
 {
+    // Keep the last committed frame on screen instead of dropping it: the
+    // engine signals a disconnect when re-arranging requests (scrub/abort), and
+    // blanking here produced the black-frame flashes between frames. A genuine
+    // upstream disconnect ends up re-rendered as a black tile set which DOES
+    // commit — so the end state stays correct.
+    Q_UNUSED(textureIndex);
     Q_UNUSED(clearRoD);
-    QMutexLocker k(&_slotsMutex);
-    if ( (textureIndex >= 0) && (textureIndex < 2) ) {
-        _slots[textureIndex].isVisible = false;
-    }
     update();
 }
 
