@@ -69,6 +69,9 @@ ViewportVR::ViewportVR(Gui* gui, QWidget* parent)
     , _lastMouseX(-1)
     , _lastMouseY(-1)
     , _dragging(false)
+    , _lastEmittedYaw(0)
+    , _lastEmittedPitch(0)
+    , _lookEmittedOnce(false)
     , _roisEnabled(true)
     , _compositingOp(eViewerCompositingOperatorNone)
     , _lut(eViewerColorSpaceLinear)
@@ -137,6 +140,13 @@ ViewportVR::setLook(double yawDeg, double pitchDeg, double fovDeg)
         pitchDeg = -kVRPitchClampDeg;
     }
     _pitchDeg = pitchDeg;
+    bool mustEmitLook = false;
+    if (!_lookEmittedOnce || (_pitchDeg != _lastEmittedPitch) || (_yawDeg != _lastEmittedYaw)) {
+        mustEmitLook = true;
+        _lastEmittedYaw = _yawDeg;
+        _lastEmittedPitch = _pitchDeg;
+        _lookEmittedOnce = true;
+    }
     if (fovDeg < 10) {
         fovDeg = 10;
     } else if (fovDeg > 130) {
@@ -144,6 +154,12 @@ ViewportVR::setLook(double yawDeg, double pitchDeg, double fovDeg)
     }
     _fovDeg = fovDeg;
     update();
+    if (mustEmitLook) {
+        // Full-pano renders do not depend on the look, so the only reason to
+        // re-render is to complete tiles the engine never delivered (aborted
+        // scrub passes); the pane schedules that cheaply.
+        Q_EMIT lookChanged();
+    }
 }
 
 void
@@ -736,6 +752,14 @@ ViewportVR::transferBufferFromRAMtoGPU(const unsigned char* ramBuffer,
         if (isFirstTile) {
             tex->ensureTextureHasSize(textureRectangle, 0);
         }
+#ifdef NATRON_DEBUG_VR
+        static const bool dbg = getenv("NATRON_DEBUG_VR") != NULL;
+        if (dbg) {
+            std::fprintf(stderr, "[ViewportVR] tile tex=%d idx=%d first=%d texRect=%d,%d,%dx%d bytes=%llu\n",
+                         textureIndex, tileRect.x1, tileRect.y1, tileRect.width(), tileRect.height(),
+                         (unsigned long long)bytesCount);
+        }
+#endif
         // The call's "roi" is the TILE's own rectangle: its bytes are uploaded
         // into the tile-sized sub-rect of the big texture (updateOnlyRoi=true),
         // exactly like ViewerGL's twin — the byte stride then matches the

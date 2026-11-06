@@ -522,6 +522,15 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         RenderEnginePtr engine = _viewerNode->getRenderEngine();
         connect( engine.get(), SIGNAL(renderFinished(int)), this, SLOT(onEngineStopped(int)) );
         connect( engine.get(), SIGNAL(renderStarted(bool)), this, SLOT(onEngineStarted(bool)) );
+
+        // After look changes: schedule one cheap re-render — completes any tile
+        // an aborted render pass left out (full-pano renders don't depend on
+        // the look; the engine cache makes the refresh nearly free).
+        _lookRefreshTimer = new QTimer(this);
+        _lookRefreshTimer->setSingleShot(true);
+        connect(_lookRefreshTimer, SIGNAL(timeout()), this, SLOT(onLookRefreshTimeout()));
+        connect(_viewport, SIGNAL(lookChanged()), this, SLOT(onViewportLookChanged()));
+        _lastLookRefreshValid = false;
     }
 
     setFocusPolicy(Qt::ClickFocus);
@@ -830,6 +839,25 @@ ViewportVRTab::onPlayToggled(bool playing)
                                                                eRenderDirectionForward);
     } else {
         _viewerNode->getRenderEngine()->abortRenderingNoRestart();
+    }
+}
+
+void
+ViewportVRTab::onViewportLookChanged()
+{
+    // Debounce drags: one re-render max per debounce window.
+    _lastLookRefreshValid = true;
+    if (_lookRefreshTimer && !_lookRefreshTimer->isActive()) {
+        _lookRefreshTimer->start(250);
+    }
+}
+
+void
+ViewportVRTab::onLookRefreshTimeout()
+{
+    if (_lastLookRefreshValid && _viewerNode) {
+        _lastLookRefreshValid = false;
+        _viewerNode->renderCurrentFrame(true);
     }
 }
 

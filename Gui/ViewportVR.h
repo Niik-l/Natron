@@ -115,6 +115,16 @@ public Q_SLOTS:
 
     void requestRedrawVR();
 
+Q_SIGNALS:
+
+    /** Emitted when the look (yaw/pitch) changes: the pane uses it to schedule
+     *  a cheap engine re-render (fills any tile a previously aborted render
+     *  pass left out — with full-pano rendering the look does not change the
+     *  render, so this is the only trigger that re-completes missing tiles). */
+    void lookChanged();
+
+public:
+
     /*******************************************/
     /***OVERRIDDEN FROM OverlaySupport (GL glue) ***/
     /*******************************************/
@@ -226,6 +236,8 @@ private:
     // drag state
     int _lastMouseX, _lastMouseY;
     bool _dragging;
+    double _lastEmittedYaw, _lastEmittedPitch;
+    bool _lookEmittedOnce;
 
     // ROI render mode (user face of the interface's isUserRegionOfInterestEnabled)
     mutable QMutex _roimutex;

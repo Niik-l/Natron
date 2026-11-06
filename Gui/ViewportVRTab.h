@@ -122,6 +122,11 @@ public Q_SLOTS:
     void onEngineStarted(bool forward);
     void onEngineStopped(int retCode);
 
+    /** Cheap post-look-change re-render (completes tiles an aborted render
+     *  pass left out; debounced). */
+    void onViewportLookChanged();
+    void onLookRefreshTimeout();
+
     void onSeekFirst();
     void onSeekPrev();
     void onSeekNext();
@@ -164,6 +169,8 @@ private:
     QDoubleSpinBox* _gammaSpin;
     // bottom bar (transport)
     QToolButton* _playBtn;
+    QTimer* _lookRefreshTimer;
+    bool _lastLookRefreshValid;
     QDoubleSpinBox* _frameSpin;
     QDoubleSpinBox* _rangeIn;
     QDoubleSpinBox* _rangeOut;
