@@ -45,7 +45,7 @@ VRViewer::getPluginID() const
 std::string
 VRViewer::getPluginLabel() const
 {
-    return "Viewer VR";
+    return "VR Viewer";
 }
 
 void
@@ -57,9 +57,9 @@ VRViewer::getPluginGrouping(std::list<std::string>* grouping) const
 std::string
 VRViewer::getPluginDescription() const
 {
-    return tr("The VR viewport's viewer: a real Viewer dedicated to the "
+    return tr("The VR viewer: a real Viewer dedicated to the "
               "equirectangular / 360 presentation. Wire footage into its "
-              "inputs and a VR viewport pane opens bound to it. Everything "
+              "inputs and a VR viewer pane opens bound to it. Everything "
               "works exactly like the 2D Viewer (image cache, channels, "
               "gain/gamma, color transform, A/B inputs, proxy scale, playback) "
               "— the pane samples the rendered texture on a sphere.").toStdString();

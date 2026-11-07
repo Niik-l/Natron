@@ -42,13 +42,14 @@
 
 class QString;
 class TimeLineGui;
+class InfoViewerWidget;
 
 NATRON_NAMESPACE_ENTER
 
 class ViewerInstance;
 
 /**
- * @brief The dedicated VR / 360 viewport: the OpenGL canvas of the "Viewer VR"
+ * @brief The dedicated VR / 360 viewport: the OpenGL canvas of the "VR Viewer"
  * node's pane.
  *
  * This is a real ViewerGL counterpart: it implements OpenGLViewerI, so the
@@ -110,6 +111,31 @@ public:
     /** The pane feeds the getViewerFrameRange contract (playback bounds). */
     void setVRPlaybackRange(int first, int last);
     void clearVRTextures();
+
+    /** Drop only the B slot's committed texture + picker (compare input
+     *  disconnected) — A stays on screen. */
+    void clearVRSlotB();
+
+    /** Bind the drag-out info bar (the viewer's InfoViewerWidget): the canvas
+     *  fills it with the committed frame's format / resolution / RoD on render
+     *  and the RGBA + HSV(L) values + pixel coordinates under the cursor on
+     *  mouse move (the 2D ViewerGL behavior). NULL = no info bar. */
+    void setInfoViewer(InfoViewerWidget* infoWidget);
+
+    /** Bind the optional second info bar ("B:"), shown only in compare mode
+     *  (the 2D viewer's infoWidget[1]). NULL = none. */
+    void setInfoViewerB(InfoViewerWidget* infoWidget) { _infoViewerB = infoWidget; }
+    InfoViewerWidget* getInfoViewerB() const { return _infoViewerB; }
+
+    /** Mix position (widget x) of the wipe/compare overlay, driven by the
+     *  pane while the user drags the wipe line. < 0 = center. */
+    void setWipeMixX(double x) { _wipeMixX = x; update(); }
+    double getWipeMixX() const { return _wipeMixX; }
+
+    /** Full-frame processing (the 2D viewer's cogs button): when false, the
+     *  rendered ROI is clipped to the pano slice visible through the FOV. */
+    void setFullFrameProcessing(bool on) { _fullFrameProcessing = on; }
+    bool isFullFrameProcessing() const { return _fullFrameProcessing; }
 
 public Q_SLOTS:
 
@@ -222,11 +248,16 @@ protected:
     virtual void mouseMoveEvent(QMouseEvent* e) OVERRIDE;
     virtual void mouseReleaseEvent(QMouseEvent* e) OVERRIDE;
     virtual void wheelEvent(QWheelEvent* e) OVERRIDE;
+    virtual void leaveEvent(QEvent* e) OVERRIDE;
 
 private:
 
+
     /** Bind the A/B slot textures + the op and draw the fullscreen quad. */
     void drawVRImage();
+
+    /** The 2D viewer's wipe control, VR edition (widget-space overlay). */
+    void drawWipeOverlay();
 
     Gui* _gui;
 
@@ -253,12 +284,28 @@ private:
     // op applied in shader between the A and B textures
     ViewerCompositingOperatorEnum _compositingOp;
 
+    // wipe overlay mix position (widget x; < 0 = centered)
+    double _wipeMixX;
+
+    // mix amount of the wipe (0 = A only, 1 = B only), the 2D viewer's mix
+    double _wipeMixAmount;
+
+    // full-frame processing (cogs): when false, clip the render ROI to the
+    // FOV window (getImageRectangleDisplayed)
+    bool _fullFrameProcessing;
+
     /** Colorspace state tracked for the interface contract (the CPU pipeline
      *  bakes it, we only report). */
     ViewerColorSpaceEnum _lut;
 
     // playback bounds reported to the engine through getViewerFrameRange
     int _rangeFirst, _rangeLast;
+
+    // the pane's info bar (InfoViewerWidget; may be NULL)
+    InfoViewerWidget* _infoViewer;
+
+    // the optional second info bar for the B slot (compare mode; may be NULL)
+    InfoViewerWidget* _infoViewerB;
 
     // engine-side comparison op requested by the pane
     ViewerCompositingOperatorEnum _requestedOp; // unused currently, kept for 5b A/B parity
@@ -281,6 +328,15 @@ private:
         bool isVisible;
         int time;                    //!< the committed frame
 
+        // picture data the info bar / color picker sample from (the committed
+        // 8-bit RGBA bytes; GL-native layout — row 0 = south pole). Stays
+        // until the next commit of this slot replaces it.
+        std::vector<unsigned char> picker;
+        RectI pickerRect;            //!< rect of the committed picker bytes
+        bool pickerValid;
+        unsigned long long pickerBytes;
+        unsigned int mipmapLevel;    //!< committed render mip (info "~" flag)
+
         // staging (only valid between a transfer frame's first tile and its
         // matching endTransfer call)
         std::vector<unsigned char> staged;
@@ -295,6 +351,18 @@ private:
     /** Commit the staged frame of one slot (GL upload through the PBO pool). */
     void commitStagedSlot(int textureIndex);
 
+    // info bar plumbing: static frame info (format / RoD / resolution) after a
+    // commit, and the RGBA/HSV(L) at a widget position from the committed bytes
+    void updateInfoStatics(int textureIndex,
+                           const ImagePtr& image,
+                           ImageBitDepthEnum depth,
+                           double par,
+                           const RectD& rod,
+                           unsigned int mipmapLevel);
+    bool pickColorAtWidgetPos(int widgetX, int widgetY, float* r, float* g, float* b, float* a, bool* approx);
+    bool pickColorAtWidgetPosSlot(int slotIdx, int widgetX, int widgetY, float* r, float* g, float* b, float* a, bool* approx);
+    void updateInfoWidgetAtPos(int widgetX, int widgetY);
+
     // double-buffered PBO pool for async uploads (ViewerGL's scheme)
     std::vector<GLuint> _pboIds;
     int _pboIndex;
@@ -302,7 +370,7 @@ private:
     // shader program (per context — rebuilt whenever the GL context is recreated)
     GLuint _program;
     bool _programReady;
-    GLint _uTexA, _uTexB, _uSize, _uTanHalfFov, _uAspect, _uYaw, _uPitch, _uUvA0, _uUvA1, _uUvB0, _uUvB1, _uOp, _uHaveB;
+    GLint _uTexA, _uTexB, _uSize, _uTanHalfFov, _uAspect, _uYaw, _uPitch, _uUvA0, _uUvA1, _uUvB0, _uUvB1, _uOp, _uHaveB, _uSubWindow, _uWipeX;
 };
 
 NATRON_NAMESPACE_EXIT

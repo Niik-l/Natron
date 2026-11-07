@@ -38,6 +38,7 @@ class QLabel;
 class QToolButton;
 class QTimer;
 class QDoubleSpinBox;
+class QCheckBox;
 
 NATRON_NAMESPACE_ENTER
 
@@ -47,7 +48,7 @@ class ComboBox;
 class ScaleSliderQWidget;
 
 /**
- * @brief Wrapper panel for the VR / 360 viewport: the pane of a "Viewer VR"
+ * @brief Wrapper panel for the VR / 360 viewport: the pane of a "VR Viewer"
  * node.
  *
  * The pane is bound to one VRViewer node (ViewerInstance-derived, created as
@@ -58,11 +59,15 @@ class ScaleSliderQWidget;
  * pano visible through the FOV") and the playback engine (play through the
  * in/out points at the desired fps) behave exactly like the 2D viewer.
  *
- * The viewer bar is rebuilt here as a compact equivalent: the top row carries
- * the display controls (channels, FOV, recenter, pause updates, ROI/proxy,
- * compare) plus VR packing (Layout/Eye); the bottom row carries the playback
- * transport (first/prev/next/last, keyframe and increment steppers, play,
- * frame counter, in/out points, fps) and the timeline.
+ * The viewer bars are laid out exactly like the 2D viewer pane: the top two
+ * rows carry the display controls (row 1: channels, inputs, FOV, recenter,
+ * pause, ROI/proxy, compare — row 2: gain/gamma sliders + VR packing
+ * Layout/Eye); below the canvas come the image-info row (InfoViewerWidget:
+ * channels/format, resolution, RoD, pixel coordinates and the RGBA + HSV(L)
+ * of the pixel under the cursor), the timeline and the playback transport,
+ * which is widget-for-widget the 2D player row (first/rewind/frame counter/
+ * forward/last, single-frame + keyframe + increment steppers, in/out points,
+ * fps lock + fps + time format, turbo, playback mode).
  */
 class ViewportVRTab
     : public QWidget
@@ -79,7 +84,7 @@ public:
 
     ViewportVR* getViewport() const { return _viewport; }
 
-    /** The bound "Viewer VR" node (weak). */
+    /** The bound "VR Viewer" node (weak). */
     NodeWPtr getNodeBinding() const { return _boundNode; }
 
 public Q_SLOTS:
@@ -100,9 +105,22 @@ public Q_SLOTS:
     void onResetView();
     void onForceRefresh();
 
+    /** Layer / alpha-channel selectors (the 2D viewer's Layer + Alpha fields,
+     *  fed by the active A input's available layers). */
+    void onLayerComboChanged(int index);
+    void onAlphaChannelComboChanged(int index);
+
+    /** Full-frame processing toggle (the 2D viewer's "cogs" button): render
+     *  the image in its entirety vs only the visible part. */
+    void onFullFrameToggled(bool on);
+
+    /** Refresh: force a re-render of the current frame (2D viewer's refresh
+     *  button; Ctrl+Shift+click adds render stats like ViewerTab::refresh). */
+    void onRefreshClicked();
+
     /** Display channels: RGB / R / G / B / A / Luminance / Matte, via the
      *  viewer node's setDisplayChannels (both inputs). */
-    void onDisplayChannelsSelected();
+    void onDisplayChannelsSelected(int index);
 
     /** Pause Updates — viewerNode->setViewerPaused, same as the 2D viewer. */
     void onPauseToggled(bool paused);
@@ -113,10 +131,14 @@ public Q_SLOTS:
 
     /** Proxy scale toggle + factor combo, via viewerNode->onMipmapLevelChanged. */
     void onProxyToggled(bool on);
-    void onProxyScaleChanged();
+    void onProxyScaleChanged(int index);
 
-    /** Comparison operator dropdown (A/B ops, applied in the VR sampler). */
-    void onCompareOperatorSelected();
+    /** Comparison operator (A/B ops, applied in the VR sampler). */
+    void onCompareOperatorSelected(int index);
+
+    /** Color transform (the 2D viewer's colorspace combo: Linear/sRGB/Rec709/
+     *  BT1886 + the OCIO config's display/view transforms). */
+    void onColorSpaceSelected(int index);
 
     /** Input A/B selectors (the viewer's A:/B: comboboxes over the Inspector
      *  node's unfolded inputs). */
@@ -136,9 +158,12 @@ public Q_SLOTS:
     /** Playback mode button: loop / bounce / once (engine's setPlaybackMode). */
     void onPlaybackModeClicked();
 
-    /** Play/stop — the viewer's render engine (renderFromCurrentFrame), fps
-     *  via setDesiredFPS, loop via the engine's playback mode. */
+    /** Play/stop — the viewer render engine (renderFromCurrentFrame), fps
+     *  via setDesiredFPS, loop via the engine's playback mode. Forward and
+     *  backward are separate buttons, exactly like the 2D viewer's player. */
     void onPlayToggled(bool playing);
+    void onPlayBackwardToggled(bool playing);
+    void onFpsLockToggled(bool on);
     void onFpsSpinChanged(double fps);
     void onEngineStarted(bool forward);
     void onEngineStopped(int retCode);
@@ -152,8 +177,6 @@ public Q_SLOTS:
     void onSeekPrev();
     void onSeekNext();
     void onSeekLast();
-    void onSeekPrevKey();
-    void onSeekNextKey();
     void onSeekPrevIncr();
     void onSeekNextIncr();
 
@@ -167,6 +190,32 @@ public Q_SLOTS:
     void onRangeInChanged(double value);
     void onRangeOutChanged(double value);
 
+    /** The 2D viewer's InfoViewerWidget row mounted above the timeline: the
+     *  canvas fills it (format / resolution / RoD / RGBA / HSV(L) mouse pick;
+     *  see ViewportVR::setInfoViewer). */
+    InfoViewerWidget* getInfoViewer() const;
+
+    /** ViewerInstance::viewerDisconnected → blank the canvas (the 2D viewer's
+     *  disconnectViewer path). */
+    void onViewerDisconnected();
+
+    /** Project frame range grew/shrank (reader connected): follow it like the
+     *  2D viewer's timeline does (the VR tab's TimeLineGui has no ViewerTab
+     *  pointer, so its own onProjectFrameRangeChanged early-returns). */
+    void onProjectFrameRangeChanged(int left, int right);
+
+    /** InspectorNode auto-picked a new A/B pair (second input connected):
+     *  mirror it into the compare combo (2D viewer's onActiveInputsChanged). */
+    void onActiveInputsChanged();
+
+    /** The active input's available layers changed: refill the layer/alpha
+     *  combos (2D viewer's onAvailableComponentsChanged). */
+    void onAvailableComponentsChanged();
+
+    /** Fill the layer/alpha combos from the active input's available layers
+     *  (ViewerTab::refreshLayerAndAlphaChannelComboBox counterpart). */
+    void refreshLayerAndAlphaChannelComboBox();
+
 protected:
 
     virtual void keyPressEvent(QKeyEvent* e) OVERRIDE;
@@ -176,12 +225,15 @@ private:
     TimeLinePtr getTimeline() const;
     void refreshTransportState();
     void refreshInputCombos();
+    void startPlayback(bool forward);
 
     NodeWPtr _boundNode;
     ViewerInstancePtr _viewerNode;
 
     ViewportVR* _viewport;
     TimeLineGui* _timelineGui;
+    InfoViewerWidget* _infoViewer;
+    InfoViewerWidget* _infoViewerB; //!< "B:" row, shown in compare mode
 
     // input A/B selector state (ViewerTab's inputNamesMap equivalent):
     // viewer input index -> node label; the InspectorNode unfolds inputs as
@@ -194,19 +246,23 @@ private:
     std::map<int, InputName> _inputNamesMap;
 
     // top bar
-    QToolButton* _channelsDropdown;
+    ComboBox* _layerChoice;
+    ComboBox* _alphaChannelChoice;
+    ComboBox* _channelsDropdown;
+    Button* _fullFrameBtn;
+    Button* _refreshBtn;
     QToolButton* _layoutDropdown;
     QToolButton* _eyeDropdown;
     QDoubleSpinBox* _fovSpin;
-    QToolButton* _pauseBtn;
-    QToolButton* _roiBtn;
-    QToolButton* _proxyBtn;
-    QToolButton* _proxyScaleDropdown;
+    Button* _pauseBtn;
+    Button* _roiBtn;
+    Button* _proxyBtn;
+    ComboBox* _proxyScaleDropdown;
     QLabel* _aLabel;
     ComboBox* _aInput;
     QLabel* _bLabel;
     ComboBox* _bInput;
-    QToolButton* _compareDropdown;
+    ComboBox* _compareDropdown;
     QDoubleSpinBox* _gainSpin;
     ScaleSliderQWidget* _gainSlider;
     bool _gainOn;
@@ -215,17 +271,30 @@ private:
     ScaleSliderQWidget* _gammaSlider;
     bool _gammaOn;
     double _lastGamma;
-    // bottom bar (transport)
-    QToolButton* _playBtn;
-    QToolButton* _playModeBtn;
-    QToolButton* _setInBtn;
-    QToolButton* _setOutBtn;
+    ComboBox* _colorSpaceCombo;
+    // OCIO display/view transforms appended after the 4 built-in colorspaces
+    // (ViewerTab's model: combo index - 4 indexes this vector).
+    std::vector<std::pair<std::string, std::string> > _ocioDisplayViews;
+    // bottom bar (transport) — widget-for-widget the 2D viewer's player row:
+    // first/rewind/current-frame/forward/last cluster, single-frame + keyframe
+    // + increment steppers, in/out points, fps lock + fps + time format,
+    // turbo (GUI freeze) and the playback-mode button.
+    Button* _playBtn;
+    Button* _playBwdBtn;
+    Button* _playModeBtn;
+    Button* _turboBtn;
+    Button* _setInBtn;
+    Button* _setOutBtn;
+    QCheckBox* _fpsLock;
+    ComboBox* _timeFormatCombo;
     QTimer* _lookRefreshTimer;
     bool _lastLookRefreshValid;
     qint64 _userStoppedMs; //!< when Stop was last pressed (grace window vs queued renders)
-    QDoubleSpinBox* _frameSpin;
-    QDoubleSpinBox* _rangeIn;
-    QDoubleSpinBox* _rangeOut;
+    SpinBox* _fpsSpin;
+    SpinBox* _frameSpin;
+    SpinBox* _rangeIn;
+    SpinBox* _rangeOut;
+    SpinBox* _incrSpin;
     QLabel* _fpsLabel;
     int _proxyScaleActive;
     bool _proxyActive;

@@ -436,7 +436,7 @@ TabWidget::createMenu()
     menu.addAction( tr("New viewer"), this, SLOT(addNewViewer()) );
     menu.addAction( tr("New histogram"), this, SLOT(newHistogramHere()) );
     menu.addAction( tr("New 3D viewport"), this, SLOT(newViewport3DHere()) );
-    menu.addAction( tr("New VR viewport"), this, SLOT(newViewportVRHere()) );
+    menu.addAction( tr("New VR viewer"), this, SLOT(newViewportVRHere()) );
     menu.addAction( tr("Node graph here"), this, SLOT(moveNodeGraphHere()) );
     menu.addAction( tr("Curve Editor here"), this, SLOT(moveCurveEditorHere()) );
     menu.addAction( tr("Dope Sheet Editor here"), this, SLOT(moveDopeSheetEditorHere()) );

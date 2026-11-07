@@ -38,8 +38,12 @@
 #include <QOpenGLContext>
 #include "Engine/Settings.h"
 #include "Engine/TimeLine.h"
+#include "Engine/Project.h"
+#include "Engine/ViewerInstance.h"
+#include "Global/GLIncludes.h" // GLProtectAttrib / GLProtectMatrix
 #include "Gui/Gui.h"
 #include "Gui/GuiAppInstance.h"
+#include "Gui/InfoViewerWidget.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -48,6 +52,11 @@ NATRON_NAMESPACE_ENTER
 // ============================================================================
 
 static const double kVRPitchClampDeg = 87.5;
+
+// Wipe-control overlay geometry (ViewerGLPrivate's values): handle lengths
+// are fractions of the widget size, not zoom-space pixels.
+static const double kVRWipeMixHandleLength = 50.;
+static const double kVRWipeRotateHandleLength = 100.;
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -75,9 +84,14 @@ ViewportVR::ViewportVR(Gui* gui, QWidget* parent)
     , _lastRodH(2048)
     , _roisEnabled(true)
     , _compositingOp(eViewerCompositingOperatorNone)
+    , _wipeMixX(-1.)
+    , _wipeMixAmount(1.)
+    , _fullFrameProcessing(true)
     , _lut(eViewerColorSpaceLinear)
     , _rangeFirst(1)
     , _rangeLast(250)
+    , _infoViewer(NULL)
+    , _infoViewerB(NULL)
     , _requestedOp(eViewerCompositingOperatorNone)
     , _program(0)
     , _programReady(false)
@@ -94,6 +108,8 @@ ViewportVR::ViewportVR(Gui* gui, QWidget* parent)
     , _uUvB1(-1)
     , _uOp(-1)
     , _uHaveB(-1)
+    , _uSubWindow(-1)
+    , _uWipeX(-1)
 {
     setMouseTracking(true);
     setFocusPolicy(Qt::ClickFocus);
@@ -101,6 +117,8 @@ ViewportVR::ViewportVR(Gui* gui, QWidget* parent)
     for (int i = 0; i < 2; ++i) {
         _slots[i].isVisible = false;
         _slots[i].time = -1;
+        _slots[i].pickerBytes = 0;
+        _slots[i].mipmapLevel = 0;
     }
     _pboIndex = 0;
     // Automated QA hook (MCP sessions): start pitched up so the zenith area is
@@ -237,11 +255,29 @@ ViewportVR::setVRPlaybackRange(int first, int last)
 }
 
 void
+ViewportVR::setInfoViewer(InfoViewerWidget* infoWidget)
+{
+    _infoViewer = infoWidget;
+}
+
+void
 ViewportVR::clearVRTextures()
 {
     QMutexLocker k(&_slotsMutex);
     for (int i = 0; i < 2; ++i) {
         _slots[i].isVisible = false;
+        _slots[i].pickerValid = false;
+    }
+    update();
+}
+
+void
+ViewportVR::clearVRSlotB()
+{
+    {
+        QMutexLocker k(&_slotsMutex);
+        _slots[1].isVisible = false;
+        _slots[1].pickerValid = false;
     }
     update();
 }
@@ -280,6 +316,13 @@ ViewportVR::initializeGL()
     // gamma, colorspace/OCIO all baked CPU-side because isGPUOcioApplicable is
     // false here): no color work left — only spherical sampling + A/B op.
     // Texture memory layout is GL-native: row 0 = image bottom = south pole.
+    //
+    // Full-frame OFF (cogs unchecked): the engine renders only the FOV window
+    // of the pano. The texture is a SUB-RECT of the sphere — it is NOT
+    // stretched onto the sphere. The shader maps each fragment to the sphere,
+    // converts to pano UV, and only samples the texture when the UV falls
+    // inside the committed window; outside the window the pano is simply
+    // "not rendered by this pass" and stays background (black).
     const char* frag =
         "#version 430 compatibility\n"
         "uniform sampler2D u_texA;\n"
@@ -295,6 +338,8 @@ ViewportVR::initializeGL()
         "uniform vec2  u_uvB1;\n"
         "uniform int   u_op;\n"    // comparison operator
         "uniform float u_haveB;\n" // 1 when input B displayed
+        "uniform float u_subWindow;\n" // 1 when the texture covers only part of the pano
+        "uniform float u_wipeX;\n"     // wipe boundary in clip-space x
         "void main() {\n"
         "    vec2 c = (gl_FragCoord.xy / u_size) * 2.0 - 1.0;\n"
         "    vec3 dir = normalize(vec3(c.x * u_tanHalfFov * u_aspect, c.y * u_tanHalfFov, -1.0));\n"
@@ -307,18 +352,28 @@ ViewportVR::initializeGL()
         "    const float k2Pi = 6.28318530717958647;\n"
         "    const float kPi = 3.1415926535897932;\n"
         "    vec2 uv = vec2(0.5 + lon / k2Pi, 0.5 + lat / kPi);\n" // row0 = bottom (GL-native layout)
-        "    vec2 uvCropA = u_uvA0 + uv * (u_uvA1 - u_uvA0);\n"
-        "    vec4 a = texture2D(u_texA, uvCropA);\n"
-        "    vec3 col = a.rgb;\n"
-        "    if (u_haveB > 0.5) {\n"
-        "        vec2 uvCropB = u_uvB0 + uv * (u_uvB1 - u_uvB0);\n"
-        "        vec4 b = texture2D(u_texB, uvCropB);\n"
-        "        if (u_op == 1 || u_op == 6) {\n" // wipe-under / stack-under
-        "            col = b.rgb;\n"
-        "        } else if (u_op == 3 || u_op == 8) {\n" // wipe-minus / stack-minus
-        "            col = abs(a.rgb - b.rgb);\n"
-        "        } else if (u_op == 4 || u_op == 9) {\n" // onion skin
-        "            col = abs(a.rgb - b.rgb);\n"
+        "    vec3 col = vec3(0.0);\n" // not rendered = black (background)
+        "    // The texture is a sub-rect of the pano (full-frame OFF): only\n"
+        "    // sample when the sphere UV falls inside the committed window.\n"
+        "    // NOTE the sub-window UVs are exactly u_uvA0/u_uvA1 (the tile-\n"
+        "    // rounded texture region intersected with the pano RoD).\n"
+        "    bool inWin = (u_subWindow < 0.5) || (uv.x >= u_uvA0.x && uv.x <= u_uvA1.x && uv.y >= u_uvA0.y && uv.y <= u_uvA1.y);\n"
+        "    if (inWin) {\n"
+        "        vec2 uvCropA = u_uvA0 + uv * (u_uvA1 - u_uvA0);\n"
+        "        vec4 a = texture2D(u_texA, uvCropA);\n"
+        "        col = a.rgb;\n"
+        "        if (u_haveB > 0.5) {\n"
+        "            vec2 uvCropB = u_uvB0 + uv * (u_uvB1 - u_uvB0);\n"
+        "            vec4 b = texture2D(u_texB, uvCropB);\n"
+        "            if (u_op == 1) {\n"         // wipe-under: B to the right of the line
+        "                col = mix(a.rgb, b.rgb, step(u_wipeX, c.x));\n"
+        "            } else if (u_op == 2) {\n" // wipe-over: B to the left of the line
+        "                col = mix(b.rgb, a.rgb, step(u_wipeX, c.x));\n"
+        "            } else if (u_op == 3) {\n" // minus: difference over the whole image
+        "                col = abs(a.rgb - b.rgb);\n"
+        "            } else if (u_op == 4) {\n" // onion skin: difference over the whole image
+        "                col = abs(a.rgb - b.rgb);\n"
+        "            }\n"
         "        }\n"
         "    }\n"
         "    gl_FragColor = vec4(col, 1.0);\n"
@@ -361,6 +416,8 @@ ViewportVR::initializeGL()
         _uUvB1        = glGetUniformLocation(_program, "u_uvB1");
         _uOp          = glGetUniformLocation(_program, "u_op");
         _uHaveB       = glGetUniformLocation(_program, "u_haveB");
+        _uSubWindow   = glGetUniformLocation(_program, "u_subWindow");
+        _uWipeX       = glGetUniformLocation(_program, "u_wipeX");
         _programReady = true;
     } else {
         char log[1024] = {0};
@@ -484,11 +541,14 @@ ViewportVR::drawVRImage()
 
     int op = 0;
     if (nameB) {
-        // wipe variants collapse to the same behavior in VR: under shows B.
         switch (_compositingOp) {
         case eViewerCompositingOperatorWipeUnder:
         case eViewerCompositingOperatorStackUnder:
             op = 1;
+            break;
+        case eViewerCompositingOperatorWipeOver:
+        case eViewerCompositingOperatorStackOver:
+            op = 2;
             break;
         case eViewerCompositingOperatorWipeMinus:
         case eViewerCompositingOperatorStackMinus:
@@ -499,8 +559,6 @@ ViewportVR::drawVRImage()
             op = 4;
             break;
         case eViewerCompositingOperatorNone:
-        case eViewerCompositingOperatorWipeOver:
-        case eViewerCompositingOperatorStackOver:
         default:
             op = 0;
             break;
@@ -508,11 +566,30 @@ ViewportVR::drawVRImage()
     }
     glUniform1i(_uOp, op);
 
-    glUniform2f(_uSize, (GLfloat)width(), (GLfloat)height());
+    // u_size must be in DEVICE pixels: gl_FragCoord is device-pixel based and
+    // the wipe comparison uses the same c.x — in logical pixels on a HiDPI
+    // screen the wipe line drifted left of the widget overlay line.
+    glUniform2f(_uSize, (GLfloat)(width() * devicePixelRatio()), (GLfloat)(height() * devicePixelRatio()));
     glUniform1f(_uTanHalfFov, (GLfloat)std::tan(_fovDeg * 0.5 * M_PI / 180.));
     glUniform1f(_uAspect, (GLfloat)width() / (GLfloat)height());
     glUniform1f(_uYaw, (GLfloat)(_yawDeg * M_PI / 180.));
     glUniform1f(_uPitch, (GLfloat)(_pitchDeg * M_PI / 180.));
+    // Full-frame OFF: the texture only spans the FOV window — tell the shader
+    // to treat the rest of the pano as not-rendered (black). Only meaningful
+    // when the committed window is actually smaller than the pano.
+    const bool subWindow = !_fullFrameProcessing && texA
+                          && (winA.x2 - winA.x1 < 1. - 1e-6
+                              || winA.y2 - winA.y1 < 1. - 1e-6);
+    glUniform1f(_uSubWindow, subWindow ? 1.0f : 0.f);
+    // wipe boundary position in clip space (the overlay line the user sees).
+    // The shader's c = fragCoord/u_size*2-1 is device-pixel based (u_size now
+    // device px), and clip space is resolution-independent, so this stays a
+    // plain logical-to-clip mapping.
+    {
+        const double w = width();
+        const double mixX = (_wipeMixX >= 0.) ? _wipeMixX : 0.5 * w;
+        glUniform1f(_uWipeX, w > 0 ? (GLfloat)(mixX / w * 2. - 1.) : 0.f);
+    }
     glUniform2f(_uUvA0, uva0[0], uva0[1] );
     glUniform2f(_uUvA1, uva1[0], uva1[1] );
     glUniform2f(_uUvB0, uvb0[0], uvb0[1] );
@@ -528,6 +605,79 @@ ViewportVR::drawVRImage()
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(0);
+    glDisable(GL_BLEND);
+    glDisable(GL_LINE_SMOOTH);
+    glPointSize(1.f);
+    glColor4f(1., 1., 1., 1.);
+
+    // Wipe/compare overlay: the 2D viewer's cross-like wipe control, drawn in
+    // widget space. Visible only for the wipe variants (stack/minus/onion have
+    // no positional handle).
+    const bool haveB = (bool)texB;
+    const bool isWipeOp = (_compositingOp == eViewerCompositingOperatorWipeUnder) ||
+                          (_compositingOp == eViewerCompositingOperatorWipeOver);
+    if (haveB && isWipeOp) {
+        drawWipeOverlay();
+    }
+}
+
+void
+ViewportVR::drawWipeOverlay()
+{
+    // The 2D wipe control (ViewerGL::drawWipeControl) simplified for VR: a
+    // vertical mixing line across the canvas at the mix position + horizontal
+    // mix handle + dot. Drawn right after the pano quad with identity
+    // matrices (clip space -1..1); widget coordinates are converted to clip
+    // space first.
+    const double w = width();
+    const double h = height();
+    if ( (w < 1) || (h < 1) ) {
+        return;
+    }
+    // mix position follows the last mouse x while dragging the line (the
+    // 2D viewer's mix handle); default center.
+    const double mixX = (_wipeMixX >= 0.) ? _wipeMixX : 0.5 * w;
+    // to clip space (y flip for the mid line)
+    const double cx = mixX / w * 2. - 1.;
+    const double hx = kVRWipeMixHandleLength / w * 2.;
+    const double cyMid = 0.; // widget middle
+
+    GLProtectAttrib a(GL_ENABLE_BIT | GL_LINE_BIT | GL_CURRENT_BIT | GL_POINT_BIT | GL_COLOR_BUFFER_BIT);
+    {
+        GLProtectMatrix p(GL_PROJECTION);
+        glLoadIdentity();
+        {
+            GLProtectMatrix m(GL_MODELVIEW);
+            glLoadIdentity();
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glEnable(GL_LINE_SMOOTH);
+            glHint(GL_LINE_SMOOTH_HINT, GL_DONT_CARE);
+            glLineWidth(1.5 * devicePixelRatio());
+
+            // draw twice: shadow then line (ViewerGL's scheme)
+            for (int l = 0; l < 2; ++l) {
+                const double c = (l == 0) ? 0. : 0.8;
+                glColor4f(c, c, c, 1.);
+                glBegin(GL_LINES);
+                // vertical wipe boundary (shadow offset by 1px)
+                glVertex2d(cx + ((l == 0) ? 2. / w : -2. / w), -1.);
+                glVertex2d(cx + ((l == 0) ? 2. / w : -2. / w),  1.);
+                // small horizontal mix handle through the center
+                glVertex2d(cx - hx, cyMid);
+                glVertex2d(cx + hx, cyMid);
+                glEnd();
+            }
+            glPointSize(5. * devicePixelRatio());
+            glEnable(GL_POINT_SMOOTH);
+            glBegin(GL_POINTS);
+            glColor4f(0.8, 0.8, 0.8, 1.);
+            glVertex2d(cx, cyMid);
+            glEnd();
+            glPointSize(1.f);
+            glColor4f(1., 1., 1., 1.);
+        }
+    }
 }
 
 // ============================================================================
@@ -641,15 +791,60 @@ ViewportVR::getImageRectangleDisplayed(const RectI & imageRoDPixel,
                                        const double par,
                                        unsigned int mipmapLevel)
 {
-    // The whole (2:1) pano is always rendered, exactly like the 2D viewer's
-    // full-frame mode: an equirect sub-window cannot be sampled with spherical
-    // math while the look direction changes (the rendered slice would drift
-    // against the camera — the double-pano-with-a-seam artifact seen in the
-    // first GUI passes). The ROI knob stays as a UI placeholder until a true
-    // user-ROI interaction (drag a rect over the pano) lands in 5b; the
-    // isUserRegionOfInterestEnabled() contract therefore reports disabled.
+    // The whole (2:1) pano is rendered by default (full-frame processing, the
+    // cogs button ON). When full-frame processing is OFF (cogs unchecked),
+    // clip the rendered ROI to the pano slice visible through the current FOV
+    // — the faster path. That ROI is a SUB-RECT of the pano: the shader
+    // samples it at its sphere position (winUV) and leaves the rest of the
+    // sphere black (never stretched).
     Q_UNUSED(par);
     Q_UNUSED(mipmapLevel);
+    if (!_fullFrameProcessing) {
+        const double fovRad = _fovDeg * M_PI / 180.;
+        const double yawRad = _yawDeg * M_PI / 180.;
+        const double pitchRad = _pitchDeg * M_PI / 180.;
+        const double latSpan = std::min(fovRad / 2., M_PI / 2.);
+        const double cosPitch = std::max(1e-3, std::cos(pitchRad));
+        const double lonSpan = std::min(fovRad / (2. * cosPitch), M_PI);
+        double latMin = pitchRad - latSpan;
+        double latMax = pitchRad + latSpan;
+        if (latMin < -M_PI / 2.) { latMin = -M_PI / 2.; }
+        if (latMax > M_PI / 2.) { latMax = M_PI / 2.; }
+        double lonMin = yawRad - lonSpan;
+        double lonMax = yawRad + lonSpan;
+        const int W = imageRoDPixel.width();
+        const int H = imageRoDPixel.height();
+        if ( (W > 0) && (H > 0) ) {
+            auto wrapLon = [](double u) {
+                while (u < 0.) { u += 1.; }
+                while (u > 1.) { u -= 1.; }
+                return u;
+            };
+            const double u0 = wrapLon(0.5 + lonMin / (2. * M_PI));
+            const double u1 = wrapLon(0.5 + lonMax / (2. * M_PI));
+            const double v0 = 0.5 + latMin / M_PI;
+            const double v1 = 0.5 + latMax / M_PI;
+            RectI roi;
+            const int x1 = (int)std::floor( std::min(u0, u1) * W );
+            const int x2 = (int)std::ceil( std::max(u0, u1) * W );
+            roi.x1 = imageRoDPixel.x1 + std::max(0, std::min(W, x1));
+            roi.x2 = imageRoDPixel.x1 + std::max(0, std::min(W, x2));
+            if (roi.x2 <= roi.x1) {
+                roi.x1 = imageRoDPixel.x1;
+                roi.x2 = imageRoDPixel.x2;
+            }
+            roi.y1 = imageRoDPixel.y1 + std::max(0, std::min(H, (int)std::floor(v0 * H)));
+            roi.y2 = imageRoDPixel.y1 + std::max(0, std::min(H, (int)std::ceil(v1 * H)));
+            if (roi.y2 <= roi.y1) {
+                roi.y1 = imageRoDPixel.y1;
+                roi.y2 = imageRoDPixel.y2;
+            }
+            RectI clipped = roi.intersect(imageRoDPixel);
+            if (!clipped.isNull()) {
+                return clipped;
+            }
+        }
+    }
     return imageRoDPixel;
 }
 
@@ -920,6 +1115,17 @@ ViewportVR::endTransferBufferFromRAMToGPU(int textureIndex,
         QMutexLocker k(&_slotsMutex);
         VRSlot& slot = _slots[textureIndex];
         slot.staged.swap(flat); // steal the staged bytes
+        // keep the committed bytes for the info bar / color picker until the
+        // next commit of this slot replaces them (they were about to be
+        // freed anyway, so this costs no extra allocation while it lives)
+        if ( !slot.picker.empty() && (slot.picker.size() >= bytes) ) {
+            std::memcpy( &slot.picker.front(), flat.empty() ? (const void*)0 : &flat.front(), bytes );
+        } else {
+            slot.picker.assign( flat.begin(), flat.end() );
+        }
+        slot.pickerBytes = bytes;
+        slot.pickerRect = stagedRect;
+        slot.pickerValid = true;
         slot.staged.clear();
         slot.stagedValid = false;
         slot.stagedTiles.clear();
@@ -986,22 +1192,270 @@ ViewportVR::endTransferBufferFromRAMToGPU(int textureIndex,
         } else {
             slot.winUV = RectD(0, 0, 1, 1);
         }
+        slot.mipmapLevel = mipmapLevel;
     }
+    // The info bar mirrors exactly the committed frame: format, resolution,
+    // RoD, and the "~" approximation flag when a proxy mip is displayed.
+    updateInfoStatics(textureIndex, image, depth, par, rod, mipmapLevel);
     update();
 }
 
 void
 ViewportVR::disconnectInputTexture(int textureIndex, bool clearRoD)
 {
-    // Keep the last committed frame on screen instead of dropping it: the
-    // engine signals a disconnect when re-arranging requests (scrub/abort), and
-    // blanking here produced the black-frame flashes between frames. A genuine
-    // upstream disconnect ends up re-rendered as a black tile set which DOES
-    // commit — so the end state stays correct.
-    Q_UNUSED(textureIndex);
-    Q_UNUSED(clearRoD);
+    // The engine signals this when a render FAILED or returned BLACK (e.g.
+    // the Alpha display channel on an input without alpha): drop the slot so
+    // the stale last frame does not stick on screen — same as ViewerGL,
+    // which sets isVisible=false here. (Keeping the frame caused the
+    // "Alpha shows the old RGB / scrub never updates" artifacts: every
+    // black result left the previous texture committed.)
+    assert(textureIndex == 0 || textureIndex == 1);
+    {
+        QMutexLocker k(&_slotsMutex);
+        VRSlot& slot = _slots[textureIndex];
+        slot.isVisible = false;
+        slot.pickerValid = false;
+        slot.stagedValid = false;
+        slot.stagedTiles.clear();
+        slot.stagedArea = 0;
+        if (clearRoD) {
+            slot.rod = RectD();
+            slot.winUV = RectD(0, 0, 1, 1);
+        }
+    }
     update();
 }
+
+void
+ViewportVR::updateInfoStatics(int textureIndex,
+                              const ImagePtr& image,
+                              ImageBitDepthEnum depth,
+                              double par,
+                              const RectD& rod,
+                              unsigned int mipmapLevel)
+{
+    Q_UNUSED(mipmapLevel);
+    if ( !_infoViewer || !_infoViewer->isVisible() ) {
+        return;
+    }
+    if ( _gui && _gui->isGUIFrozen() ) {
+        return;
+    }
+    if (textureIndex != 0) {
+        // B slot: report into the second info bar ("B:") when the pane has one.
+        if ( !_infoViewerB || !_infoViewerB->isVisible() ) {
+            return;
+        }
+        if (image) {
+            _infoViewerB->setImageFormat( image->getComponents(), depth );
+        }
+        const RectI pixelRodB = rod.toPixelEnclosing(0, par);
+        _infoViewerB->setDataWindow(pixelRodB);
+        QString infoBarNameB;
+        {
+            std::string formatName;
+            bool named = false;
+            if (_gui) {
+                GuiAppInstancePtr app = _gui->getApp();
+                if (app) {
+                    ProjectPtr project = app->getProject();
+                    if (project) {
+                        named = project->getFormatNameFromRect(pixelRodB, par, &formatName);
+                    }
+                }
+            }
+            if (named) {
+                infoBarNameB = QString::fromUtf8( formatName.c_str() );
+                infoBarNameB += QString::fromUtf8(" %1x%2").arg(pixelRodB.width()).arg(pixelRodB.height());
+            } else {
+                infoBarNameB = QString::fromUtf8("%1x%2").arg(pixelRodB.width()).arg(pixelRodB.height());
+            }
+        }
+        _infoViewerB->setResolution(infoBarNameB);
+        return;
+    }
+
+    if (image) {
+        _infoViewer->setImageFormat( image->getComponents(), depth );
+    }
+    const RectI pixelRod = rod.toPixelEnclosing(0, par);
+    _infoViewer->setDataWindow(pixelRod);
+
+    // resolution: the project format name when the RoD matches one, else plain WxH
+    QString infoBarName;
+    {
+        std::string formatName;
+        bool named = false;
+        if (_gui) {
+            GuiAppInstancePtr app = _gui->getApp();
+            if (app) {
+                ProjectPtr project = app->getProject();
+                if (project) {
+                    named = project->getFormatNameFromRect(pixelRod, par, &formatName);
+                }
+            }
+        }
+        if (named) {
+            infoBarName = QString::fromUtf8( formatName.c_str() );
+            infoBarName += QString::fromUtf8(" %1x%2").arg(pixelRod.width()).arg(pixelRod.height());
+        } else {
+            infoBarName = QString::fromUtf8("%1x%2").arg(pixelRod.width()).arg(pixelRod.height());
+        }
+    }
+    _infoViewer->setResolution(infoBarName);
+}
+
+bool
+ViewportVR::pickColorAtWidgetPos(int widgetX, int widgetY, float* r, float* g, float* b, float* a, bool* approx)
+{
+    return pickColorAtWidgetPosSlot(0, widgetX, widgetY, r, g, b, a, approx);
+}
+
+bool
+ViewportVR::pickColorAtWidgetPosSlot(int slotIdx,
+                                     int widgetX,
+                                     int widgetY,
+                                     float* r,
+                                     float* g,
+                                     float* b,
+                                     float* a,
+                                     bool* approx)
+{
+    if (r) *r = 0.f;
+    if (g) *g = 0.f;
+    if (b) *b = 0.f;
+    if (a) *a = 0.f;
+    if (approx) *approx = false;
+    if ( (slotIdx != 0) && (slotIdx != 1) ) {
+        return false;
+    }
+    if ( (widgetX < 0) || (widgetY < 0) || (widgetX >= width()) || (widgetY >= height()) ) {
+        return false;
+    }
+
+    // Snapshot the committed-frame geometry; the 4 bytes themselves are read
+    // under the lock right before returning.
+    RectI pickerRect;
+    RectD win;
+    bool visible = false, pickerValid = false;
+    unsigned int mip = 0;
+    {
+        QMutexLocker k(&_slotsMutex);
+        VRSlot& slot = _slots[slotIdx];
+        visible = slot.isVisible;
+        pickerValid = slot.pickerValid;
+        pickerRect = slot.pickerRect;
+        win = slot.winUV;
+        mip = slot.mipmapLevel;
+    }
+    if (!visible || !pickerValid) {
+        return false;
+    }
+    if ( (std::size_t)pickerRect.width() * (std::size_t)pickerRect.height() * 4 == 0 ) {
+        return false;
+    }
+    if (approx) *approx = (mip > 0);
+
+    // ---- replicate the fragment shader's spherical path for one sample -----
+    const double fragX = (double)widgetX + 0.5;
+    const double fragY = (double)height() - (double)widgetY - 0.5; // GL bottom-origin
+    double cX = (fragX / (double)width() ) * 2. - 1.;
+    double cY = (fragY / (double)height() ) * 2. - 1.;
+    double tanHalf = std::tan(_fovDeg * 0.5 * M_PI / 180.);
+    double aspect = (double)width() / (double)height();
+    double dx = cX * tanHalf * aspect;
+    double dy = cY * tanHalf;
+    double dz = -1.;
+    {
+        double len = std::sqrt(dx*dx + dy*dy + dz*dz);
+        dx /= len; dy /= len; dz /= len;
+    }
+    {
+        const double yr = _yawDeg * M_PI / 180.;
+        const double cy = std::cos(yr), sy = std::sin(yr);
+        const double nx = cy * dx + sy * dz;
+        dz = -sy * dx + cy * dz;
+        dx = nx;
+    }
+    {
+        const double pr = _pitchDeg * M_PI / 180.;
+        const double cp = std::cos(pr), sp = std::sin(pr);
+        const double ny = cp * dy + sp * dz;
+        dz = -sp * dy + cp * dz;
+        dy = ny;
+    }
+    double lon = std::atan2(dx, -dz);
+    double lat = std::asin( Image::clamp(dy, -1., 1.) );
+    const double k2Pi = 2. * M_PI;
+    double u = 0.5 + lon / k2Pi; // 0 at the pano's left edge, bottom-origin v
+    double v = 0.5 + lat / M_PI;
+
+    // Sub-window render (full-frame OFF): the texture only covers a sub-rect
+    // of the pano — the picker reads committed pano-space pixels, so nothing
+    // to sample when the UV falls outside the window (matches the shader's
+    // black background).
+    if ( (win.x2 - win.x1 < 1. - 1e-6) || (win.y2 - win.y1 < 1. - 1e-6) ) {
+        if ( (u < win.x1) || (u > win.x2) || (v < win.y1) || (v > win.y2) ) {
+            return false;
+        }
+    }
+
+    // Compose the eye crop with the committed window (same math as drawVRImage)
+    double winX1 = win.x1, winX2 = win.x2, winY1 = win.y1, winY2 = win.y2;
+    double uv0x = 0., uv0y = 0., uv1x = 1., uv1y = 1.;
+    switch (_layout) {
+    case eLayoutOverUnder:
+        if (_eye == 0) {
+            uv0y = 0.5; uv1y = 1.;
+        } else {
+            uv0y = 0.; uv1y = 0.5;
+        }
+        break;
+    case eLayoutSideBySide:
+        uv0x = (_eye == 0) ? 0. : 0.5;
+        uv1x = (_eye == 0) ? 0.5 : 1.;
+        break;
+    case eLayoutMono:
+    default:
+        break;
+    }
+    {
+        const double wx1 = winX1 + uv0x * (winX2 - winX1);
+        const double wx2 = winX1 + uv1x * (winX2 - winX1);
+        const double wy1 = winY1 + uv0y * (winY2 - winY1);
+        const double wy2 = winY1 + uv1y * (winY2 - winY1);
+        winX1 = wx1; winX2 = wx2; winY1 = wy1; winY2 = wy2;
+    }
+
+    const int texW = pickerRect.width();
+    const int texH = pickerRect.height();
+    if ( (texW < 1) || (texH < 1) ) {
+        return false;
+    }
+    int col = (int)std::floor( ( winX1 + u * (winX2 - winX1) ) * (double)texW );
+    int row = (int)std::floor( ( winY1 + v * (winY2 - winY1) ) * (double)texH );
+    if ( (col < pickerRect.x1) || (col >= pickerRect.x2) || (row < pickerRect.y1) || (row >= pickerRect.y2) ) {
+        return false;
+    }
+    const std::size_t offset = ( (std::size_t)(row - pickerRect.y1) * (std::size_t)texW
+                                 + (std::size_t)(col - pickerRect.x1) ) * 4;
+    {
+        QMutexLocker k(&_slotsMutex);
+        VRSlot& slot = _slots[slotIdx];
+        if (!slot.pickerValid || (slot.picker.size() < offset + 4)) {
+            return false;
+        }
+        // The engine packs display bytes as BGRA (toBGRA: a<<24|r<<16|g<<8|b,
+        // uploaded with GL_BGRA / UNSIGNED_INT_8_8_8_8_REV). In the staged
+        // byte buffer that's byte order B,G,R,A per pixel.
+        if (r) *r = (float)slot.picker[offset + 2] / 255.f;
+        if (g) *g = (float)slot.picker[offset + 1] / 255.f;
+        if (b) *b = (float)slot.picker[offset] / 255.f;
+        if (a) *a = (float)slot.picker[offset + 3] / 255.f;
+    }
+    return true;
+}
+
 
 void
 ViewportVR::updateColorPicker(int, int, int)
@@ -1072,6 +1526,8 @@ ViewportVR::clearLastRenderedImage()
 {
     for (int i = 0; i < 2; ++i) {
         _slots[i].texture.reset();
+        _slots[i].isVisible = false;
+        _slots[i].pickerValid = false;
     }
     update();
 }
@@ -1135,6 +1591,9 @@ ViewportVR::mousePressEvent(QMouseEvent* e)
 void
 ViewportVR::mouseMoveEvent(QMouseEvent* e)
 {
+    // The info bar follows the cursor on every move (2D ViewerGL behavior);
+    // the look-around drag is separate.
+    updateInfoWidgetAtPos( e->x(), e->y() );
     if (!_dragging || ( (_lastMouseX < 0) || (_lastMouseY < 0) )) {
         QOpenGLWidget::mouseMoveEvent(e);
         return;
@@ -1170,6 +1629,76 @@ ViewportVR::wheelEvent(QWheelEvent* e)
     }
     double factor = std::pow(0.92, (double)delta);
     setLook(_yawDeg, _pitchDeg, _fovDeg * factor);
+}
+
+void
+ViewportVR::leaveEvent(QEvent* e)
+{
+    if (_infoViewer) {
+        if ( _infoViewer->colorVisible() ) {
+            _infoViewer->hideColorInfo();
+        }
+        if ( _infoViewer->mouseVisible() ) {
+            _infoViewer->hideMouseInfo();
+        }
+    }
+    if (_infoViewerB) {
+        if ( _infoViewerB->colorVisible() ) {
+            _infoViewerB->hideColorInfo();
+        }
+        if ( _infoViewerB->mouseVisible() ) {
+            _infoViewerB->hideMouseInfo();
+        }
+    }
+    QOpenGLWidget::leaveEvent(e);
+}
+
+void
+ViewportVR::updateInfoWidgetAtPos(int widgetX, int widgetY)
+{
+    if ( !_infoViewer || !_infoViewer->isVisible() ) {
+        return;
+    }
+    if ( _gui && _gui->isGUIFrozen() ) {
+        return;
+    }
+    if ( !_infoViewer->mouseVisible() ) {
+        _infoViewer->showMouseInfo();
+    }
+    _infoViewer->setMousePos( QPoint(widgetX, widgetY) );
+
+    float r, g, b, a;
+    bool approx = false;
+    if ( pickColorAtWidgetPosSlot(0, widgetX, widgetY, &r, &g, &b, &a, &approx) ) {
+        _infoViewer->setColorApproximated(approx);
+        _infoViewer->setColorValid(true);
+        if ( !_infoViewer->colorVisible() ) {
+            _infoViewer->showColorInfo();
+        }
+        _infoViewer->setColor(r, g, b, a);
+    } else {
+        _infoViewer->setColorValid(false);
+    }
+
+    // The B info row (compare mode): pixel color under the cursor sampled
+    // from the B slot's committed texture, like the 2D viewer's infoWidget[1].
+    if (_infoViewerB && _infoViewerB->isVisible()) {
+        if ( !_infoViewerB->mouseVisible() ) {
+            _infoViewerB->showMouseInfo();
+        }
+        _infoViewerB->setMousePos( QPoint(widgetX, widgetY) );
+        bool approxB = false;
+        if ( pickColorAtWidgetPosSlot(1, widgetX, widgetY, &r, &g, &b, &a, &approxB) ) {
+            _infoViewerB->setColorApproximated(approxB);
+            _infoViewerB->setColorValid(true);
+            if ( !_infoViewerB->colorVisible() ) {
+                _infoViewerB->showColorInfo();
+            }
+            _infoViewerB->setColor(r, g, b, a);
+        } else {
+            _infoViewerB->setColorValid(false);
+        }
+    }
 }
 
 NATRON_NAMESPACE_EXIT
