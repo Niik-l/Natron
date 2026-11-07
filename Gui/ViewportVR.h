@@ -49,7 +49,7 @@ NATRON_NAMESPACE_ENTER
 class ViewerInstance;
 
 /**
- * @brief The dedicated VR / 360 viewport: the OpenGL canvas of the "VR Viewer"
+ * @brief The dedicated VR / 360 viewport: the OpenGL canvas of the "Viewer VR"
  * node's pane.
  *
  * This is a real ViewerGL counterpart: it implements OpenGLViewerI, so the
@@ -86,7 +86,7 @@ public:
     explicit ViewportVR(Gui* gui, QWidget* parent = NULL);
     virtual ~ViewportVR();
 
-    // ---- attached preview (VR Viewer node plumbing, moved to the tab) ------
+    // ---- attached preview (Viewer VR node plumbing, moved to the tab) ------
 
     QSize sizeHint() const OVERRIDE;
 

@@ -100,7 +100,7 @@ public:
 
     void createViewerGui(NodePtr viewer);
 
-    /** A VR Viewer node was created: open a VR viewport pane bound to it
+    /** A Viewer VR node was created: open a VR viewport pane bound to it
      *  (the VR counterpart of createViewerGui). */
     void createVRViewerGui(NodePtr node);
 

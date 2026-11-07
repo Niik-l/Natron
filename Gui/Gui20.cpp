@@ -668,7 +668,7 @@ Gui::addNewViewportVR(NodePtr viewerNode)
     ss << _imp->_nextViewportVRIndex;
 
     v->setScriptName( "viewportvr" + ss.str() );
-    v->setLabel( "VR Viewer" + ss.str() );
+    v->setLabel( "Viewer VR" + ss.str() );
     ++_imp->_nextViewportVRIndex;
     _imp->_viewportVRs.push_back(v);
 

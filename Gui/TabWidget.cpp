@@ -784,7 +784,7 @@ TabWidget::newViewport3DHere()
 void
 TabWidget::newViewportVRHere()
 {
-    // Same as "New viewer": create a VR Viewer node in the graph; the
+    // Same as "New viewer": create a Viewer VR node in the graph; the
     // createNodeGui hook opens the VR viewport pane bound to it, placed in
     // this pane via the next-viewer anchor.
     _imp->gui->setNextViewerAnchor(this);

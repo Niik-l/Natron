@@ -401,7 +401,7 @@ void
 Gui::createVRViewerGui(NodePtr node)
 {
     // Same "next viewer place" preference as the 2D viewer; the pane binds to
-    // the VR Viewer node it was created for (node-tree wire, no selector).
+    // the Viewer VR node it was created for (node-tree wire, no selector).
     TabWidget* where = _imp->_nextViewerTabPlace;
 
     if (!where) {

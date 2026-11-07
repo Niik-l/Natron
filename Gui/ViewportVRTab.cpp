@@ -162,7 +162,7 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
     {
         _layerChoice = new ComboBox(toolbar);
         _layerChoice->setToolTip( QString::fromUtf8("<p><b>") + tr("Layer:") + QString::fromUtf8("</b></p><p>")
-                                  + tr("The layer that the VR Viewer node will fetch upstream in the tree. "
+                                  + tr("The layer that the Viewer VR node will fetch upstream in the tree. "
                                        "The channels of the layer will be mapped to the RGBA channels of the viewer according to "
                                        "its number of channels. (e.g: UV would be mapped to RG)") + QString::fromUtf8("</p>") );
         _layerChoice->setFixedWidth( fm.horizontalAdvance( QString::fromUtf8("Color.Toto.RGBA") ) + 3 * TO_DPIX(DROP_DOWN_ICON_SIZE) );
@@ -384,7 +384,7 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         _aInput->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         _aInput->setToolTip(QString::fromUtf8(
             "Input A: pick which node the VR viewport renders. The list fills "
-            "with the nodes connected to the VR Viewer node in the graph."));
+            "with the nodes connected to the Viewer VR node in the graph."));
         QObject::connect( _aInput, SIGNAL(currentIndexChanged(QString)), this, SLOT(onFirstInputNameChanged(QString)) );
         toolbarLayout->addWidget(_aInput);
     }
@@ -405,7 +405,7 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
 
         _compareDropdown = new ComboBox(toolbar);
         _compareDropdown->setToolTip(QString::fromUtf8(
-            "Comparison between inputs of the VR Viewer node: Difference / "
+            "Comparison between inputs of the Viewer VR node: Difference / "
             "Minus / Onion-skin. The 2D viewer's A/B machinery renders both "
             "inputs; the VR sampler applies the operation."));
         _compareDropdown->setFixedWidth( fm.horizontalAdvance( QString::fromUtf8("W-OnionSkin") ) + 3 * TO_DPIX(DROP_DOWN_ICON_SIZE) );
@@ -1047,7 +1047,7 @@ ViewportVRTab::ViewportVRTab(NodePtr viewerNode, Gui* gui, QWidget* parent)
         connect( engine.get(), SIGNAL(renderFinished(int)), this, SLOT(onEngineStopped(int)) );
         connect( engine.get(), SIGNAL(renderStarted(bool)), this, SLOT(onEngineStarted(bool)) );
 
-        // Graph edits on the VR Viewer node (inputs connect/disconnect) refill
+        // Graph edits on the Viewer VR node (inputs connect/disconnect) refill
         // the A/B comboboxes — the same wiring ViewerTab uses for its A:/B:
         // selectors.
         NodePtr wrapper = _viewerNode->getNode();
@@ -1239,7 +1239,7 @@ ViewportVRTab::refreshInputCombos()
 void
 ViewportVRTab::onInputChanged(int inputNb)
 {
-    // A node connected/disconnected on the VR Viewer node in the graph: rebuild
+    // A node connected/disconnected on the Viewer VR node in the graph: rebuild
     // the combobox entries (same as ViewerTab::onInputChanged).
     if (!_viewerNode) {
         return;

@@ -1,6 +1,6 @@
 # VR / 360 — game plan (started 2026-11-06)
 
-**Status 2026-11-07: Parts 1, 2, 3, 5a, 5b DONE** — the VR group + icon, the VR Viewer
+**Status 2026-11-07: Parts 1, 2, 3, 5a, 5b DONE** — the VR group + icon, the Viewer VR
 node + pane (through the viewer-parity pass `ccdde305a`), and the six VR tool nodes
 (see "Part 2/3 — VR tools, DELIVERED" below). Remaining: Part 4a/4b (writer metadata).
 
@@ -164,12 +164,12 @@ modeled on VectorBlur/LensDefocus):
 - **VRExpoGlow** ("ExpoGlow VR") — Fusion-style exponential glow: Size/4 pre-blur then a
   pyramid cascade weighted Falloff^level (no large convolutions at all). Same combine
   knobs.
-- **VRDepthBlur** ("Depth Blur VR") — per-pixel sigma via slice compositing (6 discrete
+- **VRDepthBlur** ("DepthBlur VR") — per-pixel sigma via slice compositing (6 discrete
   sigmas at half res, per-pixel lerped by depth). Depth Source choice: a depth-like channel
   of the Source (auto-detected by name — simplified LensDefocus depthScore — with a
   populated Depth Channel menu + refreshLayerChoices on input/knob change) or the optional
   Depth input. Size / Focus / Range drive the ramp; without depth the node passes through.
-- **VRLightWrap** ("Light Wrap VR") — blur(Background) masked to the foreground edge and
+- **VRLightWrap** ("LightWrap VR") — blur(Background) masked to the foreground edge and
   combined (Plus/Screen) over over(Source, Background). Edge Softness = 0 → classic
   (1-alpha) mask everywhere the fg is absent; > 0 → band = max(0, blur(1-a) - (1-a)),
   confining the wrap to just inside the fg edge. RoD overridden to the Source's.

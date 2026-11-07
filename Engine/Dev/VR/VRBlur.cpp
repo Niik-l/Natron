@@ -96,7 +96,7 @@ VRBlur::initializeKnobs()
 
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Size"));
-        k->setName("size"); k->setDefaultValue(25.0); k->setAnimationEnabled(true);
+        k->setName("size"); k->setDefaultValue(1.0); k->setAnimationEnabled(true);
         k->setMinimum(0.0); k->setDisplayMinimum(0.0); k->setDisplayMaximum(200.0);
         k->setHintToolTip(tr("Blur sigma in pixels at the equator (at the current proxy "
                              "scale). The horizontal kernel wraps across the 0/360 seam."));

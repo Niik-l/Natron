@@ -34,7 +34,7 @@ NATRON_NAMESPACE_ENTER
 struct VRLightWrapPrivate;
 
 /**
- * @brief "Light Wrap VR": wrap background light around the foreground edge, seam-safe
+ * @brief "LightWrap VR": wrap background light around the foreground edge, seam-safe
  * for latlong maps.
  *
  * Classic light wrap for VR360 comps: the Background is blurred with the seam-safe
@@ -68,7 +68,7 @@ public:
     { return PLUGINID_NATRON_VRLIGHTWRAP; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "Light Wrap VR"; }
+    { return "LightWrap VR"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 

@@ -34,7 +34,7 @@ NATRON_NAMESPACE_ENTER
 struct VRDepthBlurPrivate;
 
 /**
- * @brief "Depth Blur VR": depth-masked seam-safe blur for latlong maps.
+ * @brief "DepthBlur VR": depth-masked seam-safe blur for latlong maps.
  *
  * Each pixel is blurred by an amount driven by its depth: pixels at the Focus depth stay
  * sharp, and the blur sigma ramps up to Size over Range depth units on either side of
@@ -72,7 +72,7 @@ public:
     { return PLUGINID_NATRON_VRDEPTHBLUR; }
 
     virtual std::string getPluginLabel() const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return "Depth Blur VR"; }
+    { return "DepthBlur VR"; }
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 

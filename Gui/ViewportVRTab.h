@@ -48,7 +48,7 @@ class ComboBox;
 class ScaleSliderQWidget;
 
 /**
- * @brief Wrapper panel for the VR / 360 viewport: the pane of a "VR Viewer"
+ * @brief Wrapper panel for the VR / 360 viewport: the pane of a "Viewer VR"
  * node.
  *
  * The pane is bound to one VRViewer node (ViewerInstance-derived, created as
@@ -84,7 +84,7 @@ public:
 
     ViewportVR* getViewport() const { return _viewport; }
 
-    /** The bound "VR Viewer" node (weak). */
+    /** The bound "Viewer VR" node (weak). */
     NodeWPtr getNodeBinding() const { return _boundNode; }
 
 public Q_SLOTS:

@@ -33,8 +33,8 @@
  * produces a harsh vertical seam at the wrap boundary and smears features near the poles.
  *
  * Everything here works on raw interleaved float buffers (W*H*nComp, RGBA layout) so the
- * same machinery is shared by Blur VR / Sharpen VR / Glow VR / ExpoGlow VR / Depth Blur VR /
- * Light Wrap VR. Two seam rules are enforced everywhere:
+ * same machinery is shared by Blur VR / Sharpen VR / Glow VR / ExpoGlow VR / DepthBlur VR /
+ * LightWrap VR. Two seam rules are enforced everywhere:
  *
  *   - Horizontal (X) always WRAPS: the kernel index is taken modulo the image width, so
  *     effects bleed smoothly across the 0/360-degree seam with no boundary artifact.

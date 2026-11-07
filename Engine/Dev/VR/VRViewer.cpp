@@ -45,7 +45,7 @@ VRViewer::getPluginID() const
 std::string
 VRViewer::getPluginLabel() const
 {
-    return "VR Viewer";
+    return "Viewer VR";
 }
 
 void
