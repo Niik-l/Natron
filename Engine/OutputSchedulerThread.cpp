@@ -2470,7 +2470,8 @@ DefaultScheduler::processFrame(const BufferedFrames& frames)
             EffectInstance::RenderRoIRetCode retCode;
             retCode = effect->renderRoI(*renderArgs, &planes);
             if (retCode != EffectInstance::eRenderRoIRetCodeOk) {
-                notifyRenderFailure("");
+                notifyRenderFailure(retCode == EffectInstance::eRenderRoIRetCodeAborted ? "the render was aborted"
+                                                                                       : "a node failed to render (see its error message)");
             }
         } catch (const std::exception& e) {
             notifyRenderFailure( e.what() );
@@ -2519,6 +2520,19 @@ DefaultScheduler::getFrameRangeToRender(int& first,
 void
 DefaultScheduler::handleRenderFailure(const std::string& errorMessage)
 {
+    // Always say which render failed, at what frame, and why: the GUI otherwise shows a bare
+    // "Failed" in the Progress panel and nothing else.
+    {
+        OutputEffectInstancePtr effect = _effect.lock();
+        int frame = 0;
+        {
+            QMutexLocker k(&_currentTimeMutex);
+            frame = _currentTime;
+        }
+        std::cerr << "[Render] " << (effect ? effect->getScriptName_mt_safe() : std::string("?"))
+                  << ": render failed around frame " << frame
+                  << (errorMessage.empty() ? "" : ": ") << errorMessage << std::endl;
+    }
     if ( appPTR->isBackground() ) {
         std::cerr << errorMessage << std::endl;
     }

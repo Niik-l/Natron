@@ -2677,7 +2677,14 @@ ScanlineRender::render(const RenderActionArgs& args)
 {
     assert(!args.outputPlanes.empty());
     ImagePtr outImg = args.outputPlanes.front().second;
-    if (!outImg) return eStatusFailed;
+    // Every failure exit says why on stderr: in the GUI a failed Write only shows "Failed" in
+    // the Progress panel, with no message anywhere.
+    const std::string slrName = getNode() ? getNode()->getScriptName_mt_safe() : std::string("ScanlineRender");
+    if (!outImg) {
+        std::fprintf(stderr, "[ScanlineRender] %s frame %g: no output image\n", slrName.c_str(), args.time);
+        std::fflush(stderr);
+        return eStatusFailed;
+    }
 
     int baseW = _imp->outputWidth.lock()->getValue();
     int baseH = _imp->outputHeight.lock()->getValue();
@@ -2758,7 +2765,11 @@ ScanlineRender::render(const RenderActionArgs& args)
     ParticleDataPtr particleData;
 
     EffectInstancePtr geoEffect = getInput(1);
-    if (!geoEffect) return eStatusFailed;
+    if (!geoEffect) {
+        std::fprintf(stderr, "[ScanlineRender] %s frame %g: no scene/geo input\n", slrName.c_str(), args.time);
+        std::fflush(stderr);
+        return eStatusFailed;
+    }
     // Honor the "D" disable knob: a disabled scene/geo input renders nothing.
     if (geoEffect->getNode() && geoEffect->getNode()->isNodeDisabled()) {
         return eStatusFailed;
@@ -2864,7 +2875,13 @@ ScanlineRender::render(const RenderActionArgs& args)
         }
     }
 
-    if (geoObjects.empty() && !particleData && !particleInstancer && !volume3d && !readVdb) return eStatusFailed;
+    if (geoObjects.empty() && !particleData && !particleInstancer && !volume3d && !readVdb) {
+        std::fprintf(stderr, "[ScanlineRender] %s frame %g: the scene produced no geometry (input %s)\n",
+                     slrName.c_str(), args.time,
+                     geoEffect->getNode() ? geoEffect->getNode()->getScriptName_mt_safe().c_str() : "?");
+        std::fflush(stderr);
+        return eStatusFailed;
+    }
 
     // --- Acquire GL context ---
     // The frame render already reserved a context for this thread (ParallelRenderArgsSetter), so

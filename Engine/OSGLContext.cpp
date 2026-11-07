@@ -31,7 +31,17 @@
 
 #include <QDebug>
 #include <QMutex>
+#include <QThread>
 #include <QWaitCondition>
+#include <cstdio>
+#include <cstdlib>
+
+// Set NATRON_DEBUG_GLCTX=1 to trace the shared-context ownership handshake on stderr.
+static bool glCtxTraceEnabled()
+{
+    static const bool on = (std::getenv("NATRON_DEBUG_GLCTX") != NULL);
+    return on;
+}
 
 #include "Engine/AppManager.h"
 
@@ -387,6 +397,10 @@ OSGLContext::setContextCurrent(const AbortableRenderInfoPtr& abortInfo
     }
 #endif
     ++_imp->renderOwningContextCount;
+    if (glCtxTraceEnabled()) {
+        std::fprintf(stderr, "[GLCTX] attach ctx=%p render=%p count=%d thread=%p\n", (void*)this, (void*)abortInfo.get(),
+                     _imp->renderOwningContextCount, (void*)QThread::currentThreadId());
+    }
 #endif
 
     setContextCurrentNoRender();
@@ -435,9 +449,18 @@ OSGLContext::unsetCurrentContext(const AbortableRenderInfoPtr& abortInfo)
 #ifdef NATRON_RENDER_SHARED_CONTEXT
     QMutexLocker k(&_imp->renderOwningContextMutex);
     if (abortInfo != _imp->renderOwningContext) {
+        if (glCtxTraceEnabled()) {
+            std::fprintf(stderr, "[GLCTX] detach ctx=%p render=%p IGNORED (owner is %p, count=%d) thread=%p\n", (void*)this,
+                         (void*)abortInfo.get(), (void*)_imp->renderOwningContext.get(), _imp->renderOwningContextCount,
+                         (void*)QThread::currentThreadId());
+        }
         return;
     }
     --_imp->renderOwningContextCount;
+    if (glCtxTraceEnabled()) {
+        std::fprintf(stderr, "[GLCTX] detach ctx=%p render=%p count=%d thread=%p\n", (void*)this, (void*)abortInfo.get(),
+                     _imp->renderOwningContextCount, (void*)QThread::currentThreadId());
+    }
     if (!_imp->renderOwningContextCount) {
 #ifdef DEBUG
         //qDebug() << "Detaching" << this << "from frame" << _imp->renderOwningContextFrameTime;
