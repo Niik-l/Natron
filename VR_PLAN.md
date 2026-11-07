@@ -1,5 +1,9 @@
 # VR / 360 — game plan (started 2026-11-06)
 
+**Status 2026-11-07: Parts 1, 2, 3, 5a, 5b DONE** — the VR group + icon, the VR Viewer
+node + pane (through the viewer-parity pass `ccdde305a`), and the six VR tool nodes
+(see "Part 2/3 — VR tools, DELIVERED" below). Remaining: Part 4a/4b (writer metadata).
+
 User request (workspace session 2026-11-06): a CaraVR-inspired VR/360 feature family —
 a dedicated VR viewport, a set of VR effect nodes, spherical metadata on output. Ordered
 **viewport-first** so the user's own VR footage can be inspected and later work tested
@@ -136,39 +140,50 @@ Every VR node registers with grouping `VR` (fallback icon applies automatically 
 `getPluginGrouping()` returns "VR"; explicit icon path optional per
 AppManager.cpp:1728–1741).
 
-## Part 2 — `VRBlur` node (CPU)
+## Part 2/3 — VR tools, DELIVERED 2026-11-07 (six nodes, expanded from the planned two)
 
-**Where:** `Engine/Dev/VR/VRBlur.{h,cpp}`, ID `fr.inria.built-in.VRBlur`, grouping
-`PLUGIN_GROUP_VR`. New family dir → CMake GLOB + APPEND pair (Engine/CMakeLists.txt
-47–62 pattern) + cmake regen. NODE_REGISTRY.md row.
+The planned VRBlur/VRGlow became a six-node tool family sharing a seam-safe core in
+`Engine/Dev/VR/VRFilterCore.{h,cpp}` (namespace `VRFilterCore`, pure float-buffer API,
+QtConcurrent row batching with abort polls between batches). Core rules everywhere:
+horizontal kernel WRAPS modulo the image width (no 0/360 seam), vertical CLAMPS at the
+poles, and `latitudeComp` grows the horizontal sigma by 1/cos(latitude) (capped 8x) so
+blurs stay isotropic ON THE SPHERE; large sigmas go through an internal
+decimate→blur→upsample path, and per-row sigma variation (latitude comp) is handled by
+processing rows in octave runs of similar sigma. Nodes (all `Engine/Dev/VR/`, IDs
+`fr.inria.built-in.VR*`, grouping `PLUGIN_GROUP_VR`, `supportsTiles()` false, float-only,
+modeled on VectorBlur/LensDefocus):
 
-**Model to copy:** SphericalTransform for single-plane plumbing (RenderActionArgs,
-RoD 2:1 handling, filter knob shape), LensDefocus for the multi-plane/getComponents
-hygiene if deep support ever lands.
+- **VRBlur** ("Blur VR") — Size / Size x Factor / Quality (kernel extent 2-4 sigma) /
+  Latitude Compensation / Mix.
+- **VRSharpen** ("Sharpen VR") — unsharp mask `src + Amount*(src - blur(src, Size))`, same
+  knob family.
+- **VRGlow** ("Glow VR") — Kawase-style bloom: Threshold + Softness isolation, a stack of
+  kernels with geometrically increasing sigma (Size, Size*Ratio, ... Iterations kernels)
+  evaluated on wrap-aware pyramid levels (each level picked so its local sigma lands near
+  1.5 px), Combine Plus/Screen, Glow Only, Gain, Mix.
+- **VRExpoGlow** ("ExpoGlow VR") — Fusion-style exponential glow: Size/4 pre-blur then a
+  pyramid cascade weighted Falloff^level (no large convolutions at all). Same combine
+  knobs.
+- **VRDepthBlur** ("Depth Blur VR") — per-pixel sigma via slice compositing (6 discrete
+  sigmas at half res, per-pixel lerped by depth). Depth Source choice: a depth-like channel
+  of the Source (auto-detected by name — simplified LensDefocus depthScore — with a
+  populated Depth Channel menu + refreshLayerChoices on input/knob change) or the optional
+  Depth input. Size / Focus / Range drive the ramp; without depth the node passes through.
+- **VRLightWrap** ("Light Wrap VR") — blur(Background) masked to the foreground edge and
+  combined (Plus/Screen) over over(Source, Background). Edge Softness = 0 → classic
+  (1-alpha) mask everywhere the fg is absent; > 0 → band = max(0, blur(1-a) - (1-a)),
+  confining the wrap to just inside the fg edge. RoD overridden to the Source's.
 
-**Knobs (first cut):** `Size` (glaring default ~25 px at 4K-width pano), `Size x
-Factor` for horizontal stretch (wrap axis scale), `Quality` (1–3, kernel radius
-multiplier), `Crop to Format`, `Black outside`, standard Blend If. Keep the rows the
-same as the stock Blur node so habits transfer.
+Registration: plugin-ID macros in `Engine/EffectInstance.h` (after VRVIEWER),
+`registerBuiltInPlugin<...>` in `AppManager.cpp` (VR block), rows in NODE_REGISTRY.md.
+Tests: `tools/vr-tests/` (`make_pano_ref.py` pure-stdlib 16-bit PNG fixtures +
+`vr_check.py` Read→VR node→Write EXR graphs + `run_vr_check.sh` oiiotool assertions):
+seam-left == seam-right strip means (wrap, latComp on AND off), seam blob == mid blob,
+blur spread, sharpen overshoot, glow/expoglow corner isolation + halo spread, depth-driven
+near/far peaks, light-wrap edge brightening + band confinement. 12/12 PASS (DONE_OK).
 
-**Render:** separable gaussian in equirect space. Horizontal axis WRAPS (kernel
-index = modulo width — no seam); vertical clamps at the poles. Quality tiers widen
-the kernel; a per-row sigma profile (scaled by cos(latitude)) is the v2 refinement
-if flat-blur looks off near poles — decide after the first GUI test.
-
-**Tests:** `tools/vr-tests/run_vr_blur_check.sh` + `run_check.py`:
-(a) synthetic pano (checker/grid fixture via `make_pano_ref.py`),
-(b) left/right edge continuity after blur (wrap correctness within tolerance),
-(c) flat center matches an oiiotool-computed gaussian reference (`--diff --fail`),
-(d) SphericalTransform equi→recti→VRBlur→back vs direct pano blur within tolerance.
-Headless with NatronRenderer per the cryptomatte-tests pattern.
-
-## Part 3 — `VRGlow` node
-
-Same `Dev/VR` family: threshold + gain on top of the shared gaussian machinery
-(downsample → blur → add). Shares the pano test fixture; checks: threshold
-correctness (below-threshold pixels unchanged), gain sweep monotonicity, wrap
-continuity.
+The old Part 2/3 notes (VRBlur/VRGlow first cut) are superseded by the above; the knob
+philosophy (rows mirroring the stock Blur node) carried over into the six-node family.
 
 ## Part 4a — WriteFFmpeg spherical metadata (video)
 
