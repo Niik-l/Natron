@@ -241,6 +241,7 @@ private:
     HGLRC _handle;
     int _interval;
     HWND _windowHandle;
+    HDC _windowDc;   // the hidden window's private DC, taken on the thread that owns the window
 };
 
 

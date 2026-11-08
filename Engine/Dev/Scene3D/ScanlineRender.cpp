@@ -66,6 +66,7 @@
 #include "../../Node.h"
 #include "../../NodeMetadata.h"
 #include "../../OSGLContext.h"
+#include "../../ParallelRenderArgs.h"
 #include "ReadGeo.h"
 #include "../../CameraTrackerNode.h"
 #include "SceneGraph.h"
@@ -2676,7 +2677,14 @@ ScanlineRender::render(const RenderActionArgs& args)
 {
     assert(!args.outputPlanes.empty());
     ImagePtr outImg = args.outputPlanes.front().second;
-    if (!outImg) return eStatusFailed;
+    // Every failure exit says why on stderr: in the GUI a failed Write only shows "Failed" in
+    // the Progress panel, with no message anywhere.
+    const std::string slrName = getNode() ? getNode()->getScriptName_mt_safe() : std::string("ScanlineRender");
+    if (!outImg) {
+        std::fprintf(stderr, "[ScanlineRender] %s frame %g: no output image\n", slrName.c_str(), args.time);
+        std::fflush(stderr);
+        return eStatusFailed;
+    }
 
     int baseW = _imp->outputWidth.lock()->getValue();
     int baseH = _imp->outputHeight.lock()->getValue();
@@ -2757,7 +2765,11 @@ ScanlineRender::render(const RenderActionArgs& args)
     ParticleDataPtr particleData;
 
     EffectInstancePtr geoEffect = getInput(1);
-    if (!geoEffect) return eStatusFailed;
+    if (!geoEffect) {
+        std::fprintf(stderr, "[ScanlineRender] %s frame %g: no scene/geo input\n", slrName.c_str(), args.time);
+        std::fflush(stderr);
+        return eStatusFailed;
+    }
     // Honor the "D" disable knob: a disabled scene/geo input renders nothing.
     if (geoEffect->getNode() && geoEffect->getNode()->isNodeDisabled()) {
         return eStatusFailed;
@@ -2863,38 +2875,81 @@ ScanlineRender::render(const RenderActionArgs& args)
         }
     }
 
-    if (geoObjects.empty() && !particleData && !particleInstancer && !volume3d && !readVdb) return eStatusFailed;
+    if (geoObjects.empty() && !particleData && !particleInstancer && !volume3d && !readVdb) {
+        std::fprintf(stderr, "[ScanlineRender] %s frame %g: the scene produced no geometry (input %s)\n",
+                     slrName.c_str(), args.time,
+                     geoEffect->getNode() ? geoEffect->getNode()->getScriptName_mt_safe().c_str() : "?");
+        std::fflush(stderr);
+        return eStatusFailed;
+    }
 
     // --- Acquire GL context ---
+    // The frame render already reserved a context for this thread (ParallelRenderArgsSetter), so
+    // use that one. The pool runs in shared mode (NATRON_RENDER_SHARED_CONTEXT): contexts are
+    // cycled between renders and several renders can hold the same one, so it must be taken
+    // through OSGLContextAttacher, which waits until the render that owns it right now is done
+    // with it. Making it current directly (setContextCurrentNoRender) collided with another
+    // ScanlineRender on the same context when two or three rendered at once: wglMakeCurrent
+    // failed with ERROR_BUSY, every GL call after it failed, the framebuffer never completed and
+    // the render ended as a bare "Rendering Failed".
     GPUContextPool* pool = appPTR->getGPUContextPool();
     if (!pool) return eStatusFailed;
 
     NodePtr reportNode = getNode();
-    OSGLContextPtr glContext;
-    try {
-        glContext = pool->attachGLContextToRender(true);
-    } catch (const std::exception& e) {
-        if (reportNode) {
-            reportNode->setPersistentMessage(eMessageTypeError, std::string("ScanlineRender: failed to create an OpenGL context: ") + e.what());
-        }
-        return eStatusFailed;
-    } catch (...) {
-        if (reportNode) {
-            reportNode->setPersistentMessage(eMessageTypeError, "ScanlineRender: failed to create an OpenGL context (unknown error).");
-        }
-        return eStatusFailed;
-    }
+    ParallelRenderArgsPtr frameArgs = getParallelRenderArgsTLS();
+    OSGLContextPtr glContext = frameArgs ? frameArgs->openGLContext.lock() : OSGLContextPtr();
+    bool attachedFromPool = false;
     if (!glContext) {
-        if (reportNode) {
-            reportNode->setPersistentMessage(eMessageTypeError,
-                                             "ScanlineRender cannot render: OpenGL rendering is disabled in "
-                                             "Preferences > General > GPU rendering (default is disabled in the "
-                                             "background renderer). Set it to Enabled, or use CyclesRender.");
+        try {
+            glContext = pool->attachGLContextToRender(true);
+        } catch (const std::exception& e) {
+            if (reportNode) {
+                reportNode->setPersistentMessage(eMessageTypeError, std::string("ScanlineRender: failed to create an OpenGL context: ") + e.what());
+            }
+            return eStatusFailed;
+        } catch (...) {
+            if (reportNode) {
+                reportNode->setPersistentMessage(eMessageTypeError, "ScanlineRender: failed to create an OpenGL context (unknown error).");
+            }
+            return eStatusFailed;
         }
-        return eStatusFailed;
+        if (!glContext) {
+            if (reportNode) {
+                reportNode->setPersistentMessage(eMessageTypeError,
+                                                 "ScanlineRender cannot render: OpenGL rendering is disabled in "
+                                                 "Preferences > General > GPU rendering (default is disabled in the "
+                                                 "background renderer). Set it to Enabled, or use CyclesRender.");
+            }
+            return eStatusFailed;
+        }
+        attachedFromPool = true;
     }
 
-    glContext->setContextCurrentNoRender();
+    AbortableRenderInfoPtr abortInfo = frameArgs ? frameArgs->abortInfo.lock() : AbortableRenderInfoPtr();
+    OSGLContextAttacher glAttacher(glContext, abortInfo
+#ifdef DEBUG
+                                   , args.time
+#endif
+                                   );
+    glAttacher.attach();   // waits for the render that owns the context, then makes it current
+    auto releaseGL = [&]() {
+        glAttacher.dettach();
+        if (attachedFromPool) {
+            pool->releaseGLContextFromRender(glContext);
+        }
+    };
+    if (!OSGLContext::threadHasACurrentContext()) {
+        std::fprintf(stderr, "[ScanlineRender] the OpenGL context could not be made current on the render thread\n");
+        std::fflush(stderr);
+        if (reportNode) {
+            reportNode->setPersistentMessage(eMessageTypeError,
+                                             "ScanlineRender: the OpenGL context could not be made current on the render "
+                                             "thread. Render again; if it persists, raise Preferences > GPU rendering > "
+                                             "No. of OpenGL Contexts.");
+        }
+        releaseGL();
+        return eStatusFailed;
+    }
 
     // --- Determine MSAA sample count from the Antialiasing knob (clamp to driver max) ---
     GLint maxSamples = 0;
@@ -2906,28 +2961,74 @@ ScanlineRender::render(const RenderActionArgs& args)
     if (samples < 1) samples = 1;
 
     // --- Create MSAA FBO (multisampled color + depth renderbuffers) ---
+    // Several ScanlineRenders rendering at once each hold an RGBA32F multisample target of the
+    // output size (8 samples at 4K is close to a gigabyte with depth and AOVs), so the driver
+    // can refuse the storage and the framebuffer comes back incomplete, which used to fail the
+    // whole render ("Rendering Failed" on one of the Writes). Step the sample count down
+    // (8 -> 4 -> 2 -> 1 -> 0) until a framebuffer completes; 0 is a plain single-sample
+    // renderbuffer that the resolve blit copies as-is.
+    const int requestedSamples = samples;
     GLuint msFBO = 0, msColorRB = 0, msDepthRB = 0;
-    glGenFramebuffers(1, &msFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, msFBO);
+    GLenum msStatus = 0, msError = GL_NO_ERROR;       // of the last attempt
+    GLenum firstStatus = 0, firstError = GL_NO_ERROR; // of the first refused attempt
+    for (;;) {
+        for (int drain = 0; drain < 16 && glGetError() != GL_NO_ERROR; ++drain) {
+            // Clear stale errors. Bounded: with no current context glGetError errors forever.
+        }
+        glGenFramebuffers(1, &msFBO);
+        glBindFramebuffer(GL_FRAMEBUFFER, msFBO);
 
-    glGenRenderbuffers(1, &msColorRB);
-    glBindRenderbuffer(GL_RENDERBUFFER, msColorRB);
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA32F, outW, outH);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, msColorRB);
+        glGenRenderbuffers(1, &msColorRB);
+        glBindRenderbuffer(GL_RENDERBUFFER, msColorRB);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA32F, outW, outH);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, msColorRB);
 
-    glGenRenderbuffers(1, &msDepthRB);
-    glBindRenderbuffer(GL_RENDERBUFFER, msDepthRB);
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH_COMPONENT24, outW, outH);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, msDepthRB);
+        glGenRenderbuffers(1, &msDepthRB);
+        glBindRenderbuffer(GL_RENDERBUFFER, msDepthRB);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH_COMPONENT24, outW, outH);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, msDepthRB);
 
-    GLenum msStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    if (msStatus != GL_FRAMEBUFFER_COMPLETE) {
+        msError = glGetError();
+        msStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (msStatus == GL_FRAMEBUFFER_COMPLETE && msError != GL_OUT_OF_MEMORY) {
+            break;
+        }
+        if (!firstStatus) {
+            firstStatus = msStatus;
+            firstError = msError;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glDeleteFramebuffers(1, &msFBO);
         glDeleteRenderbuffers(1, &msColorRB);
         glDeleteRenderbuffers(1, &msDepthRB);
-        OSGLContext::unsetCurrentContextNoRender();
-        pool->releaseGLContextFromRender(glContext);
+        msFBO = msColorRB = msDepthRB = 0;
+        if (samples <= 0) {
+            break;
+        }
+        samples = samples > 1 ? samples / 2 : 0;
+    }
+    if (!msFBO) {
+        std::fprintf(stderr, "[ScanlineRender] %dx%d render framebuffer refused at every sample count "
+                             "(requested %d; first refusal status 0x%x GL error 0x%x, last 0x%x / 0x%x)\n",
+                     outW, outH, requestedSamples, (unsigned)firstStatus, (unsigned)firstError,
+                     (unsigned)msStatus, (unsigned)msError);
+        std::fflush(stderr);
+        if (reportNode) {
+            char buf[320];
+            std::snprintf(buf, sizeof(buf),
+                          "ScanlineRender: could not create a %dx%d render framebuffer (status 0x%x, GL error 0x%x). "
+                          "Lower the project format or Antialiasing, or render fewer ScanlineRenders at once.",
+                          outW, outH, (unsigned)msStatus, (unsigned)msError);
+            reportNode->setPersistentMessage(eMessageTypeError, buf);
+        }
+        releaseGL();
         return eStatusFailed;
+    }
+    if (samples != requestedSamples) {
+        std::fprintf(stderr, "[ScanlineRender] %dx%d multisample framebuffer refused at %d samples "
+                             "(status 0x%x, GL error 0x%x); rendering with %d\n",
+                     outW, outH, requestedSamples, (unsigned)firstStatus, (unsigned)firstError, samples);
+        std::fflush(stderr);
     }
 
     // --- Create resolve FBO (single-sample, used for glReadPixels) ---
@@ -2949,14 +3050,25 @@ ScanlineRender::render(const RenderActionArgs& args)
 
     GLenum fbStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if (fbStatus != GL_FRAMEBUFFER_COMPLETE) {
+        const GLenum fbError = glGetError();
+        std::fprintf(stderr, "[ScanlineRender] %dx%d resolve framebuffer incomplete (status 0x%x, GL error 0x%x)\n",
+                     outW, outH, (unsigned)fbStatus, (unsigned)fbError);
+        std::fflush(stderr);
+        if (reportNode) {
+            char buf[320];
+            std::snprintf(buf, sizeof(buf),
+                          "ScanlineRender: could not create a %dx%d resolve framebuffer (status 0x%x, GL error 0x%x). "
+                          "Lower the project format, or render fewer ScanlineRenders at once.",
+                          outW, outH, (unsigned)fbStatus, (unsigned)fbError);
+            reportNode->setPersistentMessage(eMessageTypeError, buf);
+        }
         glDeleteFramebuffers(1, &msFBO);
         glDeleteRenderbuffers(1, &msColorRB);
         glDeleteRenderbuffers(1, &msDepthRB);
         glDeleteFramebuffers(1, &fbo);
         glDeleteTextures(1, &colorTex);
         glDeleteRenderbuffers(1, &depthRB);
-        OSGLContext::unsetCurrentContextNoRender();
-        pool->releaseGLContextFromRender(glContext);
+        releaseGL();
         return eStatusFailed;
     }
 
@@ -5034,8 +5146,7 @@ ScanlineRender::render(const RenderActionArgs& args)
     if (msVelocityRB)       glDeleteRenderbuffers(1, &msVelocityRB);
     if (velocityResolveTex) glDeleteTextures(1, &velocityResolveTex);
 
-    OSGLContext::unsetCurrentContextNoRender();
-    pool->releaseGLContextFromRender(glContext);
+    releaseGL();
 
     return eStatusOK;
 }

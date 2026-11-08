@@ -25,11 +25,19 @@
 
 #include "OSGLContext_win.h"
 
+#include <cstdio>
+
 #ifdef __NATRON_WIN32__
 #include <iostream> // std::cerr
 #include <sstream> // stringstream
 
 #include <QtGlobal>      // for Q_UNUSED
+#include <QCoreApplication>
+#include <QMutex>
+#include <QObject>
+#include <QThread>
+#include <cstdlib>       // std::getenv
+#include <map>
 
 #include "Engine/AppManager.h"
 #include "Engine/MemoryInfo.h" // isApplication32Bits
@@ -59,12 +67,124 @@ NATRON_NAMESPACE_ENTER
 
 namespace {
 
+// Which thread last made each rendering context current, kept so that a make-current failure can
+// say who holds the context. Set NATRON_DEBUG_GLCTX=1 to trace every make-current on stderr.
+static QMutex g_currentHoldersMutex;
+static std::map<HGLRC, DWORD> g_currentHolders;
+
+static bool glCtxTraceEnabled()
+{
+    static const bool on = (std::getenv("NATRON_DEBUG_GLCTX") != NULL);
+    return on;
+}
+
+static void noteCurrent(HGLRC context)
+{
+    const DWORD tid = GetCurrentThreadId();
+    QMutexLocker l(&g_currentHoldersMutex);
+    for (std::map<HGLRC, DWORD>::iterator it = g_currentHolders.begin(); it != g_currentHolders.end();) {
+        if (it->second == tid) {
+            g_currentHolders.erase(it++);
+        } else {
+            ++it;
+        }
+    }
+    if (context) {
+        g_currentHolders[context] = tid;
+    }
+}
+
+// DC -> the hidden window it was taken from (0 for an NV affinity DC), for the failure report.
+static std::map<HDC, HWND> g_dcWindows;
+
+static void describeDC(HDC dc, char* buf, size_t n)
+{
+    HWND stored = 0;
+    {
+        QMutexLocker l(&g_currentHoldersMutex);
+        std::map<HDC, HWND>::const_iterator it = g_dcWindows.find(dc);
+        if (it != g_dcWindows.end()) {
+            stored = it->second;
+        }
+    }
+    POINT vo = {0, 0}, wo = {0, 0};
+    SIZE ve = {0, 0}, we = {0, 0};
+    GetViewportOrgEx(dc, &vo);
+    GetWindowOrgEx(dc, &wo);
+    GetViewportExtEx(dc, &ve);
+    GetWindowExtEx(dc, &we);
+    HDC again = stored ? GetDC(stored) : 0;
+    std::snprintf(buf, n,
+                  "GetObjectType(dc)=%lu (3=DC, 0=dead) WindowFromDC=%p storedWindow=%p %s GetDC(storedWindow)=%p mapMode=%d gfxMode=%d "
+                  "viewportOrg=(%ld,%ld) windowOrg=(%ld,%ld) viewportExt=(%ld,%ld) windowExt=(%ld,%ld) pixelFormat=%d",
+                  (unsigned long)GetObjectType(dc), (void*)WindowFromDC(dc), (void*)stored,
+                  stored ? (IsWindow(stored) ? "alive" : "DESTROYED") : "(affinity DC, no window)", (void*)again,
+                  GetMapMode(dc), GetGraphicsMode(dc), vo.x, vo.y, wo.x, wo.y, ve.cx, ve.cy, we.cx, we.cy, GetPixelFormat(dc));
+    if (again && again != dc) {
+        ReleaseDC(stored, again);
+    }
+}
+
+static DWORD holderOf(HGLRC context)
+{
+    QMutexLocker l(&g_currentHoldersMutex);
+    std::map<HGLRC, DWORD>::const_iterator it = g_currentHolders.find(context);
+    return it == g_currentHolders.end() ? 0 : it->second;
+}
+
 bool makeDCAndContextCurrent(HDC dc, HGLRC context)
 {
     const OSGLContext_wgl_data* wglInfo = appPTR->getWGLData();
 
     assert(wglInfo);
-    return wglInfo->MakeCurrent(dc, context);
+    bool ok = wglInfo->MakeCurrent(dc, context);
+    if (ok) {
+        if (glCtxTraceEnabled()) {
+            std::fprintf(stderr, "[GLCTX] tid %lu: %s rc=%p\n", (unsigned long)GetCurrentThreadId(),
+                         context ? "made current" : "released", (void*)context);
+        }
+        noteCurrent(context);
+        return ok;
+    }
+    if (!context) {
+        if (glCtxTraceEnabled()) {
+            std::fprintf(stderr, "[GLCTX] tid %lu: wglMakeCurrent(NULL) failed: Win32 error %lu\n",
+                         (unsigned long)GetCurrentThreadId(), (unsigned long)GetLastError());
+        }
+        return ok;
+    }
+
+    // Safety net for transient refusals. NVIDIA's threaded driver ("Threaded optimization", on by
+    // default) is known to refuse wglMakeCurrent now and then when several threads switch
+    // contexts, with Win32 error 2004 (ERROR_TRANSFORM_NOT_SUPPORTED) or 6, and succeed a few
+    // milliseconds later (community.khronos.org thread 61048: NVIDIA acknowledged a driver bug,
+    // the confirmed workaround is a retry loop with Sleep(10)). ERROR_BUSY (170) means another
+    // thread still holds the context and is about to release it. A failure that survives every
+    // retry is reported in full below; a destroyed DC (see GLWindowOwner) looked exactly like
+    // that: error 2004 at first, then 6 for good.
+    const unsigned long firstError = (unsigned long)GetLastError();
+    int retries = 0;
+    for (; retries < 20 && !ok; ++retries) {
+        Sleep(10);
+        ok = wglInfo->MakeCurrent(dc, context);
+    }
+    if (ok) {
+        std::fprintf(stderr, "[OSGLContext_win] wglMakeCurrent(rc=%p) succeeded after %d retr%s (first Win32 error %lu)\n",
+                     (void*)context, retries, retries == 1 ? "y" : "ies", firstError);
+        noteCurrent(context);
+    } else {
+        // Printed because callers only see a bool.
+        const unsigned long lastError = (unsigned long)GetLastError();
+        char dcInfo[512];
+        describeDC(dc, dcInfo, sizeof(dcInfo));
+        std::fprintf(stderr, "[OSGLContext_win] wglMakeCurrent(dc=%p, rc=%p) failed after %d retries: Win32 error %lu (first %lu); "
+                             "this tid %lu, rc last made current by tid %lu, this thread's current rc=%p; %s\n",
+                     (void*)dc, (void*)context, retries, lastError, firstError,
+                     (unsigned long)GetCurrentThreadId(), (unsigned long)holderOf(context),
+                     (void*)wglInfo->GetCurrentContext(), dcInfo);
+    }
+    std::fflush(stderr);
+    return ok;
 }
 
 }  // namespace
@@ -198,33 +318,95 @@ OSGLContext_win::destroyWGLData(OSGLContext_wgl_data* wglInfo)
     UnregisterClassW( NATRON_WNDCLASSNAME, GetModuleHandleW(NULL) );
 }
 
-// Creates the GLFW window and rendering context
+// The hidden windows that give the rendering contexts their device contexts are created and
+// destroyed on this one thread, which lives as long as the process.
 //
-static bool
-createWindow(HWND* window)
+// Win32 windows and common DCs are thread-affine: when the thread that created a window exits,
+// the system destroys the window; a DC obtained with GetDC from a thread other than the window's
+// creator is a common DC that is released when that thread exits (see createWindow). The context
+// pool creates its contexts lazily on whichever render thread asks first, so the shared contexts
+// used to belong to the render threads of the first Write that rendered; when that Write finished
+// and its threads exited, every other render still using the contexts got wglMakeCurrent errors
+// 2004 then ERROR_INVALID_HANDLE (GetObjectType(dc) == 0) and ended as a bare "Rendering Failed".
+// Three ScanlineRender Writes started together in the GUI showed it every time the first one
+// finished before the others. (Qt documents the same constraint for QOffscreenSurface.)
+namespace {
+class GLWindowOwner : public QObject
 {
-    int xpos = CW_USEDEFAULT;
-    int ypos = CW_USEDEFAULT;
-    const int fullWidth = 32;
-    const int fullHeight = 32;
-
-    *window = CreateWindowExW(/*exStyle*/ 0,
-                                          NATRON_WNDCLASSNAME,
-                                          L"",
-                                          /*style*/ 0,
-                                          xpos, ypos,
-                                          fullWidth, fullHeight,
-                                          NULL, // No parent window
-                                          NULL, // No window menu
-                                          GetModuleHandleW(NULL),
-                                          NULL);
-
-
-    if (!*window) {
-        return false;
+public:
+    static GLWindowOwner* instance()
+    {
+        static QMutex mutex;
+        static GLWindowOwner* owner = 0;
+        QMutexLocker l(&mutex);
+        if (!owner) {
+            owner = new GLWindowOwner;
+            QThread* thread = new QThread;   // never stopped: it must outlive every context
+            thread->setObjectName( QString::fromUtf8("NatronGLWindowOwner") );
+            owner->moveToThread(thread);
+            thread->start();
+            // start() returns before the thread runs; run() below must not fall back to the
+            // calling thread because isRunning() is still false.
+            while ( !thread->isRunning() ) {
+                QThread::yieldCurrentThread();
+            }
+        }
+        return owner;
     }
 
-    return true;
+    // Runs fn on the owner thread and waits for it. Falls back to running it in place when there
+    // is no event loop to go through (process teardown) or when already on the owner thread.
+    template <typename F>
+    void run(F fn)
+    {
+        if (QThread::currentThread() == thread() || !QCoreApplication::instance() || !thread()->isRunning()) {
+            fn();
+            return;
+        }
+        QMetaObject::invokeMethod(this, fn, Qt::BlockingQueuedConnection);
+    }
+};
+} // namespace
+
+// Creates the hidden 32x32 window the context's DC comes from, and takes that DC.
+//
+// Both happen on the owner thread. GetDC on a CS_OWNDC window returns the window's private DC
+// only when called from the thread that created the window; from any other thread it returns a
+// common DC from the system cache, and a common DC is released when the thread that obtained it
+// exits (verified on Windows 11: GetObjectType(dc) == 0 and WindowFromDC(dc) == NULL afterwards).
+// The old code took the DC on the render thread that created the context, so the shared contexts'
+// DCs died with the first Write's render threads.
+//
+static bool
+createWindow(HWND* window, HDC* dc)
+{
+    HWND created = 0;
+    HDC privateDc = 0;
+    DWORD creatorTid = 0;
+    GLWindowOwner::instance()->run([&created, &privateDc, &creatorTid]() {
+        creatorTid = GetCurrentThreadId();
+        created = CreateWindowExW(/*exStyle*/ 0,
+                                  NATRON_WNDCLASSNAME,
+                                  L"",
+                                  /*style*/ 0,
+                                  CW_USEDEFAULT, CW_USEDEFAULT,
+                                  32, 32,
+                                  NULL, // No parent window
+                                  NULL, // No window menu
+                                  GetModuleHandleW(NULL),
+                                  NULL);
+        if (created) {
+            privateDc = GetDC(created);
+        }
+    });
+    *window = created;
+    *dc = privateDc;
+    if (glCtxTraceEnabled()) {
+        std::fprintf(stderr, "[GLCTX] hidden window %p / private DC %p created on tid %lu (requested from tid %lu)\n",
+                     (void*)created, (void*)privateDc, (unsigned long)creatorTid, (unsigned long)GetCurrentThreadId());
+    }
+
+    return created != 0 && privateDc != 0;
 }
 
 int
@@ -294,13 +476,28 @@ OSGLContext_win::createGLContext(const FramebufferConfig& pixelFormatAttrs,
     }
     bool useNVGPUAffinity = rendererID.rendererHandle && wglInfo->NV_gpu_affinity;
     if (useNVGPUAffinity) {
+        // Created on the owner thread as well, in case the driver ties it to the calling thread.
         HGPUNV GpuMask[2] = {(HGPUNV)rendererID.rendererHandle, NULL};
-        _dc = wglInfo->CreateAffinityDCNV(GpuMask);
+        HDC affinityDc = 0;
+        GLWindowOwner::instance()->run([&affinityDc, &GpuMask, wglInfo]() {
+            affinityDc = wglInfo->CreateAffinityDCNV(GpuMask);
+        });
+        _dc = affinityDc;
     } else {
-        _dc = GetDC(_windowHandle);
+        _dc = _windowDc;   // the private DC taken on the owner thread, never GetDC() from here
     }
     if (!_dc) {
         throw std::runtime_error("WGL: Failed to retrieve DC for window");
+    }
+    {
+        QMutexLocker l(&g_currentHoldersMutex);
+        g_dcWindows[_dc] = useNVGPUAffinity ? (HWND)0 : _windowHandle;
+    }
+    if (glCtxTraceEnabled()) {
+        char dcInfo[512];
+        describeDC(_dc, dcInfo, sizeof(dcInfo));
+        std::fprintf(stderr, "[GLCTX] context DC %p created on tid %lu (%s): %s\n", (void*)_dc, (unsigned long)GetCurrentThreadId(),
+                     useNVGPUAffinity ? "NV affinity DC" : "window DC", dcInfo);
     }
 
 
@@ -543,8 +740,13 @@ void
 OSGLContext_win::destroyWindow()
 {
     if (_windowHandle) {
-        DestroyWindow(_windowHandle);
+        // DestroyWindow only works from the thread that created the window.
+        HWND w = _windowHandle;
+        GLWindowOwner::instance()->run([w]() {
+            DestroyWindow(w);
+        });
         _windowHandle = 0;
+        _windowDc = 0;   // a private DC goes with its window
     }
 }
 
@@ -569,8 +771,9 @@ OSGLContext_win::OSGLContext_win(const FramebufferConfig& pixelFormatAttrs,
     , _handle(0)
     , _interval(0)
     , _windowHandle(0)
+    , _windowDc(0)
 {
-    if ( !createWindow(&_windowHandle) ) {
+    if ( !createWindow(&_windowHandle, &_windowDc) ) {
         throw std::runtime_error("WGL: Failed to create window");
     }
 
@@ -604,7 +807,7 @@ OSGLContext_win::OSGLContext_win(const FramebufferConfig& pixelFormatAttrs,
         destroyWindow();
 
         // ...and then create them again, this time with better APIs
-        if ( !createWindow(&_windowHandle) ) {
+        if ( !createWindow(&_windowHandle, &_windowDc) ) {
             throw std::runtime_error("WGL: Failed to create window");
         }
 

@@ -1653,6 +1653,10 @@ EffectInstance::renderRoI(const RenderRoIArgs & args,
         ///Throwing this exception will ensure the render stops.
         ///This is slightly clumsy since we already have a render rect code indicating it, we should
         ///use the ret code instead.
+        // Name the node: the exception message reaches the GUI as a bare "Rendering Failed".
+        ::fprintf(stderr, "[Render] %s frame %g: the render action failed\n",
+                  getNode()->getScriptName_mt_safe().c_str(), args.time);
+        ::fflush(stderr);
         throw std::runtime_error("Rendering Failed");
     } else if (renderRetCode == eRenderRoIStatusRenderOutOfGPUMemory) {
         /// Recall renderRoI on this node, but don't use GPU this time if possible
