@@ -57,6 +57,7 @@
 #include "Gui/GuiPrivate.h"
 #include "Gui/Histogram.h"
 #include "Gui/Viewport3DTab.h"
+#include "Gui/ViewportVRTab.h"
 #include "Gui/Menu.h"
 #include "Gui/NodeGraph.h"
 #include "Gui/NodeGui.h"
@@ -76,7 +77,7 @@
 
 #include <SequenceParsing.h> // for removePath
 
-#define NAMED_PLUGIN_GROUP_NO 15
+#define NAMED_PLUGIN_GROUP_NO 16
 
 #define PLUGIN_GROUP_DEFAULT_ICON_PATH NATRON_IMAGES_PATH "GroupingIcons/Set" NATRON_ICON_SET_NUMBER "/other_grouping_" NATRON_ICON_SET_NUMBER ".png"
 
@@ -96,6 +97,7 @@ static std::string namedGroupsOrdered[NAMED_PLUGIN_GROUP_NO] = {
     PLUGIN_GROUP_3D,
     PLUGIN_GROUP_DEEP,
     PLUGIN_GROUP_MULTIVIEW,
+    PLUGIN_GROUP_VR,
     PLUGIN_GROUP_TOOLSETS,
     PLUGIN_GROUP_OTHER,
     PLUGIN_GROUP_DEFAULT
@@ -134,6 +136,8 @@ getPixmapForGrouping(QPixmap* pixmap,
         e = NATRON_PIXMAP_DEEP_GROUPING;
     } else if ( grouping == QString::fromUtf8(PLUGIN_GROUP_MULTIVIEW) ) {
         e = NATRON_PIXMAP_MULTIVIEW_GROUPING;
+    } else if ( grouping == QString::fromUtf8(PLUGIN_GROUP_VR) ) {
+        e = NATRON_PIXMAP_VR_GROUPING;
     } else if ( grouping == QString::fromUtf8(PLUGIN_GROUP_TOOLSETS) ) {
         e = NATRON_PIXMAP_TOOLSETS_GROUPING;
     } else if ( grouping == QString::fromUtf8(PLUGIN_GROUP_OTHER) ) {
@@ -654,6 +658,35 @@ Gui::removeViewport3D(Viewport3DTab* v)
     _imp->_viewport3Ds.erase(it);
 }
 
+ViewportVRTab*
+Gui::addNewViewportVR(NodePtr viewerNode)
+{
+    ViewportVRTab* v = new ViewportVRTab(viewerNode, this);
+    QMutexLocker l(&_imp->_viewportVRMutex);
+    std::stringstream ss;
+
+    ss << _imp->_nextViewportVRIndex;
+
+    v->setScriptName( "viewportvr" + ss.str() );
+    v->setLabel( "Viewer VR" + ss.str() );
+    ++_imp->_nextViewportVRIndex;
+    _imp->_viewportVRs.push_back(v);
+
+    return v;
+}
+
+void
+Gui::removeViewportVR(ViewportVRTab* v)
+{
+    unregisterTab(v);
+    QMutexLocker l(&_imp->_viewportVRMutex);
+    std::list<ViewportVRTab*>::iterator it = std::find(_imp->_viewportVRs.begin(), _imp->_viewportVRs.end(), v);
+
+    assert( it != _imp->_viewportVRs.end() );
+    delete *it;
+    _imp->_viewportVRs.erase(it);
+}
+
 const std::list<Histogram*> &
 Gui::getHistograms() const
 {
@@ -676,6 +709,14 @@ Gui::getViewport3Ds_mt_safe() const
     QMutexLocker l(&_imp->_viewport3DMutex);
 
     return _imp->_viewport3Ds;
+}
+
+std::list<ViewportVRTab*>
+Gui::getViewportVRs_mt_safe() const
+{
+    QMutexLocker l(&_imp->_viewportVRMutex);
+
+    return _imp->_viewportVRs;
 }
 
 void

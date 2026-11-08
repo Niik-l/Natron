@@ -69,6 +69,7 @@ CLANG_DIAG_ON(deprecated)
 #include "Gui/GuiMacros.h"
 #include "Gui/Histogram.h"
 #include "Gui/Viewport3DTab.h"
+#include "Gui/ViewportVRTab.h"
 #include "Gui/Menu.h"
 #include "Gui/NodeGraph.h"
 #include "Gui/PropertiesBinWrapper.h"
@@ -435,6 +436,7 @@ TabWidget::createMenu()
     menu.addAction( tr("New viewer"), this, SLOT(addNewViewer()) );
     menu.addAction( tr("New histogram"), this, SLOT(newHistogramHere()) );
     menu.addAction( tr("New 3D viewport"), this, SLOT(newViewport3DHere()) );
+    menu.addAction( tr("New VR viewer"), this, SLOT(newViewportVRHere()) );
     menu.addAction( tr("Node graph here"), this, SLOT(moveNodeGraphHere()) );
     menu.addAction( tr("Curve Editor here"), this, SLOT(moveCurveEditorHere()) );
     menu.addAction( tr("Dope Sheet Editor here"), this, SLOT(moveDopeSheetEditorHere()) );
@@ -777,6 +779,26 @@ TabWidget::newViewport3DHere()
     appendTab(v, v);
 
     _imp->gui->getApp()->triggerAutoSave();
+}
+
+void
+TabWidget::newViewportVRHere()
+{
+    // Same as "New viewer": create a Viewer VR node in the graph; the
+    // createNodeGui hook opens the VR viewport pane bound to it, placed in
+    // this pane via the next-viewer anchor.
+    _imp->gui->setNextViewerAnchor(this);
+
+    NodeGraph* lastFocusedGraph = _imp->gui->getLastSelectedGraph();
+    NodeGraph* graph = lastFocusedGraph ? lastFocusedGraph : _imp->gui->getNodeGraph();
+    if (!graph) {
+        graph = _imp->gui->getNodeGraph();
+    }
+    if (!graph) {
+        return;
+    }
+    CreateNodeArgs args(PLUGINID_NATRON_VRVIEWER, graph->getGroup() );
+    _imp->gui->getApp()->createNode(args);
 }
 
 /*Get the header name of the tab at index "index".*/

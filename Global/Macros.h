@@ -299,6 +299,7 @@ NATRON_VERSION_STRINGIZE__(major, minor)
 #define PLUGIN_GROUP_3D "3D"
 #define PLUGIN_GROUP_DEEP "Deep"
 #define PLUGIN_GROUP_MULTIVIEW "Views"
+#define PLUGIN_GROUP_VR "VR"
 #define PLUGIN_GROUP_TOOLSETS "ToolSets"
 #define PLUGIN_GROUP_OTHER "Other"
 #define PLUGIN_GROUP_DEFAULT "Misc"

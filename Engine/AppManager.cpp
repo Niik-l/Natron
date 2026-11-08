@@ -240,6 +240,13 @@
 #include "Dev/Scene3D/GeoMaterialOverride.h"
 #include "Dev/Scene3D/DevStamp.h"
 #include "Dev/Scene3D/CyclesRenderPass.h"
+#include "Dev/VR/VRViewer.h"
+#include "Dev/VR/VRBlur.h"
+#include "Dev/VR/VRSharpen.h"
+#include "Dev/VR/VRGlow.h"
+#include "Dev/VR/VRExpoGlow.h"
+#include "Dev/VR/VRDepthBlur.h"
+#include "Dev/VR/VRLightWrap.h"
 
 #include "sbkversion.h" // shiboken/pyside version
 
@@ -1776,6 +1783,20 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<GeoMaterialOverride>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<DevStamp>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<CyclesRenderPass>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+
+    // Dev nodes — VR / 360
+    // The "Viewer VR" node: a real ViewerInstance whose pane is the VR canvas
+    // (Gui::createVRViewerGui routes it there). Same cache/engine as the 2D
+    // viewer; the pane presents the texture equirectangularly.
+    registerBuiltInPlugin<VRViewer>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
+
+    // Dev nodes — VR / 360 tools (seam-safe latlong filtering, see VRFilterCore)
+    registerBuiltInPlugin<VRBlur>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
+    registerBuiltInPlugin<VRSharpen>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
+    registerBuiltInPlugin<VRGlow>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
+    registerBuiltInPlugin<VRExpoGlow>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
+    registerBuiltInPlugin<VRDepthBlur>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
+    registerBuiltInPlugin<VRLightWrap>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
 
     // Dev nodes — Channel
     registerBuiltInPlugin<DevShuffle>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/channel_grouping_2.png"), false, false);

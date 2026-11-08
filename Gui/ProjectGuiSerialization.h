@@ -84,7 +84,8 @@ GCC_DIAG_ON(unused-parameter)
 #define PROJECT_GUI_SERIALIZATION_INTRODUCES_PYTHON_PANELS 11
 #define PROJECT_GUI_SERIALIZATION_INTRODUCES_PANEL_STATES 12
 #define PROJECT_GUI_SERIALIZATION_INTRODUCES_VIEWPORT3D 13
-#define PROJECT_GUI_SERIALIZATION_VERSION PROJECT_GUI_SERIALIZATION_INTRODUCES_VIEWPORT3D
+#define PROJECT_GUI_SERIALIZATION_INTRODUCES_VIEWPORTVR 14
+#define PROJECT_GUI_SERIALIZATION_VERSION PROJECT_GUI_SERIALIZATION_INTRODUCES_VIEWPORTVR
 
 #define PANE_SERIALIZATION_INTRODUCES_CURRENT_TAB 2
 #define PANE_SERIALIZATION_INTRODUCES_SIZE 3
@@ -658,6 +659,9 @@ class ProjectGuiSerialization
     ///Active 3D viewports (script names of viewport3d{N} tabs)
     std::list<std::string> _viewport3Ds;
 
+    ///Active VR viewports (script names of viewportv{N} tabs)
+    std::list<std::string> _viewportVRs;
+
     ///Active backdrops (kept here for bw compatibility with Natron < 1.1
     std::list<NodeBackdropSerialization> _backdrops;
 
@@ -692,6 +696,7 @@ class ProjectGuiSerialization
         ar & ::boost::serialization::make_nvp("OpenedPanelsMinimized", _openedPanelsMinimizedOrdered);
         ar & ::boost::serialization::make_nvp("OpenedPanelsHideUnmodified", _openedPanelsHideUnmodifiedOrdered);
         ar & ::boost::serialization::make_nvp("Viewport3Ds", _viewport3Ds);
+        ar & ::boost::serialization::make_nvp("ViewportVRs", _viewportVRs);
     }
 
     template<class Archive>
@@ -745,6 +750,10 @@ class ProjectGuiSerialization
             ar & ::boost::serialization::make_nvp("Viewport3Ds", _viewport3Ds);
         }
 
+        if (version >= PROJECT_GUI_SERIALIZATION_INTRODUCES_VIEWPORTVR) {
+            ar & ::boost::serialization::make_nvp("ViewportVRs", _viewportVRs);
+        }
+
         _version = version;
     }
 
@@ -756,6 +765,7 @@ public:
         , _viewersData()
         , _histograms()
         , _viewport3Ds()
+        , _viewportVRs()
         , _backdrops()
         , _openedPanelsOrdered()
         , _openedPanelsMinimizedOrdered()
@@ -794,6 +804,11 @@ public:
     const std::list<std::string> & getViewport3Ds() const
     {
         return _viewport3Ds;
+    }
+
+    const std::list<std::string> & getViewportVRs() const
+    {
+        return _viewportVRs;
     }
 
     const std::list<NodeBackdropSerialization> & getBackdrops() const

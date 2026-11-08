@@ -504,7 +504,14 @@ GuiAppInstance::createNodeGui(const NodePtr &node,
 
     bool isViewer = node->isEffectViewer() != 0;
     if (isViewer) {
-        _imp->_gui->createViewerGui(node);
+        if (node->getPluginID() == PLUGINID_NATRON_VRVIEWER) {
+            // The "Viewer VR" node opens its own VR pane (VR canvas) instead
+            // of the 2D viewer tab — same createNodeGui hook, same project-load
+            // path, one pane per node.
+            _imp->_gui->createVRViewerGui(node);
+        } else {
+            _imp->_gui->createViewerGui(node);
+        }
     }
 
     // Must be done after the viewer gui has been created

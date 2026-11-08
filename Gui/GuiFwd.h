@@ -235,6 +235,8 @@ class ViewerGL;
 class ViewerTab;
 class Viewport3D;
 class Viewport3DTab;
+class ViewportVR;
+class ViewportVRTab;
 class ViewerToolButton;
 class KnobPageGui;
 

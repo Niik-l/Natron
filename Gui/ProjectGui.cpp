@@ -76,6 +76,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Gui/ViewerGL.h"
 #include "Gui/ViewerTab.h"
 #include "Gui/Viewport3DTab.h"
+#include "Gui/ViewportVRTab.h"
 
 //Remove when serialization is gone from this file
 #include "Engine/RectISerialization.h"
@@ -592,6 +593,8 @@ ProjectGui::load<boost::archive::xml_iarchive>(bool isAutosave,  boost::archive:
         ///relocate each viewport3d{N} tab into its saved split pane (wipeLayout conserves
         ///registered tabs rather than deleting them). Without this, the saved layout
         ///references a viewport3d tab that doesn't exist and the split is dropped.
+        ///NOTE: the VR viewports do NOT need this — a VRViewer node opens its bound
+        ///pane through the createNodeGui hook while the project's nodes are loaded.
         const std::list<std::string> & viewport3Ds = obj.getViewport3Ds();
         for (std::list<std::string>::const_iterator it = viewport3Ds.begin(); it != viewport3Ds.end(); ++it) {
             Viewport3DTab* v = _gui->addNewViewport3D();

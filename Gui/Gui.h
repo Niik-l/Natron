@@ -100,6 +100,10 @@ public:
 
     void createViewerGui(NodePtr viewer);
 
+    /** A Viewer VR node was created: open a VR viewport pane bound to it
+     *  (the VR counterpart of createViewerGui). */
+    void createVRViewerGui(NodePtr node);
+
     void createGroupGui(const NodePtr& group, const CreateNodeArgs& args);
 
     void addGroupGui(NodeGraph* tab, TabWidget* where);
@@ -150,6 +154,10 @@ public:
     Viewport3DTab* addNewViewport3D();
     void removeViewport3D(Viewport3DTab* v);
     std::list<Viewport3DTab*> getViewport3Ds_mt_safe() const;
+
+    ViewportVRTab* addNewViewportVR(NodePtr viewerNode);
+    void removeViewportVR(ViewportVRTab* v);
+    std::list<ViewportVRTab*> getViewportVRs_mt_safe() const;
 
     void maximize(TabWidget* what);
 
