@@ -391,6 +391,9 @@ public:
 
     std::string getUserStyleSheetFilePath() const;
 
+    // true when the pre-2026.11 stylesheet and title-bar icons should be used
+    bool getClassicInterfaceStyle() const;
+
 #ifdef NATRON_DOCUMENTATION_ONLINE
     int getDocumentationSource() const;
 #endif
@@ -636,6 +639,7 @@ private:
     KnobChoicePtr _systemFontChoice;
     KnobIntPtr _fontSize;
     KnobFilePtr _qssFile;
+    KnobBoolPtr _classicStyle;
     KnobIntPtr _defaultAppearanceVersion;
 
     // Appearance/Main Window

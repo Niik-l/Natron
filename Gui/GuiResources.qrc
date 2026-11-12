@@ -290,6 +290,21 @@
         <file>Resources/Images/zebra_off.png</file>
         <file>Resources/Images/zebra_on.png</file>
         <file>Resources/Stylesheets/mainstyle.qss</file>
+        <file>Resources/Stylesheets/mainstyle_classic.qss</file>
+        <file>Resources/Images/classic/close.png</file>
+        <file>Resources/Images/classic/groupbox_folded.png</file>
+        <file>Resources/Images/classic/groupbox_unfolded.png</file>
+        <file>Resources/Images/classic/help.png</file>
+        <file>Resources/Images/classic/hide_unmodified.png</file>
+        <file>Resources/Images/classic/maximize.png</file>
+        <file>Resources/Images/classic/minimize.png</file>
+        <file>Resources/Images/classic/redo.png</file>
+        <file>Resources/Images/classic/redo_grayscale.png</file>
+        <file>Resources/Images/classic/restoreDefaultDisabled.png</file>
+        <file>Resources/Images/classic/restoreDefaultEnabled.png</file>
+        <file>Resources/Images/classic/undo.png</file>
+        <file>Resources/Images/classic/undo_grayscale.png</file>
+        <file>Resources/Images/classic/unhide_unmodified.png</file>
         <file>Resources/Images/checkbox_tick.png</file>
         <file>Resources/Images/checkbox_tick.png</file>
         <file>Resources/Images/rotoNodeIcon.png</file>

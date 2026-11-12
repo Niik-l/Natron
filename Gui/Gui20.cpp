@@ -280,7 +280,8 @@ Gui::loadStyleSheet()
     if ( !userQss.empty() ) {
         qss.setFileName( QString::fromUtf8( userQss.c_str() ) );
     } else {
-        qss.setFileName( QString::fromUtf8(":/Resources/Stylesheets/mainstyle.qss") );
+        qss.setFileName( settings->getClassicInterfaceStyle() ? QString::fromUtf8(":/Resources/Stylesheets/mainstyle_classic.qss")
+                         : QString::fromUtf8(":/Resources/Stylesheets/mainstyle.qss") );
     }
 
     if ( qss.open(QIODevice::ReadOnly

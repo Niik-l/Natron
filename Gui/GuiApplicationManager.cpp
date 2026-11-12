@@ -797,6 +797,33 @@ GuiApplicationManager::getIcon(PixmapEnum e,
         if ( path.empty() ) {
             assert(!"Missing image.");
         }
+        // Preferences > Appearance > Classic interface style: the icons that were redrawn for
+        // the 2026.11 look keep their older version in Images/classic/.
+        if ( appPTR->getCurrentSettings()->getClassicInterfaceStyle() ) {
+            static const char* const classicIcons[] = {
+                "close.png",
+                "groupbox_folded.png",
+                "groupbox_unfolded.png",
+                "help.png",
+                "hide_unmodified.png",
+                "maximize.png",
+                "minimize.png",
+                "redo.png",
+                "redo_grayscale.png",
+                "restoreDefaultDisabled.png",
+                "restoreDefaultEnabled.png",
+                "undo.png",
+                "undo_grayscale.png",
+                "unhide_unmodified.png",
+            };
+            const std::string prefix(NATRON_IMAGES_PATH);
+            for (std::size_t i = 0; i < sizeof(classicIcons) / sizeof(classicIcons[0]); ++i) {
+                if (path == prefix + classicIcons[i]) {
+                    path = prefix + "classic/" + classicIcons[i];
+                    break;
+                }
+            }
+        }
         // put a breakpoint in png_chunk_report to catch the error "libpng warning: iCCP: known incorrect sRGB profile"
 
         // old version:

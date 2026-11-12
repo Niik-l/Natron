@@ -754,6 +754,13 @@ Settings::initializeKnobsAppearance()
     _qssFile->setHintToolTip( tr("When pointing to a valid .qss file, the stylesheet of the application will be set according to this file instead of the default "
                                  "stylesheet. You can adapt the default stylesheet that can be found in your distribution of %1.").arg( QString::fromUtf8(NATRON_APPLICATION_NAME) ) );
     _appearanceTab->addKnob(_qssFile);
+
+    _classicStyle = AppManager::createKnob<KnobBool>( this, tr("Classic interface style") );
+    _classicStyle->setName("classicInterfaceStyle");
+    _classicStyle->setHintToolTip( tr("When checked, %1 uses the interface style from before the 2026.11 restyle: the older menus, tabs, "
+                                      "buttons, scrollbars and tooltips, and the older panel title-bar icons. The stylesheet changes at once, "
+                                      "the icons after a restart. This has no effect on the stylesheet when a stylesheet file is set above.").arg( QString::fromUtf8(NATRON_APPLICATION_NAME) ) );
+    _appearanceTab->addKnob(_classicStyle);
 } // Settings::initializeKnobsAppearance
 
 void
@@ -1819,6 +1826,7 @@ Settings::setDefaultValues()
     _systemFontChoice->setDefaultValue(0);
     _fontSize->setDefaultValue(NATRON_FONT_SIZE_DEFAULT);
     //_qssFile
+    _classicStyle->setDefaultValue(false);
     //_defaultAppearanceVersion
 
     // Appearance/Main Window
@@ -2666,7 +2674,7 @@ Settings::onKnobValueChanged(KnobI* k,
                   ( k == _sliderColor.get() ) ||
                   ( k == _numbersColor.get() ) ) ) {
         appPTR->reloadStylesheets();
-    } else if ( k == _qssFile.get() ) {
+    } else if ( ( k == _qssFile.get() ) || ( k == _classicStyle.get() ) ) {
         appPTR->reloadStylesheets();
     } else if ( k == _hostName.get() ) {
         std::string hostName = _hostName->getActiveEntry().id;
@@ -4167,6 +4175,12 @@ std::string
 Settings::getUserStyleSheetFilePath() const
 {
     return _qssFile->getValue();
+}
+
+bool
+Settings::getClassicInterfaceStyle() const
+{
+    return _classicStyle->getValue();
 }
 
 void
