@@ -40,11 +40,19 @@ CLANG_DIAG_OFF(uninitialized)
 #include "Global/QtCompat.h"
 #include <QApplication>
 #include <QStringListModel>
+#include <QStyledItemDelegate>
+#include <QPainter>
+#include <QScreen>
+#include <QGuiApplication>
+#include <QAction>
+#include <QPixmap>
+#include <QIcon>
 CLANG_DIAG_ON(deprecated)
 CLANG_DIAG_ON(uninitialized)
 
 #include "Engine/AppManager.h"
 #include "Engine/Plugin.h"
+#include "Engine/Settings.h"
 #include "Gui/LineEdit.h"
 #include "Gui/GuiApplicationManager.h"
 
@@ -55,6 +63,138 @@ CLANG_DIAG_ON(uninitialized)
 //#define NODE_TAB_DIALOG_USE_MATCHED_LENGTH
 
 NATRON_NAMESPACE_ENTER
+
+// Maximum number of rows the completion list shows before it scrolls.
+#define NATRON_COMPLETER_MAX_VISIBLE_ROWS 14
+
+NATRON_NAMESPACE_ANONYMOUS_ENTER
+
+static QColor
+settingsColor(void (Settings::*getter)(double*, double*, double*) const)
+{
+    double r = 0.5, g = 0.5, b = 0.5;
+    ( appPTR->getCurrentSettings().get()->*getter )(&r, &g, &b);
+
+    return QColor::fromRgbF(r, g, b);
+}
+
+/**
+ * @brief Paints one completion row: the name on the left and, when the entry is of the form
+ * "Name  [Group]" (a plug-in), the group as a dimmed tag on the right. The model text is left
+ * untouched, it is what identifies the entry.
+ **/
+class CompleterItemDelegate
+    : public QStyledItemDelegate
+{
+public:
+
+    CompleterItemDelegate(QObject* parent)
+        : QStyledItemDelegate(parent)
+    {
+    }
+
+    static int hPad(const QFontMetrics& fm) { return fm.height() / 2; }
+
+    static int vPad(const QFontMetrics& fm) { return std::max(3, fm.height() / 5); }
+
+    virtual QSize sizeHint(const QStyleOptionViewItem& option,
+                           const QModelIndex& /*index*/) const OVERRIDE FINAL
+    {
+        QFontMetrics fm(option.font);
+
+        // The width follows the view (no horizontal scrolling): long names are elided.
+        return QSize( 10, fm.height() + 2 * vPad(fm) );
+    }
+
+    virtual void paint(QPainter* painter,
+                       const QStyleOptionViewItem& option,
+                       const QModelIndex& index) const OVERRIDE FINAL
+    {
+        const QColor textColor = settingsColor(&Settings::getTextColor);
+        const QColor selColor = settingsColor(&Settings::getSelectionColor);
+        const bool selected = option.state & QStyle::State_Selected;
+        const bool hovered = option.state & QStyle::State_MouseOver;
+        const QRect r = option.rect;
+        QFontMetrics fm(option.font);
+        const int pad = hPad(fm);
+        const int bar = std::max(2, pad / 3);
+
+        painter->save();
+        painter->setFont(option.font);
+        if (selected) {
+            QColor fill = selColor;
+            fill.setAlpha(70);
+            painter->fillRect(r, fill);
+            painter->fillRect(QRect( r.left(), r.top(), bar, r.height() ), selColor);
+        } else if (hovered) {
+            QColor fill = textColor;
+            fill.setAlpha(22);
+            painter->fillRect(r, fill);
+        }
+
+        QString name = index.data().toString();
+        QString group;
+        const int bracket = name.lastIndexOf( QString::fromUtf8("  [") );
+        if ( (bracket > 0) && name.endsWith( QLatin1Char(']') ) ) {
+            group = name.mid(bracket + 3, name.size() - bracket - 4);
+            name = name.left(bracket);
+        }
+
+        QRect textRect = r.adjusted(pad + bar, 0, -pad, 0);
+        if ( !group.isEmpty() ) {
+            const QString g = fm.elidedText(group, Qt::ElideRight, textRect.width() / 2);
+            const int gw = fm.horizontalAdvance(g);
+            QColor dim = textColor;
+            dim.setAlpha(selected ? 190 : 120);
+            painter->setPen(dim);
+            painter->drawText(textRect, Qt::AlignRight | Qt::AlignVCenter, g);
+            textRect.setRight(textRect.right() - gw - pad);
+        }
+        painter->setPen( selected ? textColor.lighter(125) : textColor );
+        painter->drawText( textRect, Qt::AlignLeft | Qt::AlignVCenter,
+                           fm.elidedText( name, Qt::ElideRight, textRect.width() ) );
+        painter->restore();
+    }
+};
+
+// Shared look of the completion popup: flat list, no horizontal scrollbar, a slim vertical
+// scrollbar without arrow buttons, rows drawn by CompleterItemDelegate.
+static void
+setupCompleterView(QListView* view)
+{
+    const QColor base = settingsColor(&Settings::getBaseColor);
+    const QColor text = settingsColor(&Settings::getTextColor);
+    const QString rgba = QString::fromUtf8("rgba(%1,%2,%3,%4)");
+    const QString handle = rgba.arg( text.red() ).arg( text.green() ).arg( text.blue() ).arg(90);
+    const QString handleHover = rgba.arg( text.red() ).arg( text.green() ).arg( text.blue() ).arg(150);
+
+    view->setItemDelegate( new CompleterItemDelegate(view) );
+    view->setUniformItemSizes(true);
+    view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    view->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    view->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    view->setTextElideMode(Qt::ElideRight);
+    view->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    view->setSelectionMode(QAbstractItemView::SingleSelection);
+    view->setMouseTracking(true);
+    view->viewport()->setAttribute(Qt::WA_Hover, true);
+    view->setFocusPolicy(Qt::NoFocus);
+
+    view->setStyleSheet( QString::fromUtf8(
+                             "QListView { background-color: %1; border: 1px solid %2; outline: none; padding: 0px; }\n"
+                             "QScrollBar:vertical { background: transparent; border: none; width: 10px; margin: 2px 2px 2px 0px; }\n"
+                             "QScrollBar::handle:vertical { background: %3; border: none; border-radius: 4px; min-height: 28px; }\n"
+                             "QScrollBar::handle:vertical:hover { background: %4; }\n"
+                             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; width: 0px; border: none; background: none; }\n"
+                             "QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { image: none; width: 0px; height: 0px; }\n"
+                             "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }\n")
+                         .arg( base.name() )
+                         .arg( base.darker(170).name() )
+                         .arg(handle)
+                         .arg(handleHover) );
+}
+
+NATRON_NAMESPACE_ANONYMOUS_EXIT
 
 
 struct CompleterLineEditPrivate
@@ -103,6 +243,7 @@ CompleterLineEdit::CompleterLineEdit(const PluginsNamesMap& plugins,
     _imp->model = new QStringListModel(this);
     _imp->listView->setWindowFlags(Qt::ToolTip);
     _imp->listView->setModel(_imp->model);
+    setupCompleterView(_imp->listView);
 
     connect( this, SIGNAL(textChanged(QString)), this, SLOT(filterText(QString)) );
     connect( _imp->listView, SIGNAL(clicked(QModelIndex)), this, SLOT(setTextFromIndex(QModelIndex)) );
@@ -119,6 +260,7 @@ CompleterLineEdit::CompleterLineEdit(const QStringList & displayWords,
     _imp->model = new QStringListModel(this);
     _imp->listView->setWindowFlags(Qt::ToolTip);
     _imp->listView->setModel(_imp->model);
+    setupCompleterView(_imp->listView);
 
     connect( this, SIGNAL(textChanged(QString)), this, SLOT(filterText(QString)) );
     connect( _imp->listView, SIGNAL(clicked(QModelIndex)), this, SLOT(setTextFromIndex(QModelIndex)) );
@@ -193,21 +335,35 @@ CompleterLineEdit::filterText(const QString & txt)
 
     int rowCount = _imp->model->rowCount();
     if (rowCount == 0) {
+        // Nothing matches: do not leave the previous results on screen.
+        _imp->listView->hide();
+
         return;
     }
 
-    QPoint p = mapToGlobal( QPoint( 0, height() ) );
-    //QDesktopWidget* desktop = QApplication::desktop();
-    //QRect screen = desktop->screenGeometry();
-    //double maxHeight = ( screen.height() - p.y() ) * 0.8;
-    //QFontMetrics fm = _imp->listView->fontMetrics();
-    //maxHeight = std::min( maxHeight, ( rowCount * fm.height() * 1.2 + fm.height() ) );
+    // The first match is what Enter creates: show it as selected.
+    _imp->listView->setCurrentIndex( _imp->model->index(0) );
 
-    // Position the text edit
-    //   _imp->listView->setFixedSize(width(),maxHeight);
+    // Size the list to its rows (up to NATRON_COMPLETER_MAX_VISIBLE_ROWS, less when the screen
+    // ends sooner) so short result lists do not leave an empty box.
+    QPoint p = mapToGlobal( QPoint( 0, height() ) );
+    const int rowHeight = std::max( 1, _imp->listView->sizeHintForRow(0) );
+    int visibleRows = std::min(rowCount, NATRON_COMPLETER_MAX_VISIBLE_ROWS);
+    QScreen* screen = QGuiApplication::screenAt(p);
+    if (screen) {
+        const int room = screen->availableGeometry().bottom() - p.y() - 2 * _imp->listView->frameWidth();
+        visibleRows = std::max( 1, std::min(visibleRows, room / rowHeight) );
+    }
+    _imp->listView->setFixedHeight(visibleRows * rowHeight + 2 * _imp->listView->frameWidth() + 2);
 
     _imp->listView->move(p);
     _imp->listView->show();
+    // The window system may give the popup an invisible frame: once shown, line its contents
+    // up with the bottom of the field so the two touch.
+    const QPoint offset = _imp->listView->geometry().topLeft() - p;
+    if ( !offset.isNull() ) {
+        _imp->listView->move(_imp->listView->pos() - offset);
+    }
 } // CompleterLineEdit::filterText
 
 void
@@ -455,17 +611,59 @@ NodeCreationDialog::NodeCreationDialog(const QString& initialFilter,
     }
 
     _imp->textEdit = new CompleterLineEdit(pluginsMap, true, this);
+    _imp->textEdit->setPlaceholderText( tr("Search nodes...") );
+    {
+        // The search field and the results below it read as one panel: same background and
+        // thin border as the list, the selection colour as an underline, a magnifier in front.
+        QFontMetrics fm = _imp->textEdit->fontMetrics();
+        const QColor base = settingsColor(&Settings::getBaseColor);
+        const QColor text = settingsColor(&Settings::getTextColor);
+        const QColor sel = settingsColor(&Settings::getSelectionColor);
+
+        // Wide enough for "Name   [Group]" rows without eliding the common ones.
+        _imp->textEdit->setMinimumWidth( fm.horizontalAdvance( QLatin1Char('M') ) * 30 );
+        // Fix the height on the dialog too: left to its size hint the frameless dialog comes
+        // out shorter than the field and cuts off its bottom edge.
+        const int fieldHeight = fm.height() + 16;
+        _imp->textEdit->setFixedHeight(fieldHeight);
+        setFixedHeight(fieldHeight);
+        _imp->textEdit->setStyleSheet( QString::fromUtf8(
+                                           "QLineEdit { background-color: %1; color: %2; border: 1px solid %3; "
+                                           "border-bottom: 2px solid %4; border-radius: 0px; padding: 2px 4px; "
+                                           "selection-background-color: %4; }")
+                                       .arg( base.name() )
+                                       .arg( text.name() )
+                                       .arg( base.darker(170).name() )
+                                       .arg( sel.name() ) );
+
+        QPixmap pm(64, 64);
+        pm.fill(Qt::transparent);
+        {
+            QPainter painter(&pm);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            QColor dim = text;
+            dim.setAlpha(150);
+            QPen pen(dim);
+            pen.setWidthF(6.);
+            pen.setCapStyle(Qt::RoundCap);
+            painter.setPen(pen);
+            painter.drawEllipse(QPointF(27., 27.), 16., 16.);
+            painter.drawLine( QPointF(39., 39.), QPointF(54., 54.) );
+        }
+        _imp->textEdit->addAction(QIcon(pm), QLineEdit::LeadingPosition);
+    }
     if ( !initialFilterName.isEmpty() ) {
         _imp->textEdit->setText(initialFilterName);
     }
 
+    _imp->layout->addWidget(_imp->textEdit);
+
+    // Centre the search field on the cursor.
     QPoint global = QCursor::pos();
     QSize sizeH = sizeHint();
     global.rx() -= sizeH.width() / 2;
     global.ry() -= sizeH.height() / 2;
     move( global.x(), global.y() );
-
-    _imp->layout->addWidget(_imp->textEdit);
     _imp->textEdit->setFocus();
     _imp->textEdit->selectAll();
     QTimer::singleShot( 20, _imp->textEdit, SLOT(showCompleter()) );
