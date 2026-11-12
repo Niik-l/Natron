@@ -184,6 +184,7 @@ DockablePanel::DockablePanel(Gui* gui,
     QColor currentColor;
     if (headerMode != eHeaderModeNoHeader) {
         _imp->_headerWidget = new QFrame(this);
+        _imp->_headerWidget->setObjectName( QString::fromUtf8("DockablePanelHeader") ); // styled in mainstyle.qss
         _imp->_headerWidget->setFrameShape(QFrame::Box);
         _imp->_headerLayout = new QHBoxLayout(_imp->_headerWidget);
         _imp->_headerLayout->setContentsMargins(0, 0, 0, 0);

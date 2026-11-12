@@ -483,9 +483,22 @@ ScaleSliderQWidget::paintEvent(QPaintEvent* /*e*/)
         return;
     }
 
-    /*drawing X axis*/
+    /*drawing X axis: a rounded track; the part up to the handle is filled further down,
+       once the handle colour is known*/
     double lineYpos = height() - 1 - fontM.height()  - TO_DPIY(TICK_HEIGHT) / 2;
-    p.drawLine(0, lineYpos, width() - 1, lineYpos);
+    const double trackHalfHeight = TO_DPIY(3) / 2.;
+    const QRectF trackRect(0.5, lineYpos - trackHalfHeight, width() - 1., 2 * trackHalfHeight);
+    {
+        QColor trackColor = _imp->useLineColor ? _imp->lineColor : scaleColor;
+        trackColor.setAlphaF(0.55);
+        QPainter::RenderHints trackHints = p.renderHints();
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(Qt::NoPen);
+        p.setBrush(trackColor);
+        p.drawRoundedRect(trackRect, trackHalfHeight, trackHalfHeight);
+        p.setBrush(Qt::NoBrush);
+        p.setRenderHints(trackHints);
+    }
 
     double tickBottom = _imp->zoomCtx.toZoomCoordinates( 0, height() - 1 - fontM.height() ).y();
     double tickTop = _imp->zoomCtx.toZoomCoordinates( 0, height() - 1 - fontM.height()  - TO_DPIY(TICK_HEIGHT) ).y();
@@ -547,7 +560,11 @@ ScaleSliderQWidget::paintEvent(QPaintEvent* /*e*/)
                     alphaText *= (tickSizePixel - sSizePixel) / (double)minTickSizeTextPixel;
                 }
                 //alphaText = std::min(alphaText, alpha); // don't draw more opaque than ticks
-                QColor c = _imp->readOnly || !isEnabled() ? Qt::black : textColor;
+                QColor c = textColor;
+                if ( _imp->readOnly || !isEnabled() ) {
+                    // greyed out rather than black, which cannot be read on the dark panel
+                    alphaText *= 0.45;
+                }
                 c.setAlphaF(alphaText);
                 p.setFont(_imp->font);
                 p.setPen(c);
@@ -611,16 +628,28 @@ ScaleSliderQWidget::paintEvent(QPaintEvent* /*e*/)
 #else
     QPainter::RenderHints rh = p.renderHints();
     p.setRenderHints(QPainter::Antialiasing);
-   /*draw the slider*/
-    if (!_imp->readOnly) {
-        p.setBrush(QBrush(_imp->sliderColor));
-    } else {
-        QColor disabledColor(100,100,100, 200);
-        p.setBrush(QBrush(disabledColor));
+    const QColor handleColor = !_imp->readOnly ? _imp->sliderColor : QColor(100, 100, 100, 200);
+    /*fill the track from the left end (or the minimum, when it is on screen) up to the handle*/
+    {
+        double fillStart = 0.;
+        if (_imp->minimum > -1e30) {
+            fillStart = std::max( 0., _imp->zoomCtx.toWidgetCoordinates(_imp->minimum, 0).x() );
+        }
+        const double fillEnd = std::min( (double)width() - 1., positionValue );
+        if (fillEnd > fillStart) {
+            QColor fillColor = handleColor;
+            fillColor.setAlphaF(fillColor.alphaF() * 0.7);
+            p.setPen(Qt::NoPen);
+            p.setBrush(fillColor);
+            p.drawRoundedRect(QRectF( fillStart, trackRect.top(), fillEnd - fillStart, trackRect.height() ),
+                              trackHalfHeight, trackHalfHeight);
+        }
     }
-    /*draw a black rect around the slider for contrast or orange when focused*/
+   /*draw the slider*/
+    p.setBrush( QBrush(handleColor) );
+    /*a soft dark edge around the handle for contrast, the selection colour when focused*/
     if ( !hasFocus() || _imp->readOnly ) {
-        p.setPen(Qt::black);
+        p.setPen( QColor(0, 0, 0, 170) );
     } else {
         QPen pen = p.pen();
         pen.setColor(selectionColor); // alpha could be set too, if required

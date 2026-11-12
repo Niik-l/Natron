@@ -290,6 +290,8 @@
         <file>Resources/Images/zebra_off.png</file>
         <file>Resources/Images/zebra_on.png</file>
         <file>Resources/Stylesheets/mainstyle.qss</file>
+        <file>Resources/Images/checkbox_tick.png</file>
+        <file>Resources/Images/checkbox_tick.png</file>
         <file>Resources/Images/rotoNodeIcon.png</file>
         <file>Resources/Images/interp_constant.png</file>
         <file>Resources/Images/interp_linear.png</file>
