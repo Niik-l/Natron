@@ -169,13 +169,13 @@ QTreeWidget::branch:selected {
     background: %13;
 }
 QTreeWidget::branch:has-siblings:!adjoins-item {
-    border-image: url(:/Resources/Images/treeview_vline.png);
+    border-image: none; /* no connector lines between rows */
 }
 QTreeWidget::branch:has-siblings:adjoins-item {
-    border-image: url(:/Resources/Images/treeview_more.png);
+    border-image: none; /* no connector lines between rows */
 }
 QTreeWidget::branch:!has-children:!has-siblings:adjoins-item {
-    border-image: url(:/Resources/Images/treeview_end.png);
+    border-image: none; /* no connector lines between rows */
 }
 QTreeWidget::branch:has-children:!has-siblings:closed,
 QTreeWidget::branch:closed:has-children:has-siblings {
