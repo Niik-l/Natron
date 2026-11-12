@@ -176,7 +176,8 @@ KnobTableItemDelegate::paint(QPainter * painter,
     QPen pen;
 
     if ( !item->flags().testFlag(Qt::ItemIsEnabled) ) {
-        pen.setColor(Qt::black);
+        // Built-in / non-editable rows: dimmed but legible on the dark table.
+        pen.setColor( QColor(135, 135, 135) );
     } else {
         pen.setColor( QColor(200, 200, 200) );
     }

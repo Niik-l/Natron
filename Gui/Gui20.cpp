@@ -265,6 +265,12 @@ Gui::loadStyleSheet()
         qApp->setPalette( p );
     }
 
+    // Disabled and read-only text: the text colour pulled halfway to the background, so it
+    // reads as "greyed out" but stays legible (it used to be pure black on dark fields).
+    const QColor disTxtCol( (txtCol.red() * 55 + baseCol.red() * 45) / 100,
+                            (txtCol.green() * 55 + baseCol.green() * 45) / 100,
+                            (txtCol.blue() * 55 + baseCol.blue() * 45) / 100 );
+
     QFile qss;
     std::string userQss = settings->getUserStyleSheetFilePath();
     if ( !userQss.empty() ) {
@@ -296,7 +302,8 @@ Gui::loadStyleSheet()
                              .arg( qcolor_to_qstring(disCol) ) // %8: disabled editable text
                              .arg( qcolor_to_qstring(eCol) ) // %9: expression background color
                              .arg( qcolor_to_qstring(altCol) ) // %10 = altered text color
-                             .arg( qcolor_to_qstring(lightSelCol) ) ); // %11 = mouse over selection color
+                             .arg( qcolor_to_qstring(lightSelCol) ) // %11 = mouse over selection color
+                             .arg( qcolor_to_qstring(disTxtCol) ) ); // %12 = disabled / read-only text
     } else {
         Dialogs::errorDialog( tr("Stylesheet").toStdString(), tr("Failure to load stylesheet file ").toStdString() + qss.fileName().toStdString() );
     }

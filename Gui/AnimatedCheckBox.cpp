@@ -29,6 +29,7 @@
 
 #include <QStyle>
 #include <QPainter>
+#include <QPainterPath>
 #include <QStyleOption>
 #include "Gui/GuiMacros.h"
 // clang-format off
@@ -140,14 +141,15 @@ AnimatedCheckBox::paintEvent(QPaintEvent* e)
 
     opt.initFrom(this);
     QPainter p(this);
-    QRectF bRect = rect();
-    double fw = frameWidth();
+    // A rounded box, slightly inset from the widget, antialiased.
+    const QRectF bRect = QRectF( rect() ).adjusted(1.5, 1.5, -1.5, -1.5);
+    QPainterPath boxPath;
+    boxPath.addRoundedRect(bRect, 2.5, 2.5);
+    p.setRenderHint(QPainter::Antialiasing, true);
     QPen pen = p.pen();
     QColor activeColor;
 
     ///Draw bg
-    QRectF bgRect = bRect.adjusted(fw / 2., fw / 2., -fw, -fw);
-    //bRect.adjust(fw, fw, -fw, -fw);
     double bgR = 0., bgG = 0., bgB = 0.;
     if (animation == 0) {
         getBackgroundColor(&bgR, &bgG, &bgB);
@@ -162,7 +164,7 @@ AnimatedCheckBox::paintEvent(QPaintEvent* e)
     pen.setColor(activeColor);
     p.setPen(pen);
 
-    p.fillRect(bgRect, activeColor);
+    p.fillPath(boxPath, activeColor);
 
 
     ///Draw tick
@@ -183,29 +185,34 @@ AnimatedCheckBox::paintEvent(QPaintEvent* e)
             activeColor.setRgbF(r, g, b);
         }
 
-        pen.setColor(activeColor);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(pen);
-        p.drawLine( bRect.topLeft(), bRect.bottomRight() );
-        p.drawLine( bRect.bottomLeft(), bRect.topRight() );
+        // A tick rather than a cross: a cross reads as "off" to most people.
+        QPen tickPen(activeColor);
+        tickPen.setWidthF(1.8);
+        tickPen.setCapStyle(Qt::RoundCap);
+        tickPen.setJoinStyle(Qt::RoundJoin);
+        QPainterPath tick;
+        tick.moveTo( bRect.left() + bRect.width() * 0.22, bRect.top() + bRect.height() * 0.53 );
+        tick.lineTo( bRect.left() + bRect.width() * 0.43, bRect.top() + bRect.height() * 0.74 );
+        tick.lineTo( bRect.left() + bRect.width() * 0.79, bRect.top() + bRect.height() * 0.28 );
+        p.setBrush(Qt::NoBrush);
+        p.setPen(tickPen);
+        p.drawPath(tick);
     }
 
 
-    ///Draw frame
-    pen.setColor(Qt::black);
-    p.setPen(pen);
-    p.drawRect(bRect);
-
-    ///Draw focus highlight
+    ///Draw frame: a soft dark edge, or the selection colour with the keyboard focus
+    pen.setWidthF(1.);
     if ( hasFocus() ) {
         double selR, selG, selB;
         appPTR->getCurrentSettings()->getSelectionColor(&selR, &selG, &selB);
-        QRectF focusRect = bRect.adjusted(fw, fw, -fw, -fw);
         activeColor.setRgbF(selR, selG, selB);
         pen.setColor(activeColor);
-        p.setPen(pen);
-        p.drawRect(focusRect);
+    } else {
+        pen.setColor( QColor(0, 0, 0, 170) );
     }
+    p.setBrush(Qt::NoBrush);
+    p.setPen(pen);
+    p.drawPath(boxPath);
 } // AnimatedCheckBox::paintEvent
 
 NATRON_NAMESPACE_EXIT

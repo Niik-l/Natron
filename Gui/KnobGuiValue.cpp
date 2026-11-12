@@ -225,7 +225,7 @@ KnobGuiValue::createWidget(QHBoxLayout* layout)
     layout->addWidget(_imp->container);
 
     containerLayout->setContentsMargins(0, 0, 0, 0);
-    containerLayout->setSpacing(3);
+    containerLayout->setSpacing(5);
 
     if (getKnobsCountOnSameLine() > 1) {
         disableSlider();
@@ -324,7 +324,7 @@ KnobGuiValue::createWidget(QHBoxLayout* layout)
         QHBoxLayout *boxContainerLayout = 0;
         boxContainerLayout = new QHBoxLayout(boxContainer);
         boxContainerLayout->setContentsMargins(0, 0, 0, 0);
-        boxContainerLayout->setSpacing(3);
+        boxContainerLayout->setSpacing(5);
 
 
         ClickableLabel *subDesc = 0;

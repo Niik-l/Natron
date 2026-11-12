@@ -136,7 +136,7 @@ ComboBox::sizeForWidth(int w) const
     //Using this constructor of QFontMetrics will respect the DPI of the screen, see http://doc.qt.io/qt-4.8/qfontmetrics.html#QFontMetrics-2
     QFontMetrics fm(font(), 0);
     Qt::Alignment align = QStyle::visualAlignment( Qt::LeftToRight, QFlag(_align) );
-    int hextra = DROP_DOWN_ICON_SIZE * 2, vextra = 0;
+    int hextra = DROP_DOWN_ICON_SIZE * 2 + 4, vextra = 0;
 
     ///Indent of 1 character
     int indent = fm.horizontalAdvance( QLatin1Char('x') );
@@ -239,7 +239,7 @@ ComboBox::layoutRect() const
 {
     QRect cr = contentsRect();
     Qt::Alignment align = QStyle::visualAlignment( Qt::LeftToRight, QFlag(_align) );
-    int indent = fontMetrics().horizontalAdvance( QLatin1Char('x') ) / 2;
+    int indent = fontMetrics().horizontalAdvance( QLatin1Char('x') );
 
     if (indent > 0) {
         if (align & Qt::AlignLeft) {
@@ -305,10 +305,12 @@ ComboBox::paintEvent(QPaintEvent* /*e*/)
                               Color::floatToInt<256>(b) );
         }
 
-        double fw = frameWidth();
+        // A 1px rounded frame, antialiased: a soft dark edge normally, the selection colour
+        // when the widget has the keyboard focus.
         QPen pen;
+        pen.setWidthF(1.);
         if ( !hasFocus() ) {
-            pen.setColor(Qt::black);
+            pen.setColor( QColor(0, 0, 0, 160) );
         } else {
             double r, g, b;
             appPTR->getCurrentSettings()->getSelectionColor(&r, &g, &b);
@@ -316,17 +318,17 @@ ComboBox::paintEvent(QPaintEvent* /*e*/)
             c.setRgb( Color::floatToInt<256>(r),
                       Color::floatToInt<256>(g),
                       Color::floatToInt<256>(b) );
-            fw = 2;
+            pen.setColor(c);
         }
-        p.setPen(pen);
 
-
-        QRectF roundedRect = bRect.adjusted(fw / 2., fw / 2., -fw, -fw);
-        bRect.adjust(fw, fw, -fw, -fw);
-        p.fillRect(bRect, fillColor);
-        double roundPixels = 3;
+        p.setRenderHint(QPainter::Antialiasing, true);
+        const QRectF roundedRect = bRect.adjusted(0.5, 0.5, -0.5, -0.5);
+        bRect.adjust(1, 1, -1, -1);
+        const double roundPixels = 3;
         QPainterPath path;
         path.addRoundedRect(roundedRect, roundPixels, roundPixels);
+        p.fillPath(path, fillColor);
+        p.setPen(pen);
         p.drawPath(path);
     }
     QColor textColor;
@@ -336,14 +338,16 @@ ComboBox::paintEvent(QPaintEvent* /*e*/)
         double aR, aG, aB;
         appPTR->getCurrentSettings()->getAltTextColor(&aR, &aG, &aB);
         textColor.setRgbF(aR, aG, aB);
-    } else if (!_enabled) {
-        textColor = Qt::black;
     } else {
         double r, g, b;
         appPTR->getCurrentSettings()->getTextColor(&r, &g, &b);
         textColor.setRgb( Color::floatToInt<256>(r),
                           Color::floatToInt<256>(g),
                           Color::floatToInt<256>(b) );
+        if (!_enabled) {
+            // Greyed out, not black: black is unreadable on the dark fill.
+            textColor.setAlpha(110);
+        }
     }
     {
         Qt::Alignment align = QStyle::visualAlignment( Qt::LeftToRight, QFlag(_align) );
@@ -364,14 +368,24 @@ ComboBox::paintEvent(QPaintEvent* /*e*/)
     }
 
     {
-        ///Draw the dropdown icon
+        ///Draw the dropdown icon: a small chevron
+        const double cx = bRect.right() - DROP_DOWN_ICON_SIZE - 1.;
+        const double cy = rect().height() / 2. + 0.5;
+        const double hw = DROP_DOWN_ICON_SIZE / 2. + 0.5;
+        const double hh = DROP_DOWN_ICON_SIZE / 4. + 0.5;
         QPainterPath path;
-        QPolygonF poly;
-        poly.push_back( QPointF(bRect.right() - DROP_DOWN_ICON_SIZE * 3. / 2., bRect.height() / 2. - DROP_DOWN_ICON_SIZE / 2.) );
-        poly.push_back( QPointF(bRect.right() - DROP_DOWN_ICON_SIZE / 2., bRect.height() / 2. - DROP_DOWN_ICON_SIZE / 2.) );
-        poly.push_back( QPointF(bRect.right() - DROP_DOWN_ICON_SIZE, bRect.height() / 2. + DROP_DOWN_ICON_SIZE / 2.) );
-        path.addPolygon(poly);
-        p.fillPath(path, textColor);
+        path.moveTo(cx - hw, cy - hh);
+        path.lineTo(cx, cy + hh);
+        path.lineTo(cx + hw, cy - hh);
+        QColor chevronColor = textColor;
+        chevronColor.setAlpha(std::min(textColor.alpha(), 200));
+        QPen chevronPen(chevronColor);
+        chevronPen.setWidthF(1.5);
+        chevronPen.setCapStyle(Qt::RoundCap);
+        chevronPen.setJoinStyle(Qt::RoundJoin);
+        p.setBrush(Qt::NoBrush);
+        p.setPen(chevronPen);
+        p.drawPath(path);
     }
 } // ComboBox::paintEvent
 

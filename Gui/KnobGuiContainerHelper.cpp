@@ -47,7 +47,7 @@ CLANG_DIAG_ON(uninitialized)
 #include "Gui/TabGroup.h"
 
 #define NATRON_FORM_LAYOUT_LINES_SPACING 0
-#define NATRON_SETTINGS_VERTICAL_SPACING_PIXELS 3
+#define NATRON_SETTINGS_VERTICAL_SPACING_PIXELS 5
 
 
 NATRON_NAMESPACE_ENTER
@@ -687,8 +687,8 @@ KnobGuiContainerHelper::findKnobGuiOrCreate(const KnobIPtr & knob,
             ///if new line is not turned off, create a new line
             fieldContainer = createKnobHorizontalFieldContainer(page->tab);
             fieldLayout = new QHBoxLayout(fieldContainer);
-            fieldLayout->setContentsMargins( TO_DPIX(3), 0, 0, TO_DPIY(NATRON_SETTINGS_VERTICAL_SPACING_PIXELS) );
-            fieldLayout->setSpacing( TO_DPIY(2) );
+            fieldLayout->setContentsMargins( TO_DPIX(6), 0, 0, TO_DPIY(NATRON_SETTINGS_VERTICAL_SPACING_PIXELS) );
+            fieldLayout->setSpacing( TO_DPIY(4) );
             fieldLayout->setAlignment(Qt::AlignLeft);
         } else {
             ///otherwise re-use the last row's widget and layout
