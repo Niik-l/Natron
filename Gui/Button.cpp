@@ -45,6 +45,11 @@ Button::Button(const QString & text,
     : QPushButton(text, parent)
 {
     setAttribute(Qt::WA_LayoutUsesWidgetRect); // Don't use the layout rect calculated from QMacStyle.
+    // Buttons that carry a word get horizontal padding from the stylesheet
+    // (QPushButton[textButton="true"]); icon and one-glyph buttons keep the tight box.
+    if (text.size() >= 4) {
+        setProperty("textButton", true);
+    }
     initInternal();
 }
 

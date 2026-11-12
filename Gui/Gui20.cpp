@@ -271,6 +271,10 @@ Gui::loadStyleSheet()
                             (txtCol.green() * 55 + baseCol.green() * 45) / 100,
                             (txtCol.blue() * 55 + baseCol.blue() * 45) / 100 );
 
+    // The selection colour as a translucent tint: the highlight of hovered menu items, the
+    // same treatment as the selected row of the node-search popup.
+    const QString selTint = QString::fromUtf8("rgba(%1,%2,%3,80)").arg( selCol.red() ).arg( selCol.green() ).arg( selCol.blue() );
+
     QFile qss;
     std::string userQss = settings->getUserStyleSheetFilePath();
     if ( !userQss.empty() ) {
@@ -303,7 +307,8 @@ Gui::loadStyleSheet()
                              .arg( qcolor_to_qstring(eCol) ) // %9: expression background color
                              .arg( qcolor_to_qstring(altCol) ) // %10 = altered text color
                              .arg( qcolor_to_qstring(lightSelCol) ) // %11 = mouse over selection color
-                             .arg( qcolor_to_qstring(disTxtCol) ) ); // %12 = disabled / read-only text
+                             .arg( qcolor_to_qstring(disTxtCol) ) // %12 = disabled / read-only text
+                             .arg(selTint) ); // %13 = soft selection tint (hovered menu items)
     } else {
         Dialogs::errorDialog( tr("Stylesheet").toStdString(), tr("Failure to load stylesheet file ").toStdString() + qss.fileName().toStdString() );
     }
