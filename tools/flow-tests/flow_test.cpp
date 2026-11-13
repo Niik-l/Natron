@@ -70,8 +70,32 @@ void tObject(double x, double y, double* u, double* v, bool* s)
     *s = !nearEdge;
 }
 
+// a smooth-shaded sphere without any texture, moving over an empty black background: the CG case
+// (ScanlineRender straight into VectorGenerator). The background must come out still.
+const double SX = 300., SY = 180., SR = 120., SU = 15., SV = 0.;
+double sphereShade(double x, double y)
+{
+    const double dx = (x - SX) / SR, dy = (y - SY) / SR, r2 = dx * dx + dy * dy;
+    if (r2 >= 1.) {
+        return 0.;
+    }
+    const double nz = std::sqrt(1. - r2);
+    return 0.05 + 0.9 * std::max(0., 0.45 * dx - 0.5 * dy + 0.74 * nz);
+}
+void tSphere(double x, double y, double* u, double* v, bool* s)
+{
+    const double d0 = std::hypot(x - SX, y - SY), d1 = std::hypot(x - SX - SU, y - SY - SV);
+    const bool in = d0 < SR - 6.;
+    const bool far = d0 > SR + 40. && d1 > SR + 40.;
+    *u = in ? SU : 0.; *v = in ? SV : 0.;
+    *s = in || far;
+}
+
 double frame0(const Case& c, double x, double y)
 {
+    if (c.truth == tSphere) {
+        return sphereShade(x, y);
+    }
     if (c.object && x >= OX && x < OX + OS && y >= OY && y < OY + OS) {
         return tex(x * 1.7, y * 1.7, 90);
     }
@@ -81,6 +105,9 @@ double frame0(const Case& c, double x, double y)
 // frame 1 by inverting the motion: fixed-point iteration on the smooth fields
 double frame1(const Case& c, double x, double y)
 {
+    if (c.truth == tSphere) {
+        return sphereShade(x - SU, y - SV);
+    }
     if (c.object) {
         const double sx = x - OU, sy = y - OV;
         if (sx >= OX && sx < OX + OS && sy >= OY && sy < OY + OS) {
@@ -106,6 +133,7 @@ int main()
         { "zoom 3% + rotate", 0.3, tZoomRot, false, 1. },
         { "small translation, 20% brighter", 0.2, tSmall, false, 1.2 },
         { "moving square over moving background", 0.6, tObject, true, 1. },
+        { "untextured shaded sphere on black", 1.0, tSphere, false, 1. },
     };
     const double details[] = { 1., 0.5, 0.25 };
     int failures = 0;
@@ -126,6 +154,7 @@ int main()
             const bool ok = FlowCore::computeFlow(&a[0], &b[0], W, H, p, &flow);
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             double sum = 0., worst = 0.; long cnt = 0, bad = 0;
+            double sumMoving = 0., sumStill = 0.; long cntMoving = 0, cntStill = 0;
             for (int y = 12; y < H - 12; ++y) {
                 for (int x = 12; x < W - 12; ++x) {
                     double u, v; bool s;
@@ -135,6 +164,7 @@ int main()
                     }
                     const double e = std::hypot(flow[( (size_t)y * W + x ) * 2] - u, flow[( (size_t)y * W + x ) * 2 + 1] - v);
                     sum += e; worst = std::max(worst, e); ++cnt; bad += e > 1.;
+                    if (u != 0. || v != 0.) { sumMoving += e; ++cntMoving; } else { sumStill += e; ++cntStill; }
                 }
             }
             const double epe = sum / cnt;
@@ -142,6 +172,9 @@ int main()
             failures += !pass;
             std::printf("%-40s detail %.2f  EPE %.3f px  >1px %5.2f%%  worst %6.2f  %6.0f ms  %s\n", c.name, details[di], epe,
                         100. * bad / cnt, worst, ms, di > 0 ? "" : (pass ? "ok" : "FAIL"));
+            if (cntStill > 100 && cntMoving > 0 && di == 0) {
+                std::printf("    moving part EPE %.3f px, still part EPE %.3f px\n", sumMoving / cntMoving, sumStill / cntStill);
+            }
         }
     }
     return failures ? 1 : 0;

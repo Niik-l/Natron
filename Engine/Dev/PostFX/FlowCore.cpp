@@ -420,6 +420,48 @@ computeFlow(const float* i0,
         }
     }
 
+    // Where nothing changed between the two frames there is no motion to report. Without this an
+    // empty background (a CG element over black) inherits the motion of whatever moves in front
+    // of it, because a flat area has nothing of its own to track.
+    {
+        const int R = 2;
+        const float tol = 0.02f; // in 0..255 match units: only identical areas qualify, not a slowly
+                                 // changing highlight inside a moving object
+        std::vector<unsigned char> changed( (std::size_t)width * height ), rowMax( (std::size_t)width * height );
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const std::size_t k = (std::size_t)y * width + x;
+                changed[k] = std::fabs(i0[k] - i1[k]) > tol;
+            }
+            for (int x = 0; x < width; ++x) {
+                unsigned char m = 0;
+                for (int xx = std::max(0, x - R); xx <= std::min(width - 1, x + R); ++xx) {
+                    m |= changed[(std::size_t)y * width + xx];
+                }
+                rowMax[(std::size_t)y * width + x] = m;
+            }
+        }
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                unsigned char m = 0;
+                for (int yy = std::max(0, y - R); yy <= std::min(height - 1, y + R); ++yy) {
+                    m |= rowMax[(std::size_t)yy * width + x];
+                }
+                if (!m) {
+                    const std::size_t k = (std::size_t)y * width + x;
+                    (*flow)[2 * k] = 0.f;
+                    (*flow)[2 * k + 1] = 0.f;
+                }
+            }
+        }
+    }
+
     return true;
 } // computeFlow
 
