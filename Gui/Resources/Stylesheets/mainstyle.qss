@@ -298,37 +298,36 @@ QDialogButtonBox QPushButton {
     padding: 4px 14px 4px 14px;
     min-width: 4em;
 }
+/* flat buttons: panel title bars, pane tab bars, viewer and timeline toolbars */
+#PaneHeader QPushButton,
+ViewerTab QPushButton,
+Natron--ViewerTab QPushButton,
 #DockablePanelHeader QPushButton {
     background-color: transparent;
     border: 1px solid transparent;
     border-radius: 3px;
     padding: 0px;
 }
+#PaneHeader QPushButton:hover,
+ViewerTab QPushButton:hover,
+Natron--ViewerTab QPushButton:hover,
 #DockablePanelHeader QPushButton:hover {
     background-color: rgba(128, 128, 128, 70);
     border: 1px solid transparent;
 }
+#PaneHeader QPushButton:pressed,
+#PaneHeader QPushButton:checked,
+ViewerTab QPushButton:pressed,
+ViewerTab QPushButton:checked,
+Natron--ViewerTab QPushButton:pressed,
+Natron--ViewerTab QPushButton:checked,
 #DockablePanelHeader QPushButton:pressed,
 #DockablePanelHeader QPushButton:checked {
     background-color: %13;
 }
-#DockablePanelHeader QPushButton:focus {
-    border: 1px solid transparent;
-}
-#DockablePanelHeader QPushButton {
-    background-color: transparent;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    padding: 0px;
-}
-#DockablePanelHeader QPushButton:hover {
-    background-color: rgba(128, 128, 128, 70);
-    border: 1px solid transparent;
-}
-#DockablePanelHeader QPushButton:pressed,
-#DockablePanelHeader QPushButton:checked {
-    background-color: %13;
-}
+#PaneHeader QPushButton:focus,
+ViewerTab QPushButton:focus,
+Natron--ViewerTab QPushButton:focus,
 #DockablePanelHeader QPushButton:focus {
     border: 1px solid transparent;
 }

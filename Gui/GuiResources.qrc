@@ -291,6 +291,23 @@
         <file>Resources/Images/zebra_on.png</file>
         <file>Resources/Stylesheets/mainstyle.qss</file>
         <file>Resources/Stylesheets/mainstyle_classic.qss</file>
+        <file>Resources/Images/classic/back1.png</file>
+        <file>Resources/Images/classic/firstFrame.png</file>
+        <file>Resources/Images/classic/forward1.png</file>
+        <file>Resources/Images/classic/lastFrame.png</file>
+        <file>Resources/Images/classic/locked.png</file>
+        <file>Resources/Images/classic/unlocked.png</file>
+        <file>Resources/Images/classic/nextIncr.png</file>
+        <file>Resources/Images/classic/previousIncr.png</file>
+        <file>Resources/Images/classic/play.png</file>
+        <file>Resources/Images/classic/rewind.png</file>
+        <file>Resources/Images/classic/timelineIn.png</file>
+        <file>Resources/Images/classic/timelineOut.png</file>
+        <file>Resources/Images/classic/nextKF.png</file>
+        <file>Resources/Images/classic/prevKF.png</file>
+        <file>Resources/Images/classic/bounce.png</file>
+        <file>Resources/Images/classic/loopmode.png</file>
+        <file>Resources/Images/classic/playOnce.png</file>
         <file>Resources/Images/classic/close.png</file>
         <file>Resources/Images/classic/groupbox_folded.png</file>
         <file>Resources/Images/classic/groupbox_unfolded.png</file>

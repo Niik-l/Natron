@@ -263,6 +263,7 @@ TabWidget::TabWidget(Gui* gui,
     _imp->mainLayout->setSpacing(0);
 
     _imp->header = new TabWidgetHeader(this);
+    _imp->header->setObjectName( QString::fromUtf8("PaneHeader") ); // styled in mainstyle.qss
     QObject::connect( _imp->header, SIGNAL(mouseLeftTabBar()), this, SLOT(onTabBarMouseLeft()) );
     _imp->headerLayout = new QHBoxLayout(_imp->header);
     _imp->headerLayout->setContentsMargins(0, 0, 0, 0);
