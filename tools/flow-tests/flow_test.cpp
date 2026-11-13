@@ -7,7 +7,22 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
+
+
+// tuning overrides from the environment, e.g. FLOW_ALPHA=30 FLOW_DELTA=2
+static void applyEnv(FlowCore::Params* p)
+{
+    if (const char* s = std::getenv("FLOW_ALPHA")) p->refineAlpha = std::atof(s);
+    if (const char* s = std::getenv("FLOW_DELTA")) p->refineDelta = std::atof(s);
+    if (const char* s = std::getenv("FLOW_GAMMA")) p->refineGamma = std::atof(s);
+    if (const char* s = std::getenv("FLOW_FP")) p->refineIterations = std::atoi(s);
+    if (const char* s = std::getenv("FLOW_SOR")) p->refineSor = std::atoi(s);
+    if (const char* s = std::getenv("FLOW_PSMOOTH")) p->patchSmooth = std::atoi(s) != 0;
+    if (const char* s = std::getenv("FLOW_PATCH")) p->patchSize = std::atoi(s);
+    if (const char* s = std::getenv("FLOW_ZETA")) p->refineZeta = std::atof(s);
+}
 
 namespace {
 const int W = 640, H = 360;
@@ -91,8 +106,36 @@ void tSphere(double x, double y, double* u, double* v, bool* s)
     *s = in || far;
 }
 
+// A shaded checkerboard: flat squares whose only detail is straight edges, so most patches can
+// measure motion across an edge but not along it (the aperture problem).
+const double CU = 12.4, CV = -0.6, CSQ = 36.;
+double checker(double x, double y)
+{
+    const double fx = x / CSQ - std::floor(x / CSQ), fy = y / CSQ - std::floor(y / CSQ);
+    const double ex = std::min(fx, 1. - fx) * CSQ, ey = std::min(fy, 1. - fy) * CSQ; // distance to an edge, px
+    const int cell = ( (int)std::floor(x / CSQ) + (int)std::floor(y / CSQ) ) & 1;
+    const double e = std::min(1., std::min(ex, ey) / 1.5); // soft 1.5 px edge
+    const double val = 0.5 + (cell ? 0.5 : -0.5) * e;
+    return 0.08 + 0.8 * val;
+}
+// lighting that moves with the surface (a ramp) or stays where it is while the surface moves under
+// it (a soft highlight, as on a lit CG object): the vectors must follow the surface either way
+double rampLight(double x, double) { return 0.35 + 0.65 * x / W; }
+double fixedLight(double x, double y)
+{
+    return 0.3 + 0.7 * std::exp( -( (x - 300.) * (x - 300.) + (y - 160.) * (y - 160.) ) / (2. * 130. * 130.) );
+}
+void tCheckerLit(double, double, double* u, double* v, bool* s) { *u = CU; *v = CV; *s = true; }
+void tChecker(double, double, double* u, double* v, bool* s) { *u = CU; *v = CV; *s = true; }
+
 double frame0(const Case& c, double x, double y)
 {
+    if (c.truth == tChecker) {
+        return checker(x, y) * rampLight(x, y);
+    }
+    if (c.truth == tCheckerLit) {
+        return checker(x, y) * fixedLight(x, y);
+    }
     if (c.truth == tSphere) {
         return sphereShade(x, y);
     }
@@ -105,6 +148,12 @@ double frame0(const Case& c, double x, double y)
 // frame 1 by inverting the motion: fixed-point iteration on the smooth fields
 double frame1(const Case& c, double x, double y)
 {
+    if (c.truth == tChecker) {
+        return checker(x - CU, y - CV) * rampLight(x - CU, y - CV);
+    }
+    if (c.truth == tCheckerLit) {
+        return checker(x - CU, y - CV) * fixedLight(x, y);
+    }
     if (c.truth == tSphere) {
         return sphereShade(x - SU, y - SV);
     }
@@ -134,6 +183,8 @@ int main()
         { "small translation, 20% brighter", 0.2, tSmall, false, 1.2 },
         { "moving square over moving background", 0.6, tObject, true, 1. },
         { "untextured shaded sphere on black", 1.0, tSphere, false, 1. },
+        { "shaded checkerboard (12.4,-0.6)", 0.5, tChecker, false, 1. },
+        { "checkerboard under fixed lighting", 0.5, tCheckerLit, false, 1. },
     };
     const double details[] = { 1., 0.5, 0.25 };
     int failures = 0;
@@ -149,6 +200,7 @@ int main()
         for (unsigned di = 0; di < 3; ++di) {
             FlowCore::Params p;
             p.vectorDetail = details[di];
+            applyEnv(&p);
             std::vector<float> flow;
             const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
             const bool ok = FlowCore::computeFlow(&a[0], &b[0], W, H, p, &flow);

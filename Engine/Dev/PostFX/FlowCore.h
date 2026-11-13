@@ -54,12 +54,32 @@ struct Params
     // between the two frames is not mistaken for motion.
     bool meanNormalize;
 
+    // Variational refinement after the patch search at every level: weights of the smoothness,
+    // brightness and gradient terms (for 0..255 images; the smoothness weight is scaled by
+    // `smoothness`), outer iterations and solver sweeps per iteration. 0 iterations = off.
+    double refineAlpha, refineDelta, refineGamma;
+
+    // Gradient strength (0..255 units per pixel) below which the refinement trusts the picture
+    // less: soft shading and noise should not outvote real edges.
+    double refineZeta;
+    int refineIterations, refineSor;
+
+    // Also run the edge-aware smoothing filter on the patch result before refining.
+    bool patchSmooth;
+
     Params()
         : vectorDetail(0.5)
         , smoothness(0.5)
         , patchSize(8)
         , iterations(16)
         , meanNormalize(true)
+        , refineAlpha(20.)
+        , refineDelta(1.)
+        , refineGamma(10.)
+        , refineZeta(2.)
+        , refineIterations(8)
+        , refineSor(5)
+        , patchSmooth(true)
     {}
 };
 

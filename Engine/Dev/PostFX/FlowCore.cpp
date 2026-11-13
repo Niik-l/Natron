@@ -326,6 +326,149 @@ refineLevel(const Level& L, const Params& params, bool smooth, std::vector<float
     }
 } // refineLevel
 
+// Variational refinement of one level (Brox et al. 2004, as used by Dense Inverse Search): moves
+// the field to a minimum of a brightness term + a gradient term + a smoothness term. A patch that
+// only sees one straight edge can measure motion across that edge but not along it; here the
+// smoothness term supplies the missing component from the neighbours, and flat areas are filled in.
+void
+variationalRefine(const Level& L, const Params& params, std::vector<float>* flowIO)
+{
+    const int w = L.w, h = L.h;
+    const std::size_t N = (std::size_t)w * h;
+    const float alpha = (float)(params.refineAlpha * params.smoothness * 2.);
+
+    if ( (w < 4) || (h < 4) || (alpha <= 0.f) || (params.refineIterations < 1) ) {
+        return;
+    }
+    const float delta = (float)params.refineDelta, gamma = (float)params.refineGamma;
+    const float zeta2 = (float)(params.refineZeta * params.refineZeta), eps2 = 1e-6f, omega = 1.6f;
+    const float* I0 = &L.i0[0];
+    const float* I1 = &L.i1[0];
+    std::vector<float>& flow = *flowIO;
+    std::vector<float> Iz(N), Ix(N), Iy(N), Ixx(N), Ixy(N), Iyy(N), Ixz(N), Iyz(N), valid(N);
+    std::vector<float> du(N, 0.f), dv(N, 0.f), ws(N), a11(N), a12(N), a22(N), b1(N), b2(N);
+    {
+        std::vector<float> avg(N);
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const std::size_t k = (std::size_t)y * w + x;
+                const float sx = (float)x + flow[2 * k], sy = (float)y + flow[2 * k + 1];
+                const float s = sample(I1, w, h, sx, sy);
+                valid[k] = (sx >= 0.f && sy >= 0.f && sx <= (float)(w - 1) && sy <= (float)(h - 1) ) ? 1.f : 0.f;
+                avg[k] = 0.5f * (s + I0[k]);
+                Iz[k] = s - I0[k];
+            }
+        }
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+        for (int y = 0; y < h; ++y) {
+            const int ym = std::max(y - 1, 0), yp = std::min(y + 1, h - 1);
+            for (int x = 0; x < w; ++x) {
+                const int xm = std::max(x - 1, 0), xp = std::min(x + 1, w - 1);
+                const std::size_t k = (std::size_t)y * w + x;
+                Ix[k] = 0.5f * (avg[(std::size_t)y * w + xp] - avg[(std::size_t)y * w + xm]);
+                Iy[k] = 0.5f * (avg[(std::size_t)yp * w + x] - avg[(std::size_t)ym * w + x]);
+                Ixz[k] = 0.5f * (Iz[(std::size_t)y * w + xp] - Iz[(std::size_t)y * w + xm]);
+                Iyz[k] = 0.5f * (Iz[(std::size_t)yp * w + x] - Iz[(std::size_t)ym * w + x]);
+            }
+        }
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+        for (int y = 0; y < h; ++y) {
+            const int ym = std::max(y - 1, 0), yp = std::min(y + 1, h - 1);
+            for (int x = 0; x < w; ++x) {
+                const int xm = std::max(x - 1, 0), xp = std::min(x + 1, w - 1);
+                const std::size_t k = (std::size_t)y * w + x;
+                Ixx[k] = 0.5f * (Ix[(std::size_t)y * w + xp] - Ix[(std::size_t)y * w + xm]);
+                Ixy[k] = 0.5f * (Ix[(std::size_t)yp * w + x] - Ix[(std::size_t)ym * w + x]);
+                Iyy[k] = 0.5f * (Iy[(std::size_t)yp * w + x] - Iy[(std::size_t)ym * w + x]);
+            }
+        }
+    }
+
+    for (int fp = 0; fp < params.refineIterations; ++fp) {
+        // data terms and smoothness weights, with the robust weights from the current estimate
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+        for (int y = 0; y < h; ++y) {
+            const int yp = std::min(y + 1, h - 1);
+            for (int x = 0; x < w; ++x) {
+                const int xp = std::min(x + 1, w - 1);
+                const std::size_t k = (std::size_t)y * w + x;
+                const std::size_t kx = (std::size_t)y * w + xp, ky = (std::size_t)yp * w + x;
+                float A11 = 0.01f, A12 = 0.f, A22 = 0.01f, B1 = 0.f, B2 = 0.f;
+                if (valid[k] > 0.f) {
+                    if (delta > 0.f) {
+                        const float nrm = Ix[k] * Ix[k] + Iy[k] * Iy[k] + zeta2;
+                        const float r = Iz[k] + Ix[k] * du[k] + Iy[k] * dv[k];
+                        const float wgt = delta / std::sqrt(r * r / nrm + eps2) / nrm;
+                        A11 += wgt * Ix[k] * Ix[k];
+                        A12 += wgt * Ix[k] * Iy[k];
+                        A22 += wgt * Iy[k] * Iy[k];
+                        B1 -= wgt * Iz[k] * Ix[k];
+                        B2 -= wgt * Iz[k] * Iy[k];
+                    }
+                    if (gamma > 0.f) {
+                        const float n1 = Ixx[k] * Ixx[k] + Ixy[k] * Ixy[k] + zeta2;
+                        const float n2 = Iyy[k] * Iyy[k] + Ixy[k] * Ixy[k] + zeta2;
+                        const float r1 = Ixz[k] + Ixx[k] * du[k] + Ixy[k] * dv[k];
+                        const float r2 = Iyz[k] + Ixy[k] * du[k] + Iyy[k] * dv[k];
+                        const float wgt = gamma / std::sqrt(r1 * r1 / n1 + r2 * r2 / n2 + eps2);
+                        A11 += wgt * (Ixx[k] * Ixx[k] / n1 + Ixy[k] * Ixy[k] / n2);
+                        A12 += wgt * (Ixx[k] * Ixy[k] / n1 + Ixy[k] * Iyy[k] / n2);
+                        A22 += wgt * (Ixy[k] * Ixy[k] / n1 + Iyy[k] * Iyy[k] / n2);
+                        B1 -= wgt * (Ixx[k] * Ixz[k] / n1 + Ixy[k] * Iyz[k] / n2);
+                        B2 -= wgt * (Ixy[k] * Ixz[k] / n1 + Iyy[k] * Iyz[k] / n2);
+                    }
+                }
+                a11[k] = A11; a12[k] = A12; a22[k] = A22; b1[k] = B1; b2[k] = B2;
+                const float ux = flow[2 * kx] + du[kx] - flow[2 * k] - du[k];
+                const float uy = flow[2 * ky] + du[ky] - flow[2 * k] - du[k];
+                const float vx = flow[2 * kx + 1] + dv[kx] - flow[2 * k + 1] - dv[k];
+                const float vy = flow[2 * ky + 1] + dv[ky] - flow[2 * k + 1] - dv[k];
+                ws[k] = alpha / std::sqrt(ux * ux + uy * uy + vx * vx + vy * vy + eps2);
+            }
+        }
+        // successive over-relaxation, red / black so the rows can run in parallel
+        for (int it = 0; it < params.refineSor * 2; ++it) {
+            const int colour = it & 1;
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+            for (int y = 0; y < h; ++y) {
+                for (int x = (y + colour) & 1; x < w; x += 2) {
+                    const std::size_t k = (std::size_t)y * w + x;
+                    float sw = 0.f, su = 0.f, sv = 0.f;
+                    const float u0 = flow[2 * k], v0 = flow[2 * k + 1];
+#define NATRON_FLOW_NB(q) { const float wn = 0.5f * (ws[k] + ws[q]); sw += wn; \
+                            su += wn * (flow[2 * (q)] + du[q] - u0); sv += wn * (flow[2 * (q) + 1] + dv[q] - v0); }
+                    if (x > 0) NATRON_FLOW_NB(k - 1)
+                    if (x < w - 1) NATRON_FLOW_NB(k + 1)
+                    if (y > 0) NATRON_FLOW_NB(k - w)
+                    if (y < h - 1) NATRON_FLOW_NB(k + w)
+#undef NATRON_FLOW_NB
+                    const float nu = (b1[k] + su - a12[k] * dv[k]) / (a11[k] + sw);
+                    du[k] += omega * (nu - du[k]);
+                    const float nv = (b2[k] + sv - a12[k] * du[k]) / (a22[k] + sw);
+                    dv[k] += omega * (nv - dv[k]);
+                }
+            }
+        }
+    }
+    for (std::size_t k = 0; k < N; ++k) {
+        if ( (du[k] == du[k]) && (dv[k] == dv[k]) ) {
+            flow[2 * k] += du[k];
+            flow[2 * k + 1] += dv[k];
+        }
+    }
+} // variationalRefine
+
 } // namespace
 
 float
@@ -393,7 +536,8 @@ computeFlow(const float* i0,
         }
         fw = L.w;
         fh = L.h;
-        refineLevel(L, params, true, &f, &conf);
+        refineLevel(L, params, params.patchSmooth, &f, &conf);
+        variationalRefine(L, params, &f);
     }
     if (abort && *abort) {
         return false;
@@ -422,12 +566,15 @@ computeFlow(const float* i0,
 
     // Where nothing changed between the two frames there is no motion to report. Without this an
     // empty background (a CG element over black) inherits the motion of whatever moves in front
-    // of it, because a flat area has nothing of its own to track.
+    // of it, because a flat area has nothing of its own to track. Only unchanged areas that reach
+    // the frame edge count: an unchanged island inside a moving object (a black square of a
+    // texture, in shadow) keeps the motion of its surroundings.
     {
         const int R = 2;
         const float tol = 0.02f; // in 0..255 match units: only identical areas qualify, not a slowly
                                  // changing highlight inside a moving object
         std::vector<unsigned char> changed( (std::size_t)width * height ), rowMax( (std::size_t)width * height );
+        std::vector<unsigned char> still( (std::size_t)width * height );
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
@@ -453,12 +600,33 @@ computeFlow(const float* i0,
                 for (int yy = std::max(0, y - R); yy <= std::min(height - 1, y + R); ++yy) {
                     m |= rowMax[(std::size_t)yy * width + x];
                 }
-                if (!m) {
-                    const std::size_t k = (std::size_t)y * width + x;
-                    (*flow)[2 * k] = 0.f;
-                    (*flow)[2 * k + 1] = 0.f;
-                }
+                still[(std::size_t)y * width + x] = !m;
             }
+        }
+        // flood from the frame edge through the unchanged pixels
+        std::vector<std::size_t> stack;
+        for (int x = 0; x < width; ++x) {
+            stack.push_back( (std::size_t)x );
+            stack.push_back( (std::size_t)(height - 1) * width + x );
+        }
+        for (int y = 0; y < height; ++y) {
+            stack.push_back( (std::size_t)y * width );
+            stack.push_back( (std::size_t)y * width + width - 1 );
+        }
+        while ( !stack.empty() ) {
+            const std::size_t k = stack.back();
+            stack.pop_back();
+            if (still[k] != 1) {
+                continue;
+            }
+            still[k] = 2;
+            (*flow)[2 * k] = 0.f;
+            (*flow)[2 * k + 1] = 0.f;
+            const int x = (int)(k % width), y = (int)(k / width);
+            if (x > 0) stack.push_back(k - 1);
+            if (x < width - 1) stack.push_back(k + 1);
+            if (y > 0) stack.push_back(k - width);
+            if (y < height - 1) stack.push_back(k + width);
         }
     }
 

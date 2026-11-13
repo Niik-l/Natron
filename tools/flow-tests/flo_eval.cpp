@@ -11,6 +11,20 @@
 #include <cstdlib>
 #include <vector>
 
+
+// tuning overrides from the environment, e.g. FLOW_ALPHA=30 FLOW_DELTA=2
+static void applyEnv(FlowCore::Params* p)
+{
+    if (const char* s = std::getenv("FLOW_ALPHA")) p->refineAlpha = std::atof(s);
+    if (const char* s = std::getenv("FLOW_DELTA")) p->refineDelta = std::atof(s);
+    if (const char* s = std::getenv("FLOW_GAMMA")) p->refineGamma = std::atof(s);
+    if (const char* s = std::getenv("FLOW_FP")) p->refineIterations = std::atoi(s);
+    if (const char* s = std::getenv("FLOW_SOR")) p->refineSor = std::atoi(s);
+    if (const char* s = std::getenv("FLOW_PSMOOTH")) p->patchSmooth = std::atoi(s) != 0;
+    if (const char* s = std::getenv("FLOW_PATCH")) p->patchSize = std::atoi(s);
+    if (const char* s = std::getenv("FLOW_ZETA")) p->refineZeta = std::atof(s);
+}
+
 static bool
 readPGM(const char* path, std::vector<float>* img, int* w, int* h)
 {
@@ -78,6 +92,7 @@ main(int argc, char** argv)
         FlowCore::Params p;
         p.vectorDetail = settings[s][0];
         p.smoothness = settings[s][1];
+        applyEnv(&p);
         std::vector<float> flow;
         const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
         FlowCore::computeFlow(&a[0], &b[0], w, h, p, &flow);
