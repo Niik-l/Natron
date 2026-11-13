@@ -93,6 +93,8 @@ public:
 
     // the neighbouring frame is needed as well as the current one
     virtual FramesNeededMap getFramesNeeded(double time, ViewIdx view) OVERRIDE FINAL WARN_UNUSED_RETURN;
+    bool computeField(double time, double otherTime, const RenderActionArgs& args, const RectI& bounds,
+                      std::vector<float>* flow, std::vector<float>* conf);
 
 private:
 

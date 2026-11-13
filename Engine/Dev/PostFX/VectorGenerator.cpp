@@ -27,7 +27,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <list>
 #include <vector>
+
+#include <QtCore/QMutex>
+#include <QtCore/QMutexLocker>
 
 #include "Engine/AppInstance.h"
 #include "Engine/AppManager.h"
@@ -53,7 +57,20 @@ struct VectorGeneratorPrivate
     KnobDoubleWPtr vectorDetail;
     KnobDoubleWPtr smoothness;
     KnobBoolWPtr flickerCompensation;
+    KnobDoubleWPtr temporalSmoothing;
     KnobDoubleWPtr weightR, weightG, weightB;
+
+    // The vector fields of the last few frame pairs, before temporal smoothing. Smoothing frame N
+    // needs the fields of N-1, N and N+1, so playing through a shot reuses two of every three.
+    struct CachedField
+    {
+        U64 hash;
+        double time, otherTime, scale;
+        RectI bounds;
+        std::vector<float> flow, conf;
+    };
+    std::list<CachedField> fields;
+    QMutex fieldsMutex;
 };
 
 VectorGenerator::VectorGenerator(NodePtr node)
@@ -159,6 +176,23 @@ VectorGenerator::initializeKnobs()
         _imp->flickerCompensation = k;
     }
     {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Temporal Smoothing") );
+        k->setName("temporalSmoothing");
+        k->setDefaultValue(1.);
+        k->setMinimum(0.);
+        k->setMaximum(1.);
+        k->setDisplayMinimum(0.);
+        k->setDisplayMaximum(1.);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Steadies the vectors over time. Each frame is otherwise solved on its own, so in flat areas the "
+                              "vectors land somewhere slightly different every frame, which shows as shimmer in a blur or a "
+                              "retime. This follows each pixel into the previous and the next frame and averages the vectors "
+                              "that agree. 0 turns it off. It needs the neighbouring frames, so a single frame takes about "
+                              "three times as long; playing through a shot costs little extra.") );
+        page->addKnob(k);
+        _imp->temporalSmoothing = k;
+    }
+    {
         KnobSeparatorPtr sep = AppManager::createKnob<KnobSeparator>( this, tr("") );
         page->addKnob(sep);
     }
@@ -191,6 +225,11 @@ VectorGenerator::getFramesNeeded(double time,
 
     range.min = backward ? time - 1. : time;
     range.max = backward ? time : time + 1.;
+    if (_imp->temporalSmoothing.lock()->getValue() > 0.) {
+        // the fields of the previous and the next frame as well
+        range.min -= 1.;
+        range.max += 1.;
+    }
     std::vector<RangeD> ranges;
     ranges.push_back(range);
     FrameRangesMap views;
@@ -260,6 +299,79 @@ toMatchImage(const ImagePtr& img,
 }
 } // namespace
 
+// The vector field from the frame at `time` to the frame at `otherTime`, over `bounds`. Returns false
+// when either frame is missing or the render was aborted.
+bool
+VectorGenerator::computeField(double time,
+                              double otherTime,
+                              const RenderActionArgs& args,
+                              const RectI& bounds,
+                              std::vector<float>* flow,
+                              std::vector<float>* conf)
+{
+    const U64 hash = getHash();
+    {
+        QMutexLocker l(&_imp->fieldsMutex);
+        for (std::list<VectorGeneratorPrivate::CachedField>::iterator it = _imp->fields.begin(); it != _imp->fields.end(); ++it) {
+            if ( (it->hash == hash) && (it->time == time) && (it->otherTime == otherTime) && (it->scale == args.mappedScale.toOfxPointD().x)
+                 && (it->bounds.x1 == bounds.x1) && (it->bounds.y1 == bounds.y1) && (it->bounds.x2 == bounds.x2) && (it->bounds.y2 == bounds.y2) ) {
+                *flow = it->flow;
+                if (conf) {
+                    *conf = it->conf;
+                }
+                _imp->fields.splice(_imp->fields.begin(), _imp->fields, it); // most recently used first
+
+                return true;
+            }
+        }
+    }
+    const int W = bounds.width(), H = bounds.height();
+    if ( (W < 8) || (H < 8) ) {
+        return false;
+    }
+    RectI roiA, roiB;
+    ImagePtr imgA = getImage(0, time, args.mappedScale, args.view, NULL, NULL, false, false, eStorageModeRAM, 0, &roiA);
+    ImagePtr imgB = getImage(0, otherTime, args.mappedScale, args.view, NULL, NULL, false, false, eStorageModeRAM, 0, &roiB);
+    if ( !imgA || !imgB || aborted() ) {
+        return false;
+    }
+    const float weights[3] = {
+        (float)_imp->weightR.lock()->getValue(), (float)_imp->weightG.lock()->getValue(), (float)_imp->weightB.lock()->getValue()
+    };
+    std::vector<float> a, b, c;
+    toMatchImage(imgA, bounds, weights, &a);
+    toMatchImage(imgB, bounds, weights, &b);
+    imgA.reset();
+    imgB.reset();
+    FlowCore::Params p;
+    p.vectorDetail = _imp->vectorDetail.lock()->getValue();
+    p.smoothness = _imp->smoothness.lock()->getValue();
+    p.meanNormalize = _imp->flickerCompensation.lock()->getValue();
+    if ( !FlowCore::computeFlow(&a[0], &b[0], W, H, p, flow, &c) || aborted() ) {
+        return false;
+    }
+    {
+        QMutexLocker l(&_imp->fieldsMutex);
+        _imp->fields.push_front( VectorGeneratorPrivate::CachedField() );
+        VectorGeneratorPrivate::CachedField& e = _imp->fields.front();
+        e.hash = hash;
+        e.time = time;
+        e.otherTime = otherTime;
+        e.scale = args.mappedScale.toOfxPointD().x;
+        e.bounds = bounds;
+        e.flow = *flow;
+        e.conf = c;
+        while (_imp->fields.size() > 4) {
+            _imp->fields.pop_back();
+        }
+    }
+    if (conf) {
+        conf->swap(c);
+    }
+
+    return true;
+} // computeField
+
 StatusEnum
 VectorGenerator::render(const RenderActionArgs& args)
 {
@@ -271,37 +383,25 @@ VectorGenerator::render(const RenderActionArgs& args)
         return eStatusFailed;
     }
     const bool backward = _imp->output.lock()->getValue() == eOutputBackward;
-    const double otherTime = backward ? args.time - 1. : args.time + 1.;
-    RectI roiA, roiB;
-    ImagePtr imgA = getImage(0, args.time, args.mappedScale, args.view, NULL, NULL, false, false, eStorageModeRAM, 0, &roiA);
-    if (!imgA) {
-        return eStatusFailed;
-    }
-    ImagePtr imgB = getImage(0, otherTime, args.mappedScale, args.view, NULL, NULL, false, false, eStorageModeRAM, 0, &roiB);
-
+    const double step = backward ? -1. : 1.;
+    const double temporal = _imp->temporalSmoothing.lock()->getValue();
     const RectI outBounds = outImg->getBounds();
     const int W = outBounds.width(), H = outBounds.height();
     const int outNComp = outImg->getComponents().getNumComponents();
     std::vector<float> flow, conf;
-    bool haveFlow = false;
-    if ( imgB && (W >= 8) && (H >= 8) ) {
-        const float weights[3] = {
-            (float)_imp->weightR.lock()->getValue(), (float)_imp->weightG.lock()->getValue(), (float)_imp->weightB.lock()->getValue()
-        };
-        std::vector<float> a, b;
-        toMatchImage(imgA, outBounds, weights, &a);
-        toMatchImage(imgB, outBounds, weights, &b);
+    const bool haveFlow = computeField(args.time, args.time + step, args, outBounds, &flow, &conf);
+    if ( aborted() ) {
+        return eStatusFailed;
+    }
+    if ( haveFlow && (temporal > 0.) ) {
+        // the same kind of field one frame further along the motion, and one frame back
+        std::vector<float> ahead, behind;
+        const bool haveAhead = computeField(args.time + step, args.time + 2. * step, args, outBounds, &ahead, NULL);
+        const bool haveBehind = computeField(args.time - step, args.time, args, outBounds, &behind, NULL);
         if ( aborted() ) {
             return eStatusFailed;
         }
-        FlowCore::Params p;
-        p.vectorDetail = _imp->vectorDetail.lock()->getValue();
-        p.smoothness = _imp->smoothness.lock()->getValue();
-        p.meanNormalize = _imp->flickerCompensation.lock()->getValue();
-        haveFlow = FlowCore::computeFlow(&a[0], &b[0], W, H, p, &flow, &conf);
-    }
-    if ( aborted() ) {
-        return eStatusFailed;
+        FlowCore::temporalFilter(flow, haveAhead ? &ahead : NULL, haveBehind ? &behind : NULL, W, H, temporal, &flow);
     }
 
     Image::WriteAccess wa( outImg.get() );

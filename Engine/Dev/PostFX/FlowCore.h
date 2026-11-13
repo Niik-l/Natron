@@ -109,6 +109,27 @@ bool computeFlow(const float* i0,
                  std::vector<float>* confidence = 0,
                  const volatile bool* abort = 0);
 
+/**
+ * @brief Steadies a flow field over time using the fields of the neighbouring frames.
+ *
+ * Each frame pair is solved on its own, so where the picture says little (flat areas) the answer
+ * lands somewhere slightly different every frame. This follows each pixel along its own motion
+ * into the neighbouring fields and averages the vectors that agree with it; a neighbour that
+ * disagrees (an occlusion, a cut) is left out.
+ *
+ * All fields have the same direction and layout as computeFlow's output. `ahead` is the field of
+ * the frame the motion points to (the next frame for a forward field, the previous one for a
+ * backward field), `behind` the one on the other side; either may be null.
+ * @param strength 0 = `current` unchanged, 1 = neighbours count as much as the frame itself
+ */
+void temporalFilter(const std::vector<float>& current,
+                    const std::vector<float>* ahead,
+                    const std::vector<float>* behind,
+                    int width,
+                    int height,
+                    double strength,
+                    std::vector<float>* out);
+
 } // namespace FlowCore
 
 #endif // NATRON_ENGINE_FLOWCORE_H

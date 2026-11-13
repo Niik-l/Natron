@@ -633,4 +633,66 @@ computeFlow(const float* i0,
     return true;
 } // computeFlow
 
+void
+temporalFilter(const std::vector<float>& current,
+               const std::vector<float>* ahead,
+               const std::vector<float>* behind,
+               int width,
+               int height,
+               double strength,
+               std::vector<float>* out)
+{
+    const std::size_t N = (std::size_t)width * height;
+    std::vector<float> res(current);
+    const float s = (float)std::max( 0., std::min(1., strength) );
+
+    if ( (s > 0.f) && (current.size() >= 2 * N) ) {
+        const std::vector<float>* nb[2] = { ahead, behind };
+        const float dir[2] = { 1.f, -1.f };
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const std::size_t k = (std::size_t)y * width + x;
+                const float u = current[2 * k], v = current[2 * k + 1];
+                if ( (u == 0.f) && (v == 0.f) ) {
+                    continue; // a still pixel stays exactly still
+                }
+                // how far a neighbour may differ and still count: a pixel plus a share of the speed
+                const float sigma = 1.f + 0.15f * std::sqrt(u * u + v * v);
+                float su = u, sv = v, sw = 1.f;
+                for (int n = 0; n < 2; ++n) {
+                    if ( !nb[n] || (nb[n]->size() < 2 * N) ) {
+                        continue;
+                    }
+                    const float fx = (float)x + dir[n] * u, fy = (float)y + dir[n] * v;
+                    if ( (fx < 0.f) || (fy < 0.f) || (fx > (float)(width - 1)) || (fy > (float)(height - 1)) ) {
+                        continue;
+                    }
+                    const int x0 = (int)fx, y0 = (int)fy;
+                    const int x1 = std::min(x0 + 1, width - 1), y1 = std::min(y0 + 1, height - 1);
+                    const float tx = fx - (float)x0, ty = fy - (float)y0;
+                    const float* f = &(*nb[n])[0];
+                    float nv[2];
+                    for (int c = 0; c < 2; ++c) {
+                        const float a = f[( (std::size_t)y0 * width + x0 ) * 2 + c], b = f[( (std::size_t)y0 * width + x1 ) * 2 + c];
+                        const float d = f[( (std::size_t)y1 * width + x0 ) * 2 + c], e = f[( (std::size_t)y1 * width + x1 ) * 2 + c];
+                        const float top = a + (b - a) * tx, bot = d + (e - d) * tx;
+                        nv[c] = top + (bot - top) * ty;
+                    }
+                    const float du = nv[0] - u, dv = nv[1] - v;
+                    const float wgt = s * std::exp( -(du * du + dv * dv) / (2.f * sigma * sigma) );
+                    su += wgt * nv[0];
+                    sv += wgt * nv[1];
+                    sw += wgt;
+                }
+                res[2 * k] = su / sw;
+                res[2 * k + 1] = sv / sw;
+            }
+        }
+    }
+    out->swap(res);
+} // temporalFilter
+
 } // namespace FlowCore
