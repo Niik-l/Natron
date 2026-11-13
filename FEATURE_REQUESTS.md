@@ -28,25 +28,22 @@ toggle, "Copy source to destination", and subdivide / add-row-column tools. The 
 overlay (drag vertices, tangents, whole rows, box select) is most of the work; the
 Roto / CornerPin overlays are the models to copy. Size: 1 to 2 weeks for a usable v1.
 
-## OFlow / Kronos (optical-flow retime and vector motion blur)
+## OFlow / Kronos (optical-flow retime and vector motion blur) — IN PROGRESS 2026-11-12
 
-Requested 2026-11-03. Today there is only frame-blend retiming (Retime / TimeBlur) and
-no motion vectors from 2D footage; the only vectors in the fork come from the 3D side
-(Cycles vector pass, particle velocity).
+Requested 2026-11-03. Names chosen by the user: `VectorGenerator` and `TimeFlow` (the Kronos
+analog). Correction to the first sketch: a `VectorBlur` node already exists (it reads vectors
+from a secondary RGB input), so only two nodes are new.
 
-Sketch, in three nodes sharing one flow engine:
-1. `VectorGenerator`: dense optical flow between frame N and N +/- 1, written to
-   forward / backward vector planes. A native DIS-style estimator (pyramidal inverse
-   search + variational refinement, about 1k lines, CPU) avoids a heavyweight
-   dependency; OpenCV or an ONNX RAFT model are the alternatives if quality is not
-   enough.
-2. `OFlow`: retime by splatting / warping both neighbours along the flow with
-   occlusion weighting and a blend fallback where confidence is low. Speed curve or
-   output-frame mapping, like Kronos.
-3. `VectorBlur`: motion blur from a vector plane (also useful for Cycles and
-   ScanlineRender renders, which already output vectors).
-Quality tuning (edge handling, occlusions, flicker) is the long tail. Size: 2 to 3
-weeks for a credible v1, more to approach Kronos.
+1. `VectorGenerator` — BUILT 2026-11-12, headless-verified, GUI pass and real footage pending.
+   Native CPU estimator in `Engine/Dev/PostFX/FlowCore` (no dependency), tests in
+   `tools/flow-tests`. See NODE_REGISTRY.md.
+2. `TimeFlow` — next: retime by warping both neighbours along forward and backward flow,
+   weighted by forward/backward consistency, with a blend fallback where the vectors disagree.
+   Speed or keyframed source-frame timing, Frame / Blend / Motion methods.
+
+Open: variational refinement and a matte input for the estimator; an ML method (RIFE via ncnn)
+only if the classical quality is not enough and the licence of the weights checks out; test
+footage (Cycles renders with a vector pass for ground truth, MPI Sintel, Xiph clips).
 
 ## VR / 360 feature family (CaraVR-inspired) — scheduled, plan in VR_PLAN.md
 
