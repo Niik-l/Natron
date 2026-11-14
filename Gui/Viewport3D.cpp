@@ -6081,6 +6081,54 @@ Viewport3D::drawSplatsNode(const SceneNode& sn) const
     if (!app) return;
     const double time = app->getTimeLine()->currentFrame();
 
+    // The Crop tab's box or sphere, as a wireframe. Its numbers are in the scene's
+    // upright space; the matrix pushed for this node already holds the Y Down flip,
+    // so flipped coordinates are un-flipped here (y and z negated) to land right.
+    {
+        int cropMode = 0;
+        float cc[3], cs[3], cr = 1.f;
+        bool flip = false;
+        splats->getCropShape(&cropMode, cc, cs, &cr, &flip);
+        if (cropMode != 0) {
+            const float f = flip ? -1.f : 1.f;
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
+            glLineWidth(1.5f);
+            glColor3f(1.0f, 0.75f, 0.1f);
+            if (cropMode == 1) {
+                const float hx = 0.5f * cs[0], hy = 0.5f * cs[1], hz = 0.5f * cs[2];
+                float v[8][3];
+                for (int i = 0; i < 8; ++i) {
+                    v[i][0] = cc[0] + ((i & 1) ? hx : -hx);
+                    v[i][1] = f * (cc[1] + ((i & 2) ? hy : -hy));
+                    v[i][2] = f * (cc[2] + ((i & 4) ? hz : -hz));
+                }
+                static const int edges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+                glBegin(GL_LINES);
+                for (int e = 0; e < 12; ++e) {
+                    glVertex3fv(v[edges[e][0]]);
+                    glVertex3fv(v[edges[e][1]]);
+                }
+                glEnd();
+            } else {
+                const int segs = 64;
+                for (int plane = 0; plane < 3; ++plane) {
+                    glBegin(GL_LINE_LOOP);
+                    for (int sgm = 0; sgm < segs; ++sgm) {
+                        const float a = (float)sgm / (float)segs * 6.2831853f;
+                        const float ca = cr * cosf(a), sa = cr * sinf(a);
+                        float q[3] = {cc[0], cc[1], cc[2]};
+                        q[plane] += ca;
+                        q[(plane + 1) % 3] += sa;
+                        glVertex3f(q[0], f * q[1], f * q[2]);
+                    }
+                    glEnd();
+                }
+            }
+            glLineWidth(1.0f);
+        }
+    }
+
     SplatDataPtr data = splats->getSplatData();
     const Viewport3DSplatCache::Entry* E =
         _imp->splatCache.acquire(data, splats->getPreviewOpacityThreshold(), splats->getViewportMaxPoints(),

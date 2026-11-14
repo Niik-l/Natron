@@ -39,7 +39,7 @@ NATRON_NAMESPACE_ENTER
 struct ReadSplatsPrivate;
 
 /**
- * @brief Read a 3D Gaussian splat scene (the standard 3DGS binary .ply).
+ * @brief Read a 3D Gaussian splat scene (3DGS binary .ply, .splat, or .spz up to version 3).
  *
  * A 3D source node: connect it to a Scene3D or straight to ScanlineRender's
  * obj/scn input. The 3D viewport and ScanlineRender show the scene as a point
@@ -97,11 +97,12 @@ public:
     virtual bool isHostChannelSelectorSupported(bool*, bool*, bool*, bool*) const OVERRIDE WARN_UNUSED_RETURN;
 
     /**
-     * @brief The loaded scene, reading the file on first use. Null when no file
-     * is set or the read failed (see getLastLoadError). Thread-safe: the 3D
-     * viewport paint and render threads may call it at the same time; the file
-     * is read once. The returned object never changes, a reload publishes a new
-     * one with a new SplatData::version.
+     * @brief The scene, after the Crop tab's crop and cleanup, reading the file
+     * on first use. Null when no file is set, the read failed, or the crop
+     * leaves nothing (see getLastLoadError). Thread-safe: the 3D viewport paint
+     * and render threads may call it at the same time; the file is read once.
+     * The returned object never changes: a reload or a crop change publishes a
+     * new one with a new SplatData::version.
      */
     SplatDataPtr getSplatData();
 
@@ -111,6 +112,11 @@ public:
     /** The node's Translate / Rotate / Scale (and Y-down flip) as one column-major
      *  matrix taking the file's space to world space. */
     void getSplatTransform(double time, float out[16]) const;
+
+    /** The Crop tab's shape, for drawing it: mode 0 none / 1 box / 2 sphere, in the scene's
+     *  upright space (see SplatFilter). `flipYZ` tells whether that space is the file's space
+     *  with Y and Z negated; the matrix of getSplatTransform already contains that flip. */
+    void getCropShape(int* mode, float center[3], float size[3], float* radius, bool* flipYZ) const;
 
     /** Uniform world scale contained in getSplatTransform (sizes multiply by it). */
     float getSplatWorldScale(double time) const;

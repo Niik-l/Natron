@@ -24,6 +24,7 @@
 #include "ReadSplats.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -61,15 +62,28 @@ struct ReadSplatsPrivate
     KnobIntWPtr renderMaxPoints;
     KnobBoolWPtr linearize;
 
+    KnobChoiceWPtr cropMode;
+    KnobBoolWPtr cropInvert;
+    KnobDoubleWPtr cropCenter[3], cropSize[3], cropRadius;
+    KnobButtonWPtr cropFit;
+    KnobDoubleWPtr minOpacity, maxSize;
+
     // Guards everything below. Held across the file read on purpose: a second
     // caller (viewport paint vs. render thread) waits for the one read instead of
     // starting its own.
     mutable std::mutex mutex;
-    SplatDataPtr data;
+    SplatDataPtr raw;            // the file as read
+    SplatDataPtr filtered;       // after crop / cleanup; built only while a filter is active
+    SplatFilter filter;          // what `filtered` was built with
+    bool filteredValid = false;
     std::string loadedPath;
     int loadedShDegree = -1;
     bool loadAttempted = false;
     std::string lastError;
+    // The file's own convention is Y up (.spz): the Y Down knob then does nothing.
+    // Atomic because the scene graph asks for the transform on every rebuild and
+    // must not wait on a file read.
+    std::atomic<bool> fileYUp{false};
 };
 
 ReadSplats::ReadSplats(NodePtr node)
@@ -124,9 +138,9 @@ ReadSplats::initializeKnobs()
     {
         KnobFilePtr k = AppManager::createKnob<KnobFile>( this, tr("File") );
         k->setName("filePath");
-        k->setHintToolTip( tr("A 3D Gaussian splat scene: the binary .ply a 3DGS trainer writes "
-                              "(usually point_cloud.ply). A plain binary point-cloud .ply also loads, "
-                              "as points without sizes.") );
+        k->setHintToolTip( tr("A 3D Gaussian splat scene. Formats: the binary .ply a 3DGS trainer writes "
+                              "(usually point_cloud.ply); .splat (base colour only); .spz up to version 3. "
+                              "A plain binary point-cloud .ply also loads, as points without sizes.") );
         page->addKnob(k);
         _imp->filePath = k;
     }
@@ -215,7 +229,7 @@ ReadSplats::initializeKnobs()
         k->setHintToolTip( tr("Scenes trained from COLMAP camera data have Y pointing down and Z pointing "
                               "away from the camera. On: turn the scene half a turn around X so it is the "
                               "right way up here (Y up). Turn it off if the scene comes in upside down. "
-                              "Applied before Rotate.") );
+                              "Applied before Rotate. Ignored for .spz files, which are stored Y up.") );
         xfPage->addKnob(k);
         _imp->yDown = k;
     }
@@ -303,6 +317,112 @@ ReadSplats::initializeKnobs()
         pvPage->addKnob(k);
         _imp->linearize = k;
     }
+
+    // ---- Crop / cleanup: applies to everything downstream (viewport, ScanlineRender, SplatRender)
+    KnobPagePtr cropPage = AppManager::createKnob<KnobPage>( this, tr("Crop") );
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>( this, tr("Crop") );
+        k->setName("cropMode");
+        k->setAnimationEnabled(false);
+        std::vector<ChoiceOption> entries;
+        entries.push_back( ChoiceOption("Off", "Off", "Keep the whole scene.") );
+        entries.push_back( ChoiceOption("Box", "Box", "Keep the splats whose centre is inside the box.") );
+        entries.push_back( ChoiceOption("Sphere", "Sphere", "Keep the splats whose centre is inside the sphere.") );
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        k->setHintToolTip( tr("Cut the scene down to a box or a sphere: a real scan comes with floor, "
+                              "walls and floating specks around the subject. The shape is drawn in the "
+                              "3D viewport. It is defined in the scene's own upright space, so it moves "
+                              "with the scene when the Transform tab changes. Splats are kept or dropped "
+                              "whole, by their centre.") );
+        cropPage->addKnob(k);
+        _imp->cropMode = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>( this, tr("Invert") );
+        k->setName("cropInvert");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Keep what is outside the shape instead: cut a hole in the scene.") );
+        cropPage->addKnob(k);
+        _imp->cropInvert = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>( this, tr("Fit to Scene") );
+        k->setName("cropFit");
+        k->setHintToolTip( tr("Set the box (and the sphere) around the bulk of the scene, leaving out "
+                              "the far-away 2% on each side, and turn the crop on if it was off. A good "
+                              "starting point to then tighten by hand.") );
+        cropPage->addKnob(k);
+        _imp->cropFit = k;
+    }
+    struct CropAxis { const char* name; const char* label; KnobDoubleWPtr* dst; double def; bool newLine; };
+    const CropAxis cropAxes[] = {
+        {"cropCenterX", "Center X", &_imp->cropCenter[0], 0., true},
+        {"cropCenterY", "Y",        &_imp->cropCenter[1], 0., false},
+        {"cropCenterZ", "Z",        &_imp->cropCenter[2], 0., false},
+        {"cropSizeX",   "Size X",   &_imp->cropSize[0],   2., true},
+        {"cropSizeY",   "Y",        &_imp->cropSize[1],   2., false},
+        {"cropSizeZ",   "Z",        &_imp->cropSize[2],   2., false},
+    };
+    for (std::size_t i = 0; i < sizeof(cropAxes) / sizeof(cropAxes[0]); ++i) {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr(cropAxes[i].label) );
+        k->setName(cropAxes[i].name);
+        k->setDefaultValue(cropAxes[i].def);
+        k->setAnimationEnabled(false);
+        const bool isSize = (i >= 3);
+        if (isSize) k->setMinimum(0.);
+        k->setDisplayMinimum(isSize ? 0. : -10.);
+        k->setDisplayMaximum(10.);
+        const bool nextStartsRow = (i + 1 >= sizeof(cropAxes) / sizeof(cropAxes[0])) || cropAxes[i + 1].newLine;
+        k->setAddNewLine(nextStartsRow);
+        if (i == 0) k->setHintToolTip( tr("Middle of the box or sphere, in the scene's upright space (before the Transform tab).") );
+        if (i == 3) k->setHintToolTip( tr("Full size of the box along each axis.") );
+        cropPage->addKnob(k);
+        *cropAxes[i].dst = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Radius") );
+        k->setName("cropRadius");
+        k->setDefaultValue(1.);
+        k->setMinimum(0.);
+        k->setDisplayMinimum(0.);
+        k->setDisplayMaximum(10.);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Radius of the sphere (Crop = Sphere).") );
+        cropPage->addKnob(k);
+        _imp->cropRadius = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Min Opacity") );
+        k->setName("minOpacity");
+        k->setDefaultValue(0.);
+        k->setMinimum(0.);
+        k->setMaximum(1.);
+        k->setDisplayMinimum(0.);
+        k->setDisplayMaximum(1.);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Remove splats more transparent than this from the scene altogether. A "
+                              "small value (0.02 to 0.1) clears much of the haze and specks a scan "
+                              "carries. Unlike Opacity Threshold on the Preview tab, this also changes "
+                              "what SplatRender draws.") );
+        cropPage->addKnob(k);
+        _imp->minOpacity = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Max Size") );
+        k->setName("maxSize");
+        k->setDefaultValue(0.);
+        k->setMinimum(0.);
+        k->setDisplayMinimum(0.);
+        k->setDisplayMaximum(100.);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Remove splats larger than this many times the typical (median) splat. "
+                              "The few very large splats of a scan are usually sky, far background or "
+                              "errors that show as smears. 0 = keep all; try 20 to 50.") );
+        cropPage->addKnob(k);
+        _imp->maxSize = k;
+    }
 }
 
 SplatDataPtr
@@ -313,26 +433,80 @@ ReadSplats::getSplatData()
     // Read the knobs before taking the mutex: knob access has its own locks.
     const std::string path = fileKnob ? fileKnob->getValue() : std::string();
     const int degree = degKnob ? degKnob->getValue() : 3;
+    SplatFilter want;
+    {
+        KnobChoicePtr cm = _imp->cropMode.lock();
+        want.cropMode = cm ? cm->getValue() : 0;
+        KnobBoolPtr inv = _imp->cropInvert.lock();
+        want.invert = inv && inv->getValue();
+        for (int k = 0; k < 3; ++k) {
+            KnobDoublePtr c = _imp->cropCenter[k].lock(), z = _imp->cropSize[k].lock();
+            want.center[k] = c ? (float)c->getValue() : 0.f;
+            want.size[k] = z ? (float)z->getValue() : 2.f;
+        }
+        KnobDoublePtr r = _imp->cropRadius.lock(), mo = _imp->minOpacity.lock(), ms = _imp->maxSize.lock();
+        want.radius = r ? (float)r->getValue() : 1.f;
+        want.minOpacity = mo ? (float)mo->getValue() : 0.f;
+        want.maxSize = ms ? (float)ms->getValue() : 0.f;
+    }
+    KnobBoolPtr yd = _imp->yDown.lock();
+    const bool yDownKnob = yd && yd->getValue();
 
     std::lock_guard<std::mutex> lk(_imp->mutex);
-    if (_imp->loadAttempted && path == _imp->loadedPath && degree == _imp->loadedShDegree) {
-        return _imp->data;
+    if (!_imp->loadAttempted || path != _imp->loadedPath || degree != _imp->loadedShDegree) {
+        _imp->loadAttempted = true;
+        _imp->loadedPath = path;
+        _imp->loadedShDegree = degree;
+        _imp->raw.reset();        // free the old scene before reading the new one
+        _imp->filtered.reset();
+        _imp->filteredValid = false;
+        _imp->lastError.clear();
+        _imp->fileYUp = false;
+        if ( !path.empty() ) {
+            _imp->raw = readSplatFile(path, degree, &_imp->lastError);
+            if (_imp->raw) {
+                _imp->fileYUp = _imp->raw->yUp;
+            } else {
+                std::fprintf( stderr, "[ReadSplats] %s: %s\n",
+                              getNode() ? getNode()->getScriptName_mt_safe().c_str() : "?", _imp->lastError.c_str() );
+                std::fflush(stderr);
+            }
+        }
     }
-    _imp->loadAttempted = true;
-    _imp->loadedPath = path;
-    _imp->loadedShDegree = degree;
-    _imp->data.reset();   // free the old scene before reading the new one
-    _imp->lastError.clear();
-    if ( path.empty() ) {
+    if (!_imp->raw) {
         return SplatDataPtr();
     }
-    _imp->data = readSplatPly(path, degree, &_imp->lastError);
-    if (!_imp->data) {
-        std::fprintf( stderr, "[ReadSplats] %s: %s\n",
-                      getNode() ? getNode()->getScriptName_mt_safe().c_str() : "?", _imp->lastError.c_str() );
-        std::fflush(stderr);
+    want.flipYZ = yDownKnob && !_imp->raw->yUp;
+    if ( !want.active() ) {
+        _imp->filtered.reset();
+        _imp->filteredValid = false;
+        _imp->lastError.clear();
+        return _imp->raw;
     }
-    return _imp->data;
+    if ( !_imp->filteredValid || !(want == _imp->filter) ) {
+        _imp->filtered = filterSplats(*_imp->raw, want);
+        _imp->filter = want;
+        _imp->filteredValid = true;
+        _imp->lastError = _imp->filtered ? std::string()
+                                         : std::string("The Crop tab leaves no splats: widen the crop, or lower Min Opacity / raise Max Size.");
+    }
+    return _imp->filtered;
+}
+
+void
+ReadSplats::getCropShape(int* mode, float center[3], float size[3], float* radius, bool* flipYZ) const
+{
+    KnobChoicePtr cm = _imp->cropMode.lock();
+    *mode = cm ? cm->getValue() : 0;
+    for (int k = 0; k < 3; ++k) {
+        KnobDoublePtr c = _imp->cropCenter[k].lock(), z = _imp->cropSize[k].lock();
+        center[k] = c ? (float)c->getValue() : 0.f;
+        size[k] = z ? (float)z->getValue() : 2.f;
+    }
+    KnobDoublePtr r = _imp->cropRadius.lock();
+    *radius = r ? (float)r->getValue() : 1.f;
+    KnobBoolPtr yd = _imp->yDown.lock();
+    *flipYZ = yd && yd->getValue() && !_imp->fileYUp.load();
 }
 
 std::string
@@ -353,7 +527,15 @@ ReadSplats::refreshInfo()
         const std::string err = getLastLoadError();
         os << ( err.empty() ? std::string("Set File to a 3DGS .ply file.") : err );
     } else {
-        os << d->count << (d->hasGaussians ? " splats" : " points (plain point cloud, no splat data)");
+        std::size_t total = d->count;
+        {
+            std::lock_guard<std::mutex> lk(_imp->mutex);
+            if (_imp->raw) total = _imp->raw->count;
+        }
+        os << d->count;
+        if (total != d->count) os << " of " << total;
+        os << (d->hasGaussians ? " splats" : " points (plain point cloud, no splat data)");
+        if (total != d->count) os << " kept by the Crop tab";
         if (d->hasGaussians) {
             os << ", SH degree " << d->fileShDegree << " in the file, " << d->shDegree << " kept";
         }
@@ -371,6 +553,52 @@ ReadSplats::knobChanged(KnobI* k, ValueChangedReasonEnum /*reason*/, ViewSpec /*
         refreshInfo();    // getSplatData notices the new path / degree and reads the file
         if ( getApp() ) getApp()->redrawAllViewers();
         return true;
+    }
+    if ( k == _imp->cropFit.lock().get() ) {
+        SplatDataPtr raw;
+        {
+            // make sure the file is read, then take the unfiltered scene
+            (void)getSplatData();
+            std::lock_guard<std::mutex> lk(_imp->mutex);
+            raw = _imp->raw;
+        }
+        if (raw) {
+            KnobBoolPtr yd = _imp->yDown.lock();
+            const bool flip = yd && yd->getValue() && !raw->yUp;
+            float c[3], z[3];
+            robustSplatBounds(*raw, flip, c, z);
+            beginChanges();
+            for (int a = 0; a < 3; ++a) {
+                // 4 significant digits: the box is a starting point, not a measurement
+                const double mag = std::pow( 10., std::floor( std::log10( std::max(1e-9f, z[a]) ) ) - 3. );
+                if ( KnobDoublePtr kc = _imp->cropCenter[a].lock() ) kc->setValue(std::round(c[a] / mag) * mag);
+                if ( KnobDoublePtr kz = _imp->cropSize[a].lock() ) kz->setValue(std::round(z[a] / mag) * mag);
+            }
+            if ( KnobDoublePtr kr = _imp->cropRadius.lock() ) {
+                const double rad = 0.5 * std::max( z[0], std::max(z[1], z[2]) );
+                const double mag = std::pow( 10., std::floor( std::log10( std::max(1e-9, rad) ) ) - 3. );
+                kr->setValue(std::round(rad / mag) * mag);
+            }
+            KnobChoicePtr cm = _imp->cropMode.lock();
+            if (cm && cm->getValue() == 0) cm->setValue(1);
+            endChanges();
+        }
+        refreshInfo();
+        if ( getApp() ) getApp()->redrawAllViewers();
+        return true;
+    }
+    {
+        bool isCrop = k == _imp->cropMode.lock().get() || k == _imp->cropInvert.lock().get()
+                      || k == _imp->cropRadius.lock().get() || k == _imp->minOpacity.lock().get()
+                      || k == _imp->maxSize.lock().get() || k == _imp->yDown.lock().get();
+        for (int a = 0; a < 3 && !isCrop; ++a) {
+            isCrop = k == _imp->cropCenter[a].lock().get() || k == _imp->cropSize[a].lock().get();
+        }
+        if (isCrop) {
+            refreshInfo();
+            if ( getApp() ) getApp()->redrawAllViewers();
+            return false;      // still evaluates normally
+        }
     }
     if ( k == _imp->reloadBtn.lock().get() ) {
         {
@@ -404,7 +632,7 @@ ReadSplats::getSplatTransform(double time, float out[16]) const
                          val(_imp->rotateX, 0.), val(_imp->rotateY, 0.), val(_imp->rotateZ, 0.),
                          s, s, s, trs);
     KnobBoolPtr yd = _imp->yDown.lock();
-    if ( yd && yd->getValue() ) {
+    if ( yd && yd->getValue() && !_imp->fileYUp.load() ) {
         // out = TRS * flip, flip = half a turn around X = diag(1, -1, -1): negate columns 1 and 2.
         for (int r = 0; r < 4; ++r) {
             trs[4 + r] = -trs[4 + r];

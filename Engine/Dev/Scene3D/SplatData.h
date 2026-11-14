@@ -65,6 +65,8 @@ struct SplatData
     int shDegree = 0;             // bands kept in memory (0..3)
     int fileShDegree = 0;         // bands present in the file (0..3)
     bool hasGaussians = false;    // false = plain point cloud (no scale / rotation / opacity in the file)
+    bool yUp = false;             // the file's own convention is Y up (.spz); false = Y down, as a
+                                  // COLMAP-trained .ply. ReadSplats only applies its Y Down flip when false.
 
     float bboxMin[3] = {0.f, 0.f, 0.f};
     float bboxMax[3] = {0.f, 0.f, 0.f};
@@ -96,6 +98,57 @@ typedef std::shared_ptr<const SplatData> SplatDataPtr;
  * @return the scene, or null on failure
  */
 SplatDataPtr readSplatPly(const std::string& path, int maxShDegree, std::string* error);
+
+/**
+ * @brief Read a splat scene in any supported format, chosen by the file extension:
+ *   .ply     3DGS binary PLY, or a plain point cloud (readSplatPly)
+ *   .splat   the 32-byte-per-splat format of the antimatter15 web viewer (base colour only)
+ *   .spz     Niantic SPZ versions 1 to 3 (gzip). Version 4 (zstd) is refused with a message.
+ * Same parameters and result as readSplatPly.
+ */
+SplatDataPtr readSplatFile(const std::string& path, int maxShDegree, std::string* error);
+
+/**
+ * @brief Which splats of a scene to keep (ReadSplats' Crop tab).
+ *
+ * The crop shape is given in the scene's upright space: the file's own space,
+ * with Y and Z negated when `flipYZ` is set (what ReadSplats' Y Down does), so
+ * the numbers mean the same thing whichever way up the file is stored and
+ * travel with the scene when the node is moved.
+ */
+struct SplatFilter
+{
+    int cropMode = 0;             // 0 = none, 1 = box, 2 = sphere
+    bool invert = false;          // keep what is OUTSIDE the shape
+    bool flipYZ = false;
+    float center[3] = {0.f, 0.f, 0.f};
+    float size[3] = {1.f, 1.f, 1.f};      // box: full size per axis
+    float radius = 1.f;                   // sphere
+    float minOpacity = 0.f;       // drop splats more transparent than this
+    float maxSize = 0.f;          // drop splats larger than this many times the median size (0 = keep all)
+
+    bool active() const { return cropMode != 0 || minOpacity > 0.f || maxSize > 0.f; }
+    bool operator==(const SplatFilter& o) const
+    {
+        return cropMode == o.cropMode && invert == o.invert && flipYZ == o.flipYZ
+               && center[0] == o.center[0] && center[1] == o.center[1] && center[2] == o.center[2]
+               && size[0] == o.size[0] && size[1] == o.size[1] && size[2] == o.size[2]
+               && radius == o.radius && minOpacity == o.minOpacity && maxSize == o.maxSize;
+    }
+};
+
+/**
+ * @brief A copy of `data` holding only the splats the filter keeps (a new scene
+ * with a new version). Null when nothing is left.
+ */
+SplatDataPtr filterSplats(const SplatData& data, const SplatFilter& filter);
+
+/**
+ * @brief A box that holds the bulk of a scene: per axis, from the 2nd to the
+ * 98th percentile of the splat centres (a real scan's full bounding box is
+ * stretched by a few far-away floaters). In the upright space of SplatFilter.
+ */
+void robustSplatBounds(const SplatData& data, bool flipYZ, float center[3], float size[3]);
 
 /**
  * @brief Build the point preview of a splat scene: one coloured, sized point per splat.
