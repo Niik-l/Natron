@@ -40,6 +40,8 @@ struct TimeFlowPrivate;
  *
  * Input 0: Source. Input 1 (optional): Vectors, backward motion vectors of the source (the
  * VectorGenerator layout, or a renderer's velocity pass) used in place of the node's own estimate.
+ * Input 2 (optional): Matte, the alpha of a foreground object; its motion and the background's
+ * are then worked out and rebuilt separately, which removes the ghost outline at its edge.
  */
 class TimeFlow
     : public EffectInstance
@@ -57,7 +59,7 @@ public:
 
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 1; }
     virtual int getMinorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 2; }
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 3; }
     virtual bool getCanTransform() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
 
     virtual std::string getPluginID() const OVERRIDE FINAL WARN_UNUSED_RETURN
@@ -72,7 +74,7 @@ public:
     { grouping->push_back(PLUGIN_GROUP_TIME); }
 
     virtual std::string getInputLabel(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN
-    { return inputNb == 0 ? "Source" : "Vectors"; }
+    { return inputNb == 0 ? "Source" : (inputNb == 1 ? "Vectors" : "Matte"); }
 
     virtual bool isInputOptional(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN
     { return inputNb != 0; }
@@ -111,7 +113,14 @@ private:
     // splits a source time into the frame before it and the position between that and the next (0..1)
     static void splitTime(double src, double* before, double* position);
 
-    bool computeField(double time, double otherTime, const RenderActionArgs& args, const RectI& bounds, std::vector<float>* flow);
+    // The field from the frame at `time` to the frame at `otherTime`. With `background` given, the
+    // Matte input splits the picture: `flow` receives the foreground's field and `background` the
+    // background's.
+    bool computeField(double time, double otherTime, const RenderActionArgs& args, const RectI& bounds, std::vector<float>* flow,
+                      std::vector<float>* background = 0);
+
+    // the Matte input at `time` over `bounds`, one value per pixel; false when there is none
+    bool fetchMatte(double time, const RenderActionArgs& args, const RectI& bounds, std::vector<float>* matte);
 
     std::unique_ptr<TimeFlowPrivate> _imp;
 };

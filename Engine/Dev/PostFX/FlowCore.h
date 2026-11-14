@@ -171,6 +171,10 @@ void invertFlow(const std::vector<float>& ba,
  * (the rest of the way back along ba) and the two are mixed by how close each frame is in time.
  * Where only one of the two lookups can be trusted (the area was hidden in the other frame) that
  * one is used alone; where neither can, the result falls back to a plain dissolve.
+ *
+ * @param validA, validB  optional single-channel pictures (width * height) saying where frame A
+ *                and frame B hold usable content for this lookup (1) and where they do not (0):
+ *                a lookup that lands on unusable content is not trusted.
  */
 void interpolateFrame(const float* a,
                       const float* b,
@@ -182,7 +186,48 @@ void interpolateFrame(const float* a,
                       const std::vector<float>& confA,
                       const std::vector<float>& confB,
                       double position,
-                      float* out);
+                      float* out,
+                      const float* validA = 0,
+                      const float* validB = 0);
+
+/**
+ * @brief computeFlow for a picture split into a foreground and a background by a matte: the two
+ * are solved separately, so the motion of one cannot leak across the edge onto the other.
+ *
+ * @param m0, m1  the matte of frame 0 and of frame 1 (width * height, 1 = foreground)
+ * @param fg      receives the field of the foreground, continued smoothly outside the matte
+ * @param bg      receives the field of the background, continued smoothly under the foreground
+ */
+bool computeFlowLayered(const float* i0,
+                        const float* i1,
+                        const float* m0,
+                        const float* m1,
+                        int width,
+                        int height,
+                        const Params& params,
+                        std::vector<float>* fg,
+                        std::vector<float>* bg,
+                        const volatile bool* abort = 0);
+
+/**
+ * @brief interpolateFrame for a matted picture: the foreground and the background are each built
+ * from their own fields (computeFlowLayered, both directions) and put back together with the
+ * matte moved to the in-between time. The background is only taken from where it is visible, so
+ * what the foreground uncovers comes from the frame that can see it.
+ */
+void interpolateFrameLayered(const float* a,
+                             const float* b,
+                             int nComp,
+                             int width,
+                             int height,
+                             const std::vector<float>& fgAB,
+                             const std::vector<float>& fgBA,
+                             const std::vector<float>& bgAB,
+                             const std::vector<float>& bgBA,
+                             const float* matteA,
+                             const float* matteB,
+                             double position,
+                             float* out);
 
 } // namespace FlowCore
 

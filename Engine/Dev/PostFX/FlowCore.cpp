@@ -865,7 +865,9 @@ interpolateFrame(const float* a,
                  const std::vector<float>& confA,
                  const std::vector<float>& confB,
                  double position,
-                 float* out)
+                 float* out,
+                 const float* validA,
+                 const float* validB)
 {
     const float s = (float)std::max( 0., std::min(1., position) );
     const std::size_t N = (std::size_t)width * height;
@@ -901,6 +903,12 @@ interpolateFrame(const float* a,
             if ( (bx < -0.5f) || (by < -0.5f) || (bx > (float)width - 0.5f) || (by > (float)height - 0.5f) ) {
                 cb *= 0.05f;
             }
+            if (validA) {
+                ca *= sample(validA, width, height, ax, ay);
+            }
+            if (validB) {
+                cb *= sample(validB, width, height, bx, by);
+            }
             // mix by closeness in time, each side scaled by how far it can be trusted
             const float wa = (1.f - s) * (ca + 0.01f), wb = s * (cb + 0.01f);
             const float inv = 1.f / (wa + wb);
@@ -924,5 +932,182 @@ interpolateFrame(const float* a,
         }
     }
 } // interpolateFrame
+
+namespace {
+// Grows the bright areas of a single-channel picture by `radius` pixels (a square maximum filter).
+void
+dilate(std::vector<float>* img, int w, int h, int radius)
+{
+    std::vector<float> tmp( img->size() );
+
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float m = 0.f;
+            for (int dx = -radius; dx <= radius; ++dx) {
+                m = std::max(m, (*img)[(std::size_t)y * w + clampi(x + dx, 0, w - 1)]);
+            }
+            tmp[(std::size_t)y * w + x] = m;
+        }
+    }
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float m = 0.f;
+            for (int dy = -radius; dy <= radius; ++dy) {
+                m = std::max(m, tmp[(std::size_t)clampi(y + dy, 0, h - 1) * w + x]);
+            }
+            (*img)[(std::size_t)y * w + x] = m;
+        }
+    }
+}
+
+// Fills the parts of `img` where `known` is low with a smooth continuation of the parts where it
+// is high (push-pull: average the known pixels down a pyramid until none are missing, then bring
+// the averages back up into the holes).
+void
+fillUnknown(std::vector<float>* img, const std::vector<float>& known, int w, int h)
+{
+    if ( (w <= 1) && (h <= 1) ) {
+        return;
+    }
+    const int nw = (w + 1) / 2, nh = (h + 1) / 2;
+    std::vector<float> small( (std::size_t)nw * nh ), smallKnown( (std::size_t)nw * nh );
+    bool anyHole = false;
+    for (int y = 0; y < nh; ++y) {
+        for (int x = 0; x < nw; ++x) {
+            float sum = 0.f, sw = 0.f;
+            for (int dy = 0; dy < 2; ++dy) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    const std::size_t k = (std::size_t)std::min(2 * y + dy, h - 1) * w + std::min(2 * x + dx, w - 1);
+                    sum += known[k] * (*img)[k];
+                    sw += known[k];
+                }
+            }
+            small[(std::size_t)y * nw + x] = sw > 0.f ? sum / sw : 0.f;
+            smallKnown[(std::size_t)y * nw + x] = std::min(1.f, sw);
+            anyHole = anyHole || (sw < 1.f);
+        }
+    }
+    if (anyHole) {
+        fillUnknown(&small, smallKnown, nw, nh);
+    }
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const std::size_t k = (std::size_t)y * w + x;
+            if (known[k] < 1.f) {
+                const float up = sample(&small[0], nw, nh, ( (float)x - 0.5f ) * 0.5f, ( (float)y - 0.5f ) * 0.5f);
+                (*img)[k] = known[k] * (*img)[k] + (1.f - known[k]) * up;
+            }
+        }
+    }
+}
+} // namespace
+
+bool
+computeFlowLayered(const float* i0,
+                   const float* i1,
+                   const float* m0,
+                   const float* m1,
+                   int width,
+                   int height,
+                   const Params& params,
+                   std::vector<float>* fg,
+                   std::vector<float>* bg,
+                   const volatile bool* abort)
+{
+    const std::size_t N = (std::size_t)width * height;
+    const float* img[2] = { i0, i1 };
+    const float* mat[2] = { m0, m1 };
+    std::vector<float> fore[2], back[2];
+
+    for (int f = 0; f < 2; ++f) {
+        // Foreground: the picture inside the matte over a flat mid grey, so that the matte's own
+        // outline becomes a feature that moves with the foreground.
+        fore[f].resize(N);
+        std::vector<float> grown(mat[f], mat[f] + N), known(N);
+        for (std::size_t k = 0; k < N; ++k) {
+            const float m = std::max( 0.f, std::min(1.f, mat[f][k]) );
+            fore[f][k] = m * img[f][k] + (1.f - m) * 128.f;
+            grown[k] = m > 0.02f ? 1.f : 0.f;
+        }
+        // Background: the foreground (and two pixels around it, where the edge is mixed in) cut
+        // out and the hole filled smoothly, so nothing of the foreground is left to be followed.
+        dilate(&grown, width, height, 2);
+        for (std::size_t k = 0; k < N; ++k) {
+            known[k] = 1.f - grown[k];
+        }
+        back[f].assign(img[f], img[f] + N);
+        fillUnknown(&back[f], known, width, height);
+    }
+    if ( !computeFlow(&fore[0][0], &fore[1][0], width, height, params, fg, 0, abort) ) {
+        return false;
+    }
+
+    return computeFlow(&back[0][0], &back[1][0], width, height, params, bg, 0, abort);
+}
+
+void
+interpolateFrameLayered(const float* a,
+                        const float* b,
+                        int nComp,
+                        int width,
+                        int height,
+                        const std::vector<float>& fgAB,
+                        const std::vector<float>& fgBA,
+                        const std::vector<float>& bgAB,
+                        const std::vector<float>& bgBA,
+                        const float* matteA,
+                        const float* matteB,
+                        double position,
+                        float* out)
+{
+    const std::size_t N = (std::size_t)width * height;
+    std::vector<float> cfA, cfB, cbA, cbB;
+
+    flowConsistency(fgAB, fgBA, width, height, &cfA);
+    flowConsistency(fgBA, fgAB, width, height, &cfB);
+    flowConsistency(bgAB, bgBA, width, height, &cbA);
+    flowConsistency(bgBA, bgAB, width, height, &cbB);
+    // Outside its own layer a field is only a smooth continuation, and both directions continue
+    // alike, so the round trip says nothing there: trust it fully and let the matte decide.
+    std::vector<float> mA(N), mB(N), holeA(N), holeB(N);
+    for (std::size_t k = 0; k < N; ++k) {
+        mA[k] = std::max( 0.f, std::min(1.f, matteA[k]) );
+        mB[k] = std::max( 0.f, std::min(1.f, matteB[k]) );
+        holeA[k] = mA[k] > 0.02f ? 1.f : 0.f;
+        holeB[k] = mB[k] > 0.02f ? 1.f : 0.f;
+    }
+    dilate(&holeA, width, height, 1);
+    dilate(&holeB, width, height, 1);
+    std::vector<float> ones(N, 1.f);
+    // the matte at the in-between time, carried by the foreground's motion
+    std::vector<float> matteT(N);
+    interpolateFrame(&mA[0], &mB[0], 1, width, height, fgAB, fgBA, ones, ones, position, &matteT[0]);
+    // the foreground from where the matte is, the background from where it is not
+    std::vector<float> fore(N * nComp), back(N * nComp);
+    interpolateFrame(a, b, nComp, width, height, fgAB, fgBA, cfA, cfB, position, &fore[0], &mA[0], &mB[0]);
+    for (std::size_t k = 0; k < N; ++k) {
+        holeA[k] = 1.f - holeA[k];
+        holeB[k] = 1.f - holeB[k];
+    }
+    interpolateFrame(a, b, nComp, width, height, bgAB, bgBA, cbA, cbB, position, &back[0], &holeA[0], &holeB[0]);
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t k = (std::size_t)y * width + x;
+            const float m = matteT[k];
+            for (int c = 0; c < nComp; ++c) {
+                out[k * nComp + c] = m * fore[k * nComp + c] + (1.f - m) * back[k * nComp + c];
+            }
+        }
+    }
+} // interpolateFrameLayered
 
 } // namespace FlowCore

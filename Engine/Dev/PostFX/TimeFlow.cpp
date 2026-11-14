@@ -89,7 +89,8 @@ struct TimeFlowPrivate
         U64 hash;
         double time, otherTime, scale;
         RectI bounds;
-        std::vector<float> flow;
+        bool layered;
+        std::vector<float> flow, background;
     };
     std::list<CachedField> fields;
     QMutex fieldsMutex;
@@ -118,15 +119,22 @@ TimeFlow::getPluginDescription() const
            "Where something is covered or uncovered between the two frames there is no motion to follow; there the node "
            "uses whichever frame can see the area, and falls back to a dissolve when neither can be trusted.\n\n"
            "The optional Vectors input replaces the node's own estimate with supplied motion vectors, for example the "
-           "velocity pass of a 3D render.";
+           "velocity pass of a 3D render.\n\n"
+           "The optional Matte input takes the alpha of a foreground object (a roto shape or a key). The object and the "
+           "background behind it are then followed and rebuilt separately and put back together, which removes the faint "
+           "double outline a moving object otherwise gets at its edge. The matte must cover the object on every source frame.";
 }
 
 void
-TimeFlow::addAcceptedComponents(int /*inputNb*/,
+TimeFlow::addAcceptedComponents(int inputNb,
                                 std::list<ImagePlaneDesc>* comps)
 {
     comps->push_back( ImagePlaneDesc::getRGBAComponents() );
-    comps->push_back( ImagePlaneDesc::getRGBComponents() );
+    if (inputNb == 2) {
+        comps->push_back( ImagePlaneDesc::getAlphaComponents() );
+    } else {
+        comps->push_back( ImagePlaneDesc::getRGBComponents() );
+    }
 }
 
 void
@@ -423,6 +431,17 @@ TimeFlow::getFramesNeeded(double time,
         views.insert( std::make_pair(view, ranges) );
         ret.insert( std::make_pair(1, views) );
     }
+    if ( ownVectors && getInput(2) && (method == eMethodMotion) && (position != 0.) ) {
+        // the matte of both source frames
+        RangeD mr;
+        mr.min = before;
+        mr.max = before + 1.;
+        std::vector<RangeD> ranges;
+        ranges.push_back(mr);
+        FrameRangesMap views;
+        views.insert( std::make_pair(view, ranges) );
+        ret.insert( std::make_pair(2, views) );
+    }
 
     return ret;
 }
@@ -530,20 +549,58 @@ toBuffer(const ImagePtr& img,
 // The vector field from the frame at `time` to the frame at `otherTime`, over `bounds`. Returns false
 // when either frame is missing or the render was aborted.
 bool
+TimeFlow::fetchMatte(double time,
+                     const RenderActionArgs& args,
+                     const RectI& bounds,
+                     std::vector<float>* matte)
+{
+    RectI roi;
+    ImagePtr img = getImage(2, time, args.mappedScale, args.view, NULL, NULL, false, false, eStorageModeRAM, 0, &roi);
+
+    if (!img) {
+        return false;
+    }
+    const int W = bounds.width(), H = bounds.height();
+    matte->assign( (std::size_t)W * H, 0.f );
+    Image::ReadAccess ra( img.get() );
+    const RectI ib = img->getBounds();
+    const int nComp = img->getComponents().getNumComponents();
+    // the alpha of an RGBA picture, otherwise the first channel
+    const int c = nComp >= 4 ? 3 : 0;
+    for (int y = std::max(bounds.y1, ib.y1); y < std::min(bounds.y2, ib.y2); ++y) {
+        float* o = &(*matte)[(std::size_t)(y - bounds.y1) * W];
+        for (int x = std::max(bounds.x1, ib.x1); x < std::min(bounds.x2, ib.x2); ++x) {
+            const float* p = (const float*)ra.pixelAt(x, y);
+            if (p) {
+                o[x - bounds.x1] = p[c];
+            }
+        }
+    }
+
+    return true;
+}
+
+bool
 TimeFlow::computeField(double time,
                        double otherTime,
                        const RenderActionArgs& args,
                        const RectI& bounds,
-                       std::vector<float>* flow)
+                       std::vector<float>* flow,
+                       std::vector<float>* background)
 {
     const U64 hash = getHash();
+    const bool layered = background != 0;
     const double scale = args.mappedScale.toOfxPointD().x;
     {
         QMutexLocker l(&_imp->fieldsMutex);
         for (std::list<TimeFlowPrivate::CachedField>::iterator it = _imp->fields.begin(); it != _imp->fields.end(); ++it) {
             if ( (it->hash == hash) && (it->time == time) && (it->otherTime == otherTime) && (it->scale == scale)
-                 && (it->bounds.x1 == bounds.x1) && (it->bounds.y1 == bounds.y1) && (it->bounds.x2 == bounds.x2) && (it->bounds.y2 == bounds.y2) ) {
+                 && (it->bounds.x1 == bounds.x1) && (it->bounds.y1 == bounds.y1) && (it->bounds.x2 == bounds.x2) && (it->bounds.y2 == bounds.y2)
+                 && (it->layered == layered) ) {
                 *flow = it->flow;
+                if (layered) {
+                    *background = it->background;
+                }
                 _imp->fields.splice(_imp->fields.begin(), _imp->fields, it); // most recently used first
 
                 return true;
@@ -572,7 +629,15 @@ TimeFlow::computeField(double time,
     p.vectorDetail = _imp->vectorDetail.lock()->getValue();
     p.smoothness = _imp->smoothness.lock()->getValue();
     p.meanNormalize = _imp->flickerCompensation.lock()->getValue();
-    if ( !FlowCore::computeFlow(&a[0], &b[0], W, H, p, flow) || aborted() ) {
+    if (layered) {
+        std::vector<float> ma, mb;
+        if ( !fetchMatte(time, args, bounds, &ma) || !fetchMatte(otherTime, args, bounds, &mb) || aborted() ) {
+            return false;
+        }
+        if ( !FlowCore::computeFlowLayered(&a[0], &b[0], &ma[0], &mb[0], W, H, p, flow, background) || aborted() ) {
+            return false;
+        }
+    } else if ( !FlowCore::computeFlow(&a[0], &b[0], W, H, p, flow) || aborted() ) {
         return false;
     }
     {
@@ -584,7 +649,11 @@ TimeFlow::computeField(double time,
         e.otherTime = otherTime;
         e.scale = scale;
         e.bounds = bounds;
+        e.layered = layered;
         e.flow = *flow;
+        if (layered) {
+            e.background = *background;
+        }
         // two fields per pair of source frames, six with temporal smoothing; room for a pair and its neighbour
         while (_imp->fields.size() > 8) {
             _imp->fields.pop_back();
@@ -657,6 +726,14 @@ TimeFlow::render(const RenderActionArgs& args)
                     ba.swap(v2);
                     FlowCore::invertFlow(ba, W, H, &ab);
                     haveFields = true;
+                }
+            } else if ( getInput(2) ) {
+                // a matte: the foreground and the background each get their own pair of fields
+                std::vector<float> bgAB, bgBA, ma, mb;
+                if ( computeField(before, after, args, outBounds, &ab, &bgAB) && computeField(after, before, args, outBounds, &ba, &bgBA)
+                     && fetchMatte(before, args, outBounds, &ma) && fetchMatte(after, args, outBounds, &mb) && !aborted() ) {
+                    FlowCore::interpolateFrameLayered(&a[0], &b[0], outNComp, W, H, ab, ba, bgAB, bgBA, &ma[0], &mb[0], position, &out[0]);
+                    moved = true;
                 }
             } else {
                 haveFields = computeField(before, after, args, outBounds, &ab) && computeField(after, before, args, outBounds, &ba);
