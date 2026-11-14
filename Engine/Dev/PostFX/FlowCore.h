@@ -130,6 +130,60 @@ void temporalFilter(const std::vector<float>& current,
                     double strength,
                     std::vector<float>* out);
 
+/**
+ * @brief How far each vector of a field can be trusted, from the field in the opposite direction.
+ *
+ * Following a pixel along `ab` into the other frame and then back along `ba` should land where it
+ * started. Where it does not, the two solves disagree: typically something is being covered or
+ * uncovered there, and there is no true vector to find.
+ *
+ * @param ab   field from frame A to frame B (computeFlow layout)
+ * @param ba   field from frame B to frame A
+ * @param confidence  receives width * height values, 1 = the round trip closes, towards 0 = it does not
+ */
+void flowConsistency(const std::vector<float>& ab,
+                     const std::vector<float>& ba,
+                     int width,
+                     int height,
+                     std::vector<float>* confidence);
+
+/**
+ * @brief The field in the opposite direction, derived from a field instead of solved from pictures:
+ * used when vectors are supplied for one direction only (a renderer's motion pass).
+ * @param ba   field from frame B to frame A
+ * @param ab   receives the field from frame A to frame B
+ */
+void invertFlow(const std::vector<float>& ba,
+                int width,
+                int height,
+                std::vector<float>* ab);
+
+/**
+ * @brief Builds the picture at a time between two frames by moving both along the motion.
+ *
+ * @param a, b   the two frames, width * height * nComp floats each (any number of channels)
+ * @param ab, ba the fields from A to B and from B to A
+ * @param confA, confB  flowConsistency of ab and of ba
+ * @param position  0 = frame A, 1 = frame B
+ * @param out    receives width * height * nComp floats
+ *
+ * Every output pixel is looked up in A (a fraction `position` of the way back along ab) and in B
+ * (the rest of the way back along ba) and the two are mixed by how close each frame is in time.
+ * Where only one of the two lookups can be trusted (the area was hidden in the other frame) that
+ * one is used alone; where neither can, the result falls back to a plain dissolve.
+ */
+void interpolateFrame(const float* a,
+                      const float* b,
+                      int nComp,
+                      int width,
+                      int height,
+                      const std::vector<float>& ab,
+                      const std::vector<float>& ba,
+                      const std::vector<float>& confA,
+                      const std::vector<float>& confB,
+                      double position,
+                      float* out);
+
 } // namespace FlowCore
 
 #endif // NATRON_ENGINE_FLOWCORE_H

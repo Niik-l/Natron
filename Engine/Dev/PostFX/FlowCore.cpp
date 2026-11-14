@@ -729,4 +729,200 @@ temporalFilter(const std::vector<float>& current,
     out->swap(res);
 } // temporalFilter
 
+namespace {
+// Bilinear lookup in a 2-channel field, edge clamped.
+inline void
+sampleFlow(const std::vector<float>& f, int w, int h, float x, float y, float* u, float* v)
+{
+    x = x < 0.f ? 0.f : ( x > (float)(w - 1) ? (float)(w - 1) : x );
+    y = y < 0.f ? 0.f : ( y > (float)(h - 1) ? (float)(h - 1) : y );
+    const int x0 = (int)x, y0 = (int)y;
+    const int x1 = std::min(x0 + 1, w - 1), y1 = std::min(y0 + 1, h - 1);
+    const float tx = x - (float)x0, ty = y - (float)y0;
+    const float* p00 = &f[( (std::size_t)y0 * w + x0 ) * 2];
+    const float* p01 = &f[( (std::size_t)y0 * w + x1 ) * 2];
+    const float* p10 = &f[( (std::size_t)y1 * w + x0 ) * 2];
+    const float* p11 = &f[( (std::size_t)y1 * w + x1 ) * 2];
+    const float ut = p00[0] + (p01[0] - p00[0]) * tx, ub = p10[0] + (p11[0] - p10[0]) * tx;
+    const float vt = p00[1] + (p01[1] - p00[1]) * tx, vb = p10[1] + (p11[1] - p10[1]) * tx;
+
+    *u = ut + (ub - ut) * ty;
+    *v = vt + (vb - vt) * ty;
+}
+
+// Bilinear lookup in an nComp-channel picture, edge clamped.
+inline void
+samplePixel(const float* img, int nComp, int w, int h, float x, float y, float* out)
+{
+    x = x < 0.f ? 0.f : ( x > (float)(w - 1) ? (float)(w - 1) : x );
+    y = y < 0.f ? 0.f : ( y > (float)(h - 1) ? (float)(h - 1) : y );
+    const int x0 = (int)x, y0 = (int)y;
+    const int x1 = std::min(x0 + 1, w - 1), y1 = std::min(y0 + 1, h - 1);
+    const float tx = x - (float)x0, ty = y - (float)y0;
+    const float* p00 = img + ( (std::size_t)y0 * w + x0 ) * nComp;
+    const float* p01 = img + ( (std::size_t)y0 * w + x1 ) * nComp;
+    const float* p10 = img + ( (std::size_t)y1 * w + x0 ) * nComp;
+    const float* p11 = img + ( (std::size_t)y1 * w + x1 ) * nComp;
+    for (int c = 0; c < nComp; ++c) {
+        const float t = p00[c] + (p01[c] - p00[c]) * tx, b = p10[c] + (p11[c] - p10[c]) * tx;
+        out[c] = t + (b - t) * ty;
+    }
+}
+
+// The point p of the source frame that a field carries to (x, y) after the fraction `part` of its
+// motion: p + part * field(p) = (x, y), found by repeated substitution. `miss` receives how far
+// the answer is from closing, in pixels (large where no single point fits, i.e. at an occlusion).
+inline void
+traceBack(const std::vector<float>& field, int w, int h, float x, float y, float part, float* px, float* py, float* miss)
+{
+    float u, v;
+
+    sampleFlow(field, w, h, x, y, &u, &v);
+    float qx = x - part * u, qy = y - part * v;
+    for (int it = 0; it < 5; ++it) {
+        sampleFlow(field, w, h, qx, qy, &u, &v);
+        qx = x - part * u;
+        qy = y - part * v;
+    }
+    sampleFlow(field, w, h, qx, qy, &u, &v);
+    const float ex = qx + part * u - x, ey = qy + part * v - y;
+    *px = qx;
+    *py = qy;
+    *miss = std::sqrt(ex * ex + ey * ey);
+}
+} // namespace
+
+void
+flowConsistency(const std::vector<float>& ab,
+                const std::vector<float>& ba,
+                int width,
+                int height,
+                std::vector<float>* confidence)
+{
+    const std::size_t N = (std::size_t)width * height;
+
+    confidence->assign(N, 0.f);
+    if ( (ab.size() < 2 * N) || (ba.size() < 2 * N) ) {
+        return;
+    }
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t k = (std::size_t)y * width + x;
+            const float u = ab[2 * k], v = ab[2 * k + 1];
+            const float tx = (float)x + u, ty = (float)y + v;
+            if ( (tx < -0.5f) || (ty < -0.5f) || (tx > (float)width - 0.5f) || (ty > (float)height - 0.5f) ) {
+                continue; // leaves the frame: nothing there to check against
+            }
+            float bu, bv;
+            sampleFlow(ba, width, height, tx, ty, &bu, &bv);
+            const float ex = u + bu, ey = v + bv;
+            // allowed miss: half a pixel plus a share of the speed
+            const float tol2 = 0.5f + 0.01f * (u * u + v * v + bu * bu + bv * bv);
+            (*confidence)[k] = std::exp( -(ex * ex + ey * ey) / (2.f * tol2) );
+        }
+    }
+}
+
+void
+invertFlow(const std::vector<float>& ba,
+           int width,
+           int height,
+           std::vector<float>* ab)
+{
+    const std::size_t N = (std::size_t)width * height;
+    std::vector<float> res(2 * N, 0.f);
+
+    if (ba.size() >= 2 * N) {
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                // the point q of B that lands on (x, y): q + ba(q) = (x, y); then ab(x, y) = -ba(q)
+                float qx, qy, miss, u, v;
+                traceBack(ba, width, height, (float)x, (float)y, 1.f, &qx, &qy, &miss);
+                sampleFlow(ba, width, height, qx, qy, &u, &v);
+                const std::size_t k = (std::size_t)y * width + x;
+                res[2 * k] = -u;
+                res[2 * k + 1] = -v;
+            }
+        }
+    }
+    ab->swap(res);
+}
+
+void
+interpolateFrame(const float* a,
+                 const float* b,
+                 int nComp,
+                 int width,
+                 int height,
+                 const std::vector<float>& ab,
+                 const std::vector<float>& ba,
+                 const std::vector<float>& confA,
+                 const std::vector<float>& confB,
+                 double position,
+                 float* out)
+{
+    const float s = (float)std::max( 0., std::min(1., position) );
+    const std::size_t N = (std::size_t)width * height;
+    const bool haveConf = (confA.size() >= N) && (confB.size() >= N);
+
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+    for (int y = 0; y < height; ++y) {
+        std::vector<float> pa(nComp), pb(nComp), da(nComp), db(nComp);
+        for (int x = 0; x < width; ++x) {
+            float ax, ay, bx, by, missA, missB;
+            traceBack(ab, width, height, (float)x, (float)y, s, &ax, &ay, &missA);
+            traceBack(ba, width, height, (float)x, (float)y, 1.f - s, &bx, &by, &missB);
+            samplePixel(a, nComp, width, height, ax, ay, &pa[0]);
+            samplePixel(b, nComp, width, height, bx, by, &pb[0]);
+            float ca = 1.f, cb = 1.f;
+            if (haveConf) {
+                float dummy;
+                // the confidence fields are single-channel: read them at the nearest pixel
+                const int iax = clampi( (int)std::floor(ax + 0.5f), 0, width - 1 ), iay = clampi( (int)std::floor(ay + 0.5f), 0, height - 1 );
+                const int ibx = clampi( (int)std::floor(bx + 0.5f), 0, width - 1 ), iby = clampi( (int)std::floor(by + 0.5f), 0, height - 1 );
+                ca = confA[(std::size_t)iay * width + iax];
+                cb = confB[(std::size_t)iby * width + ibx];
+                (void)dummy;
+            }
+            ca *= std::exp(-missA * missA / 2.f);
+            cb *= std::exp(-missB * missB / 2.f);
+            // a lookup that falls outside its frame has nothing real to offer
+            if ( (ax < -0.5f) || (ay < -0.5f) || (ax > (float)width - 0.5f) || (ay > (float)height - 0.5f) ) {
+                ca *= 0.05f;
+            }
+            if ( (bx < -0.5f) || (by < -0.5f) || (bx > (float)width - 0.5f) || (by > (float)height - 0.5f) ) {
+                cb *= 0.05f;
+            }
+            // mix by closeness in time, each side scaled by how far it can be trusted
+            const float wa = (1.f - s) * (ca + 0.01f), wb = s * (cb + 0.01f);
+            const float inv = 1.f / (wa + wb);
+            // neither side trusted: lean towards a plain dissolve of the two frames in place
+            const float trust = std::max(ca, cb);
+            const float keep = trust >= 0.3f ? 1.f : trust / 0.3f;
+            float* o = out + ( (std::size_t)y * width + x ) * nComp;
+            if (keep < 1.f) {
+                const float* qa = a + ( (std::size_t)y * width + x ) * nComp;
+                const float* qb = b + ( (std::size_t)y * width + x ) * nComp;
+                for (int c = 0; c < nComp; ++c) {
+                    const float moved = (wa * pa[c] + wb * pb[c]) * inv;
+                    const float dissolve = qa[c] + (qb[c] - qa[c]) * s;
+                    o[c] = dissolve + (moved - dissolve) * keep;
+                }
+            } else {
+                for (int c = 0; c < nComp; ++c) {
+                    o[c] = (wa * pa[c] + wb * pb[c]) * inv;
+                }
+            }
+        }
+    }
+} // interpolateFrame
+
 } // namespace FlowCore
