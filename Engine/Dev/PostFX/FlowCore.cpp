@@ -184,8 +184,35 @@ refineLevel(const Level& L, const Params& params, bool smooth, std::vector<float
             const float det = hxx * hyy - hxy * hxy;
             float u = u0, v = v0;
             float firstCost = -1.f, cost = 0.f, off = 0.f;
-            // a patch without texture in both directions cannot be located: keep the prior
-            const bool textured = det > 1e-3f * n * n && (hxx + hyy) > 0.5f * n;
+            // A patch that only holds parallel lines (cladding, blinds, a single edge) can be located
+            // across the lines but not along them. Solving both directions there divides by almost
+            // nothing and the patch slides along the lines, so such a patch is only moved across
+            // them and keeps the prior along them. The two strengths are the eigenvalues of the
+            // normal matrix; the direction across the lines is the eigenvector of the larger one.
+            const float halfTrace = 0.5f * (hxx + hyy);
+            const float disc = std::sqrt(std::max(0.f, 0.25f * (hxx - hyy) * (hxx - hyy) + hxy * hxy));
+            const float strong = halfTrace + disc, weak = halfTrace - disc;
+            const bool oneDirection = weak < 0.05f * strong;
+            float ex = 1.f, ey = 0.f;
+            if (oneDirection) {
+                if (hxx >= hyy) {
+                    ex = strong - hyy;
+                    ey = hxy;
+                } else {
+                    ex = hxy;
+                    ey = strong - hxx;
+                }
+                const float len = std::sqrt(ex * ex + ey * ey);
+                if (len > 0.f) {
+                    ex /= len;
+                    ey /= len;
+                } else {
+                    ex = 1.f;
+                    ey = 0.f;
+                }
+            }
+            // a patch without texture in any direction cannot be located at all: keep the prior
+            const bool textured = (hxx + hyy) > 0.5f * n && (oneDirection || det > 1e-3f * n * n);
             const int iters = textured ? maxIter : 1;
             for (int it = 0; it < iters; ++it) {
                 float sumW = 0.f;
@@ -216,8 +243,15 @@ refineLevel(const Level& L, const Params& params, bool smooth, std::vector<float
                 if (!textured) {
                     break;
                 }
-                const float du = ( hyy * bx - hxy * by) / det;
-                const float dv = (-hxy * bx + hxx * by) / det;
+                float du, dv;
+                if (oneDirection) {
+                    const float along = (ex * bx + ey * by) / strong;
+                    du = along * ex;
+                    dv = along * ey;
+                } else {
+                    du = ( hyy * bx - hxy * by) / det;
+                    dv = (-hxy * bx + hxx * by) / det;
+                }
                 u -= du;
                 v -= dv;
                 if (du * du + dv * dv < 0.0004f) {
