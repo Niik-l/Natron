@@ -234,6 +234,7 @@
 #include "Dev/Scene3D/Group3D.h"
 #include "Dev/Scene3D/Volume3D.h"
 #include "Dev/Scene3D/ReadVDB.h"
+#include "Dev/Scene3D/ReadSplats.h"
 #include "Dev/Scene3D/ReadAlembicCamera.h"
 #include "Dev/Scene3D/ReadAlembicTransform.h"
 #include "Dev/Scene3D/ReadAlembicArchive.h"
@@ -1773,6 +1774,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<Transform3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Volume3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadVDB>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<ReadSplats>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadAlembicCamera>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadAlembicTransform>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<ReadAlembicArchive>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
