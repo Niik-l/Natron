@@ -39,12 +39,14 @@ struct SplatRenderPrivate;
 /**
  * @brief GPU renderer for 3D Gaussian splat scenes (wgpu, via SplatCore).
  *
- * Input 0 (Scene):  a ReadSplats node, directly or under a Scene3D / Group3D /
- *                   Transform3D (a parent group's transform is applied).
+ * Input 0 (Scene):  one to eight ReadSplats nodes, directly or under a Scene3D /
+ *                   Group3D / Transform3D (a parent group's transform is applied).
+ *                   Several scenes are sorted and blended together.
  * Input 1 (Camera): optional Camera3D / any CameraProvider. Unconnected ->
  *                   the scene is framed from the front.
  *
- * Output: linear premultiplied RGBA at the project format, plus a Depth plane
+ * Output: linear premultiplied RGBA at the project format or a size of its own,
+ * with optional motion blur and depth of field (several draws averaged), plus a Depth plane
  * (mean distance along the view axis of what is visible, world units), to
  * composite against ScanlineRender / CyclesRender depth.
  *

@@ -24,10 +24,15 @@
 #include "SplatRender.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <set>
+#include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include <QtCore/QMutex>
@@ -63,12 +68,39 @@ struct SplatRenderPrivate
 {
     QMutex rendererLock;
     std::unique_ptr<SplatCore::Renderer> renderer;   // lazy, lives with the node
-    const SplatData* uploadedData = nullptr;         // what the renderer holds now
-    unsigned long long uploadedVersion = 0;
+    // What the renderer holds now: the scenes, in order, by address and version.
+    std::vector<std::pair<const SplatData*, unsigned long long> > uploaded;
 
     KnobDoubleWPtr splatScale, opacity;
     KnobChoiceWPtr shDegree;
     KnobBoolWPtr antialias, aovDepth;
+
+    KnobChoiceWPtr sizeMode;
+    KnobIntWPtr outputWidth, outputHeight;
+
+    KnobIntWPtr samples;
+    KnobBoolWPtr motionBlur, dof;
+    KnobDoubleWPtr shutter, apertureScale;
+    KnobChoiceWPtr shutterOffset;
+
+    // Output rectangle: the project format, or the node's own size.
+    void outputSize(EffectInstance* self, int* w, int* h, int* x1, int* y1) const
+    {
+        KnobChoicePtr m = sizeMode.lock();
+        if (m && m->getValue() == 1) {
+            KnobIntPtr kw = outputWidth.lock(), kh = outputHeight.lock();
+            *w = std::max(1, kw ? kw->getValue() : 1920);
+            *h = std::max(1, kh ? kh->getValue() : 1080);
+            *x1 = *y1 = 0;
+            return;
+        }
+        Format f;
+        self->getApp()->getProject()->getProjectDefaultFormat(&f);
+        *w = std::max(1, (int)(f.x2 - f.x1));
+        *h = std::max(1, (int)(f.y2 - f.y1));
+        *x1 = f.x1;
+        *y1 = f.y1;
+    }
 };
 
 namespace {
@@ -133,11 +165,12 @@ std::string
 SplatRender::getPluginDescription() const
 {
     return "GPU renderer for 3D Gaussian splat scenes. Wire a ReadSplats node (or a Scene3D / "
-           "Group3D that contains one) into the Scene input and a Camera3D into the Camera "
-           "input. Each splat is drawn as a soft, semi-transparent ellipse, blended far to "
+           "Group3D that contains up to eight of them) into the Scene input and a Camera3D into "
+           "the Camera input. Each splat is drawn as a soft, semi-transparent ellipse, blended far to "
            "near, with the view-dependent colour stored in the scan: the same picture the "
-           "standard 3DGS viewers give. Outputs linear premultiplied RGBA at the project "
-           "format, plus a Depth plane to composite against ScanlineRender or CyclesRender. "
+           "standard 3DGS viewers give. Outputs linear premultiplied RGBA plus a Depth plane to "
+           "composite against ScanlineRender or CyclesRender. The Blur tab adds motion blur "
+           "and depth of field. "
            "Splats carry the lighting they were captured with: they cannot be relit, and they "
            "do not appear in reflections of other renders. For view-dependent highlights set "
            "SH Degree on the ReadSplats node above 0.";
@@ -243,6 +276,126 @@ SplatRender::initializeKnobs()
         page->addKnob(k);
         _imp->aovDepth = k;
     }
+
+    // ---- Output size
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>( this, tr("Output Size") );
+        k->setName("sizeMode");
+        k->setAnimationEnabled(false);
+        std::vector<ChoiceOption> entries;
+        entries.push_back( ChoiceOption("Project", "Project Format", "Render at the project's format.") );
+        entries.push_back( ChoiceOption("Custom", "Custom", "Render at the Width and Height below.") );
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        k->setHintToolTip( tr("Size of the rendered picture. The camera's gate is fitted to it whatever its "
+                              "shape, as in ScanlineRender, so keep the camera's apertures in the same "
+                              "proportion as the picture.") );
+        page->addKnob(k);
+        _imp->sizeMode = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>( this, tr("Width") );
+        k->setName("outputWidth");
+        k->setDefaultValue(1920);
+        k->setMinimum(1);
+        k->setDisplayMinimum(320);
+        k->setDisplayMaximum(4096);
+        k->setAnimationEnabled(false);
+        k->setAddNewLine(false);
+        page->addKnob(k);
+        _imp->outputWidth = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>( this, tr("Height") );
+        k->setName("outputHeight");
+        k->setDefaultValue(1080);
+        k->setMinimum(1);
+        k->setDisplayMinimum(240);
+        k->setDisplayMaximum(4096);
+        k->setAnimationEnabled(false);
+        page->addKnob(k);
+        _imp->outputHeight = k;
+    }
+
+    // ---- Motion blur / depth of field: several draws averaged
+    KnobPagePtr blurPage = AppManager::createKnob<KnobPage>( this, tr("Blur") );
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>( this, tr("Samples") );
+        k->setName("samples");
+        k->setDefaultValue(16);
+        k->setMinimum(1);
+        k->setMaximum(256);
+        k->setDisplayMinimum(1);
+        k->setDisplayMaximum(64);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Number of draws averaged when Motion Blur or Depth of Field is on (it does "
+                              "nothing otherwise). Each draw takes as long as a frame without blur. Too "
+                              "few show as separate ghost images; 16 is a fair start, 32 to 64 for wide "
+                              "blurs.") );
+        blurPage->addKnob(k);
+        _imp->samples = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>( this, tr("Motion Blur") );
+        k->setName("motionBlur");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Blur from the movement of the camera and of the scene's transforms over the "
+                              "shutter time. The splats themselves do not move.") );
+        blurPage->addKnob(k);
+        _imp->motionBlur = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Shutter") );
+        k->setName("shutter");
+        k->setDefaultValue(0.5);
+        k->setMinimum(0.);
+        k->setDisplayMinimum(0.);
+        k->setDisplayMaximum(2.);
+        k->setAnimationEnabled(true);
+        k->setAddNewLine(false);
+        k->setHintToolTip( tr("How long the shutter stays open, in frames. 0.5 is a 180 degree shutter.") );
+        blurPage->addKnob(k);
+        _imp->shutter = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>( this, tr("Shutter Offset") );
+        k->setName("shutterOffset");
+        k->setAnimationEnabled(false);
+        std::vector<ChoiceOption> entries;
+        entries.push_back( ChoiceOption("Centered", "Centered", "Open half before and half after the frame.") );
+        entries.push_back( ChoiceOption("Start", "Start", "Opens at the frame.") );
+        entries.push_back( ChoiceOption("End", "End", "Closes at the frame.") );
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        blurPage->addKnob(k);
+        _imp->shutterOffset = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>( this, tr("Depth of Field") );
+        k->setName("dof");
+        k->setDefaultValue(false);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Blur what is nearer or farther than the camera's Focus Distance, using its "
+                              "F-Stop and focal length (set them on the Camera3D; its own Depth of Field "
+                              "switch is not needed). Needs a connected camera.") );
+        blurPage->addKnob(k);
+        _imp->dof = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Aperture Scale") );
+        k->setName("apertureScale");
+        k->setDefaultValue(1.0);
+        k->setMinimum(0.);
+        k->setDisplayMinimum(0.);
+        k->setDisplayMaximum(100.);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip( tr("Multiplies the size of the lens opening. The opening is worked out as if one "
+                              "scene unit were one metre (focal length / (2 x F-Stop)); a scan has no real "
+                              "unit, so raise this until the blur looks right for the scale of the scene.") );
+        blurPage->addKnob(k);
+        _imp->apertureScale = k;
+    }
 }
 
 StatusEnum
@@ -254,11 +407,11 @@ SplatRender::getPreferredMetadata(NodeMetadata& metadata)
     metadata.setNComps(-1, 4);
     metadata.setBitDepth(-1, eImageBitDepthFloat);
 
-    Format f;
-    getApp()->getProject()->getProjectDefaultFormat(&f);
+    int w, h, x1, y1;
+    _imp->outputSize(this, &w, &h, &x1, &y1);
     RectI fmt;
-    fmt.x1 = f.x1; fmt.y1 = f.y1;
-    fmt.x2 = f.x2; fmt.y2 = f.y2;
+    fmt.x1 = x1; fmt.y1 = y1;
+    fmt.x2 = x1 + w; fmt.y2 = y1 + h;
     metadata.setOutputFormat(fmt);
     return eStatusOK;
 }
@@ -267,12 +420,13 @@ StatusEnum
 SplatRender::getRegionOfDefinition(U64 /*hash*/, double /*time*/, const RenderScale& /*scale*/,
                                    ViewIdx /*view*/, RectD* rod)
 {
-    Format f;
-    getApp()->getProject()->getProjectDefaultFormat(&f);
-    rod->x1 = f.x1;
-    rod->y1 = f.y1;
-    rod->x2 = f.x2;
-    rod->y2 = f.y2;
+    // Canonical (full-resolution) coordinates, not scaled by the render scale.
+    int w, h, x1, y1;
+    _imp->outputSize(this, &w, &h, &x1, &y1);
+    rod->x1 = x1;
+    rod->y1 = y1;
+    rod->x2 = x1 + w;
+    rod->y2 = y1 + h;
     return eStatusOK;
 }
 
@@ -293,18 +447,88 @@ SplatRender::getComponentsNeededAndProduced(double time, ViewIdx view,
     *passThroughInput = 0;
 }
 
+namespace {
+
+struct SceneRef
+{
+    ReadSplats* node = NULL;
+    SplatDataPtr data;
+    float model[16];
+};
+
+struct CameraState
+{
+    float view[16];
+    float projX = 1.f, projY = 1.f, nearClip = 0.1f;
+    double focal = 50., fStop = 2.8, focusDistance = 10.;
+};
+
+// World matrices at `time` of the given ReadSplats nodes (their own transform under
+// any parent Group3D), through the scene graph.
+void splatMatricesAt(EffectInstance* self, double time, std::vector<SceneRef>& scenes)
+{
+    SceneGraph scene;
+    NodesList allNodes;
+    self->getApp()->getProject()->getNodes_recursive(allNodes, true);
+    scene.rebuild(allNodes, time);
+    for (const SceneNode& sn : scene.nodes()) {
+        if (sn.type != eSceneNodeSplats) continue;
+        NodePtr n = sn.sourceNode.lock();
+        if (!n) continue;
+        EffectInstance* e = n->getEffectInstance().get();
+        for (SceneRef& r : scenes) {
+            if ( (EffectInstance*)r.node == e ) std::memcpy(r.model, sn.worldMatrix, sizeof r.model);
+        }
+    }
+}
+
+// Run f(begin, end) over the pixel range [0, n) on several threads: the per-sample
+// colour conversion and averaging of a blurred frame cost more than the draw itself
+// when done on one.
+template <typename F>
+void parallelPixels(std::size_t n, F f)
+{
+    const unsigned hc = std::thread::hardware_concurrency();
+    const std::size_t T = std::max<std::size_t>( 1, std::min<std::size_t>(16, hc ? hc : 4) );
+    if (T == 1 || n < 65536) {
+        f( (std::size_t)0, n );
+        return;
+    }
+    std::vector<std::thread> pool;
+    pool.reserve(T - 1);
+    for (std::size_t t = 1; t < T; ++t) {
+        const std::size_t b = n * t / T, e = n * (t + 1) / T;
+        pool.emplace_back([&f, b, e]() { f(b, e); });
+    }
+    f( (std::size_t)0, n / T );
+    for (std::thread& th : pool) th.join();
+}
+
+// Point i of the Halton sequence in base b, in [0, 1).
+double halton(int i, int b)
+{
+    double f = 1., r = 0.;
+    for (int k = i + 1; k > 0; k /= b) {
+        f /= b;
+        r += f * (k % b);
+    }
+    return r;
+}
+
+} // namespace
+
 StatusEnum
 SplatRender::render(const RenderActionArgs& args)
 {
     if ( !getInput(0) ) {
         setPersistentMessage(eMessageTypeError,
                              "SplatRender: connect a ReadSplats node (or a Scene3D / Group3D that contains "
-                             "one) to the Scene input.");
+                             "some) to the Scene input.");
         return eStatusFailed;
     }
 
-    // ---- find the ReadSplats wired upstream of the Scene input, with its world
-    // matrix (its own transform under any parent Group3D), through the scene graph.
+    // ---- find the ReadSplats nodes wired upstream of the Scene input, with their
+    // world matrices, through the scene graph.
     std::set<const Node*> upstream;
     {
         std::vector<EffectInstancePtr> todo;
@@ -319,43 +543,47 @@ SplatRender::render(const RenderActionArgs& args)
             for (int i = 0; i < ni; ++i) todo.push_back( e->getInput(i) );
         }
     }
-    SceneGraph scene;
+    std::vector<SceneRef> scenes;
+    int nSplatNodes = 0;
+    std::string loadError;
     {
+        SceneGraph scene;
         NodesList allNodes;
         getApp()->getProject()->getNodes_recursive(allNodes, true);
         scene.rebuild(allNodes, args.time);
-    }
-    ReadSplats* splats = NULL;
-    int nSplatNodes = 0;
-    float model[16];
-    for (const SceneNode& sn : scene.nodes()) {
-        if (sn.type != eSceneNodeSplats || !sn.visible) continue;
-        NodePtr n = sn.sourceNode.lock();
-        if ( !n || !upstream.count( n.get() ) || n->isNodeDisabled() ) continue;
-        ReadSplats* rs = dynamic_cast<ReadSplats*>( n->getEffectInstance().get() );
-        if (!rs) continue;
-        ++nSplatNodes;
-        if (!splats) {
-            splats = rs;
-            std::memcpy(model, sn.worldMatrix, sizeof model);
+        for (const SceneNode& sn : scene.nodes()) {
+            if (sn.type != eSceneNodeSplats || !sn.visible) continue;
+            NodePtr n = sn.sourceNode.lock();
+            if ( !n || !upstream.count( n.get() ) || n->isNodeDisabled() ) continue;
+            ReadSplats* rs = dynamic_cast<ReadSplats*>( n->getEffectInstance().get() );
+            if (!rs) continue;
+            ++nSplatNodes;
+            if ( (int)scenes.size() >= SplatCore::kMaxScenes ) continue;
+            SceneRef r;
+            r.node = rs;
+            r.data = rs->getSplatData();
+            if (!r.data) {
+                if ( loadError.empty() ) loadError = rs->getLastLoadError();
+                continue;          // a node with no file, a failed read or an empty crop: skip it
+            }
+            std::memcpy(r.model, sn.worldMatrix, sizeof r.model);
+            scenes.push_back(r);
         }
     }
-    if (!splats) {
+    if (nSplatNodes == 0) {
         setPersistentMessage(eMessageTypeError, "SplatRender: no ReadSplats node in the connected scene.");
         return eStatusFailed;
     }
-    SplatDataPtr data = splats->getSplatData();
-    if (!data) {
-        const std::string why = splats->getLastLoadError();
+    if ( scenes.empty() ) {
         setPersistentMessage( eMessageTypeError,
                               ( "SplatRender: the ReadSplats node has no scene. " +
-                                ( why.empty() ? std::string("Set its File.") : why ) ).c_str() );
+                                ( loadError.empty() ? std::string("Set its File.") : loadError ) ).c_str() );
         return eStatusFailed;
     }
+    const int nScenes = (int)scenes.size();
 
-    // ---- draw parameters
+    // ---- knobs
     SplatCore::DrawParams prm;
-    std::memcpy(prm.model, model, sizeof prm.model);
     {
         KnobDoublePtr k = _imp->splatScale.lock();
         prm.splatScale = k ? (float)k->getValueAtTime(args.time) : 1.f;
@@ -366,47 +594,88 @@ SplatRender::render(const RenderActionArgs& args)
         KnobBoolPtr b = _imp->antialias.lock();
         prm.antialias = b ? b->getValue() : true;
     }
-    {
+    EffectInstancePtr camEffect = skipDots( getInput(1) );
+    CameraProvider* cp = camEffect ? dynamic_cast<CameraProvider*>( camEffect.get() ) : NULL;
+
+    bool wantMB = _imp->motionBlur.lock() && _imp->motionBlur.lock()->getValue();
+    bool wantDof = cp && _imp->dof.lock() && _imp->dof.lock()->getValue();
+    const double shutter = _imp->shutter.lock() ? _imp->shutter.lock()->getValueAtTime(args.time) : 0.5;
+    const int shutterMode = _imp->shutterOffset.lock() ? _imp->shutterOffset.lock()->getValue() : 0;
+    const double apertureScale = _imp->apertureScale.lock() ? _imp->apertureScale.lock()->getValueAtTime(args.time) : 1.;
+    if (shutter <= 0.) wantMB = false;
+    int nSamples = 1;
+    if (wantMB || wantDof) {
+        nSamples = _imp->samples.lock() ? std::max(1, std::min(256, _imp->samples.lock()->getValue())) : 16;
+        if (args.draftMode) nSamples = std::max(1, nSamples / 4);     // scrubbing, dragging a knob
+    }
+
+    // Camera at a given time. No camera: stand back along +Z from the middle of the first scene's box.
+    auto cameraAt = [&](double t, CameraState& cs) {
         double tx = 0, ty = 0, tz = 0, rx = 0, ry = 0, rz = 0;
-        double focal = 50., hAp = 24.576, vAp = 18.672;
-        float nearClip = 0.1f, farClip = 10000.f;
-        EffectInstancePtr camEffect = skipDots( getInput(1) );
-        CameraProvider* cp = camEffect ? dynamic_cast<CameraProvider*>( camEffect.get() ) : NULL;
+        double hAp = 24.576, vAp = 18.672;
+        float farClip = 10000.f;
         if (cp) {
-            cp->getCameraPosition(args.time, tx, ty, tz, rx, ry, rz);
-            focal = cp->getCameraFocalLength(args.time);
-            hAp = cp->getCameraHAperture(args.time);
-            vAp = cp->getCameraVAperture(args.time);
-            nearClip = (float)cp->getCameraNear(args.time);
-            farClip = (float)cp->getCameraFar(args.time);
+            cp->getCameraPosition(t, tx, ty, tz, rx, ry, rz);
+            cs.focal = cp->getCameraFocalLength(t);
+            hAp = cp->getCameraHAperture(t);
+            vAp = cp->getCameraVAperture(t);
+            cs.nearClip = (float)cp->getCameraNear(t);
+            farClip = (float)cp->getCameraFar(t);
+            cs.fStop = std::max( 0.1, cp->getCameraFStop(t) );
+            cs.focusDistance = std::max( 1e-6, cp->getCameraFocusDistance(t) );
         } else {
-            // No camera: stand back along +Z from the middle of the scene's box.
+            const SplatData& d = *scenes[0].data;
+            const float* model = scenes[0].model;
             float c[3], half[3];
             for (int k = 0; k < 3; ++k) {
-                c[k] = 0.5f * (data->bboxMin[k] + data->bboxMax[k]);
-                half[k] = 0.5f * (data->bboxMax[k] - data->bboxMin[k]);
+                c[k] = 0.5f * (d.bboxMin[k] + d.bboxMax[k]);
+                half[k] = 0.5f * (d.bboxMax[k] - d.bboxMin[k]);
             }
             const float wc[3] = {model[0] * c[0] + model[4] * c[1] + model[8] * c[2] + model[12],
                                  model[1] * c[0] + model[5] * c[1] + model[9] * c[2] + model[13],
                                  model[2] * c[0] + model[6] * c[1] + model[10] * c[2] + model[14]};
-            const float s = std::cbrt( std::fabs( model[0] * (model[5] * model[10] - model[9] * model[6])
-                                                  - model[4] * (model[1] * model[10] - model[9] * model[2])
-                                                  + model[8] * (model[1] * model[6] - model[5] * model[2]) ) );
-            const float radius = s * std::sqrt(half[0] * half[0] + half[1] * half[1] + half[2] * half[2]);
+            const float sc = std::cbrt( std::fabs( model[0] * (model[5] * model[10] - model[9] * model[6])
+                                                   - model[4] * (model[1] * model[10] - model[9] * model[2])
+                                                   + model[8] * (model[1] * model[6] - model[5] * model[2]) ) );
+            const float radius = sc * std::sqrt(half[0] * half[0] + half[1] * half[1] + half[2] * half[2]);
             tx = wc[0]; ty = wc[1]; tz = wc[2] + 1.5 * radius;
-            nearClip = std::max(1e-4f, radius * 1e-3f);
+            cs.nearClip = std::max(1e-4f, radius * 1e-3f);
+            // keep the picture's own shape: there is no camera gate to respect
+            const double aspect = (double)std::max( 1, args.roi.height() ) / (double)std::max( 1, args.roi.width() );
+            vAp = hAp * aspect;
         }
-        buildView(tx, ty, tz, rx, ry, rz, prm.view);
+        buildView(tx, ty, tz, rx, ry, rz, cs.view);
         float proj[16];
-        CameraMath::composeProjectionMatrix(focal, hAp, vAp, nearClip, farClip, proj);
-        prm.projX = proj[0];
-        prm.projY = proj[5];
-        prm.nearClip = nearClip;
-    }
+        CameraMath::composeProjectionMatrix(cs.focal, hAp, vAp, cs.nearClip, farClip, proj);
+        cs.projX = proj[0];
+        cs.projY = proj[5];
+    };
 
-    // ---- render: upload only when the scene object changed; draw every time.
+    // ---- render: upload only when the scenes changed; draw every time.
     const int W = args.roi.width();
     const int H = args.roi.height();
+    const bool linearize = scenes[0].node->getPreviewLinearize();
+    static const SrgbToLinear toLinear;
+    // The core blends in the splats' own (display) colourspace, as the scan was
+    // trained. Convert a finished frame to linear through its unpremultiplied value.
+    auto frameToLinear = [&](std::vector<float>& rgba) {
+        float* base = rgba.data();
+        parallelPixels( (std::size_t)W * (std::size_t)H, [base](std::size_t b, std::size_t e) {
+            float* p = base + b * 4;
+            for (std::size_t i = b; i < e; ++i, p += 4) {
+                const float a = p[3];
+                if (a <= 1e-6f) {
+                    p[0] = p[1] = p[2] = 0.f;
+                    continue;
+                }
+                const float inv = 1.f / a;
+                p[0] = toLinear(p[0] * inv) * a;
+                p[1] = toLinear(p[1] * inv) * a;
+                p[2] = toLinear(p[2] * inv) * a;
+            }
+        } );
+    };
+
     SplatCore::RenderOutput rout;
     {
         QMutexLocker lock(&_imp->rendererLock);
@@ -418,60 +687,135 @@ SplatRender::render(const RenderActionArgs& args)
                                   ( "SplatRender: GPU init failed: " + _imp->renderer->lastError() ).c_str() );
             return eStatusFailed;
         }
-        if ( _imp->uploadedData != data.get() || _imp->uploadedVersion != data->version || !_imp->renderer->hasScene() ) {
-            SplatCore::SceneDesc sd;
-            sd.count = data->count;
-            sd.pos = data->pos.data();
-            sd.scale = data->scale.data();
-            sd.rot = data->rot.data();
-            sd.opacity = data->opacity.data();
-            sd.dc = data->dc.data();
-            sd.shRest = data->shRest.empty() ? NULL : data->shRest.data();
-            sd.shDegree = data->shDegree;
-            if ( !_imp->renderer->upload(sd) ) {
-                _imp->uploadedData = NULL;
+        std::vector<std::pair<const SplatData*, unsigned long long> > key;
+        for (const SceneRef& r : scenes) key.push_back( std::make_pair(r.data.get(), r.data->version) );
+        if ( key != _imp->uploaded || !_imp->renderer->hasScene() ) {
+            std::vector<SplatCore::SceneDesc> sds( (std::size_t)nScenes );
+            std::size_t total = 0, bytes = 0;
+            int maxDeg = 0;
+            for (int si = 0; si < nScenes; ++si) {
+                const SplatData& d = *scenes[si].data;
+                SplatCore::SceneDesc& sd = sds[(std::size_t)si];
+                sd.count = d.count;
+                sd.pos = d.pos.data();
+                sd.scale = d.scale.data();
+                sd.rot = d.rot.data();
+                sd.opacity = d.opacity.data();
+                sd.dc = d.dc.data();
+                sd.shRest = d.shRest.empty() ? NULL : d.shRest.data();
+                sd.shDegree = d.shDegree;
+                sd.id = d.version;        // lets SplatRender nodes on the same scan share one GPU copy
+                total += d.count;
+                maxDeg = std::max(maxDeg, d.shRest.empty() ? 0 : d.shDegree);
+            }
+            bytes = SplatCore::Renderer::gpuBytesFor(total, maxDeg);
+            if ( !_imp->renderer->upload(sds.data(), nScenes) ) {
+                _imp->uploaded.clear();
                 setPersistentMessage( eMessageTypeError, ( "SplatRender: " + _imp->renderer->lastError() ).c_str() );
                 return eStatusFailed;
             }
-            _imp->uploadedData = data.get();
-            _imp->uploadedVersion = data->version;
-            std::fprintf( stderr, "[SplatRender] uploaded %llu splats, SH degree %d, %.0f MB on %s\n",
-                          (unsigned long long)data->count, data->shDegree,
-                          (double)SplatCore::Renderer::gpuBytesFor(data->count, data->shDegree) / 1048576.0,
+            _imp->uploaded = key;
+            std::fprintf( stderr, "[SplatRender] uploaded %llu splats in %d scene(s), SH degree %d, %.0f MB on %s\n",
+                          (unsigned long long)total, nScenes, maxDeg, (double)bytes / 1048576.0,
                           _imp->renderer->adapterName().c_str() );
             std::fflush(stderr);
         }
-        if ( !_imp->renderer->draw(data->pos.data(), prm, W, H, rout) ) {
-            setPersistentMessage( eMessageTypeError, ( "SplatRender: " + _imp->renderer->lastError() ).c_str() );
-            return eStatusFailed;
+        std::vector<const float*> positions( (std::size_t)nScenes );
+        for (int si = 0; si < nScenes; ++si) positions[(std::size_t)si] = scenes[(std::size_t)si].data->pos.data();
+
+        // NATRON_SPLAT_TIMING=1 prints where a frame's time went (stderr).
+        static const bool timing = std::getenv("NATRON_SPLAT_TIMING") != NULL;
+        typedef std::chrono::steady_clock Clock;
+        auto msSince = [](const Clock::time_point& t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); };
+        const Clock::time_point tFrame = Clock::now();
+        double msSetup = 0., msSort = 0., msGpu = 0., msWait = 0., msDraw = 0., msPost = 0.;
+
+        std::vector<float> accRgba, accDepth, accAlpha;
+        if (nSamples > 1) {
+            accRgba.assign( (std::size_t)W * H * 4, 0.f );
+            accDepth.assign( (std::size_t)W * H, 0.f );
+            accAlpha.assign( (std::size_t)W * H, 0.f );
+        }
+        for (int smp = 0; smp < nSamples; ++smp) {
+            if ( nSamples > 1 && aborted() ) {
+                return eStatusFailed;
+            }
+            const Clock::time_point tS = Clock::now();
+            // Time of this draw inside the shutter.
+            double t = args.time;
+            if (wantMB) {
+                const double t01 = ( (double)smp + 0.5 ) / (double)nSamples;
+                if (shutterMode == 1) t += t01 * shutter;
+                else if (shutterMode == 2) t += (t01 - 1.) * shutter;
+                else t += (t01 - 0.5) * shutter;
+                splatMatricesAt(this, t, scenes);
+            }
+            CameraState cs;
+            cameraAt(t, cs);
+            std::memcpy(prm.view, cs.view, sizeof prm.view);
+            for (int si = 0; si < nScenes; ++si) std::memcpy(prm.model[si], scenes[(std::size_t)si].model, 16 * sizeof(float));
+            prm.projX = cs.projX;
+            prm.projY = cs.projY;
+            prm.nearClip = cs.nearClip;
+            prm.ndcOffsetX = prm.ndcOffsetY = 0.f;
+            if (wantDof) {
+                // A point on the lens (even spread over a disc). Move the camera there, in its
+                // own plane, and shift the picture back so that what lies at the focus distance
+                // stays put: everything else smears, more the farther it is from that distance.
+                const double lensRadius = cs.focal / (2. * cs.fStop) / 1000. * apertureScale;   // 1 unit = 1 m
+                const double r = std::sqrt( halton(smp, 2) ), th = 6.283185307179586 * halton(smp, 3);
+                const double lx = lensRadius * r * std::cos(th), ly = lensRadius * r * std::sin(th);
+                prm.view[12] -= (float)lx;
+                prm.view[13] -= (float)ly;
+                prm.ndcOffsetX = (float)(cs.projX * lx / cs.focusDistance);
+                prm.ndcOffsetY = (float)(cs.projY * ly / cs.focusDistance);
+            }
+            // Lens samples of one instant see almost the same order: sort once. With motion
+            // blur the view really changes, so every draw sorts.
+            prm.reuseOrder = (smp > 0 && !wantMB);
+            msSetup += msSince(tS);
+            const Clock::time_point tD = Clock::now();
+            if ( !_imp->renderer->draw(positions.data(), prm, W, H, rout) ) {
+                setPersistentMessage( eMessageTypeError, ( "SplatRender: " + _imp->renderer->lastError() ).c_str() );
+                return eStatusFailed;
+            }
+            msDraw += msSince(tD);
+            msSort += rout.sortMs;
+            msGpu += rout.gpuMs;
+            msWait += rout.waitMs;
+            const Clock::time_point tP = Clock::now();
+            if (linearize) frameToLinear(rout.rgba);      // average light, not display values
+            if (nSamples > 1) {
+                parallelPixels( (std::size_t)W * (std::size_t)H, [&](std::size_t b, std::size_t e) {
+                    for (std::size_t i = b * 4; i < e * 4; ++i) accRgba[i] += rout.rgba[i];
+                    for (std::size_t i = b; i < e; ++i) {
+                        const float a = rout.rgba[i * 4 + 3];
+                        accDepth[i] += rout.depth[i] * a;
+                        accAlpha[i] += a;
+                    }
+                } );
+            }
+            msPost += msSince(tP);
+        }
+        if (nSamples > 1) {
+            const std::size_t n = (std::size_t)W * (std::size_t)H;
+            const float inv = 1.f / (float)nSamples;
+            for (std::size_t i = 0; i < n * 4; ++i) rout.rgba[i] = accRgba[i] * inv;
+            for (std::size_t i = 0; i < n; ++i) rout.depth[i] = accAlpha[i] > 1e-6f ? accDepth[i] / accAlpha[i] : 0.f;
+        }
+        if (timing) {
+            std::fprintf(stderr, "[SplatRender] %dx%d, %d sample(s), %llu splats drawn: %.0f ms (per sample: setup %.1f, draw %.1f "
+                                 "of which sort %.1f, GPU %.1f, copy back %.1f; colour + average %.1f)\n",
+                         W, H, nSamples, (unsigned long long)rout.drawn, msSince(tFrame), msSetup / nSamples, msDraw / nSamples,
+                         msSort / nSamples, msWait / nSamples, (msGpu - msWait) / nSamples, msPost / nSamples);
+            std::fflush(stderr);
         }
     }
-    if (nSplatNodes > 1) {
+    if (nSplatNodes > SplatCore::kMaxScenes) {
         setPersistentMessage(eMessageTypeWarning,
-                             "SplatRender: the scene holds more than one ReadSplats node; only the first is "
-                             "rendered. Render each with its own SplatRender and merge them with their Depth.");
+                             "SplatRender: the scene holds more than 8 ReadSplats nodes; only the first 8 are rendered.");
     } else {
         clearPersistentMessage(false);
-    }
-
-    // ---- colours: the core blends in the splats' own (display) colourspace, as
-    // the scan was trained. Convert the finished pixel to linear, through its
-    // unpremultiplied value.
-    if ( splats->getPreviewLinearize() ) {
-        static const SrgbToLinear toLinear;
-        const std::size_t n = (std::size_t)W * (std::size_t)H;
-        float* p = rout.rgba.data();
-        for (std::size_t i = 0; i < n; ++i, p += 4) {
-            const float a = p[3];
-            if (a <= 1e-6f) {
-                p[0] = p[1] = p[2] = 0.f;
-                continue;
-            }
-            const float inv = 1.f / a;
-            p[0] = toLinear(p[0] * inv) * a;
-            p[1] = toLinear(p[1] * inv) * a;
-            p[2] = toLinear(p[2] * inv) * a;
-        }
     }
 
     // ---- write planes (core row 0 = image top; Natron y1 = image bottom)
@@ -496,9 +840,9 @@ SplatRender::render(const RenderActionArgs& args)
                 if (isDepth) {
                     for (int c = 0; c < nc; ++c) dst[c] = rout.depth[si];
                 } else {
-                    const float* s = &rout.rgba[si * 4];
-                    for (int c = 0; c < nc; ++c) dst[c] = c < 4 ? s[c] : s[3];
-                    if (nc == 1) dst[0] = s[3];
+                    const float* sp = &rout.rgba[si * 4];
+                    for (int c = 0; c < nc; ++c) dst[c] = c < 4 ? sp[c] : sp[3];
+                    if (nc == 1) dst[0] = sp[3];
                 }
             }
         }
