@@ -6,6 +6,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <thread>
 
 #include "webgpu.h"
 #include "wgpu.h"
@@ -19,12 +22,14 @@ namespace {
 // One instanced quad per splat, 4 vertices as a triangle strip. Bindings:
 //   0 uniforms, 1 position + opacity, 2 covariance (6 floats), 3 SH colour
 //   coefficients (shStride floats, coefficient-major: c0.rgb, c1.rgb, ...),
-//   4 draw order (far to near).
+//   4 draw order (far to near). Several scenes share the buffers, one after the
+//   other; a splat finds its scene (and so its transform) from its id.
 const char* kShader = R"(
 struct U {
     view: mat4x4f,
-    model: mat4x4f,
-    camPosLocal: vec4f,
+    models: array<mat4x4f, 8>,       // per scene: file space -> world
+    camPosLocal: array<vec4f, 8>,    // per scene: camera position in the scene's file space
+    sceneEnd: array<vec4u, 2>,       // per scene: one past its last splat id
     focal: vec2f,
     viewport: vec2f,
     tanFov: vec2f,
@@ -35,9 +40,8 @@ struct U {
     lowpass: f32,
     maxPx: f32,
     opacityScale: f32,
-    pad0: f32,
-    pad1: f32,
-    pad2: f32,
+    numScenes: u32,
+    ndcOffset: vec2f,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> posOp: array<vec4f>;
@@ -99,7 +103,12 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
     let opacity = p.w * u.opacityScale;
     if (opacity < 0.00392156862) { return o; }
 
-    let mv = u.view * u.model;
+    // Which scene this splat belongs to (ids are concatenated scene after scene).
+    var sc = 0u;
+    for (var k = 0u; k + 1u < u.numScenes; k++) {
+        if (id >= u.sceneEnd[k >> 2u][k & 3u]) { sc = k + 1u; }
+    }
+    let mv = u.view * u.models[sc];
     let pc = mv * vec4f(p.xyz, 1.0);       // camera space: +x right, +y up, looking down -z
     let tz = -pc.z;
     if (tz < u.nearClip) { return o; }
@@ -148,12 +157,12 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
 
     let corner = vec2f(f32(vi & 1u) * 2.0 - 1.0, f32((vi >> 1u) & 1u) * 2.0 - 1.0);
     let offPx = corner.x * r1 * ax1 + corner.y * r2 * ax2;
-    let ndc = vec2f(u.focal.x * pc.x / tz, u.focal.y * pc.y / tz) / (0.5 * u.viewport);
+    let ndc = vec2f(u.focal.x * pc.x / tz, u.focal.y * pc.y / tz) / (0.5 * u.viewport) + u.ndcOffset;
     o.pos = vec4f(ndc + offPx / (0.5 * u.viewport), 0.5, 1.0);
     o.uv = vec2f(corner.x * r1 / s1, corner.y * r2 / s2);
     o.depth = tz;
 
-    let dir = normalize(p.xyz - u.camPosLocal.xyz);
+    let dir = normalize(p.xyz - u.camPosLocal[sc].xyz);
     o.color = vec4f(shColor(id, dir), opacity);
     return o;
 }
@@ -176,8 +185,9 @@ fn fs(i: VOut) -> FOut {
 
 struct Uniforms {
     float view[16];
-    float model[16];
-    float camPosLocal[4];
+    float models[kMaxScenes][16];
+    float camPosLocal[kMaxScenes][4];
+    uint32_t sceneEnd[8];
     float focal[2];
     float viewport[2];
     float tanFov[2];
@@ -188,9 +198,11 @@ struct Uniforms {
     float lowpass;
     float maxPx;
     float opacityScale;
-    float pad[3];
+    uint32_t numScenes;
+    float ndcOffset[2];
 };
-static_assert(sizeof(Uniforms) == 208, "Uniforms must match the WGSL struct U");
+static_assert(kMaxScenes == 8, "the WGSL arrays are hard-coded to 8 scenes");
+static_assert(sizeof(Uniforms) == 800, "Uniforms must match the WGSL struct U");
 
 WGPUStringView sv(const char* s) {
     WGPUStringView v;
@@ -258,13 +270,40 @@ inline float halfToFloat(uint16_t h) {
     return f;
 }
 
+// Run f(thread, begin, end) over [0, n) split into contiguous ranges, one per
+// thread. Small jobs run inline.
+template <typename F>
+void parallelFor(std::size_t n, int threads, F f) {
+    if (threads <= 1 || n < (std::size_t)threads) {
+        f(0, (std::size_t)0, n);
+        return;
+    }
+    std::vector<std::thread> pool;
+    pool.reserve((std::size_t)threads - 1);
+    for (int t = 1; t < threads; ++t) {
+        const std::size_t b = n * (std::size_t)t / (std::size_t)threads, e = n * (std::size_t)(t + 1) / (std::size_t)threads;
+        pool.emplace_back([&f, t, b, e]() { f(t, b, e); });
+    }
+    f(0, (std::size_t)0, n / (std::size_t)threads);
+    for (std::thread& th : pool) th.join();
+}
+
+int sortThreads(std::size_t n) {
+    if (n < 200000) return 1;
+    const unsigned hc = std::thread::hardware_concurrency();
+    return (int)std::max(1u, std::min(16u, hc ? hc : 4u));
+}
+
 double msSince(const std::chrono::steady_clock::time_point& t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
-}  // namespace
-
-struct Renderer::Impl {
+// The GPU device, shared by every Renderer in the process. Each Renderer used to
+// make its own: with four devices alive, one frame's GPU time went from 16 ms to
+// 137 ms (measured), so a comp with several splat renders crawled for no reason.
+// The device lives as long as any Renderer does. All use of it is serialised with
+// `mutex` (the error text below is shared state).
+struct Gpu {
     WGPUInstance instance = nullptr;
     WGPUAdapter adapter = nullptr;
     WGPUDevice device = nullptr;
@@ -275,29 +314,14 @@ struct Renderer::Impl {
     std::string adapterName;
     bool float32Blend = false;
     WGPUTextureFormat format = WGPUTextureFormat_RGBA16Float;
-
     WGPURenderPipeline pipeline = nullptr;
-    WGPUBuffer uniformBuf = nullptr;
-
-    // Scene (resident between draws)
-    std::size_t count = 0;
-    int shDegree = 0;
-    WGPUBuffer posBuf = nullptr, covBuf = nullptr, shBuf = nullptr, orderBuf = nullptr;
-    WGPUBindGroup bindGroup = nullptr;
-
-    // Targets (resident, recreated when the size changes)
-    int texW = 0, texH = 0;
-    WGPUTexture colorTex = nullptr, depthTex = nullptr;
-    WGPUTextureView colorView = nullptr, depthView = nullptr;
-    WGPUBuffer readBuf = nullptr;
-    uint64_t readBytes = 0;
-
-    // Sort scratch
-    std::vector<float> depth;
-    std::vector<uint32_t> idxA, idxB, keyA, keyB;
+    // Recursive: releasing a shared scene (below) can happen while its owner holds the lock.
+    std::recursive_mutex mutex;
+    // Uploaded scenes by content ids, so several Renderers can share one copy.
+    std::map<std::vector<unsigned long long>, std::weak_ptr<struct SceneGpu> > sceneCache;
 
     static void onError(WGPUDevice const*, WGPUErrorType, WGPUStringView msg, void* u, void*) {
-        Impl* self = (Impl*)u;
+        Gpu* self = (Gpu*)u;
         if (!self) return;
         const std::size_t n = msg.length == WGPU_STRLEN ? (msg.data ? std::strlen(msg.data) : 0) : msg.length;
         if (self->gpuError.empty() && msg.data) self->gpuError.assign(msg.data, n);
@@ -333,7 +357,7 @@ struct Renderer::Impl {
         }
         // Without a callback wgpu-native aborts the process on a validation or
         // out-of-memory error; with one, the error becomes a failed render.
-        dd.uncapturedErrorCallbackInfo.callback = &Impl::onError;
+        dd.uncapturedErrorCallbackInfo.callback = &Gpu::onError;
         dd.uncapturedErrorCallbackInfo.userdata1 = this;
 
         WGPURequestDeviceCallbackInfo dcb = {};
@@ -353,11 +377,15 @@ struct Renderer::Impl {
             adapterName.assign(info.device.data,
                                info.device.length == WGPU_STRLEN ? std::strlen(info.device.data) : info.device.length);
         }
-
-        WGPUBufferDescriptor bd = {};
-        bd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
-        bd.size = sizeof(Uniforms);
-        uniformBuf = wgpuDeviceCreateBuffer(device, &bd);
+        switch (info.backendType) {
+            case WGPUBackendType_Vulkan:   adapterName += " (Vulkan)"; break;
+            case WGPUBackendType_D3D12:    adapterName += " (Direct3D 12)"; break;
+            case WGPUBackendType_D3D11:    adapterName += " (Direct3D 11)"; break;
+            case WGPUBackendType_Metal:    adapterName += " (Metal)"; break;
+            case WGPUBackendType_OpenGL:   adapterName += " (OpenGL)"; break;
+            case WGPUBackendType_OpenGLES: adapterName += " (OpenGL ES)"; break;
+            default: break;
+        }
 
         return createPipeline();
     }
@@ -410,13 +438,116 @@ struct Renderer::Impl {
         return true;
     }
 
+    ~Gpu() {
+        if (pipeline) wgpuRenderPipelineRelease(pipeline);
+        if (queue) wgpuQueueRelease(queue);
+        if (device) wgpuDeviceRelease(device);
+        if (adapter) wgpuAdapterRelease(adapter);
+        if (instance) wgpuInstanceRelease(instance);
+    }
+};
+
+// One uploaded set of scenes: the large buffers, which do not depend on the view.
+struct SceneGpu {
+    std::shared_ptr<Gpu> gpu;
+    WGPUBuffer posBuf = nullptr, covBuf = nullptr, shBuf = nullptr;
+    std::size_t count = 0;                      // total splats
+    int numScenes = 0;
+    std::size_t sceneStart[kMaxScenes + 1] = {0};
+    int shDegree = 0;                           // highest degree among the scenes
+    std::vector<float> radius;                  // per splat: largest scale (file units), for culling
+
+    ~SceneGpu() {
+        if (!gpu) return;
+        std::lock_guard<std::recursive_mutex> lk(gpu->mutex);
+        for (WGPUBuffer b : {posBuf, covBuf, shBuf})
+            if (b) { wgpuBufferDestroy(b); wgpuBufferRelease(b); }
+    }
+};
+
+std::shared_ptr<Gpu> acquireGpu(std::string& err) {
+    static std::mutex m;
+    static std::weak_ptr<Gpu> shared;
+    std::lock_guard<std::mutex> lk(m);
+    std::shared_ptr<Gpu> g = shared.lock();
+    if (!g) {
+        g = std::make_shared<Gpu>();
+        if (!g->init()) {
+            err = g->error.empty() ? std::string("GPU initialisation failed") : g->error;
+            return std::shared_ptr<Gpu>();
+        }
+        shared = g;
+    }
+    return g;
+}
+
+}  // namespace
+
+struct Renderer::Impl {
+    std::shared_ptr<Gpu> gpu;          // the shared device; the handles below are borrowed from it
+    WGPUDevice device = nullptr;
+    WGPUQueue queue = nullptr;
+    WGPULimits limits = {};
+    std::string error;
+    std::string noGpuError;
+    std::string* gpuErrorP = &noGpuError;   // the shared device's error text
+    std::string adapterName;
+    bool float32Blend = false;
+    WGPUTextureFormat format = WGPUTextureFormat_RGBA16Float;
+
+    WGPURenderPipeline pipeline = nullptr;
+    WGPUBuffer uniformBuf = nullptr;
+
+    // Scenes (resident between draws), concatenated in the buffers. The big buffers
+    // belong to `scene`, which other Renderers may share; the fields below are copies.
+    std::shared_ptr<SceneGpu> scene;
+    std::size_t count = 0;                      // total splats
+    int numScenes = 0;
+    std::size_t sceneStart[kMaxScenes + 1] = {0};
+    int shDegree = 0;                           // highest degree among the scenes
+    std::size_t lastDrawn = 0;                  // visible count of the last sorted draw (reuseOrder)
+    WGPUBuffer orderBuf = nullptr;              // this Renderer's draw order (depends on its view)
+    WGPUBindGroup bindGroup = nullptr;
+
+    // Targets (resident, recreated when the size changes)
+    int texW = 0, texH = 0;
+    WGPUTexture colorTex = nullptr, depthTex = nullptr;
+    WGPUTextureView colorView = nullptr, depthView = nullptr;
+    WGPUBuffer readBuf = nullptr;
+    uint64_t readBytes = 0;
+
+    // Sort scratch
+    std::vector<float> depth;
+    std::vector<uint32_t> idxA, idxB, keyA, keyB;
+
+    bool init() {
+        gpu = acquireGpu(error);
+        if (!gpu) return false;
+        device = gpu->device;
+        queue = gpu->queue;
+        limits = gpu->limits;
+        adapterName = gpu->adapterName;
+        float32Blend = gpu->float32Blend;
+        format = gpu->format;
+        pipeline = gpu->pipeline;
+        gpuErrorP = &gpu->gpuError;
+        std::lock_guard<std::recursive_mutex> lk(gpu->mutex);
+        WGPUBufferDescriptor bd = {};
+        bd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+        bd.size = sizeof(Uniforms);
+        uniformBuf = wgpuDeviceCreateBuffer(device, &bd);
+        return uniformBuf != nullptr;
+    }
+
     void releaseScene() {
         if (bindGroup) wgpuBindGroupRelease(bindGroup);
-        for (WGPUBuffer b : {posBuf, covBuf, shBuf, orderBuf})
-            if (b) { wgpuBufferDestroy(b); wgpuBufferRelease(b); }
+        if (orderBuf) { wgpuBufferDestroy(orderBuf); wgpuBufferRelease(orderBuf); }
         bindGroup = nullptr;
-        posBuf = covBuf = shBuf = orderBuf = nullptr;
+        orderBuf = nullptr;
         count = 0;
+        numScenes = 0;
+        lastDrawn = 0;
+        scene.reset();      // frees the big buffers when no other Renderer uses them
     }
 
     void releaseTargets() {
@@ -439,14 +570,12 @@ struct Renderer::Impl {
     }
 
     ~Impl() {
-        releaseScene();
-        releaseTargets();
-        if (pipeline) wgpuRenderPipelineRelease(pipeline);
-        if (uniformBuf) wgpuBufferRelease(uniformBuf);
-        if (queue) wgpuQueueRelease(queue);
-        if (device) wgpuDeviceRelease(device);
-        if (adapter) wgpuAdapterRelease(adapter);
-        if (instance) wgpuInstanceRelease(instance);
+        if (gpu) {
+            std::lock_guard<std::recursive_mutex> lk(gpu->mutex);
+            releaseScene();
+            releaseTargets();
+            if (uniformBuf) wgpuBufferRelease(uniformBuf);
+        }
     }
 };
 
@@ -454,11 +583,11 @@ Renderer::Renderer() : _p(new Impl) {
     if (!_p->init() && _p->error.empty()) _p->error = "GPU initialisation failed";
 }
 Renderer::~Renderer() {}
-bool Renderer::valid() const { return _p->device != nullptr && _p->pipeline != nullptr; }
+bool Renderer::valid() const { return _p->gpu && _p->device != nullptr && _p->pipeline != nullptr; }
 const std::string& Renderer::lastError() const { return _p->error; }
 std::string Renderer::adapterName() const { return _p->adapterName; }
 bool Renderer::float32Targets() const { return _p->float32Blend; }
-bool Renderer::hasScene() const { return _p->count > 0 && _p->bindGroup != nullptr; }
+bool Renderer::hasScene() const { return _p->scene && _p->count > 0 && _p->bindGroup != nullptr; }
 std::size_t Renderer::sceneCount() const { return _p->count; }
 
 std::size_t Renderer::gpuBytesFor(std::size_t count, int shDegree) {
@@ -466,99 +595,145 @@ std::size_t Renderer::gpuBytesFor(std::size_t count, int shDegree) {
     return count * (16 + 24 + 12 * k + 4);
 }
 
-bool Renderer::upload(const SceneDesc& s) {
+bool Renderer::upload(const SceneDesc* scenes, int numScenes) {
     Impl& g = *_p;
     g.error.clear();
-    g.gpuError.clear();
     if (!valid()) { g.error = "no GPU device"; return false; }
+    std::lock_guard<std::recursive_mutex> gpuLock(g.gpu->mutex);
+    (*g.gpuErrorP).clear();
     g.releaseScene();
-    if (s.count == 0 || !s.pos || !s.scale || !s.rot || !s.opacity || !s.dc) {
-        g.error = "empty splat scene";
+    if (!scenes || numScenes < 1 || numScenes > kMaxScenes) {
+        g.error = "between 1 and 8 splat scenes can be rendered together";
         return false;
     }
-    const int deg = (s.shRest && s.shDegree > 0) ? std::min(3, s.shDegree) : 0;
-    const std::size_t K = (std::size_t)(deg + 1) * (std::size_t)(deg + 1);   // coefficients incl. band 0
-    const std::size_t shStride = 3 * K;                                    // floats per splat
-    const std::size_t restK = K - 1;
+    std::size_t total = 0;
+    int deg = 0;
+    std::vector<unsigned long long> key;
+    for (int si = 0; si < numScenes; ++si) {
+        const SceneDesc& s = scenes[si];
+        if (s.count == 0 || !s.pos || !s.scale || !s.rot || !s.opacity || !s.dc) {
+            g.error = "empty splat scene";
+            return false;
+        }
+        total += s.count;
+        if (s.shRest && s.shDegree > 0) deg = std::max(deg, std::min(3, s.shDegree));
+        key.push_back(s.id);
+    }
+    const bool shareable = std::find(key.begin(), key.end(), 0ull) == key.end();
 
-    const uint64_t posBytes = (uint64_t)s.count * 16;
-    const uint64_t covBytes = (uint64_t)s.count * 24;
-    const uint64_t shBytes = (uint64_t)s.count * shStride * 4;
-    const uint64_t biggest = std::max(posBytes, std::max(covBytes, shBytes));
-    const uint64_t limit = std::min(g.limits.maxBufferSize, g.limits.maxStorageBufferBindingSize);
-    if (s.count > 0xFFFFFFF0ull / 16 || biggest > limit) {
-        char msg[256];
-        std::snprintf(msg, sizeof msg,
-                      "the scene is too large for this GPU: it needs one buffer of %.0f MB, the limit is %.0f MB. "
-                      "Lower SH Degree on the ReadSplats node.",
-                      (double)biggest / 1048576.0, (double)limit / 1048576.0);
-        g.error = msg;
-        return false;
+    // ---- the big buffers: reuse another Renderer's copy of the same scenes, or build them
+    std::shared_ptr<SceneGpu> sc;
+    if (shareable) {
+        std::map<std::vector<unsigned long long>, std::weak_ptr<SceneGpu> >::iterator it = g.gpu->sceneCache.find(key);
+        if (it != g.gpu->sceneCache.end()) {
+            sc = it->second.lock();
+            if (!sc) g.gpu->sceneCache.erase(it);
+        }
+    }
+    if (!sc) {
+        const std::size_t K = (std::size_t)(deg + 1) * (std::size_t)(deg + 1);   // coefficients incl. band 0
+        const std::size_t shStride = 3 * K;                                    // floats per splat
+        const uint64_t posBytes = (uint64_t)total * 16;
+        const uint64_t covBytes = (uint64_t)total * 24;
+        const uint64_t shBytes = (uint64_t)total * shStride * 4;
+        const uint64_t biggest = std::max(posBytes, std::max(covBytes, shBytes));
+        const uint64_t limit = std::min(g.limits.maxBufferSize, g.limits.maxStorageBufferBindingSize);
+        if (total > 0xFFFFFFF0ull / 16 || biggest > limit) {
+            char msg[256];
+            std::snprintf(msg, sizeof msg,
+                          "the scene is too large for this GPU: it needs one buffer of %.0f MB, the limit is %.0f MB. "
+                          "Lower SH Degree on the ReadSplats node.",
+                          (double)biggest / 1048576.0, (double)limit / 1048576.0);
+            g.error = msg;
+            return false;
+        }
+        sc = std::make_shared<SceneGpu>();
+        sc->gpu = g.gpu;
+        sc->posBuf = g.storage(posBytes);
+        sc->covBuf = g.storage(covBytes);
+        sc->shBuf = g.storage(shBytes);
+        wgpuDevicePoll(g.device, false, nullptr);
+        if (!sc->posBuf || !sc->covBuf || !sc->shBuf || !(*g.gpuErrorP).empty()) {
+            g.error = "not enough graphics memory for the scene (" + (*g.gpuErrorP) + ")";
+            return false;
+        }
+        sc->radius.resize(total);
+
+        // Build and send in chunks so the staging copies stay small next to the scene.
+        const std::size_t chunk = 1u << 18;
+        std::vector<float> stPos(chunk * 4), stCov(chunk * 6), stSh(chunk * shStride);
+        std::size_t base = 0;
+        for (int si = 0; si < numScenes; ++si) {
+            const SceneDesc& s = scenes[si];
+            sc->sceneStart[si] = base;
+            const int sDeg = (s.shRest && s.shDegree > 0) ? std::min(3, s.shDegree) : 0;
+            const std::size_t restK = (std::size_t)(sDeg + 1) * (std::size_t)(sDeg + 1) - 1;   // bands 1.. this scene has
+            // The scene keeps bands 1.. as R.. G.. B.. over its own coefficient count.
+            const std::size_t sceneK = (std::size_t)(s.shDegree + 1) * (std::size_t)(s.shDegree + 1) - 1;
+            for (std::size_t start = 0; start < s.count; start += chunk) {
+                const std::size_t n = std::min(chunk, s.count - start);
+                if (restK + 1 < K) std::fill(stSh.begin(), stSh.begin() + n * shStride, 0.f);   // missing bands = 0
+                for (std::size_t j = 0; j < n; ++j) {
+                    const std::size_t i = start + j;
+                    float* P = &stPos[j * 4];
+                    P[0] = s.pos[i * 3]; P[1] = s.pos[i * 3 + 1]; P[2] = s.pos[i * 3 + 2];
+                    P[3] = s.opacity[i];
+
+                    // Sigma = R * diag(scale^2) * R^T
+                    const float qw = s.rot[i * 4], qx = s.rot[i * 4 + 1], qy = s.rot[i * 4 + 2], qz = s.rot[i * 4 + 3];
+                    const float R[3][3] = {
+                        {1.f - 2.f * (qy * qy + qz * qz), 2.f * (qx * qy - qw * qz),       2.f * (qx * qz + qw * qy)},
+                        {2.f * (qx * qy + qw * qz),       1.f - 2.f * (qx * qx + qz * qz), 2.f * (qy * qz - qw * qx)},
+                        {2.f * (qx * qz - qw * qy),       2.f * (qy * qz + qw * qx),       1.f - 2.f * (qx * qx + qy * qy)}};
+                    const float sx = s.scale[i * 3], sy = s.scale[i * 3 + 1], sz = s.scale[i * 3 + 2];
+                    const float s2[3] = {sx * sx, sy * sy, sz * sz};
+                    auto sig = [&](int a, int b) {
+                        return R[a][0] * s2[0] * R[b][0] + R[a][1] * s2[1] * R[b][1] + R[a][2] * s2[2] * R[b][2];
+                    };
+                    float* C = &stCov[j * 6];
+                    C[0] = sig(0, 0); C[1] = sig(0, 1); C[2] = sig(0, 2);
+                    C[3] = sig(1, 1); C[4] = sig(1, 2); C[5] = sig(2, 2);
+                    sc->radius[base + i] = std::max(sx, std::max(sy, sz));
+
+                    float* H = &stSh[j * shStride];
+                    H[0] = s.dc[i * 3]; H[1] = s.dc[i * 3 + 1]; H[2] = s.dc[i * 3 + 2];
+                    if (restK > 0) {
+                        const float* src = s.shRest + i * 3 * sceneK;
+                        for (std::size_t k = 0; k < restK; ++k) {
+                            H[3 + k * 3]     = src[k];
+                            H[3 + k * 3 + 1] = src[sceneK + k];
+                            H[3 + k * 3 + 2] = src[2 * sceneK + k];
+                        }
+                    }
+                }
+                const uint64_t at = (uint64_t)(base + start);
+                wgpuQueueWriteBuffer(g.queue, sc->posBuf, at * 16, stPos.data(), n * 16);
+                wgpuQueueWriteBuffer(g.queue, sc->covBuf, at * 24, stCov.data(), n * 24);
+                wgpuQueueWriteBuffer(g.queue, sc->shBuf, at * shStride * 4, stSh.data(), n * shStride * 4);
+                wgpuQueueSubmit(g.queue, 0, nullptr);      // flush this chunk's staging
+                wgpuDevicePoll(g.device, false, nullptr);
+                if (!(*g.gpuErrorP).empty()) {
+                    g.error = "uploading the scene to the GPU failed (" + (*g.gpuErrorP) + ")";
+                    return false;
+                }
+            }
+            base += s.count;
+        }
+        sc->sceneStart[numScenes] = base;
+        sc->count = total;
+        sc->numScenes = numScenes;
+        sc->shDegree = deg;
+        if (shareable) g.gpu->sceneCache[key] = sc;
     }
 
-    g.posBuf = g.storage(posBytes);
-    g.covBuf = g.storage(covBytes);
-    g.shBuf = g.storage(shBytes);
-    g.orderBuf = g.storage((uint64_t)s.count * 4);
+    // ---- this Renderer's own part: the draw order and the bindings
+    g.orderBuf = g.storage((uint64_t)sc->count * 4);
     wgpuDevicePoll(g.device, false, nullptr);
-    if (!g.posBuf || !g.covBuf || !g.shBuf || !g.orderBuf || !g.gpuError.empty()) {
-        g.error = "not enough graphics memory for the scene (" + g.gpuError + ")";
+    if (!g.orderBuf || !(*g.gpuErrorP).empty()) {
+        g.error = "not enough graphics memory for the scene (" + (*g.gpuErrorP) + ")";
         g.releaseScene();
         return false;
     }
-
-    // Build and send in chunks so the staging copies stay small next to the scene.
-    const std::size_t chunk = 1u << 18;
-    std::vector<float> stPos(chunk * 4), stCov(chunk * 6), stSh(chunk * shStride);
-    for (std::size_t start = 0; start < s.count; start += chunk) {
-        const std::size_t n = std::min(chunk, s.count - start);
-        for (std::size_t j = 0; j < n; ++j) {
-            const std::size_t i = start + j;
-            float* P = &stPos[j * 4];
-            P[0] = s.pos[i * 3]; P[1] = s.pos[i * 3 + 1]; P[2] = s.pos[i * 3 + 2];
-            P[3] = s.opacity[i];
-
-            // Sigma = R * diag(scale^2) * R^T
-            const float qw = s.rot[i * 4], qx = s.rot[i * 4 + 1], qy = s.rot[i * 4 + 2], qz = s.rot[i * 4 + 3];
-            const float R[3][3] = {
-                {1.f - 2.f * (qy * qy + qz * qz), 2.f * (qx * qy - qw * qz),       2.f * (qx * qz + qw * qy)},
-                {2.f * (qx * qy + qw * qz),       1.f - 2.f * (qx * qx + qz * qz), 2.f * (qy * qz - qw * qx)},
-                {2.f * (qx * qz - qw * qy),       2.f * (qy * qz + qw * qx),       1.f - 2.f * (qx * qx + qy * qy)}};
-            const float s2[3] = {s.scale[i * 3] * s.scale[i * 3], s.scale[i * 3 + 1] * s.scale[i * 3 + 1],
-                                 s.scale[i * 3 + 2] * s.scale[i * 3 + 2]};
-            auto sig = [&](int a, int b) {
-                return R[a][0] * s2[0] * R[b][0] + R[a][1] * s2[1] * R[b][1] + R[a][2] * s2[2] * R[b][2];
-            };
-            float* C = &stCov[j * 6];
-            C[0] = sig(0, 0); C[1] = sig(0, 1); C[2] = sig(0, 2);
-            C[3] = sig(1, 1); C[4] = sig(1, 2); C[5] = sig(2, 2);
-
-            float* H = &stSh[j * shStride];
-            H[0] = s.dc[i * 3]; H[1] = s.dc[i * 3 + 1]; H[2] = s.dc[i * 3 + 2];
-            if (restK > 0) {
-                // The scene keeps bands 1.. as R.. G.. B.. over its own (possibly
-                // larger) coefficient count; the GPU wants coefficient-major rgb.
-                const std::size_t sceneK = (std::size_t)(s.shDegree + 1) * (std::size_t)(s.shDegree + 1) - 1;
-                const float* src = s.shRest + i * 3 * sceneK;
-                for (std::size_t k = 0; k < restK; ++k) {
-                    H[3 + k * 3]     = src[k];
-                    H[3 + k * 3 + 1] = src[sceneK + k];
-                    H[3 + k * 3 + 2] = src[2 * sceneK + k];
-                }
-            }
-        }
-        wgpuQueueWriteBuffer(g.queue, g.posBuf, (uint64_t)start * 16, stPos.data(), n * 16);
-        wgpuQueueWriteBuffer(g.queue, g.covBuf, (uint64_t)start * 24, stCov.data(), n * 24);
-        wgpuQueueWriteBuffer(g.queue, g.shBuf, (uint64_t)start * shStride * 4, stSh.data(), n * shStride * 4);
-        wgpuQueueSubmit(g.queue, 0, nullptr);      // flush this chunk's staging
-        wgpuDevicePoll(g.device, false, nullptr);
-        if (!g.gpuError.empty()) {
-            g.error = "uploading the scene to the GPU failed (" + g.gpuError + ")";
-            g.releaseScene();
-            return false;
-        }
-    }
-
     auto entry = [](uint32_t b, WGPUBuffer buf) {
         WGPUBindGroupEntry e = {};
         e.binding = b;
@@ -566,8 +741,8 @@ bool Renderer::upload(const SceneDesc& s) {
         e.size = WGPU_WHOLE_SIZE;
         return e;
     };
-    WGPUBindGroupEntry be[5] = {entry(0, g.uniformBuf), entry(1, g.posBuf), entry(2, g.covBuf),
-                                entry(3, g.shBuf), entry(4, g.orderBuf)};
+    WGPUBindGroupEntry be[5] = {entry(0, g.uniformBuf), entry(1, sc->posBuf), entry(2, sc->covBuf),
+                                entry(3, sc->shBuf), entry(4, g.orderBuf)};
     WGPUBindGroupLayout layout = wgpuRenderPipelineGetBindGroupLayout(g.pipeline, 0);
     WGPUBindGroupDescriptor bgd = {};
     bgd.layout = layout;
@@ -575,25 +750,29 @@ bool Renderer::upload(const SceneDesc& s) {
     bgd.entries = be;
     g.bindGroup = wgpuDeviceCreateBindGroup(g.device, &bgd);
     wgpuBindGroupLayoutRelease(layout);
-    if (!g.bindGroup || !g.gpuError.empty()) {
-        g.error = "binding the scene buffers failed (" + g.gpuError + ")";
+    if (!g.bindGroup || !(*g.gpuErrorP).empty()) {
+        g.error = "binding the scene buffers failed (" + (*g.gpuErrorP) + ")";
         g.releaseScene();
         return false;
     }
-    g.count = s.count;
-    g.shDegree = deg;
+    g.scene = sc;
+    g.count = sc->count;
+    g.numScenes = sc->numScenes;
+    for (int si = 0; si <= sc->numScenes; ++si) g.sceneStart[si] = sc->sceneStart[si];
+    g.shDegree = sc->shDegree;
     return true;
 }
 
-bool Renderer::draw(const float* pos, const DrawParams& prm, int W, int H, RenderOutput& out) {
+bool Renderer::draw(const float* const* pos, const DrawParams& prm, int W, int H, RenderOutput& out) {
     Impl& g = *_p;
     g.error.clear();
-    g.gpuError.clear();
     out.width = W;
     out.height = H;
     out.drawn = 0;
     out.sortMs = out.gpuMs = 0.;
     if (!valid() || !hasScene() || !pos) { g.error = "no splat scene uploaded"; return false; }
+    std::lock_guard<std::recursive_mutex> gpuLock(g.gpu->mutex);
+    (*g.gpuErrorP).clear();
     if (W <= 0 || H <= 0) { g.error = "empty output size"; return false; }
     if ((uint32_t)W > g.limits.maxTextureDimension2D || (uint32_t)H > g.limits.maxTextureDimension2D) {
         g.error = "the output is larger than the GPU's largest texture";
@@ -602,76 +781,144 @@ bool Renderer::draw(const float* pos, const DrawParams& prm, int W, int H, Rende
     out.rgba.assign((std::size_t)W * H * 4, 0.f);
     out.depth.assign((std::size_t)W * H, 0.f);
 
-    // ---- sort far to near on view depth
-    const auto tSort = std::chrono::steady_clock::now();
-    float mv[16];
-    mul4(prm.view, prm.model, mv);
-    const float za = -mv[2], zb = -mv[6], zc = -mv[10], zt = -mv[14];   // depth = -z_camera
     const std::size_t N = g.count;
-    g.depth.resize(N);
-    float dMin = 1e30f, dMax = -1e30f;
+    const float* sceneRadius = g.scene->radius.data();
     std::size_t M = 0;
-    for (std::size_t i = 0; i < N; ++i) {
-        const float d = za * pos[i * 3] + zb * pos[i * 3 + 1] + zc * pos[i * 3 + 2] + zt;
-        g.depth[i] = d;
-        if (d >= prm.nearClip) {
-            ++M;
-            dMin = std::min(dMin, d);
-            dMax = std::max(dMax, d);
+    if (prm.reuseOrder && g.lastDrawn > 0) {
+        M = g.lastDrawn;            // the order buffer on the GPU is still the one to use
+    } else {
+        // ---- cull, then sort far to near on view depth, across all scenes
+        const auto tSort = std::chrono::steady_clock::now();
+        const int T = sortThreads(N);
+        g.depth.resize(N);
+        // Half-extent of the picture at depth 1 (with the lens shift and a few pixels of slack
+        // for the low-pass), and how far a splat reaches from its centre in standard deviations.
+        const float tanX = (1.f + std::fabs(prm.ndcOffsetX) + 8.f / (float)W) / std::max(1e-6f, prm.projX);
+        const float tanY = (1.f + std::fabs(prm.ndcOffsetY) + 8.f / (float)H) / std::max(1e-6f, prm.projY);
+        const float reach = 3.33f * std::max(0.f, prm.splatScale);
+        std::vector<std::size_t> cnt((std::size_t)T, 0);
+        std::vector<float> tMin((std::size_t)T, 1e30f), tMax((std::size_t)T, -1e30f);
+        for (int si = 0; si < g.numScenes; ++si) {
+            float mv[16];
+            mul4(prm.view, prm.model[si], mv);
+            // Largest stretch of the model matrix: turns a file-space radius into a world one.
+            float stretch = 0.f;
+            for (int c = 0; c < 3; ++c)
+                stretch = std::max(stretch, std::sqrt(mv[c * 4] * mv[c * 4] + mv[c * 4 + 1] * mv[c * 4 + 1] + mv[c * 4 + 2] * mv[c * 4 + 2]));
+            const float* P = pos[si];
+            const std::size_t base = g.sceneStart[si], n = g.sceneStart[si + 1] - base;
+            const bool cull = prm.frustumCull;
+            const float nearClip = prm.nearClip;
+            parallelFor(n, T, [&, base](int t, std::size_t b, std::size_t e) {
+                std::size_t c = 0;
+                float lo = 1e30f, hi = -1e30f;
+                for (std::size_t i = b; i < e; ++i) {
+                    const float x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+                    const float d = -(mv[2] * x + mv[6] * y + mv[10] * z + mv[14]);     // depth = -z_camera
+                    float keep = d;
+                    if (d < nearClip) {
+                        keep = -1.f;
+                    } else if (cull) {
+                        const float r = sceneRadius[base + i] * stretch * reach;
+                        const float xc = mv[0] * x + mv[4] * y + mv[8] * z + mv[12];
+                        const float yc = mv[1] * x + mv[5] * y + mv[9] * z + mv[13];
+                        if (std::fabs(xc) - r > d * tanX || std::fabs(yc) - r > d * tanY) keep = -1.f;
+                    }
+                    g.depth[base + i] = keep;
+                    if (keep >= 0.f) {
+                        ++c;
+                        lo = std::min(lo, d);
+                        hi = std::max(hi, d);
+                    }
+                }
+                cnt[(std::size_t)t] += c;
+                tMin[(std::size_t)t] = std::min(tMin[(std::size_t)t], lo);
+                tMax[(std::size_t)t] = std::max(tMax[(std::size_t)t], hi);
+            });
         }
+        float dMin = 1e30f, dMax = -1e30f;
+        for (int t = 0; t < T; ++t) {
+            M += cnt[(std::size_t)t];
+            dMin = std::min(dMin, tMin[(std::size_t)t]);
+            dMax = std::max(dMax, tMax[(std::size_t)t]);
+        }
+        out.drawn = M;
+        g.lastDrawn = M;
+        if (M == 0) return true;      // nothing in view: an empty frame
+
+        const uint32_t kBits = 11, kBuckets = 1u << kBits, kMask = kBuckets - 1;
+        const float kMaxKey = (float)((1u << (2 * kBits)) - 1);
+        const float keyScale = (dMax > dMin) ? kMaxKey / (dMax - dMin) : 0.f;
+        g.idxA.resize(M); g.idxB.resize(M); g.keyA.resize(M); g.keyB.resize(M);
+        // Compact the visible splats (single pass: the per-thread counts above are per scene
+        // range, not per global range, so the write position is tracked serially here).
+        {
+            std::size_t m = 0;
+            for (std::size_t i = 0; i < N; ++i) {
+                const float d = g.depth[i];
+                if (d < 0.f) continue;
+                g.idxA[m] = (uint32_t)i;
+                g.keyA[m] = (uint32_t)((dMax - d) * keyScale);    // far = small key = drawn first
+                ++m;
+            }
+        }
+        const int TS = sortThreads(M);
+        std::vector<uint32_t> hist((std::size_t)TS * kBuckets);
+        for (uint32_t pass = 0; pass < 2; ++pass) {
+            const uint32_t shift = pass * kBits;
+            std::vector<uint32_t>& ki = pass == 0 ? g.keyA : g.keyB;
+            std::vector<uint32_t>& ko = pass == 0 ? g.keyB : g.keyA;
+            std::vector<uint32_t>& ii = pass == 0 ? g.idxA : g.idxB;
+            std::vector<uint32_t>& io = pass == 0 ? g.idxB : g.idxA;
+            std::fill(hist.begin(), hist.end(), 0u);
+            parallelFor(M, TS, [&](int t, std::size_t b, std::size_t e) {
+                uint32_t* h = &hist[(std::size_t)t * kBuckets];
+                for (std::size_t m = b; m < e; ++m) ++h[(ki[m] >> shift) & kMask];
+            });
+            // Start of each (bucket, thread) run: buckets in order, threads in order inside a
+            // bucket, which keeps the sort stable.
+            uint32_t running = 0;
+            for (uint32_t b = 0; b < kBuckets; ++b)
+                for (int t = 0; t < TS; ++t) {
+                    uint32_t& h = hist[(std::size_t)t * kBuckets + b];
+                    const uint32_t c = h;
+                    h = running;
+                    running += c;
+                }
+            parallelFor(M, TS, [&](int t, std::size_t b, std::size_t e) {
+                uint32_t* h = &hist[(std::size_t)t * kBuckets];
+                for (std::size_t m = b; m < e; ++m) {
+                    const uint32_t dst = h[(ki[m] >> shift) & kMask]++;
+                    ko[dst] = ki[m];
+                    io[dst] = ii[m];
+                }
+            });
+        }
+        out.sortMs = msSince(tSort);     // sorted order is back in idxA
+        wgpuQueueWriteBuffer(g.queue, g.orderBuf, 0, g.idxA.data(), M * 4);
     }
     out.drawn = M;
-    if (M == 0) return true;      // nothing in front of the camera: an empty frame
-
-    const uint32_t kBits = 11, kBuckets = 1u << kBits, kMask = kBuckets - 1;
-    const float kMaxKey = (float)((1u << (2 * kBits)) - 1);
-    const float keyScale = (dMax > dMin) ? kMaxKey / (dMax - dMin) : 0.f;
-    g.idxA.resize(M); g.idxB.resize(M); g.keyA.resize(M); g.keyB.resize(M);
-    {
-        std::size_t m = 0;
-        for (std::size_t i = 0; i < N; ++i) {
-            const float d = g.depth[i];
-            if (d < prm.nearClip) continue;
-            g.idxA[m] = (uint32_t)i;
-            g.keyA[m] = (uint32_t)((dMax - d) * keyScale);    // far = small key = drawn first
-            ++m;
-        }
-    }
-    for (uint32_t pass = 0; pass < 2; ++pass) {
-        const uint32_t shift = pass * kBits;
-        std::vector<uint32_t>& ki = pass == 0 ? g.keyA : g.keyB;
-        std::vector<uint32_t>& ko = pass == 0 ? g.keyB : g.keyA;
-        std::vector<uint32_t>& ii = pass == 0 ? g.idxA : g.idxB;
-        std::vector<uint32_t>& io = pass == 0 ? g.idxB : g.idxA;
-        uint32_t hist[kBuckets + 1];
-        std::memset(hist, 0, sizeof hist);
-        for (std::size_t m = 0; m < M; ++m) ++hist[((ki[m] >> shift) & kMask) + 1];
-        for (uint32_t b = 0; b < kBuckets; ++b) hist[b + 1] += hist[b];
-        for (std::size_t m = 0; m < M; ++m) {
-            const uint32_t dst = hist[(ki[m] >> shift) & kMask]++;
-            ko[dst] = ki[m];
-            io[dst] = ii[m];
-        }
-    }
-    out.sortMs = msSince(tSort);     // sorted order is back in idxA
     const auto tGpu = std::chrono::steady_clock::now();
-    wgpuQueueWriteBuffer(g.queue, g.orderBuf, 0, g.idxA.data(), M * 4);
 
     // ---- uniforms
     Uniforms u;
     std::memset(&u, 0, sizeof u);
     std::memcpy(u.view, prm.view, sizeof u.view);
-    std::memcpy(u.model, prm.model, sizeof u.model);
     {
-        // Camera position in world space, then in the splats' own space (the SH
+        // Camera position in world space, then in each scene's own space (the SH
         // colour depends on the direction the splat is seen from, in that space).
         const float* v = prm.view;
         const float camW[3] = {-(v[0] * v[12] + v[1] * v[13] + v[2] * v[14]),
                                -(v[4] * v[12] + v[5] * v[13] + v[6] * v[14]),
                                -(v[8] * v[12] + v[9] * v[13] + v[10] * v[14])};
-        float camL[3] = {camW[0], camW[1], camW[2]};
-        invAffinePoint(prm.model, camW, camL);
-        u.camPosLocal[0] = camL[0]; u.camPosLocal[1] = camL[1]; u.camPosLocal[2] = camL[2]; u.camPosLocal[3] = 1.f;
+        for (int si = 0; si < g.numScenes; ++si) {
+            std::memcpy(u.models[si], prm.model[si], 16 * sizeof(float));
+            float camL[3] = {camW[0], camW[1], camW[2]};
+            invAffinePoint(prm.model[si], camW, camL);
+            u.camPosLocal[si][0] = camL[0]; u.camPosLocal[si][1] = camL[1]; u.camPosLocal[si][2] = camL[2];
+            u.camPosLocal[si][3] = 1.f;
+            u.sceneEnd[si] = (uint32_t)g.sceneStart[si + 1];
+        }
     }
     u.focal[0] = prm.projX * 0.5f * (float)W;
     u.focal[1] = prm.projY * 0.5f * (float)H;
@@ -685,6 +932,9 @@ bool Renderer::draw(const float* pos, const DrawParams& prm, int W, int H, Rende
     u.lowpass = prm.antialias ? 0.3f : 0.f;
     u.maxPx = 2.f * (float)std::max(W, H);
     u.opacityScale = prm.opacityScale;
+    u.numScenes = (uint32_t)g.numScenes;
+    u.ndcOffset[0] = prm.ndcOffsetX;
+    u.ndcOffset[1] = prm.ndcOffsetY;
     wgpuQueueWriteBuffer(g.queue, g.uniformBuf, 0, &u, sizeof u);
 
     // ---- targets
@@ -709,8 +959,8 @@ bool Renderer::draw(const float* pos, const DrawParams& prm, int W, int H, Rende
         rd.size = texBytes * 2;
         g.readBuf = wgpuDeviceCreateBuffer(g.device, &rd);
         g.readBytes = rd.size;
-        if (!g.colorView || !g.depthView || !g.readBuf || !g.gpuError.empty()) {
-            g.error = "not enough graphics memory for the render targets (" + g.gpuError + ")";
+        if (!g.colorView || !g.depthView || !g.readBuf || !(*g.gpuErrorP).empty()) {
+            g.error = "not enough graphics memory for the render targets (" + (*g.gpuErrorP) + ")";
             g.releaseTargets();
             return false;
         }
@@ -763,8 +1013,9 @@ bool Renderer::draw(const float* pos, const DrawParams& prm, int W, int H, Rende
     mcb.userdata1 = &mapped;
     wgpuBufferMapAsync(g.readBuf, WGPUMapMode_Read, 0, g.readBytes, mcb);
     while (!mapped) wgpuDevicePoll(g.device, true, nullptr);
-    if (!g.gpuError.empty()) {
-        g.error = "the GPU reported an error while drawing (" + g.gpuError + ")";
+    out.waitMs = msSince(tGpu);
+    if (!(*g.gpuErrorP).empty()) {
+        g.error = "the GPU reported an error while drawing (" + (*g.gpuErrorP) + ")";
         wgpuBufferUnmap(g.readBuf);
         return false;
     }
@@ -773,30 +1024,34 @@ bool Renderer::draw(const float* pos, const DrawParams& prm, int W, int H, Rende
         g.error = "reading the picture back from the GPU failed";
         return false;
     }
-    for (int y = 0; y < H; ++y) {
-        const unsigned char* rowC = px + (std::size_t)y * rowBytes;
-        const unsigned char* rowD = px + texBytes + (std::size_t)y * rowBytes;
-        float* dstC = &out.rgba[(std::size_t)y * W * 4];
-        float* dstD = &out.depth[(std::size_t)y * W];
-        if (g.float32Blend) {
-            std::memcpy(dstC, rowC, (std::size_t)W * 16);
-            const float* d = (const float*)rowD;
-            for (int x = 0; x < W; ++x) {
-                dstC[x * 4 + 3] = 1.f - dstC[x * 4 + 3];
-                const float a = 1.f - d[x * 4 + 3];
-                dstD[x] = a > 1e-6f ? d[x * 4] / a : 0.f;
-            }
-        } else {
-            const uint16_t* c = (const uint16_t*)rowC;
-            const uint16_t* d = (const uint16_t*)rowD;
-            for (int x = 0; x < W * 4; ++x) dstC[x] = halfToFloat(c[x]);
-            for (int x = 0; x < W; ++x) {
-                dstC[x * 4 + 3] = 1.f - dstC[x * 4 + 3];
-                const float a = 1.f - halfToFloat(d[x * 4 + 3]);
-                dstD[x] = a > 1e-6f ? halfToFloat(d[x * 4]) / a : 0.f;
+    // Copy out row by row, on several threads (two full-HD float pictures is a lot of bytes).
+    const bool f32 = g.float32Blend;
+    parallelFor((std::size_t)H, sortThreads((std::size_t)W * (std::size_t)H), [&](int, std::size_t y0, std::size_t y1) {
+        for (std::size_t y = y0; y < y1; ++y) {
+            const unsigned char* rowC = px + y * rowBytes;
+            const unsigned char* rowD = px + texBytes + y * rowBytes;
+            float* dstC = &out.rgba[y * (std::size_t)W * 4];
+            float* dstD = &out.depth[y * (std::size_t)W];
+            if (f32) {
+                std::memcpy(dstC, rowC, (std::size_t)W * 16);
+                const float* d = (const float*)rowD;
+                for (int x = 0; x < W; ++x) {
+                    dstC[x * 4 + 3] = 1.f - dstC[x * 4 + 3];
+                    const float a = 1.f - d[x * 4 + 3];
+                    dstD[x] = a > 1e-6f ? d[x * 4] / a : 0.f;
+                }
+            } else {
+                const uint16_t* c = (const uint16_t*)rowC;
+                const uint16_t* d = (const uint16_t*)rowD;
+                for (int x = 0; x < W * 4; ++x) dstC[x] = halfToFloat(c[x]);
+                for (int x = 0; x < W; ++x) {
+                    dstC[x * 4 + 3] = 1.f - dstC[x * 4 + 3];
+                    const float a = 1.f - halfToFloat(d[x * 4 + 3]);
+                    dstD[x] = a > 1e-6f ? halfToFloat(d[x * 4]) / a : 0.f;
+                }
             }
         }
-    }
+    });
     wgpuBufferUnmap(g.readBuf);
     out.gpuMs = msSince(tGpu);
     return true;
