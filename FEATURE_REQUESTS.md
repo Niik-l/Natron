@@ -37,7 +37,7 @@ from a secondary RGB input), so only two nodes are new.
 1. `VectorGenerator` — BUILT 2026-11-12, headless-verified, GUI pass and real footage pending.
    Native CPU estimator in `Engine/Dev/PostFX/FlowCore` (no dependency), tests in
    `tools/flow-tests`. See NODE_REGISTRY.md.
-2. `TimeFlow` — next: retime by warping both neighbours along forward and backward flow,
+2. `TimeFlow` — BUILT 2026-11-14, headless-verified, GUI pass and real footage pending: retime by warping both neighbours along forward and backward flow,
    weighted by forward/backward consistency, with a blend fallback where the vectors disagree.
    Speed or keyframed source-frame timing, Frame / Blend / Motion methods.
 

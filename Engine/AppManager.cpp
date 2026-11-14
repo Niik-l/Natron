@@ -180,6 +180,7 @@
 #include "Dev/PostFX/PatchFill.h"
 #include "Dev/PostFX/ContentFill.h"
 #include "Dev/PostFX/VectorGenerator.h"
+#include "Dev/PostFX/TimeFlow.h"
 #include "Dev/PostFX/LensDefocus.h"
 #include "Dev/PostFX/PMask.h"
 
@@ -1835,6 +1836,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     // Dev nodes — PostFX
     registerBuiltInPlugin<VectorBlur>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
     registerBuiltInPlugin<VectorGenerator>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/time_grouping_2.png"), false, false);
+    registerBuiltInPlugin<TimeFlow>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/time_grouping_2.png"), false, false);
     registerBuiltInPlugin<PatchFill>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
     registerBuiltInPlugin<ContentFill>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
     registerBuiltInPlugin<LensDefocus>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/filter_grouping_2.png"), false, false);
