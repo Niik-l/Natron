@@ -82,6 +82,13 @@ struct SplatRenderPrivate
     KnobBoolWPtr motionBlur, dof;
     KnobDoubleWPtr shutter, apertureScale;
     KnobChoiceWPtr shutterOffset;
+    // Depth of field: where the focus and the f-stop come from, and the iris shape
+    // (same names and meaning as LensDefocus' knobs).
+    KnobChoiceWPtr focusMode;
+    KnobDoubleWPtr focusDistance, fStop;
+    KnobBoolWPtr fStopFromCamera;
+    KnobIntWPtr blades;
+    KnobDoubleWPtr curvature, rotation, squeeze;
 
     // Output rectangle: the project format, or the node's own size.
     void outputSize(EffectInstance* self, int* w, int* h, int* x1, int* y1) const
@@ -376,11 +383,65 @@ SplatRender::initializeKnobs()
         k->setName("dof");
         k->setDefaultValue(false);
         k->setAnimationEnabled(false);
-        k->setHintToolTip( tr("Blur what is nearer or farther than the camera's Focus Distance, using its "
-                              "F-Stop and focal length (set them on the Camera3D; its own Depth of Field "
-                              "switch is not needed). Needs a connected camera.") );
+        k->setHintToolTip( tr("Blur what is nearer or farther than the focus distance, as a real lens does. "
+                              "This is a true depth of field: the scene is drawn Samples times from points "
+                              "spread over the lens opening and averaged, so it is right through "
+                              "semi-transparent splats and thin edges, where a blur made afterwards from a "
+                              "depth pass has to guess. For lens character beyond the iris shape (cat's eye, "
+                              "swirl, chromatic aberration, real lenses), leave this off and put a "
+                              "LensDefocus after this node: it reads the Depth plane.") );
         blurPage->addKnob(k);
         _imp->dof = k;
+    }
+    {
+        KnobChoicePtr k = AppManager::createKnob<KnobChoice>( this, tr("Focus") );
+        k->setName("focusMode");
+        k->setAnimationEnabled(false);
+        std::vector<ChoiceOption> entries;
+        entries.push_back( ChoiceOption("camera", "Camera", "The Focus Distance of the camera on the Camera input, so the camera "
+                                                            "drives this node, CyclesRender and LensDefocus alike.") );
+        entries.push_back( ChoiceOption("distance", "Distance", "Focus at Focus Distance below.") );
+        k->populateChoices(entries);
+        k->setDefaultValue(0);
+        blurPage->addKnob(k);
+        _imp->focusMode = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Focus Distance") );
+        k->setName("focusDistance");
+        k->setDefaultValue(5.0);
+        k->setMinimum(1e-6);
+        k->setDisplayMinimum(0.1);
+        k->setDisplayMaximum(50.);
+        k->setAnimationEnabled(true);
+        k->setAddNewLine(false);
+        k->setHintToolTip( tr("Distance from the camera, along its view axis, that is sharp (Focus = Distance), "
+                              "in scene units. The Depth plane of this node gives that distance for any "
+                              "pixel: view it and read the value under the cursor.") );
+        blurPage->addKnob(k);
+        _imp->focusDistance = k;
+    }
+    {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>( this, tr("F-Stop From Camera") );
+        k->setName("fStopFromCamera");
+        k->setDefaultValue(true);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Take the f-stop from the camera on the Camera input. Off: use F-Stop below.") );
+        blurPage->addKnob(k);
+        _imp->fStopFromCamera = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("F-Stop") );
+        k->setName("fStop");
+        k->setDefaultValue(2.8);
+        k->setMinimum(0.1);
+        k->setDisplayMinimum(0.7);
+        k->setDisplayMaximum(22.);
+        k->setAnimationEnabled(true);
+        k->setAddNewLine(false);
+        k->setHintToolTip( tr("Smaller = wider opening = more blur. Used when F-Stop From Camera is off.") );
+        blurPage->addKnob(k);
+        _imp->fStop = k;
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Aperture Scale") );
@@ -392,9 +453,67 @@ SplatRender::initializeKnobs()
         k->setAnimationEnabled(true);
         k->setHintToolTip( tr("Multiplies the size of the lens opening. The opening is worked out as if one "
                               "scene unit were one metre (focal length / (2 x F-Stop)); a scan has no real "
-                              "unit, so raise this until the blur looks right for the scale of the scene.") );
+                              "unit, so raise this until the blur looks right for the scale of the scene. "
+                              "To match a LensDefocus on the same camera: 1 = its Scene Units set to Metres, "
+                              "100 = Centimetres, or Custom with Millimetres per Unit = 1000 / this value. "
+                              "The two agree when the focus distance is much longer than the focal length; "
+                              "LensDefocus also models the extra blur of close-up (macro) focus, this node, "
+                              "like CyclesRender, does not.") );
         blurPage->addKnob(k);
         _imp->apertureScale = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>( this, tr("Blades") );
+        k->setName("blades");
+        k->setDefaultValue(0);
+        k->setMinimum(0);
+        k->setMaximum(16);
+        k->setDisplayMinimum(0);
+        k->setDisplayMaximum(16);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Iris blades: the shape of out-of-focus highlights. 0 = circular opening; "
+                              "3 to 16 = polygon. Shapes need more Samples than a plain disc to look clean.") );
+        blurPage->addKnob(k);
+        _imp->blades = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Blade Curvature") );
+        k->setName("curvature");
+        k->setDefaultValue(0.);
+        k->setMinimum(0.);
+        k->setMaximum(1.);
+        k->setDisplayMinimum(0.);
+        k->setDisplayMaximum(1.);
+        k->setAnimationEnabled(false);
+        k->setAddNewLine(false);
+        k->setHintToolTip( tr("0 = straight blades, 1 = round. Real irises are rounder wide open.") );
+        blurPage->addKnob(k);
+        _imp->curvature = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Rotation") );
+        k->setName("rotation");
+        k->setDefaultValue(0.);
+        k->setDisplayMinimum(-180.);
+        k->setDisplayMaximum(180.);
+        k->setAnimationEnabled(true);
+        k->setAddNewLine(false);
+        k->setHintToolTip( tr("Iris rotation in degrees.") );
+        blurPage->addKnob(k);
+        _imp->rotation = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Anamorphic Squeeze") );
+        k->setName("squeeze");
+        k->setDefaultValue(1.);
+        k->setMinimum(0.1);
+        k->setDisplayMinimum(0.5);
+        k->setDisplayMaximum(2.);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Oval bokeh: above 1 makes out-of-focus highlights taller (anamorphic look), "
+                              "below 1 wider. The area of the opening is kept.") );
+        blurPage->addKnob(k);
+        _imp->squeeze = k;
     }
 }
 
@@ -504,6 +623,43 @@ void parallelPixels(std::size_t n, F f)
     for (std::thread& th : pool) th.join();
 }
 
+// Even spread of `n` points over the lens opening, in units of its radius: a disc, or
+// an iris of `blades` blades whose sides bulge towards a circle with `curvature`,
+// turned by `rotationDeg` and squeezed (area kept). Points come from a
+// low-discrepancy sequence over the square, keeping those inside the shape, so the
+// density is uniform over the opening whatever its shape.
+double halton(int i, int b);
+void lensPoints(int n, int blades, double curvature, double rotationDeg, double squeeze,
+                std::vector<std::pair<double, double> >& out)
+{
+    out.clear();
+    const double pi = 3.14159265358979323846;
+    const double rot = rotationDeg * pi / 180.;
+    const double sq = std::sqrt( std::max(0.01, squeeze) );
+    const double seg = blades >= 3 ? 2. * pi / blades : 0.;
+    for (int i = 0; (int)out.size() < n && i < n * 64 + 1024; ++i) {
+        const double x = 2. * halton(i, 2) - 1., y = 2. * halton(i, 3) - 1.;
+        const double r = std::sqrt(x * x + y * y);
+        if (r > 1.) continue;
+        if (blades >= 3) {
+            // Distance to the polygon's edge along this direction (corners on the unit circle).
+            double a = std::fmod(std::atan2(y, x) - rot, seg);
+            if (a < 0.) a += seg;
+            const double edge = std::cos(0.5 * seg) / std::cos(a - 0.5 * seg);
+            if (r > edge + (1. - edge) * std::min( 1., std::max(0., curvature) ) ) continue;
+        }
+        out.push_back( std::make_pair(x / sq, y * sq) );
+    }
+    if ( out.empty() ) out.push_back( std::make_pair(0., 0.) );
+    // Centre the set on the lens axis: a finite set of points is never exactly balanced, and
+    // any offset would slide the whole out-of-focus picture sideways by a pixel or two.
+    double mx = 0., my = 0.;
+    for (std::size_t i = 0; i < out.size(); ++i) { mx += out[i].first; my += out[i].second; }
+    mx /= (double)out.size();
+    my /= (double)out.size();
+    for (std::size_t i = 0; i < out.size(); ++i) { out[i].first -= mx; out[i].second -= my; }
+}
+
 // Point i of the Halton sequence in base b, in [0, 1).
 double halton(int i, int b)
 {
@@ -598,10 +754,13 @@ SplatRender::render(const RenderActionArgs& args)
     CameraProvider* cp = camEffect ? dynamic_cast<CameraProvider*>( camEffect.get() ) : NULL;
 
     bool wantMB = _imp->motionBlur.lock() && _imp->motionBlur.lock()->getValue();
-    bool wantDof = cp && _imp->dof.lock() && _imp->dof.lock()->getValue();
+    // Without a camera the framing camera's 50 mm and the node's own Focus Distance / F-Stop are used.
+    bool wantDof = _imp->dof.lock() && _imp->dof.lock()->getValue();
     const double shutter = _imp->shutter.lock() ? _imp->shutter.lock()->getValueAtTime(args.time) : 0.5;
     const int shutterMode = _imp->shutterOffset.lock() ? _imp->shutterOffset.lock()->getValue() : 0;
     const double apertureScale = _imp->apertureScale.lock() ? _imp->apertureScale.lock()->getValueAtTime(args.time) : 1.;
+    const int focusMode = _imp->focusMode.lock() ? _imp->focusMode.lock()->getValue() : 0;
+    const bool fStopFromCamera = !_imp->fStopFromCamera.lock() || _imp->fStopFromCamera.lock()->getValue();
     if (shutter <= 0.) wantMB = false;
     int nSamples = 1;
     if (wantMB || wantDof) {
@@ -730,6 +889,16 @@ SplatRender::render(const RenderActionArgs& args)
         const Clock::time_point tFrame = Clock::now();
         double msSetup = 0., msSort = 0., msGpu = 0., msWait = 0., msDraw = 0., msPost = 0.;
 
+        std::vector<std::pair<double, double> > lens;
+        if (wantDof) {
+            lensPoints(nSamples,
+                       _imp->blades.lock() ? _imp->blades.lock()->getValue() : 0,
+                       _imp->curvature.lock() ? _imp->curvature.lock()->getValue() : 0.,
+                       _imp->rotation.lock() ? _imp->rotation.lock()->getValueAtTime(args.time) : 0.,
+                       _imp->squeeze.lock() ? _imp->squeeze.lock()->getValue() : 1.,
+                       lens);
+        }
+
         std::vector<float> accRgba, accDepth, accAlpha;
         if (nSamples > 1) {
             accRgba.assign( (std::size_t)W * H * 4, 0.f );
@@ -762,13 +931,16 @@ SplatRender::render(const RenderActionArgs& args)
                 // A point on the lens (even spread over a disc). Move the camera there, in its
                 // own plane, and shift the picture back so that what lies at the focus distance
                 // stays put: everything else smears, more the farther it is from that distance.
-                const double lensRadius = cs.focal / (2. * cs.fStop) / 1000. * apertureScale;   // 1 unit = 1 m
-                const double r = std::sqrt( halton(smp, 2) ), th = 6.283185307179586 * halton(smp, 3);
-                const double lx = lensRadius * r * std::cos(th), ly = lensRadius * r * std::sin(th);
+                double fStop = cs.fStop, focusDist = cs.focusDistance;
+                if (!fStopFromCamera && _imp->fStop.lock()) fStop = std::max( 0.1, _imp->fStop.lock()->getValueAtTime(t) );
+                if (focusMode == 1 && _imp->focusDistance.lock()) focusDist = std::max( 1e-6, _imp->focusDistance.lock()->getValueAtTime(t) );
+                const double lensRadius = cs.focal / (2. * fStop) / 1000. * apertureScale;   // 1 unit = 1 m
+                const std::pair<double, double>& lp = lens[(std::size_t)smp % lens.size()];
+                const double lx = lensRadius * lp.first, ly = lensRadius * lp.second;
                 prm.view[12] -= (float)lx;
                 prm.view[13] -= (float)ly;
-                prm.ndcOffsetX = (float)(cs.projX * lx / cs.focusDistance);
-                prm.ndcOffsetY = (float)(cs.projY * ly / cs.focusDistance);
+                prm.ndcOffsetX = (float)(cs.projX * lx / focusDist);
+                prm.ndcOffsetY = (float)(cs.projY * ly / focusDist);
             }
             // Lens samples of one instant see almost the same order: sort once. With motion
             // blur the view really changes, so every draw sorts.
