@@ -60,6 +60,8 @@ CLANG_DIAG_ON(uninitialized)
 #include "Engine/Dev/Particles/ParticleInstance.h"
 #include "Engine/Dev/Particles/ParticleSolver.h"
 #include "Engine/Dev/Scene3D/ReadVDB.h"
+#include "Engine/Dev/Scene3D/ReadSplats.h"
+#include "Gui/Viewport3DSplatCache.h"
 #include "Engine/Dev/Scene3D/Volume3D.h"
 #include "Engine/Dev/Scene3D/Cube3D.h"
 #include "Engine/Dev/Scene3D/Cylinder3D.h"
@@ -952,6 +954,8 @@ struct Viewport3DPrivate
     // GPU copies of the scene meshes + the headlight/texture shader that draws
     // them (see Viewport3DMeshCache). Per-context resources like the above.
     mutable Viewport3DMeshCache meshCache;
+    // GPU-resident point previews of ReadSplats scenes (see Viewport3DSplatCache.h).
+    mutable Viewport3DSplatCache splatCache;
 
     // Local-space bounds per MeshData::version, for the Group3D bounding box.
     // A 1.5M-vertex scan is scanned once per upload, not once per paint.
@@ -1135,6 +1139,7 @@ Viewport3D::initializeGL()
 
     // The cached mesh buffers belong to the previous context too.
     _imp->meshCache.forgetAll();
+    _imp->splatCache.forgetAll();
 
     // Mesh shader: flat face normal headlight (same formula as
     // ViewportFaceLitFactor: ambient + abs(N.L) * (1 - ambient), two-sided
@@ -1596,6 +1601,7 @@ Viewport3D::paintGL()
     ++_imp->paintSerial;
     purgePreviewTextures(_imp->previewGlTextures, _imp->paintSerial, 600);
     _imp->meshCache.purgeIdle(_imp->paintSerial, 600);
+    _imp->splatCache.purgeIdle(_imp->paintSerial, 600);
     // Background from Preferences > 3D Viewport, every frame (a one-off
     // glClearColor in initializeGL could not follow a preference change).
     {
@@ -1981,6 +1987,7 @@ Viewport3D::paintGL()
             case eSceneNodeLight:      drawLightNode(sn); break;
             case eSceneNodeTransform:  drawTransformNode(sn); break;
             case eSceneNodePath:       drawPathNode(sn); break;
+            case eSceneNodeSplats:     drawSplatsNode(sn); break;
         }
 
         glPopMatrix();
@@ -6055,6 +6062,80 @@ Viewport3D::drawParticlesNode(const SceneNode& sn) const
             glLineWidth(1.0f);
         }
     }
+}
+
+// Point preview of a Gaussian splat scene (ReadSplats): one opaque round point
+// per splat, sized in world units. The points live in a cached vertex buffer
+// (Viewport3DSplatCache), so a repaint is one draw call and no upload. Drawn
+// with depth write on and no blending: nearest point wins, no sorting needed.
+void
+Viewport3D::drawSplatsNode(const SceneNode& sn) const
+{
+    NodePtr node = sn.sourceNode.lock();
+    if (!node) return;
+    EffectInstancePtr effect = node->getEffectInstance();
+    ReadSplats* splats = effect ? dynamic_cast<ReadSplats*>(effect.get()) : NULL;
+    if (!splats) return;
+    Gui* gui = getGui();
+    GuiAppInstancePtr app = gui ? gui->getApp() : GuiAppInstancePtr();
+    if (!app) return;
+    const double time = app->getTimeLine()->currentFrame();
+
+    SplatDataPtr data = splats->getSplatData();
+    const Viewport3DSplatCache::Entry* E =
+        _imp->splatCache.acquire(data, splats->getPreviewOpacityThreshold(), splats->getViewportMaxPoints(),
+                                 splats->getPreviewSizeClamp(), _imp->paintSerial);
+    if (!E) return;
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    // The shared particle shader fades alpha towards the edge of each point. With
+    // blending off that alpha would be written as is, and the widget is composited
+    // with its alpha: every point got a dark rim, and dense areas went black. Leave
+    // the framebuffer alpha alone so the points are solid discs.
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
+
+    glBindBuffer(GL_ARRAY_BUFFER, E->vbo);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glVertexPointer(3, GL_FLOAT, Viewport3DSplatCache::kStride, (void*)0);
+    glColorPointer(4, GL_UNSIGNED_BYTE, Viewport3DSplatCache::kStride, (void*)(size_t)Viewport3DSplatCache::kColorOffset);
+
+    if (_imp->particleShaderReady) {
+        glUseProgram(_imp->particleShaderProgram);
+        GLint vp[4] = {0, 0, 0, 0};
+        glGetIntegerv(GL_VIEWPORT, vp);
+        // Stored diameters are in the file's units: world size = diameter * the
+        // node's Uniform Scale * Point Scale. Projection [1][1] is 1/tan(fov/2).
+        const float pxPerUnit = _imp->cameraProjection[5] * 0.5f * (float)std::max(1, (int)vp[3])
+                                * splats->getSplatWorldScale(time) * splats->getPreviewPointScale(time);
+        glUniform1f(glGetUniformLocation(_imp->particleShaderProgram, "u_pxPerUnit"), pxPerUnit);
+        glUniform1f(glGetUniformLocation(_imp->particleShaderProgram, "u_maxPx"), 256.0f);
+        glEnable(GL_PROGRAM_POINT_SIZE);
+        glEnable(GL_POINT_SPRITE);
+        const GLint psizeLoc = glGetAttribLocation(_imp->particleShaderProgram, "psize");
+        if (psizeLoc >= 0) {
+            glEnableVertexAttribArray(psizeLoc);
+            glVertexAttribPointer(psizeLoc, 1, GL_FLOAT, GL_FALSE, Viewport3DSplatCache::kStride,
+                                  (void*)(size_t)Viewport3DSplatCache::kSizeOffset);
+        }
+        glDrawArrays(GL_POINTS, 0, E->count);
+        if (psizeLoc >= 0) glDisableVertexAttribArray(psizeLoc);
+        glDisable(GL_POINT_SPRITE);
+        glDisable(GL_PROGRAM_POINT_SIZE);
+        glUseProgram(0);
+    } else {
+        // No shader: fixed-size square points.
+        glPointSize(2.0f);
+        glDrawArrays(GL_POINTS, 0, E->count);
+        glPointSize(1.0f);
+    }
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void

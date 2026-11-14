@@ -51,7 +51,8 @@ enum SceneNodeType {
     eSceneNodeVolume,
     eSceneNodeLight,
     eSceneNodeTransform,
-    eSceneNodePath          // Path3D rail: control points are world space, local = identity
+    eSceneNodePath,         // Path3D rail: control points are world space, local = identity
+    eSceneNodeSplats        // ReadSplats: Gaussian splat scene, local = the node's own transform
 };
 
 /**
