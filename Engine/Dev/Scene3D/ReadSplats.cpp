@@ -147,11 +147,12 @@ ReadSplats::initializeKnobs()
         entries.push_back( ChoiceOption("2", "2", "Keep two bands of view-dependent colour. 152 bytes per splat.") );
         entries.push_back( ChoiceOption("3", "3 (full)", "Keep all of the file's view-dependent colour. 236 bytes per splat.") );
         k->populateChoices(entries);
-        k->setDefaultValue(0);
+        k->setDefaultValue(3);
         k->setHintToolTip( tr("How much of the splats' view-dependent colour (spherical harmonics) to keep "
-                              "in memory. The point preview only uses the base colour, so 0 costs nothing "
-                              "here and keeps a large scan four times smaller. A splat renderer needs the "
-                              "higher bands for highlights and reflections that shift with the camera. "
+                              "in memory and on the graphics card. SplatRender uses it for highlights and "
+                              "reflections that shift with the camera. The point preview in the 3D viewport "
+                              "and ScanlineRender only uses the base colour, so for layout work, or when a "
+                              "large scan does not fit in memory, 0 keeps it four times smaller. "
                               "Changing this reads the file again.") );
         page->addKnob(k);
         _imp->shDegree = k;
@@ -311,7 +312,7 @@ ReadSplats::getSplatData()
     KnobChoicePtr degKnob = _imp->shDegree.lock();
     // Read the knobs before taking the mutex: knob access has its own locks.
     const std::string path = fileKnob ? fileKnob->getValue() : std::string();
-    const int degree = degKnob ? degKnob->getValue() : 0;
+    const int degree = degKnob ? degKnob->getValue() : 3;
 
     std::lock_guard<std::mutex> lk(_imp->mutex);
     if (_imp->loadAttempted && path == _imp->loadedPath && degree == _imp->loadedShDegree) {
