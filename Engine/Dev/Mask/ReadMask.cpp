@@ -463,6 +463,12 @@ ReadMask::importFile(double time)
     const double docHeight = doc.height > 0.0 ? doc.height : formatH;
 
     // Layer grouping: main layer named after the file, sub-layers per SVG group.
+    //
+    // All tree mutations go through RotoContext::addItem: it links the parent,
+    // registers the layer, and emits itemInserted — the RotoPanel keeps its tree
+    // in sync via those signals. Mutating RotoLayer directly (addItem/insertItem)
+    // is silent and leaves the RotoPanel stale (and, on rebuild, was the
+    // use-after-free path into QTreeWidgetItem::insertChild).
     RotoLayerPtr baseLayer = ctx->getOrCreateBaseLayer();
     RotoLayerPtr mainLayer;
     std::map<std::string, RotoLayerPtr> subLayers;
@@ -471,9 +477,10 @@ ReadMask::importFile(double time)
             VectorMask::sanitizeName(info.completeBaseName().toStdString(), "Imported_Vector");
         mainLayer.reset(new RotoLayer(ctx, fileLabel, RotoLayerPtr()));
         if (baseLayer) {
-            baseLayer->addItem(mainLayer, true);
+            ctx->addItem(baseLayer, (int)baseLayer->getItems().size(), mainLayer, RotoItem::eSelectionReasonOther);
+        } else {
+            ctx->addItem(RotoLayerPtr(), 0, mainLayer, RotoItem::eSelectionReasonOther);
         }
-        ctx->addLayer(mainLayer);
         _imp->importedItems.push_back(mainLayer);
     }
 
@@ -495,9 +502,8 @@ ReadMask::importFile(double time)
             if (shape.layerName != "Layer1") {
                 std::map<std::string, RotoLayerPtr>::iterator found = subLayers.find(safeLayer);
                 if (found == subLayers.end()) {
-                    RotoLayerPtr sub(new RotoLayer(ctx, safeLayer, mainLayer));
-                    mainLayer->addItem(sub, true);
-                    ctx->addLayer(sub);
+                    RotoLayerPtr sub(new RotoLayer(ctx, safeLayer, RotoLayerPtr()));
+                    ctx->addItem(mainLayer, (int)mainLayer->getItems().size(), sub, RotoItem::eSelectionReasonOther);
                     subLayers[safeLayer] = sub;
                     _imp->importedItems.push_back(sub);
                     dest = sub;
@@ -516,7 +522,7 @@ ReadMask::importFile(double time)
             ctx->generateUniqueName(VectorMask::sanitizeName(shape.name.empty() ? std::string("Shape") : shape.name, "Shape"));
         BezierPtr curve(new Bezier(ctx, shapeName, RotoLayerPtr(), !shape.closed));
         curve->createNodes();
-        dest->insertItem(curve, 0);
+        ctx->addItem(dest, 0, curve, RotoItem::eSelectionReasonOther);
         _imp->importedItems.push_back(curve);
 
         // Build-up: control points (feather points are added at the same positions).
