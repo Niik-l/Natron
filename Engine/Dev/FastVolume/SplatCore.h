@@ -72,6 +72,7 @@ struct DrawParams {
     bool frustumCull = true;    // skip splats that cannot touch the picture (off only for testing)
     bool reuseOrder = false;    // keep the previous draw's visible set and order (same scenes, nearly
                                 //   the same view: the lens samples of one depth-of-field frame)
+    bool aovs = false;          // also fill RenderOutput's normal / matte / nearest layers (one more draw)
 };
 
 // Per-pixel layers, row 0 = TOP of the image.
@@ -80,6 +81,15 @@ struct RenderOutput {
     std::vector<float> rgba;    // width*height*4: premultiplied colour + alpha
     std::vector<float> depth;   // width*height:   mean distance along the view axis of what is visible
                                 //                 (world units), 0 where alpha is 0
+    // Filled only when DrawParams::aovs is set (empty otherwise):
+    std::vector<float> normal;  // width*height*3: world-space direction the surface faces, unit length,
+                                //   towards the camera; 0 where empty. A splat has no true normal: this is
+                                //   the direction of its thinnest axis, blended like the colour.
+    std::vector<float> matte;   // width*height*3: how much of the pixel comes from scene 0, 1 and 2
+                                //   (their share of the alpha; scenes 3.. are not in it)
+    std::vector<float> nearestDepth;  // width*height: distance along the view axis of the nearest splat
+                                //   that is at least half opaque at that pixel; 0 where there is none
+    std::vector<float> nearestScene;  // width*height: 1 + index of the scene that splat belongs to, 0 = none
     std::size_t drawn = 0;      // splats that passed culling, sorted and drawn
     double sortMs = 0., gpuMs = 0.;   // gpuMs = waitMs (submit until the GPU is done) + the copy back
     double waitMs = 0.;

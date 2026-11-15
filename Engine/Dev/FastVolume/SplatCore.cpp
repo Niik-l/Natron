@@ -48,12 +48,15 @@ struct U {
 @group(0) @binding(2) var<storage, read> cov: array<f32>;
 @group(0) @binding(3) var<storage, read> sh: array<f32>;
 @group(0) @binding(4) var<storage, read> order: array<u32>;
+@group(0) @binding(5) var<storage, read> nrm: array<f32>;     // 3 per splat: its thinnest axis (file space)
 
 struct VOut {
     @builtin(position) pos: vec4f,
     @location(0) color: vec4f,     // rgb + opacity
     @location(1) uv: vec2f,        // position inside the splat, in standard deviations
     @location(2) depth: f32,       // distance along the view axis
+    @location(3) normal: vec3f,    // world space, facing the camera
+    @location(4) @interpolate(flat) scene: u32,
 };
 
 fn shc(id: u32, k: u32) -> vec3f {
@@ -97,6 +100,8 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
     o.color = vec4f(0.0);
     o.uv = vec2f(0.0);
     o.depth = 0.0;
+    o.normal = vec3f(0.0);
+    o.scene = 0u;
 
     let id = order[ii];
     let p = posOp[id];
@@ -164,6 +169,19 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
 
     let dir = normalize(p.xyz - u.camPosLocal[sc].xyz);
     o.color = vec4f(shColor(id, dir), opacity);
+
+    // Normal: the splat's thinnest axis, in camera space to pick the side that faces the
+    // camera, sent out in world space.
+    let nb = id * 3u;
+    let nLocal = vec3f(nrm[nb], nrm[nb + 1u], nrm[nb + 2u]);
+    let nCam = w * nLocal;
+    let m3 = mat3x3f(u.models[sc][0].xyz, u.models[sc][1].xyz, u.models[sc][2].xyz);
+    var nWorld = m3 * nLocal;
+    if (dot(nCam, pc.xyz) > 0.0) { nWorld = -nWorld; }
+    let nl = length(nWorld);
+    if (nl > 1e-12) { nWorld = nWorld / nl; }
+    o.normal = nWorld;
+    o.scene = sc;
     return o;
 }
 
@@ -179,6 +197,29 @@ fn fs(i: VOut) -> FOut {
     var o: FOut;
     o.color = vec4f(i.color.rgb * alpha, alpha);
     o.depth = vec4f(i.depth * alpha, 0.0, 0.0, alpha);
+    return o;
+}
+
+// Second pass, same splats in the same order: layers that are not colour.
+struct FAov {
+    @location(0) normal: vec4f,     // normal x alpha, blended like the colour
+    @location(1) matte: vec4f,      // alpha into the channel of the splat's scene (scenes 0..2)
+    @location(2) nearest: vec4f,    // depth and 1 + scene of the last (= nearest) half-opaque splat
+};
+
+@fragment
+fn fsAov(i: VOut) -> FAov {
+    let alpha = min(0.99, i.color.w * exp(-0.5 * dot(i.uv, i.uv)));
+    if (alpha < 0.00392156862) { discard; }
+    var o: FAov;
+    o.normal = vec4f(i.normal * alpha, alpha);
+    var m = vec3f(0.0);
+    if (i.scene == 0u) { m.x = alpha; } else if (i.scene == 1u) { m.y = alpha; } else if (i.scene == 2u) { m.z = alpha; }
+    o.matte = vec4f(m, alpha);
+    // Splats are drawn far to near, so with an all-or-nothing alpha the last one written
+    // is the nearest one that is solid here.
+    let solid = select(0.0, 1.0, alpha >= 0.5);
+    o.nearest = vec4f(i.depth * solid, f32(i.scene + 1u) * solid, 0.0, solid);
     return o;
 }
 )";
@@ -315,6 +356,8 @@ struct Gpu {
     bool float32Blend = false;
     WGPUTextureFormat format = WGPUTextureFormat_RGBA16Float;
     WGPURenderPipeline pipeline = nullptr;
+    WGPURenderPipeline pipelineAov = nullptr;    // second pass: normal, scene matte, nearest depth
+    WGPUBindGroupLayout bindLayout = nullptr;    // one layout for both, so one bind group serves both
     // Recursive: releasing a shared scene (below) can happen while its owner holds the lock.
     std::recursive_mutex mutex;
     // Uploaded scenes by content ids, so several Renderers can share one copy.
@@ -399,6 +442,24 @@ struct Gpu {
         WGPUShaderModule mod = wgpuDeviceCreateShaderModule(device, &smd);
         if (!mod || !gpuError.empty()) { error = "splat shader failed to compile: " + gpuError; return false; }
 
+        // One explicit bind group layout for both pipelines (an automatic layout is private to
+        // its pipeline, and the colour pass does not use every binding).
+        WGPUBindGroupLayoutEntry le[6] = {};
+        for (uint32_t b = 0; b < 6; ++b) {
+            le[b].binding = b;
+            le[b].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+            le[b].buffer.type = b == 0 ? WGPUBufferBindingType_Uniform : WGPUBufferBindingType_ReadOnlyStorage;
+        }
+        WGPUBindGroupLayoutDescriptor bld = {};
+        bld.entryCount = 6;
+        bld.entries = le;
+        bindLayout = wgpuDeviceCreateBindGroupLayout(device, &bld);
+        WGPUPipelineLayoutDescriptor pld = {};
+        pld.bindGroupLayoutCount = 1;
+        pld.bindGroupLayouts = &bindLayout;
+        WGPUPipelineLayout layout = wgpuDeviceCreatePipelineLayout(device, &pld);
+        if (!bindLayout || !layout || !gpuError.empty()) { error = "splat pipeline layout failed: " + gpuError; return false; }
+
         WGPUBlendState blend = {};
         blend.color.operation = WGPUBlendOperation_Add;
         blend.color.srcFactor = WGPUBlendFactor_One;
@@ -410,36 +471,45 @@ struct Gpu {
         blend.alpha.operation = WGPUBlendOperation_Add;
         blend.alpha.srcFactor = WGPUBlendFactor_Zero;
         blend.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
-        WGPUColorTargetState targets[2] = {};
-        for (int i = 0; i < 2; ++i) {
-            targets[i].format = format;
-            targets[i].blend = &blend;
-            targets[i].writeMask = WGPUColorWriteMask_All;
-        }
-        WGPUFragmentState fs = {};
-        fs.module = mod;
-        fs.entryPoint = sv("fs");
-        fs.targetCount = 2;
-        fs.targets = targets;
+        for (int which = 0; which < 2; ++which) {
+            // 0: colour + depth, in the best blendable float format. 1: the three extra layers,
+            // always 16-bit float (three 32-bit targets would pass the per-pixel attachment limit).
+            const int nTargets = which == 0 ? 2 : 3;
+            WGPUColorTargetState targets[3] = {};
+            for (int i = 0; i < nTargets; ++i) {
+                targets[i].format = which == 0 ? format : WGPUTextureFormat_RGBA16Float;
+                targets[i].blend = &blend;
+                targets[i].writeMask = WGPUColorWriteMask_All;
+            }
+            WGPUFragmentState fs = {};
+            fs.module = mod;
+            fs.entryPoint = sv(which == 0 ? "fs" : "fsAov");
+            fs.targetCount = (size_t)nTargets;
+            fs.targets = targets;
 
-        WGPURenderPipelineDescriptor pd = {};
-        pd.vertex.module = mod;
-        pd.vertex.entryPoint = sv("vs");
-        pd.primitive.topology = WGPUPrimitiveTopology_TriangleStrip;
-        pd.primitive.stripIndexFormat = WGPUIndexFormat_Undefined;
-        pd.primitive.frontFace = WGPUFrontFace_CCW;
-        pd.primitive.cullMode = WGPUCullMode_None;
-        pd.multisample.count = 1;
-        pd.multisample.mask = 0xFFFFFFFFu;
-        pd.fragment = &fs;
-        pipeline = wgpuDeviceCreateRenderPipeline(device, &pd);
+            WGPURenderPipelineDescriptor pd = {};
+            pd.layout = layout;
+            pd.vertex.module = mod;
+            pd.vertex.entryPoint = sv("vs");
+            pd.primitive.topology = WGPUPrimitiveTopology_TriangleStrip;
+            pd.primitive.stripIndexFormat = WGPUIndexFormat_Undefined;
+            pd.primitive.frontFace = WGPUFrontFace_CCW;
+            pd.primitive.cullMode = WGPUCullMode_None;
+            pd.multisample.count = 1;
+            pd.multisample.mask = 0xFFFFFFFFu;
+            pd.fragment = &fs;
+            (which == 0 ? pipeline : pipelineAov) = wgpuDeviceCreateRenderPipeline(device, &pd);
+        }
+        wgpuPipelineLayoutRelease(layout);
         wgpuShaderModuleRelease(mod);
-        if (!pipeline || !gpuError.empty()) { error = "splat pipeline creation failed: " + gpuError; return false; }
+        if (!pipeline || !pipelineAov || !gpuError.empty()) { error = "splat pipeline creation failed: " + gpuError; return false; }
         return true;
     }
 
     ~Gpu() {
         if (pipeline) wgpuRenderPipelineRelease(pipeline);
+        if (pipelineAov) wgpuRenderPipelineRelease(pipelineAov);
+        if (bindLayout) wgpuBindGroupLayoutRelease(bindLayout);
         if (queue) wgpuQueueRelease(queue);
         if (device) wgpuDeviceRelease(device);
         if (adapter) wgpuAdapterRelease(adapter);
@@ -450,7 +520,7 @@ struct Gpu {
 // One uploaded set of scenes: the large buffers, which do not depend on the view.
 struct SceneGpu {
     std::shared_ptr<Gpu> gpu;
-    WGPUBuffer posBuf = nullptr, covBuf = nullptr, shBuf = nullptr;
+    WGPUBuffer posBuf = nullptr, covBuf = nullptr, shBuf = nullptr, nrmBuf = nullptr;
     std::size_t count = 0;                      // total splats
     int numScenes = 0;
     std::size_t sceneStart[kMaxScenes + 1] = {0};
@@ -460,7 +530,7 @@ struct SceneGpu {
     ~SceneGpu() {
         if (!gpu) return;
         std::lock_guard<std::recursive_mutex> lk(gpu->mutex);
-        for (WGPUBuffer b : {posBuf, covBuf, shBuf})
+        for (WGPUBuffer b : {posBuf, covBuf, shBuf, nrmBuf})
             if (b) { wgpuBufferDestroy(b); wgpuBufferRelease(b); }
     }
 };
@@ -515,6 +585,12 @@ struct Renderer::Impl {
     WGPUTextureView colorView = nullptr, depthView = nullptr;
     WGPUBuffer readBuf = nullptr;
     uint64_t readBytes = 0;
+    // Targets of the second pass (made on first use)
+    int aovW = 0, aovH = 0;
+    WGPUTexture aovTex[3] = {nullptr, nullptr, nullptr};
+    WGPUTextureView aovView[3] = {nullptr, nullptr, nullptr};
+    WGPUBuffer aovReadBuf = nullptr;
+    uint64_t aovReadBytes = 0;
 
     // Sort scratch
     std::vector<float> depth;
@@ -560,6 +636,19 @@ struct Renderer::Impl {
         colorTex = depthTex = nullptr;
         readBuf = nullptr;
         texW = texH = 0;
+        releaseAovTargets();
+    }
+
+    void releaseAovTargets() {
+        for (int i = 0; i < 3; ++i) {
+            if (aovView[i]) wgpuTextureViewRelease(aovView[i]);
+            if (aovTex[i]) { wgpuTextureDestroy(aovTex[i]); wgpuTextureRelease(aovTex[i]); }
+            aovView[i] = nullptr;
+            aovTex[i] = nullptr;
+        }
+        if (aovReadBuf) { wgpuBufferDestroy(aovReadBuf); wgpuBufferRelease(aovReadBuf); }
+        aovReadBuf = nullptr;
+        aovW = aovH = 0;
     }
 
     WGPUBuffer storage(uint64_t size) {
@@ -592,7 +681,7 @@ std::size_t Renderer::sceneCount() const { return _p->count; }
 
 std::size_t Renderer::gpuBytesFor(std::size_t count, int shDegree) {
     const std::size_t k = (std::size_t)(shDegree + 1) * (std::size_t)(shDegree + 1);
-    return count * (16 + 24 + 12 * k + 4);
+    return count * (16 + 24 + 12 * k + 4 + 12);
 }
 
 bool Renderer::upload(const SceneDesc* scenes, int numScenes) {
@@ -652,8 +741,9 @@ bool Renderer::upload(const SceneDesc* scenes, int numScenes) {
         sc->posBuf = g.storage(posBytes);
         sc->covBuf = g.storage(covBytes);
         sc->shBuf = g.storage(shBytes);
+        sc->nrmBuf = g.storage((uint64_t)total * 12);
         wgpuDevicePoll(g.device, false, nullptr);
-        if (!sc->posBuf || !sc->covBuf || !sc->shBuf || !(*g.gpuErrorP).empty()) {
+        if (!sc->posBuf || !sc->covBuf || !sc->shBuf || !sc->nrmBuf || !(*g.gpuErrorP).empty()) {
             g.error = "not enough graphics memory for the scene (" + (*g.gpuErrorP) + ")";
             return false;
         }
@@ -661,7 +751,7 @@ bool Renderer::upload(const SceneDesc* scenes, int numScenes) {
 
         // Build and send in chunks so the staging copies stay small next to the scene.
         const std::size_t chunk = 1u << 18;
-        std::vector<float> stPos(chunk * 4), stCov(chunk * 6), stSh(chunk * shStride);
+        std::vector<float> stPos(chunk * 4), stCov(chunk * 6), stSh(chunk * shStride), stNrm(chunk * 3);
         std::size_t base = 0;
         for (int si = 0; si < numScenes; ++si) {
             const SceneDesc& s = scenes[si];
@@ -694,6 +784,9 @@ bool Renderer::upload(const SceneDesc* scenes, int numScenes) {
                     C[0] = sig(0, 0); C[1] = sig(0, 1); C[2] = sig(0, 2);
                     C[3] = sig(1, 1); C[4] = sig(1, 2); C[5] = sig(2, 2);
                     sc->radius[base + i] = std::max(sx, std::max(sy, sz));
+                    // The axis the splat is thinnest along: what stands in for a surface normal.
+                    const int thin = (sx <= sy && sx <= sz) ? 0 : (sy <= sz ? 1 : 2);
+                    stNrm[j * 3] = R[0][thin]; stNrm[j * 3 + 1] = R[1][thin]; stNrm[j * 3 + 2] = R[2][thin];
 
                     float* H = &stSh[j * shStride];
                     H[0] = s.dc[i * 3]; H[1] = s.dc[i * 3 + 1]; H[2] = s.dc[i * 3 + 2];
@@ -710,6 +803,7 @@ bool Renderer::upload(const SceneDesc* scenes, int numScenes) {
                 wgpuQueueWriteBuffer(g.queue, sc->posBuf, at * 16, stPos.data(), n * 16);
                 wgpuQueueWriteBuffer(g.queue, sc->covBuf, at * 24, stCov.data(), n * 24);
                 wgpuQueueWriteBuffer(g.queue, sc->shBuf, at * shStride * 4, stSh.data(), n * shStride * 4);
+                wgpuQueueWriteBuffer(g.queue, sc->nrmBuf, at * 12, stNrm.data(), n * 12);
                 wgpuQueueSubmit(g.queue, 0, nullptr);      // flush this chunk's staging
                 wgpuDevicePoll(g.device, false, nullptr);
                 if (!(*g.gpuErrorP).empty()) {
@@ -741,15 +835,13 @@ bool Renderer::upload(const SceneDesc* scenes, int numScenes) {
         e.size = WGPU_WHOLE_SIZE;
         return e;
     };
-    WGPUBindGroupEntry be[5] = {entry(0, g.uniformBuf), entry(1, sc->posBuf), entry(2, sc->covBuf),
-                                entry(3, sc->shBuf), entry(4, g.orderBuf)};
-    WGPUBindGroupLayout layout = wgpuRenderPipelineGetBindGroupLayout(g.pipeline, 0);
+    WGPUBindGroupEntry be[6] = {entry(0, g.uniformBuf), entry(1, sc->posBuf), entry(2, sc->covBuf),
+                                entry(3, sc->shBuf), entry(4, g.orderBuf), entry(5, sc->nrmBuf)};
     WGPUBindGroupDescriptor bgd = {};
-    bgd.layout = layout;
-    bgd.entryCount = 5;
+    bgd.layout = g.gpu->bindLayout;
+    bgd.entryCount = 6;
     bgd.entries = be;
     g.bindGroup = wgpuDeviceCreateBindGroup(g.device, &bgd);
-    wgpuBindGroupLayoutRelease(layout);
     if (!g.bindGroup || !(*g.gpuErrorP).empty()) {
         g.error = "binding the scene buffers failed (" + (*g.gpuErrorP) + ")";
         g.releaseScene();
@@ -1053,6 +1145,122 @@ bool Renderer::draw(const float* const* pos, const DrawParams& prm, int W, int H
         }
     });
     wgpuBufferUnmap(g.readBuf);
+
+    out.normal.clear();
+    out.matte.clear();
+    out.nearestDepth.clear();
+    out.nearestScene.clear();
+    if (prm.aovs) {
+        // ---- second pass: the same splats in the same order into three more targets
+        const uint32_t aRow = ((uint32_t)W * 8u + 255u) & ~255u;
+        const uint64_t aBytes = (uint64_t)aRow * (uint64_t)H;
+        if (g.aovW != W || g.aovH != H) {
+            g.releaseAovTargets();
+            WGPUTextureDescriptor td = {};
+            td.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc;
+            td.dimension = WGPUTextureDimension_2D;
+            td.size.width = (uint32_t)W; td.size.height = (uint32_t)H; td.size.depthOrArrayLayers = 1;
+            td.format = WGPUTextureFormat_RGBA16Float;
+            td.mipLevelCount = 1;
+            td.sampleCount = 1;
+            bool okT = true;
+            for (int i = 0; i < 3; ++i) {
+                g.aovTex[i] = wgpuDeviceCreateTexture(g.device, &td);
+                if (g.aovTex[i]) g.aovView[i] = wgpuTextureCreateView(g.aovTex[i], nullptr);
+                okT = okT && g.aovView[i];
+            }
+            WGPUBufferDescriptor rd = {};
+            rd.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+            rd.size = aBytes * 3;
+            g.aovReadBuf = wgpuDeviceCreateBuffer(g.device, &rd);
+            g.aovReadBytes = rd.size;
+            if (!okT || !g.aovReadBuf || !(*g.gpuErrorP).empty()) {
+                g.error = "not enough graphics memory for the extra layers (" + (*g.gpuErrorP) + ")";
+                g.releaseAovTargets();
+                return false;
+            }
+            g.aovW = W; g.aovH = H;
+        }
+        WGPURenderPassColorAttachment aatt[3] = {};
+        for (int i = 0; i < 3; ++i) {
+            aatt[i].view = g.aovView[i];
+            aatt[i].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+            aatt[i].loadOp = WGPULoadOp_Clear;
+            aatt[i].storeOp = WGPUStoreOp_Store;
+            aatt[i].clearValue = WGPUColor{0., 0., 0., 1.};
+        }
+        WGPURenderPassDescriptor arp = {};
+        arp.colorAttachmentCount = 3;
+        arp.colorAttachments = aatt;
+        WGPUCommandEncoder aenc = wgpuDeviceCreateCommandEncoder(g.device, nullptr);
+        WGPURenderPassEncoder apass = wgpuCommandEncoderBeginRenderPass(aenc, &arp);
+        wgpuRenderPassEncoderSetPipeline(apass, g.gpu->pipelineAov);
+        wgpuRenderPassEncoderSetBindGroup(apass, 0, g.bindGroup, 0, nullptr);
+        wgpuRenderPassEncoderDraw(apass, 4, (uint32_t)M, 0, 0);
+        wgpuRenderPassEncoderEnd(apass);
+        wgpuRenderPassEncoderRelease(apass);
+        for (int i = 0; i < 3; ++i) {
+            WGPUTexelCopyTextureInfo srcT = {};
+            srcT.texture = g.aovTex[i];
+            srcT.aspect = WGPUTextureAspect_All;
+            WGPUTexelCopyBufferInfo dstB = {};
+            dstB.buffer = g.aovReadBuf;
+            dstB.layout.offset = aBytes * (uint64_t)i;
+            dstB.layout.bytesPerRow = aRow;
+            dstB.layout.rowsPerImage = (uint32_t)H;
+            WGPUExtent3D ext = {(uint32_t)W, (uint32_t)H, 1};
+            wgpuCommandEncoderCopyTextureToBuffer(aenc, &srcT, &dstB, &ext);
+        }
+        WGPUCommandBuffer acmd = wgpuCommandEncoderFinish(aenc, nullptr);
+        wgpuQueueSubmit(g.queue, 1, &acmd);
+        wgpuCommandBufferRelease(acmd);
+        wgpuCommandEncoderRelease(aenc);
+
+        bool amapped = false;
+        WGPUBufferMapCallbackInfo amcb = {};
+        amcb.mode = WGPUCallbackMode_AllowProcessEvents;
+        amcb.callback = onMap;
+        amcb.userdata1 = &amapped;
+        wgpuBufferMapAsync(g.aovReadBuf, WGPUMapMode_Read, 0, g.aovReadBytes, amcb);
+        while (!amapped) wgpuDevicePoll(g.device, true, nullptr);
+        if (!(*g.gpuErrorP).empty()) {
+            g.error = "the GPU reported an error while drawing the extra layers (" + (*g.gpuErrorP) + ")";
+            wgpuBufferUnmap(g.aovReadBuf);
+            return false;
+        }
+        const unsigned char* apx = (const unsigned char*)wgpuBufferGetConstMappedRange(g.aovReadBuf, 0, g.aovReadBytes);
+        if (!apx) {
+            g.error = "reading the extra layers back from the GPU failed";
+            return false;
+        }
+        const std::size_t np = (std::size_t)W * (std::size_t)H;
+        out.normal.assign(np * 3, 0.f);
+        out.matte.assign(np * 3, 0.f);
+        out.nearestDepth.assign(np, 0.f);
+        out.nearestScene.assign(np, 0.f);
+        parallelFor((std::size_t)H, sortThreads(np), [&](int, std::size_t y0, std::size_t y1) {
+            for (std::size_t y = y0; y < y1; ++y) {
+                const uint16_t* rn = (const uint16_t*)(apx + y * aRow);
+                const uint16_t* rm = (const uint16_t*)(apx + aBytes + y * aRow);
+                const uint16_t* rd = (const uint16_t*)(apx + 2 * aBytes + y * aRow);
+                for (int x = 0; x < W; ++x) {
+                    const std::size_t i = y * (std::size_t)W + (std::size_t)x;
+                    // normal: blended vector, back to unit length
+                    const float nx = halfToFloat(rn[x * 4]), ny = halfToFloat(rn[x * 4 + 1]), nz = halfToFloat(rn[x * 4 + 2]);
+                    const float nl = std::sqrt(nx * nx + ny * ny + nz * nz);
+                    if (nl > 1e-6f) {
+                        out.normal[i * 3] = nx / nl; out.normal[i * 3 + 1] = ny / nl; out.normal[i * 3 + 2] = nz / nl;
+                    }
+                    for (int c = 0; c < 3; ++c) out.matte[i * 3 + c] = halfToFloat(rm[x * 4 + c]);
+                    if (halfToFloat(rd[x * 4 + 3]) < 0.5f) {       // transmittance 0 = a solid splat was written
+                        out.nearestDepth[i] = halfToFloat(rd[x * 4]);
+                        out.nearestScene[i] = halfToFloat(rd[x * 4 + 1]);
+                    }
+                }
+            }
+        });
+        wgpuBufferUnmap(g.aovReadBuf);
+    }
     out.gpuMs = msSince(tGpu);
     return true;
 }
