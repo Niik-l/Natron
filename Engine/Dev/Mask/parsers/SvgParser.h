@@ -29,6 +29,9 @@
 #include <map>
 #include <utility>
 #include <vector>
+#include <map>
+#include <set>
+#include <utility>
 
 #include <QIODevice>
 #include <QString>
@@ -42,12 +45,32 @@ NATRON_NAMESPACE_ENTER
 
 namespace VectorMask {
 
+/// Tokenized SVG start/end event, kept for <use> subtree replays.
+struct MiniEvent
+{
+    bool isStart;
+    QString tag;                // lower-cased local name
+    QXmlStreamAttributes atts;
+    QString id;                 // value of the id attribute (may be empty)
+};
+
+/// Per-element context shared by the document walk and the <use> replays.
+struct UseCtx
+{
+    Matrix2D mat;
+    std::map<QString, QString> styles;
+    QString layerName;
+};
+
 /**
  * @brief Parses SVG files into a VectorDocument: <path> (full grammar
  * M/L/H/V/C/S/Q/T/A/Z with implicit repeats), rect/circle/ellipse/line/polyline/
  * polygon primitives, nested transforms (matrix chain), and cascading
  * style/opacity/fill/stroke. Elements under defs/clipPath/gradients/pattern/mask
- * are skipped. Gradient fills degrade to no fill color (the shape still imports).
+ * are not rendered from the document flow, but every element with an id is
+ * indexed and can be instantiated by <use> (href/xlink:href), with nested
+ * use references resolved to a bounded depth. Gradient fills degrade to no
+ * fill color (the shape still imports).
  */
 class SvgParser
 {
@@ -66,6 +89,23 @@ private:
 
     void reset(VectorDocument* doc);
     bool parseStream(QXmlStreamReader& xml, VectorDocument* doc, QString* errorString);
+
+    /// Shape-element dispatch shared by the document walk and the <use> replays.
+    void processShapeStart(const MiniEvent& ev,
+                           const UseCtx& ctx,
+                           const std::vector<MiniEvent>& events,
+                           const std::map<QString, std::pair<int, int> >& idRanges,
+                           std::set<QString>* activeUses,
+                           int useDepth);
+
+    /// Renders the subtree of the element with the given id (defs content
+    /// included) with the referencing transform/styles composed on top.
+    void resolveUse(const QString& targetId,
+                    const UseCtx& useCtx,
+                    const std::vector<MiniEvent>& events,
+                    const std::map<QString, std::pair<int, int> >& idRanges,
+                    std::set<QString>* activeUses,
+                    int useDepth);
 
     // Geometry builders (take the accumulated matrix, merged styles, layer name and
     // the element's attributes).

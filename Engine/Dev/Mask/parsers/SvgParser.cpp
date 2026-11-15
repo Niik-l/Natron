@@ -28,6 +28,8 @@
 #include <cassert>
 #include <cmath>
 #include <map>
+#include <set>
+#include <vector>
 
 #include <QIODevice>
 #include <QStringList>
@@ -481,33 +483,206 @@ SvgParser::parseDevice(QIODevice* device, VectorDocument* doc, QString* errorStr
     return parseStream(xml, doc, errorString);
 }
 
+// <use> resolution: the document is tokenized into start/end events, every
+// element with an id is indexed (including elements under <defs>, which are
+// not rendered from the document flow), and a <use> replays the indexed
+// subtree with the referencing element's transform/styles composed on top.
+namespace {
+
+bool
+tokenizeEvents(QXmlStreamReader& xml, std::vector<MiniEvent>* events)
+{
+    assert(events);
+    while (!xml.atEnd()) {
+        const QXmlStreamReader::TokenType type = xml.readNext();
+        if (type == QXmlStreamReader::StartElement) {
+            MiniEvent ev;
+            ev.isStart = true;
+            ev.tag = xml.name().toString().toLower();
+            ev.atts = xml.attributes();
+            ev.id = attrValue(ev.atts, "id");
+            events->push_back(ev);
+        } else if (type == QXmlStreamReader::EndElement) {
+            MiniEvent ev;
+            ev.isStart = false;
+            ev.tag = xml.name().toString().toLower();
+            events->push_back(ev);
+        }
+    }
+    return !xml.hasError();
+}
+
+std::map<QString, std::pair<int, int> >
+indexIds(const std::vector<MiniEvent>& events)
+{
+    // id -> [startIndex, endIndex): endIndex points at the matching End event.
+    std::map<QString, std::pair<int, int> > ranges;
+    std::vector<std::pair<QString, int> > openIds; // (id, startIndex)
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        if (events[i].isStart) {
+            if (!events[i].id.isEmpty()) {
+                openIds.push_back( std::make_pair(events[i].id, (int)i) );
+            }
+        } else if (!openIds.empty()) {
+            // Well-formed XML: the innermost open element closes first.
+            const std::pair<QString, int>& open = openIds.back();
+            ranges[open.first] = std::make_pair(open.second, (int)i);
+            openIds.pop_back();
+        }
+    }
+    return ranges;
+}
+
+QString
+useTargetId(const QXmlStreamAttributes& atts)
+{
+    QString href = attrValue(atts, "href");
+    if (href.isEmpty()) {
+        href = attrValue(atts, "xlink:href");
+    }
+    if (href.size() > 1 && href.startsWith( QChar::fromLatin1('#') )) {
+        return href.mid(1);
+    }
+    return QString();
+}
+
+std::map<QString, QString>
+mergedStyles(const std::map<QString, QString>& inherited, const QXmlStreamAttributes& atts)
+{
+    // The element's own presentation attributes / style= win over the inherited
+    // ones (SVG inheritance rule, used by <use> replays).
+    std::map<QString, QString> out = inherited;
+    const std::map<QString, QString> own = parseStyleDict(atts);
+    for (std::map<QString, QString>::const_iterator it = own.begin(); it != own.end(); ++it) {
+        out[it->first] = it->second;
+    }
+    return out;
+}
+
+} // anonymous namespace
+
+void
+SvgParser::processShapeStart(const MiniEvent& ev,
+                             const UseCtx& ctx,
+                             const std::vector<MiniEvent>& events,
+                             const std::map<QString, std::pair<int, int> >& idRanges,
+                             std::set<QString>* activeUses,
+                             int useDepth)
+{
+    if (ev.tag == QLatin1String("path")) {
+        const QString d = attrValue(ev.atts, "d");
+        if (!d.isEmpty()) {
+            QString id = attrValue(ev.atts, "id");
+            if (id.isEmpty()) id = QLatin1String("Path");
+            buildPathShapes(d, id, ctx.mat, ctx.styles, ctx.layerName);
+        }
+    } else if (ev.tag == QLatin1String("rect")) {
+        buildRectShape(ev.atts, ctx.mat, ctx.styles, ctx.layerName);
+    } else if (ev.tag == QLatin1String("circle")) {
+        const double cx = parseLength(attrValue(ev.atts, "cx"), 0.0);
+        const double cy = parseLength(attrValue(ev.atts, "cy"), 0.0);
+        const double r = parseLength(attrValue(ev.atts, "r"), 0.0);
+        if (r > 0.0) {
+            QString id = attrValue(ev.atts, "id");
+            if (id.isEmpty()) id = QLatin1String("Circle");
+            buildEllipseFromParams(id, cx, cy, r, r, ctx.mat, ctx.styles, ctx.layerName, "Circle");
+        }
+    } else if (ev.tag == QLatin1String("ellipse")) {
+        const double cx = parseLength(attrValue(ev.atts, "cx"), 0.0);
+        const double cy = parseLength(attrValue(ev.atts, "cy"), 0.0);
+        const double rx = parseLength(attrValue(ev.atts, "rx"), 0.0);
+        const double ry = parseLength(attrValue(ev.atts, "ry"), 0.0);
+        if (rx > 0.0 && ry > 0.0) {
+            QString id = attrValue(ev.atts, "id");
+            if (id.isEmpty()) id = QLatin1String("Ellipse");
+            buildEllipseFromParams(id, cx, cy, rx, ry, ctx.mat, ctx.styles, ctx.layerName, "Ellipse");
+        }
+    } else if (ev.tag == QLatin1String("line")) {
+        buildLineShape(ev.atts, ctx.mat, ctx.styles, ctx.layerName);
+    } else if (ev.tag == QLatin1String("polyline") || ev.tag == QLatin1String("polygon")) {
+        buildPolygonShape(ev.atts, ctx.mat, ctx.styles, ctx.layerName,
+                          ev.tag == QLatin1String("polygon"));
+    } else if (ev.tag == QLatin1String("use")) {
+        const QString id = useTargetId(ev.atts);
+        if (!id.isEmpty()) {
+            resolveUse(id, ctx, events, idRanges, activeUses, useDepth);
+        }
+    }
+}
+
+void
+SvgParser::resolveUse(const QString& targetId,
+                      const UseCtx& useCtx,
+                      const std::vector<MiniEvent>& events,
+                      const std::map<QString, std::pair<int, int> >& idRanges,
+                      std::set<QString>* activeUses,
+                      int useDepth)
+{
+    const int kMaxUseDepth = 8;
+    if (useDepth >= kMaxUseDepth || activeUses->find(targetId) != activeUses->end()) {
+        return;
+    }
+    std::map<QString, std::pair<int, int> >::const_iterator found = idRanges.find(targetId);
+    if ( found == idRanges.end() ) {
+        return;
+    }
+
+    activeUses->insert(targetId);
+    // Replay [start, end): events[start] is the target's own Start, events[end]
+    // its End. The local stack starts empty; the first Start composes onto
+    // useCtx (the referencing element's transform/styles).
+    std::vector<UseCtx> stack;
+    const int start = found->second.first;
+    const int end = found->second.second;
+    for (int i = start; i < end; ++i) {
+        const MiniEvent& ev = events[i];
+        if (ev.isStart) {
+            UseCtx parent = stack.empty() ? useCtx : stack.back();
+            UseCtx ctx = parent;
+            ctx.styles = mergedStyles(parent.styles, ev.atts);
+            const Matrix2D local = Matrix2D::fromSvgTransform(attrValue(ev.atts, "transform"));
+            ctx.mat = parent.mat.multiplied(local);
+            // Layer naming mirrors the main walk: a <g> with an id names the layer.
+            if ( (ev.tag == QLatin1String("g")) && !ev.id.isEmpty() ) {
+                ctx.layerName = ev.id;
+            }
+            processShapeStart(ev, ctx, events, idRanges, activeUses, useDepth + 1);
+            stack.push_back(ctx);
+        } else if (!stack.empty()) {
+            stack.pop_back();
+        }
+    }
+    activeUses->erase(targetId);
+}
+
 bool
 SvgParser::parseStream(QXmlStreamReader& xml, VectorDocument* doc, QString* errorString)
 {
     assert(_doc == doc);
     (void)errorString;
 
+    // Pass 0: tokenize + index id'd subtrees (defs content included) for <use>.
+    std::vector<MiniEvent> events;
+    if (!tokenizeEvents(xml, &events)) {
+        return false;
+    }
+    const std::map<QString, std::pair<int, int> > idRanges = indexIds(events);
+
     // Per-element context: accumulated matrix, merged styles, layer name.
-    struct Ctx
-    {
-        Matrix2D mat;
-        std::map<QString, QString> styles;
-        QString layerName;
-    };
-    std::vector<Ctx> stack;
+    std::vector<UseCtx> stack;
     bool rootHandled = false;
     int ignoreDepth = -1; // inside defs/clipPath/gradients/pattern/mask
+    std::set<QString> activeUses;
 
-    while (!xml.atEnd()) {
-        const QXmlStreamReader::TokenType type = xml.readNext();
-        if (type == QXmlStreamReader::StartElement) {
-            const int depth = (int)stack.size();
-            const QString tag = xml.name().toString().toLower();
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        const MiniEvent& ev = events[i];
+        if (ev.isStart) {
+            const QString tag = ev.tag;
 
             if (!rootHandled) {
                 // The root <svg> element: viewport size + viewBox mapping.
                 rootHandled = true;
-                const QXmlStreamAttributes atts = xml.attributes();
+                const QXmlStreamAttributes atts = ev.atts;
                 double vbMinX = 0.0, vbMinY = 0.0, vbW = 1920.0, vbH = 1080.0;
                 bool hasVb = false;
                 const QString viewBoxStr = attrValue(atts, "viewBox");
@@ -536,15 +711,15 @@ SvgParser::parseStream(QXmlStreamReader& xml, VectorDocument* doc, QString* erro
                     rootTransform = Matrix2D::scale(width / vbW, height / vbH)
                                     .multiplied(Matrix2D::translate(-vbMinX, -vbMinY));
                 }
-                Ctx root;
+                UseCtx root;
                 root.mat = rootTransform;
                 root.layerName = QLatin1String("Layer1");
                 stack.push_back(root);
                 continue;
             }
 
-            Ctx ctx = stack.empty() ? Ctx() : stack.back();
-            ctx.styles = parseStyleDict(xml.attributes());
+            UseCtx ctx = stack.empty() ? UseCtx() : stack.back();
+            ctx.styles = parseStyleDict(ev.atts);
 
             bool ignored = tag == QLatin1String("defs") ||
                            tag == QLatin1String("clippath") ||
@@ -553,14 +728,14 @@ SvgParser::parseStream(QXmlStreamReader& xml, VectorDocument* doc, QString* erro
                            tag == QLatin1String("pattern") ||
                            tag == QLatin1String("mask");
             if (ignored && ignoreDepth == -1) {
-                ignoreDepth = depth;
+                ignoreDepth = (int)stack.size();
             }
 
             // Layer naming on <g>
             if (tag == QLatin1String("g")) {
-                QString gId = attrValue(xml.attributes(), "id");
+                QString gId = attrValue(ev.atts, "id");
                 if (gId.isEmpty()) {
-                    gId = attrValue(xml.attributes(), "label"); // inkscape:label
+                    gId = attrValue(ev.atts, "label"); // inkscape:label
                 }
                 if (!gId.isEmpty()) {
                     ctx.layerName = gId;
@@ -568,60 +743,27 @@ SvgParser::parseStream(QXmlStreamReader& xml, VectorDocument* doc, QString* erro
             }
 
             // Local transform
-            const Matrix2D local = Matrix2D::fromSvgTransform(attrValue(xml.attributes(), "transform"));
+            const Matrix2D local = Matrix2D::fromSvgTransform(attrValue(ev.atts, "transform"));
             ctx.mat = ctx.mat.multiplied(local);
 
             stack.push_back(ctx);
 
             if (ignoreDepth == -1) {
-                if (tag == QLatin1String("path")) {
-                    const QString d = attrValue(xml.attributes(), "d");
-                    if (!d.isEmpty()) {
-                        QString id = attrValue(xml.attributes(), "id");
-                        if (id.isEmpty()) id = QLatin1String("Path");
-                        buildPathShapes(d, id, ctx.mat, ctx.styles, ctx.layerName);
-                    }
-                } else if (tag == QLatin1String("rect")) {
-                    buildRectShape(xml.attributes(), ctx.mat, ctx.styles, ctx.layerName);
-                } else if (tag == QLatin1String("circle")) {
-                    const double cx = parseLength(attrValue(xml.attributes(), "cx"), 0.0);
-                    const double cy = parseLength(attrValue(xml.attributes(), "cy"), 0.0);
-                    const double r = parseLength(attrValue(xml.attributes(), "r"), 0.0);
-                    if (r > 0.0) {
-                        QString id = attrValue(xml.attributes(), "id");
-                        if (id.isEmpty()) id = QLatin1String("Circle");
-                        buildEllipseFromParams(id, cx, cy, r, r, ctx.mat, ctx.styles, ctx.layerName, "Circle");
-                    }
-                } else if (tag == QLatin1String("ellipse")) {
-                    const double cx = parseLength(attrValue(xml.attributes(), "cx"), 0.0);
-                    const double cy = parseLength(attrValue(xml.attributes(), "cy"), 0.0);
-                    const double rx = parseLength(attrValue(xml.attributes(), "rx"), 0.0);
-                    const double ry = parseLength(attrValue(xml.attributes(), "ry"), 0.0);
-                    if (rx > 0.0 && ry > 0.0) {
-                        QString id = attrValue(xml.attributes(), "id");
-                        if (id.isEmpty()) id = QLatin1String("Ellipse");
-                        buildEllipseFromParams(id, cx, cy, rx, ry, ctx.mat, ctx.styles, ctx.layerName, "Ellipse");
-                    }
-                } else if (tag == QLatin1String("line")) {
-                    buildLineShape(xml.attributes(), ctx.mat, ctx.styles, ctx.layerName);
-                } else if (tag == QLatin1String("polyline") || tag == QLatin1String("polygon")) {
-                    buildPolygonShape(xml.attributes(), ctx.mat, ctx.styles, ctx.layerName,
-                                      tag == QLatin1String("polygon"));
-                }
+                processShapeStart(ev, ctx, events, idRanges, &activeUses, 0);
             }
-        } else if (type == QXmlStreamReader::EndElement) {
-            const int depth = (int)stack.size();
+        } else {
             if (!stack.empty()) {
                 stack.pop_back();
             }
-            if (ignoreDepth != -1 && depth - 1 == ignoreDepth) {
+            if (ignoreDepth != -1 && (int)stack.size() == ignoreDepth) {
                 ignoreDepth = -1;
             }
         }
     }
 
-    return !xml.hasError();
+    return true;
 }
+
 
 void
 SvgParser::applyStylesAndAppend(const VectorShape& shape, const std::map<QString, QString>& styles)
