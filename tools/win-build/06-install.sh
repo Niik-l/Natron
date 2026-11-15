@@ -25,9 +25,21 @@ fix_oidn() { # dir
   fi
 }
 
+# RelWithDebInfo embeds the full DWARF in the exes (the VR/PostFX/Scene3D growth
+# put the GUI binary at ~1.99 GB of mapped image); past ~1.9 GB the Windows loader
+# rejects the PE outright ("This app can't run on your PC", 2026-11-15 — the
+# headless Renderer at ~1.67 GB still loads, which is why 07-verify never caught
+# it). The staged bundle gets the debug SECTIONS stripped while keeping the COFF
+# symbol table (gdb backtraces still name functions); the full-symbol binaries
+# remain in build-qt6 for dev debugging.
+stage_exe() { # src dst
+  cp "$1" "$2"
+  strip --strip-debug "$2"
+}
+
 # --- GUI binary + bundled DLLs + Qt platform plugin ---
 log "App: binary + DLLs"
-cp "$B/App/Natron.exe" "$I/App/"
+stage_exe "$B/App/Natron.exe" "$I/App/Natron.exe"
 cp "$MINGW"/bin/*.dll "$I/App/"
 fix_oidn "$I/App"
 cp "$MINGW/share/qt6/plugins/platforms/qwindows.dll" "$I/App/platforms/"
@@ -43,7 +55,7 @@ cp "$MINGW"/share/qt6/plugins/imageformats/*.dll "$I/App/imageformats/"
 if [ "${STAGE_RENDERER:-1}" = "1" ]; then
   log "Renderer: binary + DLLs"
   mkdir -p "$I/Renderer/platforms"
-  cp "$B/Renderer/NatronRenderer.exe" "$I/Renderer/"
+  stage_exe "$B/Renderer/NatronRenderer.exe" "$I/Renderer/NatronRenderer.exe"
   cp "$MINGW"/bin/*.dll "$I/Renderer/"
   fix_oidn "$I/Renderer"
   cp "$MINGW/share/qt6/plugins/platforms/qwindows.dll" "$I/Renderer/platforms/"
