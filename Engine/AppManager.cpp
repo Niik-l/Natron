@@ -249,6 +249,7 @@
 #include "Dev/VR/VRExpoGlow.h"
 #include "Dev/VR/VRDepthBlur.h"
 #include "Dev/VR/VRLightWrap.h"
+#include "Dev/VR/VRChromaticAberration.h"
 
 #include "sbkversion.h" // shiboken/pyside version
 
@@ -1799,6 +1800,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<VRExpoGlow>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
     registerBuiltInPlugin<VRDepthBlur>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
     registerBuiltInPlugin<VRLightWrap>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
+    registerBuiltInPlugin<VRChromaticAberration>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
 
     // Dev nodes — Channel
     registerBuiltInPlugin<DevShuffle>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/channel_grouping_2.png"), false, false);
