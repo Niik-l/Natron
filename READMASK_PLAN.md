@@ -126,8 +126,22 @@ Implementation notes beyond the original sketch:
   center + offset → absolute. Feather curve gets the same values (`setPointAtIndex(true, …)`)
   plus `setFeatherDistance(0)`/`setFeatherFallOff(0)` when Feather Splines is off.
 - **Shapes**: built directly (`new Bezier(ctx, name, parent, open)` + `createNodes()` +
-  `insertItem(curve, 0)`), no selection churn per shape; `ctx->evaluateChange()` once at
-  the end. Rebuild removal via `ctx->removeItem` in reverse insertion order.
+  `ctx->addItem(dest, 0, curve, eSelectionReasonOther)`), no selection churn per shape;
+  `ctx->evaluateChange()` once at the end. Rebuild removal via `ctx->removeItem` in
+  reverse insertion order. (2026-11-15 fix: the import originally mutated RotoLayer
+  directly — silent, so the RotoPanel tree went stale and a rebuild crashed
+  `QTreeWidgetItem::insertChild` on a stale pointer; insertions now go through the
+  context so the panel receives itemInserted like any Roto edit. `RotoPanel::
+  insertItemRecursively` also got a top-level fallback when the parent is not in the
+  tree — the release build has no assert to save it.)
+- **Inputs**: none (2026-11-15). RotoPaint's input fan (Bg, Bg2..Bg10 clone sources +
+  Mask) is meaningless on a vector importer; `RotoPaint::getMaskInputIndex` is virtual
+  now and ReadMask overrides `getNInputs() → 0`. `RotoPaint::render` guards the
+  background fetch on `getNInputs() > 0`.
+- **`<use>`/defs (2026-11-15)**: the SVG parser tokenizes into events and indexes every
+  id'ed element; `<use href/xlink:href>` replays the referenced subtree with the
+  referencing transform/styles composed on top (nested uses bounded + cycle-guarded).
+  The SVG logo (star = rotated uses, letters in defs) imports fully now.
 - **Deviation from the sketch above**: the file knob is a literal path in Part 1 —
   per-frame sequence resolution + the frame-change rebuild land with Part 2 (Bake
   Sequence); auto-rebuild fires on knob changes / the Re-import button.
