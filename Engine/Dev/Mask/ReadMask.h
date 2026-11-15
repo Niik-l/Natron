@@ -88,6 +88,10 @@ public:
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
+    /// The mask importer is a pure source: no Bg clone sources, no Mask input —
+    /// the RotoPaint input fan (Bg, Bg2..Bg10, Mask) would only be confusing here.
+    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
+
 private Q_SLOTS:
 
     /// Connected to the File knob: re-imports when Auto Rebuild is on.

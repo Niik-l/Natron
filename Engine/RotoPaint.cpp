@@ -54,8 +54,6 @@
 #include "Global/GlobalDefines.h"
 
 
-#define ROTOPAINT_MASK_INPUT_INDEX 10
-
 #define ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX 5
 
 NATRON_NAMESPACE_ENTER
@@ -147,7 +145,7 @@ RotoNode::isHostChannelSelectorSupported(bool* defaultR,
 std::string
 RotoPaint::getInputLabel (int inputNb) const
 {
-    if (inputNb == ROTOPAINT_MASK_INPUT_INDEX) {
+    if (inputNb == getMaskInputIndex()) {
         return "Mask";
     } else if (inputNb == 0) {
         return "Bg";
@@ -162,14 +160,14 @@ RotoPaint::getInputLabel (int inputNb) const
 bool
 RotoPaint::isInputMask(int inputNb) const
 {
-    return inputNb == ROTOPAINT_MASK_INPUT_INDEX;
+    return inputNb == getMaskInputIndex();
 }
 
 void
 RotoPaint::addAcceptedComponents(int inputNb,
                                  std::list<ImagePlaneDesc>* comps)
 {
-    if (inputNb != ROTOPAINT_MASK_INPUT_INDEX) {
+    if (inputNb != getMaskInputIndex()) {
         comps->push_back( ImagePlaneDesc::getRGBAComponents() );
         comps->push_back( ImagePlaneDesc::getRGBComponents() );
         comps->push_back( ImagePlaneDesc::getXYComponents() );
@@ -1449,13 +1447,13 @@ RotoPaint::isIdentity(double time,
 {
     *inputView = view;
     NodePtr node = getNode();
-    EffectInstancePtr maskInput = getInput(ROTOPAINT_MASK_INPUT_INDEX);
+    EffectInstancePtr maskInput = getInput(getMaskInputIndex());
     if (maskInput) {
         RectD maskRod;
         bool isProjectFormat;
         StatusEnum s = maskInput->getRegionOfDefinition_public(maskInput->getRenderHash(), time, scale, view, &maskRod, &isProjectFormat);
         Q_UNUSED(s);
-        const RectI maskPixelRod = maskRod.toPixelEnclosing(scale, getAspectRatio(ROTOPAINT_MASK_INPUT_INDEX));
+        const RectI maskPixelRod = maskRod.toPixelEnclosing(scale, getAspectRatio(getMaskInputIndex()));
         if ( !maskPixelRod.intersects(roi) ) {
             *inputTime = time;
             *inputNb = 0;
@@ -1480,6 +1478,8 @@ RotoPaint::render(const RenderActionArgs& args)
 {
     RotoContextPtr roto = getNode()->getRotoContext();
     std::list<RotoDrawableItemPtr> items = roto->getCurvesByRenderOrder(false /*onlyActiveItems*/);
+    const int nInputs = getNInputs();
+    const bool hasBgInput = nInputs > 0;
     ImageBitDepthEnum bgDepth = getBitDepth(0);
     std::list<ImagePlaneDesc> neededComps;
 
@@ -1494,7 +1494,10 @@ RotoPaint::render(const RenderActionArgs& args)
 
     if ( items.empty() ) {
         RectI bgImgRoI;
-        ImagePtr bgImg = getImage(0, args.time, args.mappedScale, args.view, 0, 0, false /*mapToClipPrefs*/, false /*dontUpscale*/, eStorageModeRAM /*returnOpenGLtexture*/, 0 /*textureDepth*/, &bgImgRoI);
+        ImagePtr bgImg;
+        if (hasBgInput) {
+            bgImg = getImage(0, args.time, args.mappedScale, args.view, 0, 0, false /*mapToClipPrefs*/, false /*dontUpscale*/, eStorageModeRAM /*returnOpenGLtexture*/, 0 /*textureDepth*/, &bgImgRoI);
+        }
 
         for (std::list<std::pair<ImagePlaneDesc, ImagePtr> >::const_iterator plane = args.outputPlanes.begin();
              plane != args.outputPlanes.end(); ++plane) {
@@ -1574,8 +1577,10 @@ RotoPaint::render(const RenderActionArgs& args)
                 continue;
             }
             if (!bgImg) {
-                if (!triedGetImage) {
+                if (!triedGetImage && hasBgInput) {
                     bgImg = getImage(0, args.time, args.mappedScale, args.view, 0, 0, false /*mapToClipPrefs*/, false /*dontUpscale*/, eStorageModeRAM /*returnOpenGLtexture*/, 0 /*textureDepth*/, &bgImgRoI);
+                    triedGetImage = true;
+                } else if (!hasBgInput) {
                     triedGetImage = true;
                 }
             }

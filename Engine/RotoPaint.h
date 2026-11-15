@@ -58,6 +58,13 @@ public:
 
     virtual bool isRotoPaintNode() const OVERRIDE FINAL WARN_UNUSED_RETURN  { return true; }
 
+    /// Index of the Mask input. Derived nodes that trim the input set (e.g. ReadMask,
+    /// which has no inputs at all) override both this and getNInputs().
+    virtual int getMaskInputIndex() const
+    {
+        return 10;
+    }
+
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN
     {
         return 1;
@@ -68,7 +75,7 @@ public:
         return 0;
     }
 
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN
+    virtual int getNInputs() const OVERRIDE WARN_UNUSED_RETURN
     {
         return 11;
     }
