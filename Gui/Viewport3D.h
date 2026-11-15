@@ -200,6 +200,7 @@ private:
     bool pickPathPointAtPosition(int screenX, int screenY);
     void drawZapEndpoints(const SceneNode& sn) const;
     void drawPointCloudNode(const SceneNode& sn) const;
+    void drawSplatsNode(const SceneNode& sn) const;
     void drawGroupNode(const SceneNode& sn, const std::vector<SceneNode>& sceneNodes) const;
     // World-space dashed box around everything under a Group3D / Transform3D
     // plus a cross on its pivot. Drawn BEFORE the node's matrix push. Gated by

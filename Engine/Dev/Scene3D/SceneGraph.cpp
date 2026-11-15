@@ -35,6 +35,7 @@
 #include "Cube3D.h"
 #include "Cylinder3D.h"
 #include "../Deep/DeepToPoints.h"
+#include "ReadSplats.h"
 #include "Light3D.h"
 #include "../Particles/ParticleProvider.h"
 #include "../Particles/ParticleInstance.h"
@@ -972,6 +973,19 @@ SceneGraph::rebuild(const NodesList& allNodes, double time)
             sn.name = nodeName;
             sn.sourceNode = node;
             SceneNode::setIdentity(sn.localMatrix);
+
+            nameToIndex[nodeName] = (int)_nodes.size();
+            _nodes.push_back(sn);
+            continue;
+        }
+
+        // --- Gaussian splat scene (ReadSplats) ---
+        if (ReadSplats* splats = dynamic_cast<ReadSplats*>(effect.get())) {
+            SceneNode sn;
+            sn.type = eSceneNodeSplats;
+            sn.name = nodeName;
+            sn.sourceNode = node;
+            splats->getSplatTransform(time, sn.localMatrix);
 
             nameToIndex[nodeName] = (int)_nodes.size();
             _nodes.push_back(sn);

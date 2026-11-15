@@ -52,6 +52,7 @@
 #include "../Particles/ParticleInstance.h"
 #include "../Particles/ParticleProvider.h"
 #include "ReadVDB.h"
+#include "ReadSplats.h"
 #include "ReadAlembicArchive.h"
 #include "ArchiveProvider.h"
 #include "Volume3D.h"
@@ -1396,6 +1397,53 @@ drawParticlePrimitives(GLenum primitive, const std::vector<ParticleVertex>& vert
     glDeleteBuffers(1, &vbo);
     glDeleteVertexArrays(1, &vao);
 }
+
+// ==================== Gaussian splat point preview ====================
+//
+// ReadSplats scenes are drawn as one opaque round point per splat: a point
+// sprite sized in world units, depth-tested and depth-written like geometry, so
+// the nearest point wins and nothing needs sorting. Beauty only (no AOVs); the
+// depth buffer, and so the depth output, includes the points.
+//   u_pxPerUnit: pixels covered by one world unit at clip w = 1
+//   u_maxPx:     the driver's largest point size
+
+#ifndef GL_POINT_SPRITE
+#define GL_POINT_SPRITE 0x8861
+#endif
+
+static const char* kSplatPointVert =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 in_pos;\n"
+    "layout(location = 1) in vec3 in_color;\n"
+    "layout(location = 2) in float in_size;\n"
+    "uniform mat4 u_projView;\n"
+    "uniform mat4 u_model;\n"
+    "uniform float u_pxPerUnit;\n"
+    "uniform float u_maxPx;\n"
+    "out vec3 v_color;\n"
+    "void main() {\n"
+    "    gl_Position  = u_projView * (u_model * vec4(in_pos, 1.0));\n"
+    "    gl_PointSize = clamp(in_size * u_pxPerUnit / max(gl_Position.w, 1e-4), 1.0, u_maxPx);\n"
+    "    v_color      = in_color;\n"
+    "}\n";
+
+static const char* kSplatPointFrag =
+    "#version 330 core\n"
+    "in vec3 v_color;\n"
+    "layout(location = 0) out vec4 FragColor;\n"
+    "void main() {\n"
+    "    vec2 pc = gl_PointCoord - vec2(0.5);\n"
+    "    if (dot(pc, pc) > 0.25) discard;\n"
+    "    FragColor = vec4(v_color, 1.0);\n"
+    "}\n";
+
+// One ReadSplats scene uploaded for this render.
+struct SplatPointDraw {
+    GLuint vao = 0, vbo = 0;
+    GLsizei count = 0;
+    float model[16];        // file space -> world
+    float sizeScale = 1.f;  // Uniform Scale * Point Scale
+};
 
 // ==================== ParticleInstance shaders ====================
 //
@@ -2783,6 +2831,13 @@ ScanlineRender::render(const RenderActionArgs& args)
     // since ParticleInstance inherits from it)
     ParticleInstance* particleInstancer = dynamic_cast<ParticleInstance*>(geoEffect.get());
 
+    // Gaussian splat scenes (ReadSplats), connected directly or through a Scene3D.
+    // Drawn as a point preview, see kSplatPointVert.
+    std::vector<ReadSplats*> splatNodes;
+    if (ReadSplats* directSplats = dynamic_cast<ReadSplats*>(geoEffect.get())) {
+        splatNodes.push_back(directSplats);
+    }
+
     // Underlying particle data for motion blur offsetting (works for both sprites and instances)
     ParticleDataPtr motionBlurPData;
     // Provider kept for the Trail particle mode (queries past frames' data).
@@ -2826,6 +2881,12 @@ ScanlineRender::render(const RenderActionArgs& args)
                 if (!sceneInput) continue;
                 // Honor "D" disable: skip disabled scene inputs entirely.
                 if (sceneInput->getNode() && sceneInput->getNode()->isNodeDisabled()) continue;
+
+                // Gaussian splat scenes in the scene
+                if (ReadSplats* sSplats = dynamic_cast<ReadSplats*>(sceneInput.get())) {
+                    splatNodes.push_back(sSplats);
+                    continue;
+                }
 
                 // Check for volumes in scene
                 Volume3D* sVol = dynamic_cast<Volume3D*>(sceneInput.get());
@@ -2875,7 +2936,7 @@ ScanlineRender::render(const RenderActionArgs& args)
         }
     }
 
-    if (geoObjects.empty() && !particleData && !particleInstancer && !volume3d && !readVdb) {
+    if (geoObjects.empty() && !particleData && !particleInstancer && !volume3d && !readVdb && splatNodes.empty()) {
         std::fprintf(stderr, "[ScanlineRender] %s frame %g: the scene produced no geometry (input %s)\n",
                      slrName.c_str(), args.time,
                      geoEffect->getNode() ? geoEffect->getNode()->getScriptName_mt_safe().c_str() : "?");
@@ -3192,6 +3253,70 @@ ScanlineRender::render(const RenderActionArgs& args)
     // that's been migrated to GLSL (3E.1 covers Point + streak lines; 3E.2/3
     // will add Disc/Sphere/Sprite). Failure to build silently falls back to
     // the legacy fixed-function path for unmigrated modes.
+    // Gaussian splat point preview: upload each ReadSplats scene once for this
+    // render (the points are static, every motion-blur sample redraws the same
+    // buffer). Perspective / orthographic only: a point sprite cannot follow the
+    // UV-bake and spherical projections.
+    GLuint glslSplatProg = 0;
+    std::vector<SplatPointDraw> splatDraws;
+    float splatMaxPx = 64.f;
+    if (!splatNodes.empty() && projMode <= 1) {
+        glslSplatProg = glslBuildProgram(kSplatPointVert, kSplatPointFrag);
+        if (!glslSplatProg) {
+            std::fprintf(stderr, "[GLSL FAIL] splat point program build failed, ReadSplats scenes are skipped for this render.\n");
+            std::fflush(stderr);
+        }
+        // Point sprites follow the ALIASED size range (2047 px on NVIDIA); GL_POINT_SIZE_RANGE
+        // is the much smaller antialiased-point range (about 190 px) and would cap close-up splats.
+        float range[2] = {1.f, 64.f};
+        glGetFloatv(GL_ALIASED_POINT_SIZE_RANGE, range);
+        if (range[1] > 1.f) splatMaxPx = range[1];
+        for (size_t si = 0; glslSplatProg && si < splatNodes.size(); ++si) {
+            ReadSplats* rs = splatNodes[si];
+            SplatDataPtr sd = rs->getSplatData();
+            if (!sd) {
+                const std::string why = rs->getLastLoadError();
+                if (!why.empty() && reportNode) {
+                    reportNode->setPersistentMessage(eMessageTypeError, "ScanlineRender: ReadSplats could not read its file. " + why);
+                }
+                continue;
+            }
+            std::vector<float> xyz, rgb, dia;
+            const size_t n = buildSplatPreviewPoints(*sd, rs->getPreviewOpacityThreshold(), rs->getRenderMaxPoints(),
+                                                     rs->getPreviewSizeClamp(), rs->getPreviewLinearize(),
+                                                     xyz, rgb, dia);
+            if (n == 0) continue;
+            std::vector<float> inter(n * 7);
+            for (size_t i = 0; i < n; ++i) {
+                float* d = &inter[i * 7];
+                d[0] = xyz[i * 3]; d[1] = xyz[i * 3 + 1]; d[2] = xyz[i * 3 + 2];
+                d[3] = rgb[i * 3]; d[4] = rgb[i * 3 + 1]; d[5] = rgb[i * 3 + 2];
+                d[6] = dia[i];
+            }
+            std::vector<float>().swap(xyz);
+            std::vector<float>().swap(rgb);
+            std::vector<float>().swap(dia);
+            SplatPointDraw sdw;
+            glGenVertexArrays(1, &sdw.vao);
+            glBindVertexArray(sdw.vao);
+            glGenBuffers(1, &sdw.vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, sdw.vbo);
+            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(inter.size() * sizeof(float)), inter.data(), GL_STATIC_DRAW);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)0);
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)(3 * sizeof(float)));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 7 * sizeof(float), (void*)(6 * sizeof(float)));
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glBindVertexArray(0);
+            sdw.count = (GLsizei)n;
+            rs->getSplatTransform(args.time, sdw.model);
+            sdw.sizeScale = rs->getSplatWorldScale(args.time) * rs->getPreviewPointScale(args.time);
+            splatDraws.push_back(sdw);
+        }
+    }
+
     GLuint glslParticleProg = glslBuildProgram(kParticleVert, kParticleFrag);
     if (!glslParticleProg) {
         std::fprintf(stderr, "[GLSL FAIL] particle program build failed — particles will be skipped for this render.\n");
@@ -3462,6 +3587,33 @@ ScanlineRender::render(const RenderActionArgs& args)
             GLenum drawBufs[] = { GL_COLOR_ATTACHMENT0 };
             glDrawBuffers(1, drawBufs);
         }
+    }
+
+    // --- Render Gaussian splat point previews (opaque, depth-written, beauty only) ---
+    if (glslSplatProg && !splatDraws.empty()) {
+        glUseProgram(glslSplatProg);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+        glEnable(GL_PROGRAM_POINT_SIZE);
+        glEnable(GL_POINT_SPRITE);   // compatibility profile: needed for gl_PointCoord
+        glUniformMatrix4fv(glGetUniformLocation(glslSplatProg, "u_projView"), 1, GL_FALSE, projViewMatrix);
+        glUniform1f(glGetUniformLocation(glslSplatProg, "u_maxPx"), splatMaxPx);
+        // Projection [1][1] is 1/tan(fov/2) (perspective) or 1/half-height (orthographic,
+        // where clip w is 1): either way pixels per world unit at w = 1.
+        const float pxPerUnitBase = std::fabs(projMatrix[5]) * 0.5f * (float)outH;
+        for (size_t si = 0; si < splatDraws.size(); ++si) {
+            const SplatPointDraw& sdw = splatDraws[si];
+            glUniformMatrix4fv(glGetUniformLocation(glslSplatProg, "u_model"), 1, GL_FALSE, sdw.model);
+            glUniform1f(glGetUniformLocation(glslSplatProg, "u_pxPerUnit"), pxPerUnitBase * sdw.sizeScale);
+            glBindVertexArray(sdw.vao);
+            glDrawArrays(GL_POINTS, 0, sdw.count);
+        }
+        glBindVertexArray(0);
+        glDisable(GL_POINT_SPRITE);
+        glDisable(GL_PROGRAM_POINT_SIZE);
+        glEnable(GL_BLEND);
+        glUseProgram(0);
     }
 
     // --- Render particles ---
@@ -4836,6 +4988,16 @@ ScanlineRender::render(const RenderActionArgs& args)
     if (glslBeautyProg) {
         glDeleteProgram(glslBeautyProg);
         glslBeautyProg = 0;
+    }
+    // Release the splat point preview buffers and program.
+    for (size_t si = 0; si < splatDraws.size(); ++si) {
+        if (splatDraws[si].vbo) glDeleteBuffers(1, &splatDraws[si].vbo);
+        if (splatDraws[si].vao) glDeleteVertexArrays(1, &splatDraws[si].vao);
+    }
+    splatDraws.clear();
+    if (glslSplatProg) {
+        glDeleteProgram(glslSplatProg);
+        glslSplatProg = 0;
     }
     // Phase 3E — release the particle GLSL program.
     if (glslParticleProg) {
