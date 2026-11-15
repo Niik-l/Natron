@@ -109,7 +109,28 @@ parsers):
   canvas); tgY-flip must also negate tangent Y. Port `calculate_transform`
   (roto_builder.py) verbatim.
 
-## Part 1 — ReadMask core (SVG)
+## Part 1 — ReadMask core (SVG) — DELIVERED 2026-11-15 (commit `mask: ReadMask node`)
+
+Implementation notes beyond the original sketch:
+- **Knob hook**: `ReadMask` overrides `EffectInstance::initializeData()` (virtual, empty
+  base, non-final) instead of the constructor — the ctor runs while `Node::_imp->effect`
+  is still being assigned, and knob value evaluation
+  (`setDefaultValue` → apply → `Node::onEffectKnobValueChanged`) segfaults on the
+  half-built node (gdb-verified). `initializeKnobs`/`onKnobsLoaded`/`knobChanged` are all
+  sealed FINAL by RotoPaint; `initializeData` runs after the effect is attached and
+  before loadKnobs — the latest safe hook. Knob changes are tracked via the knobs'
+  `getSignalSlotHandler()` `valueChanged` signals (three slots: file / controls /
+  re-import button).
+- **Tangents**: Natron's `setPointAtIndex` takes ABSOLUTE handle positions (Natron right
+  = P1 = outgoing, left = P2 = incoming — vectorNuke offset names match); import converts
+  center + offset → absolute. Feather curve gets the same values (`setPointAtIndex(true, …)`)
+  plus `setFeatherDistance(0)`/`setFeatherFallOff(0)` when Feather Splines is off.
+- **Shapes**: built directly (`new Bezier(ctx, name, parent, open)` + `createNodes()` +
+  `insertItem(curve, 0)`), no selection churn per shape; `ctx->evaluateChange()` once at
+  the end. Rebuild removal via `ctx->removeItem` in reverse insertion order.
+- **Deviation from the sketch above**: the file knob is a literal path in Part 1 —
+  per-frame sequence resolution + the frame-change rebuild land with Part 2 (Bake
+  Sequence); auto-rebuild fires on knob changes / the Re-import button.
 
 **Where:** new family dir `Engine/Dev/Mask/`:
 

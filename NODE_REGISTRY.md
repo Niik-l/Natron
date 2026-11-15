@@ -186,6 +186,14 @@ Updated: 2026-11-04 (Cryptomatte decoder node + Cycles encoder with a custom lay
 
 ---
 
+## Mask Import (1 node)
+
+| Node | Plugin ID | Status | Description |
+|------|-----------|--------|-------------|
+| **ReadMask** | `fr.inria.built-in.ReadMask` | Registered (2026-11-15) | Vector-file importer that IS a Roto node (derived from vectorNuke, GPL-2.0). SVG v1: full path grammar (M/L/H/V/C/S/Q/T/A/Z with implicit repeats), rect/circle/ellipse/line/polyline/polygon, nested transform chains, viewBox mapping, cascading styles — parsed into real Bézier shapes in the node's own RotoContext; outputs the mask alpha like any Roto, fully editable and project-serialized. Fit modes (Fit to Format 95% margin / Center / Original / Custom scale+offset), Invert Y (default ON, tangent handles flip too), Import Colors (fill→shape color, alpha folded into opacity), Group by Layer (file-named layer + per-SVG-group sub-layers), Feather Splines (default OFF = zero feather distance/fall-off with the feather curve locked to the shape — the vectorNuke clean single-line vectors), Auto Rebuild + Re-import button (file-driven re-import; user edits regenerate by design — bake is the Part-2 persistence path). Knobs: File, Re-import, Fit, Custom Scale X/Y, Custom Offset X/Y, Invert Y, Import Colors, Group by Layer, Feather Splines, Auto Rebuild. |
+
+---
+
 ## Summary
 
 | Category | Registered | Not Registered | Total |
@@ -204,4 +212,5 @@ Updated: 2026-11-04 (Cryptomatte decoder node + Cycles encoder with a custom lay
 | Keyer | 1 | 0 | 1 |
 | Matchmove / 3D Reconstruction | 2 | 0 | 2 |
 | VR / 360 | 8 | 0 | 8 |
-| **Total** | **79** | **19** | **98** |
+| Mask Import | 1 | 0 | 1 |
+| **Total** | **80** | **19** | **99** |
