@@ -1123,9 +1123,17 @@ RotoPanelPrivate::insertItemRecursively(double time,
     if (parent) {
         TreeItems::iterator parentIT = findItem(parent);
 
-        ///the parent must have already been inserted!
-        assert( parentIT != items.end() );
-        parentIT->treeItem->insertChild(indexInParentLayer, treeItem);
+        if ( parentIT != items.end() ) {
+            parentIT->treeItem->insertChild(indexInParentLayer, treeItem);
+        } else {
+            // The parent is not in the tree (a context mutation did not go through
+            // the RotoContext API, or the tree was rebuilt while the signal was in
+            // flight). In a release build the assert below is compiled out and
+            // end() would be dereferenced (use-after-free / garbage this).
+            // Keep the item visible by inserting it at the top level instead.
+            assert(false && "insertItemRecursively: parent layer not yet inserted");
+            tree->insertTopLevelItem(0, treeItem);
+        }
     } else {
         tree->insertTopLevelItem(0, treeItem);
     }
