@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -73,15 +74,21 @@ struct SplatRenderPrivate
 
     KnobDoubleWPtr splatScale, opacity;
     KnobChoiceWPtr shDegree;
-    KnobBoolWPtr antialias, aovDepth;
+    KnobBoolWPtr antialias;
+    // AOVs tab (labels and plane names follow ScanlineRender where it has the same layer)
+    KnobBoolWPtr outDepth, outNearest, outPosition, outPref, outNormal, outVelocity, outMatte;
 
     KnobChoiceWPtr sizeMode;
     KnobIntWPtr outputWidth, outputHeight;
 
-    KnobIntWPtr samples;
-    KnobBoolWPtr motionBlur, dof;
-    KnobDoubleWPtr shutter, apertureScale;
+    // Motion Blur tab: same knobs, names and wording as ScanlineRender's
+    KnobIntWPtr motionSamples;
+    KnobDoubleWPtr shutter, shutterCustomOffset, temporalJitter;
     KnobChoiceWPtr shutterOffset;
+    // Depth of Field tab
+    KnobBoolWPtr dof;
+    KnobIntWPtr dofSamples;
+    KnobDoubleWPtr apertureScale;
     // Depth of field: where the focus and the f-stop come from, and the iris shape
     // (same names and meaning as LensDefocus' knobs).
     KnobChoiceWPtr focusMode;
@@ -116,6 +123,26 @@ ImagePlaneDesc depthPlane()
 {
     static const char* rgb3[] = {"R", "G", "B"};
     return ImagePlaneDesc("Depth", "Depth", "", rgb3, 3);
+}
+
+ImagePlaneDesc nearestDepthPlane()
+{
+    static const char* rgb3[] = {"R", "G", "B"};
+    return ImagePlaneDesc("NearestDepth", "NearestDepth", "", rgb3, 3);
+}
+
+ImagePlaneDesc sceneMattePlane()
+{
+    static const char* rgb3[] = {"R", "G", "B"};
+    return ImagePlaneDesc("SceneMatte", "SceneMatte", "", rgb3, 3);
+}
+
+// The same plane ids and channel names as ScanlineRender's, so a comp built on one works on the other.
+ImagePlaneDesc xyzPlane(const char* id)
+{
+    std::vector<std::string> channels;
+    channels.push_back("x"); channels.push_back("y"); channels.push_back("z");
+    return ImagePlaneDesc(id, id, "xyz", channels);
 }
 
 // sRGB to linear for a whole frame: table with linear interpolation below 1,
@@ -176,8 +203,9 @@ SplatRender::getPluginDescription() const
            "the Camera input. Each splat is drawn as a soft, semi-transparent ellipse, blended far to "
            "near, with the view-dependent colour stored in the scan: the same picture the "
            "standard 3DGS viewers give. Outputs linear premultiplied RGBA plus a Depth plane to "
-           "composite against ScanlineRender or CyclesRender. The Blur tab adds motion blur "
-           "and depth of field. "
+           "composite against ScanlineRender or CyclesRender; the AOVs tab adds nearest "
+           "depth, world position, Pref, normal, velocity and a per-scene matte. Motion blur "
+           "and depth of field each have a tab. "
            "Splats carry the lighting they were captured with: they cannot be relit, and they "
            "do not appear in reflections of other renders. For view-dependent highlights set "
            "SH Degree on the ReadSplats node above 0.";
@@ -272,17 +300,6 @@ SplatRender::initializeKnobs()
         page->addKnob(k);
         _imp->antialias = k;
     }
-    {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>( this, tr("Depth AOV") );
-        k->setName("aovDepth");
-        k->setDefaultValue(true);
-        k->setAnimationEnabled(false);
-        k->setHintToolTip( tr("Produce a Depth plane: for each pixel the mean distance from the camera, "
-                              "along its view axis, of the splats visible there, in world units (0 where "
-                              "the picture is empty). Splat edges are soft, so depth is an average there.") );
-        page->addKnob(k);
-        _imp->aovDepth = k;
-    }
 
     // ---- Output size
     {
@@ -324,45 +341,34 @@ SplatRender::initializeKnobs()
         _imp->outputHeight = k;
     }
 
-    // ---- Motion blur / depth of field: several draws averaged
-    KnobPagePtr blurPage = AppManager::createKnob<KnobPage>( this, tr("Blur") );
+    // ---- Motion Blur: the knobs, names and wording of ScanlineRender's Motion Blur group
+    KnobPagePtr mbPage = AppManager::createKnob<KnobPage>( this, tr("Motion Blur") );
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>( this, tr("Samples") );
-        k->setName("samples");
-        k->setDefaultValue(16);
+        k->setName("motionSamples");
+        k->setDefaultValue(1);
         k->setMinimum(1);
         k->setMaximum(256);
         k->setDisplayMinimum(1);
         k->setDisplayMaximum(64);
         k->setAnimationEnabled(false);
-        k->setHintToolTip( tr("Number of draws averaged when Motion Blur or Depth of Field is on (it does "
-                              "nothing otherwise). Each draw takes as long as a frame without blur. Too "
-                              "few show as separate ghost images; 16 is a fair start, 32 to 64 for wide "
-                              "blurs.") );
-        blurPage->addKnob(k);
-        _imp->samples = k;
-    }
-    {
-        KnobBoolPtr k = AppManager::createKnob<KnobBool>( this, tr("Motion Blur") );
-        k->setName("motionBlur");
-        k->setDefaultValue(false);
-        k->setAnimationEnabled(false);
-        k->setHintToolTip( tr("Blur from the movement of the camera and of the scene's transforms over the "
-                              "shutter time. The splats themselves do not move.") );
-        blurPage->addKnob(k);
-        _imp->motionBlur = k;
+        k->setHintToolTip( tr("Motion blur by drawing the frame this many times across the shutter and "
+                              "averaging. 1 = no motion blur. The blur comes from the movement of the camera "
+                              "and of the scenes' transforms; the splats themselves do not move. Each sample "
+                              "takes as long as a frame without blur; too few show as separate ghost images.") );
+        mbPage->addKnob(k);
+        _imp->motionSamples = k;
     }
     {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Shutter") );
-        k->setName("shutter");
+        k->setName("motionShutter");
         k->setDefaultValue(0.5);
         k->setMinimum(0.);
         k->setDisplayMinimum(0.);
         k->setDisplayMaximum(2.);
         k->setAnimationEnabled(true);
-        k->setAddNewLine(false);
-        k->setHintToolTip( tr("How long the shutter stays open, in frames. 0.5 is a 180 degree shutter.") );
-        blurPage->addKnob(k);
+        k->setHintToolTip( tr("Shutter open duration as a fraction of frame time. 0.5 is a 180 degree shutter.") );
+        mbPage->addKnob(k);
         _imp->shutter = k;
     }
     {
@@ -370,17 +376,49 @@ SplatRender::initializeKnobs()
         k->setName("shutterOffset");
         k->setAnimationEnabled(false);
         std::vector<ChoiceOption> entries;
-        entries.push_back( ChoiceOption("Centered", "Centered", "Open half before and half after the frame.") );
-        entries.push_back( ChoiceOption("Start", "Start", "Opens at the frame.") );
-        entries.push_back( ChoiceOption("End", "End", "Closes at the frame.") );
+        entries.push_back( ChoiceOption("Centered", "", "Shutter open from t - shutter/2 to t + shutter/2 (real-camera behaviour, default).") );
+        entries.push_back( ChoiceOption("Start",    "", "Shutter open from t to t + shutter (motion happens after the frame).") );
+        entries.push_back( ChoiceOption("End",      "", "Shutter open from t - shutter to t (motion happens before the frame).") );
+        entries.push_back( ChoiceOption("Custom",   "", "Use Custom Offset (in frames, added to t) for the shutter start.") );
         k->populateChoices(entries);
         k->setDefaultValue(0);
-        blurPage->addKnob(k);
+        k->setHintToolTip( tr("Where the shutter opens relative to the current frame.") );
+        mbPage->addKnob(k);
         _imp->shutterOffset = k;
     }
     {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Custom Offset") );
+        k->setName("shutterCustomOffset");
+        k->setDefaultValue(0.0);
+        k->setDisplayMinimum(-1.);
+        k->setDisplayMaximum(1.);
+        k->setAnimationEnabled(true);
+        k->setHintToolTip( tr("When Shutter Offset = Custom, this is added to the current frame time to get "
+                              "the moment the shutter opens.") );
+        mbPage->addKnob(k);
+        _imp->shutterCustomOffset = k;
+    }
+    {
+        KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Temporal Jitter") );
+        k->setName("temporalJitter");
+        k->setDefaultValue(0.0);
+        k->setMinimum(0.0);
+        k->setMaximum(1.0);
+        k->setDisplayMinimum(0.0);
+        k->setDisplayMaximum(1.0);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Randomize sample timing within the shutter, breaking the stepped look of low "
+                              "sample counts on slow motion. 0 = uniform spacing (default), 1 = full random "
+                              "within each sample's slot.") );
+        mbPage->addKnob(k);
+        _imp->temporalJitter = k;
+    }
+
+    // ---- Depth of Field
+    KnobPagePtr dofPage = AppManager::createKnob<KnobPage>( this, tr("Depth of Field") );
+    {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>( this, tr("Depth of Field") );
-        k->setName("dof");
+        k->setName("dofEnabled");
         k->setDefaultValue(false);
         k->setAnimationEnabled(false);
         k->setHintToolTip( tr("Blur what is nearer or farther than the focus distance, as a real lens does. "
@@ -390,8 +428,25 @@ SplatRender::initializeKnobs()
                               "depth pass has to guess. For lens character beyond the iris shape (cat's eye, "
                               "swirl, chromatic aberration, real lenses), leave this off and put a "
                               "LensDefocus after this node: it reads the Depth plane.") );
-        blurPage->addKnob(k);
+        dofPage->addKnob(k);
         _imp->dof = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>( this, tr("Samples") );
+        k->setName("dofSamples");
+        k->setDefaultValue(32);
+        k->setMinimum(1);
+        k->setMaximum(256);
+        k->setDisplayMinimum(1);
+        k->setDisplayMaximum(128);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr("Number of points on the lens the frame is drawn from. Each takes as long as a "
+                              "frame without blur. Too few show as separate ghost images: 32 is a fair start, "
+                              "64 to 128 for wide blurs or shaped irises. With motion blur on as well, the "
+                              "frame is drawn the larger of the two Samples, each draw at its own moment and "
+                              "its own point on the lens.") );
+        dofPage->addKnob(k);
+        _imp->dofSamples = k;
     }
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>( this, tr("Focus") );
@@ -403,7 +458,7 @@ SplatRender::initializeKnobs()
         entries.push_back( ChoiceOption("distance", "Distance", "Focus at Focus Distance below.") );
         k->populateChoices(entries);
         k->setDefaultValue(0);
-        blurPage->addKnob(k);
+        dofPage->addKnob(k);
         _imp->focusMode = k;
     }
     {
@@ -418,7 +473,7 @@ SplatRender::initializeKnobs()
         k->setHintToolTip( tr("Distance from the camera, along its view axis, that is sharp (Focus = Distance), "
                               "in scene units. The Depth plane of this node gives that distance for any "
                               "pixel: view it and read the value under the cursor.") );
-        blurPage->addKnob(k);
+        dofPage->addKnob(k);
         _imp->focusDistance = k;
     }
     {
@@ -427,7 +482,7 @@ SplatRender::initializeKnobs()
         k->setDefaultValue(true);
         k->setAnimationEnabled(false);
         k->setHintToolTip( tr("Take the f-stop from the camera on the Camera input. Off: use F-Stop below.") );
-        blurPage->addKnob(k);
+        dofPage->addKnob(k);
         _imp->fStopFromCamera = k;
     }
     {
@@ -440,7 +495,7 @@ SplatRender::initializeKnobs()
         k->setAnimationEnabled(true);
         k->setAddNewLine(false);
         k->setHintToolTip( tr("Smaller = wider opening = more blur. Used when F-Stop From Camera is off.") );
-        blurPage->addKnob(k);
+        dofPage->addKnob(k);
         _imp->fStop = k;
     }
     {
@@ -459,7 +514,7 @@ SplatRender::initializeKnobs()
                               "The two agree when the focus distance is much longer than the focal length; "
                               "LensDefocus also models the extra blur of close-up (macro) focus, this node, "
                               "like CyclesRender, does not.") );
-        blurPage->addKnob(k);
+        dofPage->addKnob(k);
         _imp->apertureScale = k;
     }
     {
@@ -473,7 +528,7 @@ SplatRender::initializeKnobs()
         k->setAnimationEnabled(false);
         k->setHintToolTip( tr("Iris blades: the shape of out-of-focus highlights. 0 = circular opening; "
                               "3 to 16 = polygon. Shapes need more Samples than a plain disc to look clean.") );
-        blurPage->addKnob(k);
+        dofPage->addKnob(k);
         _imp->blades = k;
     }
     {
@@ -487,7 +542,7 @@ SplatRender::initializeKnobs()
         k->setAnimationEnabled(false);
         k->setAddNewLine(false);
         k->setHintToolTip( tr("0 = straight blades, 1 = round. Real irises are rounder wide open.") );
-        blurPage->addKnob(k);
+        dofPage->addKnob(k);
         _imp->curvature = k;
     }
     {
@@ -499,7 +554,7 @@ SplatRender::initializeKnobs()
         k->setAnimationEnabled(true);
         k->setAddNewLine(false);
         k->setHintToolTip( tr("Iris rotation in degrees.") );
-        blurPage->addKnob(k);
+        dofPage->addKnob(k);
         _imp->rotation = k;
     }
     {
@@ -512,8 +567,59 @@ SplatRender::initializeKnobs()
         k->setAnimationEnabled(false);
         k->setHintToolTip( tr("Oval bokeh: above 1 makes out-of-focus highlights taller (anamorphic look), "
                               "below 1 wider. The area of the opening is kept.") );
-        blurPage->addKnob(k);
+        dofPage->addKnob(k);
         _imp->squeeze = k;
+    }
+
+    // ---- AOVs: extra planes beside the RGBA picture
+    KnobPagePtr aovPage = AppManager::createKnob<KnobPage>( this, tr("AOVs") );
+    struct AovKnob { const char* label; const char* name; bool def; KnobBoolWPtr* dst; const char* hint; };
+    const AovKnob aovs[] = {
+        {"Depth", "outputDepth", true, &_imp->outDepth,
+         "Per-pixel distance from the camera along its view axis (Depth plane), in world units: the mean over "
+         "the splats visible there, weighted by how much each shows. 0 where the picture is empty. Follows "
+         "motion blur and depth of field. This is the plane LensDefocus reads."},
+        {"Nearest Depth", "outputNearestDepth", false, &_imp->outNearest,
+         "Distance of the nearest splat that is at least half opaque at the pixel (NearestDepth plane): the "
+         "first solid surface, not an average, so it does not drift between a soft foreground edge and what "
+         "is behind it. Better than Depth for holdouts against geometry. 0 where nothing is solid."},
+        {"World Position", "outputPosition", false, &_imp->outPosition,
+         "Per-pixel world-space position (world_position.x/y/z), from the Depth plane and the camera. "
+         "Empty pixels emit (0,0,0)."},
+        {"Pref", "outputPref", false, &_imp->outPref,
+         "Per-pixel reference position in the scan's own space, before the ReadSplats transform (Pref.x/y/z): "
+         "it stays fixed on the scan when the node or the camera moves. Useful as a texture-projection key."},
+        {"Normal", "outputNormal", false, &_imp->outNormal,
+         "Per-pixel direction the surface faces, in world space (Normal.x/y/z). A splat has no true normal: "
+         "this is the direction of each splat's thinnest axis, turned towards the camera and blended like the "
+         "colour. Good on flat, well-reconstructed surfaces; noisy on foliage, hair and fuzzy areas."},
+        {"Velocity", "outputVelocity", false, &_imp->outVelocity,
+         "Per-pixel screen-space motion vector in pixels per frame (Velocity.x/y/z), from the movement of the "
+         "camera and of the scenes' transforms since the previous frame. Z is reserved (0). Same convention "
+         "as ScanlineRender's."},
+        {"Scene Matte", "outputSceneMatte", false, &_imp->outMatte,
+         "Which ReadSplats each pixel comes from, when several are rendered together (SceneMatte plane): "
+         "red, green and blue hold the share of the pixel's alpha that the first, second and third scene "
+         "contribute. Scenes beyond the third are not in it."},
+    };
+    for (std::size_t i = 0; i < sizeof(aovs) / sizeof(aovs[0]); ++i) {
+        KnobBoolPtr k = AppManager::createKnob<KnobBool>( this, tr(aovs[i].label) );
+        k->setName(aovs[i].name);
+        k->setDefaultValue(aovs[i].def);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip( tr(aovs[i].hint) );
+        aovPage->addKnob(k);
+        *aovs[i].dst = k;
+    }
+    {
+        KnobStringPtr k = AppManager::createKnob<KnobString>( this, tr("Note") );
+        k->setName("aovNote");
+        k->setAsLabel();
+        k->setAnimationEnabled(false);
+        k->setEvaluateOnChange(false);
+        k->setIsPersistent(false);
+        k->setDefaultValue("All but Depth are the sharp frame: motion blur and depth of field do not blur them.");
+        aovPage->addKnob(k);
     }
 }
 
@@ -557,8 +663,14 @@ SplatRender::getComponentsNeededAndProduced(double time, ViewIdx view,
 {
     std::list<ImagePlaneDesc> produced;
     produced.push_back( ImagePlaneDesc::getRGBAComponents() );
-    KnobBoolPtr d = _imp->aovDepth.lock();
-    if ( !d || d->getValue() ) produced.push_back( depthPlane() );
+    auto on = [](const KnobBoolWPtr& w, bool def) { KnobBoolPtr k = w.lock(); return k ? k->getValue() : def; };
+    if ( on(_imp->outDepth, true) )      produced.push_back( depthPlane() );
+    if ( on(_imp->outNearest, false) )   produced.push_back( nearestDepthPlane() );
+    if ( on(_imp->outPosition, false) )  produced.push_back( xyzPlane("world_position") );
+    if ( on(_imp->outPref, false) )      produced.push_back( xyzPlane("Pref") );
+    if ( on(_imp->outNormal, false) )    produced.push_back( xyzPlane("Normal") );
+    if ( on(_imp->outVelocity, false) )  produced.push_back( xyzPlane("Velocity") );
+    if ( on(_imp->outMatte, false) )     produced.push_back( sceneMattePlane() );
     (*comps)[-1] = produced;
 
     *passThroughTime = time;
@@ -753,20 +865,42 @@ SplatRender::render(const RenderActionArgs& args)
     EffectInstancePtr camEffect = skipDots( getInput(1) );
     CameraProvider* cp = camEffect ? dynamic_cast<CameraProvider*>( camEffect.get() ) : NULL;
 
-    bool wantMB = _imp->motionBlur.lock() && _imp->motionBlur.lock()->getValue();
+    int mbSamples = _imp->motionSamples.lock() ? std::max(1, std::min(256, _imp->motionSamples.lock()->getValue())) : 1;
     // Without a camera the framing camera's 50 mm and the node's own Focus Distance / F-Stop are used.
     bool wantDof = _imp->dof.lock() && _imp->dof.lock()->getValue();
+    int dofSamples = _imp->dofSamples.lock() ? std::max(1, std::min(256, _imp->dofSamples.lock()->getValue())) : 32;
     const double shutter = _imp->shutter.lock() ? _imp->shutter.lock()->getValueAtTime(args.time) : 0.5;
     const int shutterMode = _imp->shutterOffset.lock() ? _imp->shutterOffset.lock()->getValue() : 0;
+    const double shutterCustom = _imp->shutterCustomOffset.lock() ? _imp->shutterCustomOffset.lock()->getValueAtTime(args.time) : 0.;
+    const double temporalJitter = _imp->temporalJitter.lock() ? _imp->temporalJitter.lock()->getValue() : 0.;
+    bool wantMB = mbSamples > 1;
     const double apertureScale = _imp->apertureScale.lock() ? _imp->apertureScale.lock()->getValueAtTime(args.time) : 1.;
     const int focusMode = _imp->focusMode.lock() ? _imp->focusMode.lock()->getValue() : 0;
     const bool fStopFromCamera = !_imp->fStopFromCamera.lock() || _imp->fStopFromCamera.lock()->getValue();
     if (shutter <= 0.) wantMB = false;
+    if (dofSamples <= 1) wantDof = false;
     int nSamples = 1;
     if (wantMB || wantDof) {
-        nSamples = _imp->samples.lock() ? std::max(1, std::min(256, _imp->samples.lock()->getValue())) : 16;
-        if (args.draftMode) nSamples = std::max(1, nSamples / 4);     // scrubbing, dragging a knob
+        nSamples = std::max(wantMB ? mbSamples : 1, wantDof ? dofSamples : 1);
+        if (args.draftMode) nSamples = std::max(2, nSamples / 4);     // scrubbing, dragging a knob
     }
+
+    // Which extra planes this render was asked for.
+    bool needNearest = false, needPosition = false, needPref = false, needNormal = false, needVelocity = false, needMatte = false;
+    for (auto& pp : args.outputPlanes) {
+        const std::string id = pp.first.getPlaneID();
+        if (id == "NearestDepth") needNearest = true;
+        else if (id == "world_position") needPosition = true;
+        else if (id == "Pref") needPref = true;
+        else if (id == "Normal") needNormal = true;
+        else if (id == "Velocity") needVelocity = true;
+        else if (id == "SceneMatte") needMatte = true;
+    }
+    const bool needGeom = needPosition || needPref || needVelocity;      // made from depth on the CPU
+    // The second GPU pass: its own layers, and with several scenes the per-pixel scene that
+    // Pref and Velocity need to pick the right transform.
+    const bool needAovPass = needNearest || needNormal || needMatte || ( (needPref || needVelocity) && nScenes > 1 );
+    const bool anyExtra = needGeom || needAovPass;
 
     // Camera at a given time. No camera: stand back along +Z from the middle of the first scene's box.
     auto cameraAt = [&](double t, CameraState& cs) {
@@ -835,7 +969,8 @@ SplatRender::render(const RenderActionArgs& args)
         } );
     };
 
-    SplatCore::RenderOutput rout;
+    SplatCore::RenderOutput rout, aout;
+    std::vector<float> aovPosition, aovPref, aovVelocity, aovNormal, aovMatte, aovNearest;   // row 0 = top
     {
         QMutexLocker lock(&_imp->rendererLock);
         if (!_imp->renderer) {
@@ -913,10 +1048,25 @@ SplatRender::render(const RenderActionArgs& args)
             // Time of this draw inside the shutter.
             double t = args.time;
             if (wantMB) {
-                const double t01 = ( (double)smp + 0.5 ) / (double)nSamples;
-                if (shutterMode == 1) t += t01 * shutter;
-                else if (shutterMode == 2) t += (t01 - 1.) * shutter;
-                else t += (t01 - 0.5) * shutter;
+                // Same sample times as ScanlineRender: spread over the whole shutter, ends included.
+                const double t01 = (double)smp / (double)(nSamples - 1);
+                double dt;
+                switch (shutterMode) {
+                    case 1:  dt = t01 * shutter; break;                    // Start
+                    case 2:  dt = (t01 - 1.) * shutter; break;             // End
+                    case 3:  dt = t01 * shutter + shutterCustom; break;    // Custom
+                    default: dt = (t01 - 0.5) * shutter; break;            // Centered
+                }
+                if (temporalJitter > 0.) {
+                    // Deterministic per (sample, frame), one slot wide at most (ScanlineRender's hash).
+                    uint32_t h = (uint32_t)smp * 2654435761u ^ (uint32_t)(int)args.time * 1597334677u;
+                    h ^= h >> 16;
+                    h *= 0x7feb352du;
+                    h ^= h >> 15;
+                    const double rj = ( (h & 0xFFFFu) / 65535.0 ) - 0.5;
+                    dt += temporalJitter * rj * shutter / (double)nSamples;
+                }
+                t += dt;
                 splatMatricesAt(this, t, scenes);
             }
             CameraState cs;
@@ -945,6 +1095,7 @@ SplatRender::render(const RenderActionArgs& args)
             // Lens samples of one instant see almost the same order: sort once. With motion
             // blur the view really changes, so every draw sorts.
             prm.reuseOrder = (smp > 0 && !wantMB);
+            prm.aovs = (nSamples == 1 && needAovPass);
             msSetup += msSince(tS);
             const Clock::time_point tD = Clock::now();
             if ( !_imp->renderer->draw(positions.data(), prm, W, H, rout) ) {
@@ -975,6 +1126,112 @@ SplatRender::render(const RenderActionArgs& args)
             for (std::size_t i = 0; i < n * 4; ++i) rout.rgba[i] = accRgba[i] * inv;
             for (std::size_t i = 0; i < n; ++i) rout.depth[i] = accAlpha[i] > 1e-6f ? accDepth[i] / accAlpha[i] : 0.f;
         }
+        if (anyExtra) {
+            // ---- extra planes: always the sharp frame at the frame's own time, lens centre.
+            if (wantMB) splatMatricesAt(this, args.time, scenes);
+            CameraState cs;
+            cameraAt(args.time, cs);
+            if (nSamples > 1) {
+                std::memcpy(prm.view, cs.view, sizeof prm.view);
+                for (int si = 0; si < nScenes; ++si) std::memcpy(prm.model[si], scenes[(std::size_t)si].model, 16 * sizeof(float));
+                prm.projX = cs.projX;
+                prm.projY = cs.projY;
+                prm.nearClip = cs.nearClip;
+                prm.ndcOffsetX = prm.ndcOffsetY = 0.f;
+                prm.reuseOrder = false;
+                prm.aovs = needAovPass;
+                if ( !_imp->renderer->draw(positions.data(), prm, W, H, aout) ) {
+                    setPersistentMessage( eMessageTypeError, ( "SplatRender: " + _imp->renderer->lastError() ).c_str() );
+                    return eStatusFailed;
+                }
+            }
+            const SplatCore::RenderOutput& A = (nSamples > 1) ? aout : rout;
+            const std::size_t np = (std::size_t)W * (std::size_t)H;
+            if (needGeom) {
+                // Per scene: file space <-> world now, and file space -> world one frame ago.
+                std::vector<SceneRef> prevScenes = scenes;
+                CameraState csPrev = cs;
+                if (needVelocity) {
+                    splatMatricesAt(this, args.time - 1., prevScenes);
+                    cameraAt(args.time - 1., csPrev);
+                }
+                double inv[SplatCore::kMaxScenes][12];     // rows of the inverse of each scene's matrix (3 x 4)
+                for (int si = 0; si < nScenes; ++si) {
+                    const float* m = scenes[(std::size_t)si].model;
+                    const double a = m[0], b = m[4], c = m[8], d = m[1], e = m[5], f = m[9], g = m[2], h = m[6], k = m[10];
+                    const double det = a * (e * k - f * h) - b * (d * k - f * g) + c * (d * h - e * g);
+                    const double id = std::fabs(det) > 1e-20 ? 1. / det : 0.;
+                    double* r = inv[si];
+                    r[0] = (e * k - f * h) * id; r[1] = (c * h - b * k) * id; r[2]  = (b * f - c * e) * id;
+                    r[4] = (f * g - d * k) * id; r[5] = (a * k - c * g) * id; r[6]  = (c * d - a * f) * id;
+                    r[8] = (d * h - e * g) * id; r[9] = (b * g - a * h) * id; r[10] = (a * e - b * d) * id;
+                    r[3]  = -(r[0] * m[12] + r[1] * m[13] + r[2] * m[14]);
+                    r[7]  = -(r[4] * m[12] + r[5] * m[13] + r[6] * m[14]);
+                    r[11] = -(r[8] * m[12] + r[9] * m[13] + r[10] * m[14]);
+                }
+                if (needPosition) aovPosition.assign(np * 3, 0.f);
+                if (needPref) aovPref.assign(np * 3, 0.f);
+                if (needVelocity) aovVelocity.assign(np * 3, 0.f);
+                const float* V = cs.view;
+                const float* Vp = csPrev.view;
+                const bool hasScene = nScenes > 1 && !A.nearestScene.empty();
+                parallelPixels(np, [&](std::size_t b0, std::size_t e0) {
+                    for (std::size_t i = b0; i < e0; ++i) {
+                        const float dz = A.depth[i];
+                        if (dz <= 0.f || A.rgba[i * 4 + 3] <= 1e-6f) continue;
+                        const int x = (int)(i % (std::size_t)W), y = (int)(i / (std::size_t)W);     // y from the top
+                        const double nx = ( (double)x + 0.5 ) / (double)W * 2. - 1.;
+                        const double ny = 1. - ( (double)y + 0.5 ) / (double)H * 2.;
+                        // camera space (looking down -Z), then world: the view matrix is a rotation + translation
+                        const double cx = nx / cs.projX * dz - V[12], cy = ny / cs.projY * dz - V[13], cz = -dz - V[14];
+                        const double wx = V[0] * cx + V[1] * cy + V[2] * cz;
+                        const double wy = V[4] * cx + V[5] * cy + V[6] * cz;
+                        const double wz = V[8] * cx + V[9] * cy + V[10] * cz;
+                        if (needPosition) {
+                            aovPosition[i * 3] = (float)wx; aovPosition[i * 3 + 1] = (float)wy; aovPosition[i * 3 + 2] = (float)wz;
+                        }
+                        if (!needPref && !needVelocity) continue;
+                        // Which scene the pixel shows: the nearest solid one, else the largest share.
+                        int sc = 0;
+                        if (hasScene) {
+                            sc = (int)(A.nearestScene[i] + 0.5f) - 1;
+                            if (sc < 0) {
+                                sc = 0;
+                                float best = A.matte[i * 3];
+                                for (int c = 1; c < 3 && c < nScenes; ++c)
+                                    if (A.matte[i * 3 + c] > best) { best = A.matte[i * 3 + c]; sc = c; }
+                            }
+                            sc = std::min(sc, nScenes - 1);
+                        }
+                        const double* r = inv[sc];
+                        const double px = r[0] * wx + r[1] * wy + r[2] * wz + r[3];
+                        const double py = r[4] * wx + r[5] * wy + r[6] * wz + r[7];
+                        const double pz = r[8] * wx + r[9] * wy + r[10] * wz + r[11];
+                        if (needPref) {
+                            aovPref[i * 3] = (float)px; aovPref[i * 3 + 1] = (float)py; aovPref[i * 3 + 2] = (float)pz;
+                        }
+                        if (needVelocity) {
+                            // Where the same point of the scan was one frame ago, on screen.
+                            const float* mp = prevScenes[(std::size_t)sc].model;
+                            const double qx = mp[0] * px + mp[4] * py + mp[8] * pz + mp[12];
+                            const double qy = mp[1] * px + mp[5] * py + mp[9] * pz + mp[13];
+                            const double qz = mp[2] * px + mp[6] * py + mp[10] * pz + mp[14];
+                            const double vx = Vp[0] * qx + Vp[4] * qy + Vp[8] * qz + Vp[12];
+                            const double vy = Vp[1] * qx + Vp[5] * qy + Vp[9] * qz + Vp[13];
+                            const double vz = Vp[2] * qx + Vp[6] * qy + Vp[10] * qz + Vp[14];
+                            if (-vz > 1e-9) {
+                                const double pnx = csPrev.projX * vx / -vz, pny = csPrev.projY * vy / -vz;
+                                aovVelocity[i * 3] = (float)( (nx - pnx) * 0.5 * (double)W );
+                                aovVelocity[i * 3 + 1] = (float)( (ny - pny) * 0.5 * (double)H );
+                            }
+                        }
+                    }
+                } );
+            }
+            if (needNormal) aovNormal = A.normal;
+            if (needMatte) aovMatte = A.matte;
+            if (needNearest) aovNearest = A.nearestDepth;
+        }
         if (timing) {
             std::fprintf(stderr, "[SplatRender] %dx%d, %d sample(s), %llu splats drawn: %.0f ms (per sample: setup %.1f, draw %.1f "
                                  "of which sort %.1f, GPU %.1f, copy back %.1f; colour + average %.1f)\n",
@@ -997,7 +1254,19 @@ SplatRender::render(const RenderActionArgs& args)
         if (!img) continue;
         const RectI bounds = img->getBounds();
         const int nc = desc.getNumComponents();
-        const bool isDepth = desc.getPlaneID() == "Depth";
+        const std::string id = desc.getPlaneID();
+        // Source of this plane: a 1- or 3-float-per-pixel layer, or the RGBA picture.
+        const std::vector<float>* src = NULL;
+        int stride = 0;
+        if (id == "Depth") { src = &rout.depth; stride = 1; }
+        else if (id == "NearestDepth") { src = &aovNearest; stride = 1; }
+        else if (id == "world_position") { src = &aovPosition; stride = 3; }
+        else if (id == "Pref") { src = &aovPref; stride = 3; }
+        else if (id == "Normal") { src = &aovNormal; stride = 3; }
+        else if (id == "Velocity") { src = &aovVelocity; stride = 3; }
+        else if (id == "SceneMatte") { src = &aovMatte; stride = 3; }
+        const std::size_t np = (std::size_t)W * (std::size_t)H;
+        const bool haveLayer = src && src->size() == np * (std::size_t)stride;
 
         Image::WriteAccess wa( img.get() );
         for (int y = bounds.y1; y < bounds.y2; ++y) {
@@ -1009,8 +1278,14 @@ SplatRender::render(const RenderActionArgs& args)
                 float* dst = (float*)wa.pixelAt(x, y);
                 if (!dst) continue;
                 const std::size_t si = (std::size_t)srcY * W + srcX;
-                if (isDepth) {
-                    for (int c = 0; c < nc; ++c) dst[c] = rout.depth[si];
+                if (src) {
+                    if (!haveLayer) {
+                        for (int c = 0; c < nc; ++c) dst[c] = 0.f;
+                    } else if (stride == 1) {
+                        for (int c = 0; c < nc; ++c) dst[c] = (*src)[si];
+                    } else {
+                        for (int c = 0; c < nc; ++c) dst[c] = c < 3 ? (*src)[si * 3 + c] : 0.f;
+                    }
                 } else {
                     const float* sp = &rout.rgba[si * 4];
                     for (int c = 0; c < nc; ++c) dst[c] = c < 4 ? sp[c] : sp[3];
