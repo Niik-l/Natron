@@ -47,6 +47,7 @@
 #include "Engine/RotoContext.h"
 #include "Engine/RotoItem.h"
 #include "Engine/RotoLayer.h"
+#include "Engine/TimeLine.h"
 
 #include "Dev/Mask/VectorDocument.h"
 #include "Dev/Mask/parsers/SvgParser.h"
@@ -58,6 +59,7 @@ struct ReadMaskPrivate
     KnobPageWPtr page;
     KnobFileWPtr file;
     KnobButtonWPtr reimport;
+    KnobButtonWPtr bakeSequence;
     KnobChoiceWPtr fitMode;
     KnobDoubleWPtr customScale;
     KnobDoubleWPtr customOffset;
@@ -71,6 +73,14 @@ struct ReadMaskPrivate
 
     /// Everything the last import created (shapes + layers), for rebuild removal.
     std::list<std::weak_ptr<RotoItem> > importedItems;
+
+    /// Sanitized document shape name (occurrence-disambiguated) -> imported curve.
+    /// Used by Bake Sequence to key the per-frame files into the existing shapes.
+    std::map<std::string, std::weak_ptr<Bezier> > importedShapes;
+
+    /// The file the current import came from (sequence-resolved): timeline scrubs
+    /// only rebuild when a different frame resolves to a different path.
+    QString lastImportedPath;
 };
 
 namespace {
@@ -126,6 +136,95 @@ calculateTransform(int fitModeIdx,
     }
 }
 
+/**
+ * @brief Resolve a file sequence pattern at the given frame.
+ *
+ * Supported tokens: '#' runs (one # per padding digit, e.g. #### -> %04u) and
+ * printf-style '%d' / '%Nd' / '%0Nd'. Patterns without any token are static:
+ * *isSequence is set to false and the pattern is returned unchanged.
+ */
+QString
+resolveSequencePattern(const QString& pattern, int frame, bool* isSequence)
+{
+    *isSequence = false;
+    if (pattern.isEmpty()) {
+        return pattern;
+    }
+
+    QString out;
+    out.reserve(pattern.size() + 8);
+    bool found = false;
+    int i = 0;
+    const int n = pattern.size();
+    while (i < n) {
+        const QChar c = pattern[i];
+        if (c == QChar::fromLatin1('#')) {
+            int width = 0;
+            while (i < n && pattern[i] == QChar::fromLatin1('#')) {
+                ++width;
+                ++i;
+            }
+            out += QString::number(frame).rightJustified(width, QChar::fromLatin1('0'));
+            found = true;
+        } else if (c == QChar::fromLatin1('%')) {
+            // printf-style: %d, %Nd (width), %0Nd (zero-padded width)
+            int j = i + 1;
+            bool zeroPad = false;
+            int width = 0;
+            if (j < n && pattern[j] == QChar::fromLatin1('0')) {
+                zeroPad = true;
+                ++j;
+            }
+            while (j < n && pattern[j].isDigit()) {
+                width = width * 10 + (pattern[j].toLatin1() - '0');
+                ++j;
+            }
+            if (j < n && pattern[j] == QChar::fromLatin1('d')) {
+                QString num = QString::number(frame);
+                if (width > 0) {
+                    if (zeroPad) {
+                        num = num.rightJustified(width, QChar::fromLatin1('0'));
+                    } else {
+                        num = num.leftJustified(width, QChar::fromLatin1(' '));
+                    }
+                }
+                out += num;
+                found = true;
+                i = j + 1;
+            } else {
+                out += c;
+                ++i;
+            }
+        } else {
+            out += c;
+            ++i;
+        }
+    }
+
+    if (found) {
+        *isSequence = true;
+        return out;
+    }
+    return pattern;
+}
+
+/// Key used to map a parsed shape to the imported curve: sanitized name, with a
+/// '.N' occurrence suffix when several shapes sanitize to the same name.
+/// Deterministic per parse order so every frame of a sequence maps consistently.
+std::string
+shapeMapKey(const VectorMask::VectorShape& shape, std::map<std::string, int>& occurrences)
+{
+    const std::string sanitized =
+        VectorMask::sanitizeName(shape.name.empty() ? std::string("Shape") : shape.name, "Shape");
+    std::map<std::string, int>::iterator it = occurrences.find(sanitized);
+    if (it == occurrences.end()) {
+        occurrences[sanitized] = 1;
+        return sanitized;
+    }
+    const int occurrence = ++it->second;
+    return sanitized + '.' + QString::number(occurrence).toStdString();
+}
+
 } // anonymous namespace
 
 ReadMask::ReadMask(NodePtr node)
@@ -161,7 +260,13 @@ ReadMask::initializeData()
                              "grammar, rect/circle/ellipse/line/polyline/polygon, nested "
                              "transforms and styles). The file is parsed into real Bézier "
                              "shapes in this node's Roto tree; output is the mask alpha "
-                             "like any Roto."));
+                             "like any Roto.\n\n"
+                             "A sequence is supported: '#' padding tokens (one # per digit, "
+                             "e.g. mask.####.svg -> mask.0007.svg) and printf-style %d / %0Nd "
+                             "tokens resolve against the timeline frame. On a sequence, "
+                             "Auto Rebuild re-imports when the scrubbed frame resolves to a "
+                             "different file, and Bake Sequence keys the animation into the "
+                             "shapes (file-independent)."));
         page->addKnob(k);
         _imp->file = k;
     }
@@ -173,6 +278,20 @@ ReadMask::initializeData()
         k->setCheckable(false);
         page->addKnob(k);
         _imp->reimport = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Bake Sequence"));
+        k->setName("bakeSequence");
+        k->setHintToolTip(tr("For every frame of the project range, read the frame's file "
+                             "from the sequence pattern and set a keyframe on every control "
+                             "point (and its tangent handles and feather points). After "
+                             "baking, the shapes are project-native animated Béziers - "
+                             "file-independent - and Auto Rebuild is turned off so imports "
+                             "can no longer wipe the baked animation.\n\n"
+                             "A static file (no sequence pattern) has nothing to bake."));
+        k->setCheckable(false);
+        page->addKnob(k);
+        _imp->bakeSequence = k;
     }
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Fit"));
@@ -258,10 +377,12 @@ ReadMask::initializeData()
         k->setName("autoRebuild");
         k->setDefaultValue(true);
         k->setAnimationEnabled(false);
-        k->setHintToolTip(tr("Re-import whenever the file or a placement knob changes. "
-                             "Importing regenerates the shapes by design — user edits to "
-                             "imported shapes are wiped by the next import. Turn off to edit "
-                             "freely; the Re-import button still rebuilds on demand."));
+        k->setHintToolTip(tr("Re-import whenever the file or a placement knob changes, and "
+                             "on a timeline scrub that resolves to a different frame of a "
+                             "file sequence. Importing regenerates the shapes by design - "
+                             "user edits to imported shapes are wiped by the next import. "
+                             "Turn off to edit freely; the Re-import button still rebuilds "
+                             "on demand. Bake Sequence turns this off automatically."));
         page->addKnob(k);
         _imp->autoRebuild = k;
     }
@@ -273,18 +394,20 @@ ReadMask::initializeData()
         KnobIPtr knob;
         bool isFile;
         bool isRefresh;
+        bool isBake;
     };
     const ConnectEntry entries[] = {
-        { _imp->file.lock(), true, false },
-        { _imp->reimport.lock(), false, true },
-        { _imp->fitMode.lock(), false, false },
-        { _imp->customScale.lock(), false, false },
-        { _imp->customOffset.lock(), false, false },
-        { _imp->invertY.lock(), false, false },
-        { _imp->importColors.lock(), false, false },
-        { _imp->groupByLayer.lock(), false, false },
-        { _imp->featherSplines.lock(), false, false },
-        { _imp->autoRebuild.lock(), false, false },
+        { _imp->file.lock(), true, false, false },
+        { _imp->reimport.lock(), false, true, false },
+        { _imp->bakeSequence.lock(), false, false, true },
+        { _imp->fitMode.lock(), false, false, false },
+        { _imp->customScale.lock(), false, false, false },
+        { _imp->customOffset.lock(), false, false, false },
+        { _imp->invertY.lock(), false, false, false },
+        { _imp->importColors.lock(), false, false, false },
+        { _imp->groupByLayer.lock(), false, false, false },
+        { _imp->featherSplines.lock(), false, false, false },
+        { _imp->autoRebuild.lock(), false, false, false },
     };
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); ++i) {
         const KnobSignalSlotHandlerPtr handler = entries[i].knob ? entries[i].knob->getSignalSlotHandler() : KnobSignalSlotHandlerPtr();
@@ -297,10 +420,22 @@ ReadMask::initializeData()
         } else if (entries[i].isRefresh) {
             QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
                               this, SLOT(onRefreshClicked()) );
+        } else if (entries[i].isBake) {
+            QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
+                              this, SLOT(onBakeClicked()) );
         } else {
             QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
                               this, SLOT(onControlKnobChanged(ViewSpec,int,int)) );
         }
+    }
+
+    // Timeline scrub: rebuild when the frame resolves to a different file of a
+    // sequence pattern (no-op for static files). The bake path afterwards makes
+    // the shapes file-independent and Auto Rebuild is off, so this idles.
+    const TimeLinePtr timeline = getApp() ? getApp()->getTimeLine() : TimeLinePtr();
+    if (timeline) {
+        QObject::connect( timeline.get(), SIGNAL(frameChanged(SequenceTime,int)),
+                          this, SLOT(onTimeChanged(double,int)) );
     }
 }
 
@@ -308,7 +443,7 @@ std::string
 ReadMask::getPluginDescription() const
 {
     return "Vector mask importer that is a Roto node, derived from vectorNuke.\n\n"
-           "Parses a vector file (SVG in this version) into real Bézier shapes inside its "
+           "Parses a vector file (SVG in this version) into real Bezier shapes inside its "
            "own Roto tree and outputs the mask alpha like any Roto. Shapes are project "
            "native: editable in the viewer, serialized with the project.\n\n"
            "Placement reproduces the vectorNuke fit model (Fit to Format / Center to "
@@ -316,8 +451,14 @@ ReadMask::getPluginDescription() const
            "flip on by default. Fill/stroke colors and opacity import onto the shapes; "
            "layers become RotoLayer groups. With Feather Splines off the imported shapes "
            "have zero feather, like vectorNuke's clean single-line vectors.\n\n"
-           "While file-driven, a re-import regenerates the shapes by design — bake "
-           "(per-frame keyframing) is the persistence path.";
+           "File sequences are supported via '#' or printf-style %d/%0Nd tokens: with Auto "
+           "Rebuild on, scrubbing the timeline re-imports when the frame resolves to a "
+           "different file.\n\n"
+           "While file-driven, a re-import regenerates the shapes by design. Bake Sequence "
+           "is the persistence path: it keys every control point at every frame of the "
+           "project range from the per-frame files, turning the shapes into project-native "
+           "animated Beziers (file-independent) and disabling Auto Rebuild. A static file "
+           "(no sequence token) parses once and has nothing to bake.";
 }
 
 void
@@ -376,6 +517,7 @@ ReadMask::removeImportedItems()
     const RotoContextPtr ctx = getNode()->getRotoContext();
     if (!ctx) {
         _imp->importedItems.clear();
+        _imp->importedShapes.clear();
         return;
     }
     // Remove in reverse insertion order: shapes first, layers last.
@@ -388,6 +530,213 @@ ReadMask::removeImportedItems()
         ctx->removeItem(item);
     }
     _imp->importedItems.clear();
+    _imp->importedShapes.clear();
+}
+
+void
+ReadMask::onTimeChanged(double frame, int /*reason*/)
+{
+    const KnobBoolPtr autoRebuild = _imp->autoRebuild.lock();
+    const KnobFilePtr file = _imp->file.lock();
+    if (!autoRebuild || !file || !autoRebuild->getValue()) {
+        return;
+    }
+    const QString pattern = QString::fromUtf8(file->getValue().c_str());
+    if (pattern.isEmpty()) {
+        return;
+    }
+    bool isSequence = false;
+    const QString resolved = resolveSequencePattern(pattern, (int)frame, &isSequence);
+    if (!isSequence) {
+        // Static file: frames don't change the content, nothing to re-import.
+        return;
+    }
+    if (resolved == _imp->lastImportedPath) {
+        // Same file as the current import: no rebuild, no edit wipe, no churn.
+        return;
+    }
+    importFile(frame);
+}
+
+void
+ReadMask::onBakeClicked()
+{
+    RotoContextPtr ctx = getNode()->getRotoContext();
+    const KnobFilePtr fileKnob = _imp->file.lock();
+    if (!ctx || !fileKnob) {
+        return;
+    }
+    const QString pattern = QString::fromUtf8(fileKnob->getValue().c_str());
+    if (pattern.isEmpty()) {
+        return;
+    }
+
+    // The bake keys into the shapes of the current import; make sure there is one.
+    if (_imp->importedShapes.empty()) {
+        importFile(getNode()->getRotoContext()->getTimelineCurrentTime());
+        if (_imp->importedShapes.empty()) {
+            appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("ReadMask"), QDateTime::currentDateTime(),
+                                            QString::fromUtf8("Bake Sequence: no imported shapes to bake "
+                                                              "(is the file readable?)."));
+            return;
+        }
+    }
+
+    double first = 0.0, last = 0.0;
+    getApp()->getProject()->getFrameRange(&first, &last);
+    int start = (int)std::floor(first);
+    int end = (int)std::ceil(last);
+    if (end < start) {
+        return;
+    }
+    const int frameCount = end - start + 1;
+    if (frameCount > 1000) {
+        appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("ReadMask"), QDateTime::currentDateTime(),
+                                        QString::fromUtf8("Bake Sequence: %1 frames to bake, this may take "
+                                                          "a while.").arg(frameCount));
+    }
+
+    const KnobChoicePtr fitKnob = _imp->fitMode.lock();
+    const KnobDoublePtr scaleKnob = _imp->customScale.lock();
+    const KnobDoublePtr offsetKnob = _imp->customOffset.lock();
+    const KnobBoolPtr invertYKnob = _imp->invertY.lock();
+    const bool flipY = invertYKnob ? invertYKnob->getValue() : true;
+    Format fmt;
+    getApp()->getProject()->getProjectDefaultFormat(&fmt);
+    const double formatW = fmt.x2 - fmt.x1;
+    const double formatH = fmt.y2 - fmt.y1;
+
+    beginChanges();
+
+    // Map of imported curves by occurrence key, refreshed per frame.
+    std::list<std::string> missingShapes;
+    int bakedFrames = 0;
+    QString parsedPath;
+    VectorMask::VectorDocument doc;
+    bool parseFailedLogged = false;
+
+    for (int t = start; t <= end; ++t) {
+        bool isSequence = false;
+        const QString resolved = resolveSequencePattern(pattern, t, &isSequence);
+        if (!isSequence) {
+            appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("ReadMask"), QDateTime::currentDateTime(),
+                                            QString::fromUtf8("Bake Sequence: the file knob does not resolve "
+                                                              "to a sequence (no '#' or printf token) - a static "
+                                                              "import has nothing to bake."));
+            break;
+        }
+        if (resolved == parsedPath) {
+            // Same file as the previous frame (gaps in the pattern): the previous
+            // frame's keys already carry this content.
+            ++bakedFrames;
+            continue;
+        }
+
+        QFile f(resolved);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            if (!parseFailedLogged) {
+                appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("ReadMask"), QDateTime::currentDateTime(),
+                                                QString::fromUtf8("Bake Sequence: cannot open %1 (%2) - frames "
+                                                                  "without a file keep the previous keys.")
+                                                    .arg(resolved, f.errorString()));
+                parseFailedLogged = true;
+            }
+            continue;
+        }
+        const QByteArray raw = f.readAll();
+        f.close();
+        const QString content = QString::fromUtf8(raw.data(), (int)raw.size());
+
+        QString errorString;
+        VectorMask::SvgParser parser;
+        if (!parser.parseContent(content, &doc, &errorString)) {
+            if (!parseFailedLogged) {
+                appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("ReadMask"), QDateTime::currentDateTime(),
+                                                QString::fromUtf8("Bake Sequence: failed to parse %1 - frames "
+                                                                  "without a parseable file keep the previous keys.")
+                                                    .arg(resolved));
+                parseFailedLogged = true;
+            }
+            continue;
+        }
+        parsedPath = resolved;
+        ++bakedFrames;
+
+        // Placement identical to the import (fit knobs + Y flip), recomputed for
+        // this frame's document dimensions.
+        double sx = 1.0, sy = 1.0, ox = 0.0, oy = 0.0;
+        calculateTransform(fitKnob ? fitKnob->getValue() : 0,
+                           scaleKnob ? scaleKnob->getValue(0) : 1.0,
+                           scaleKnob ? scaleKnob->getValue(1) : 1.0,
+                           offsetKnob ? offsetKnob->getValue(0) : 0.0,
+                           offsetKnob ? offsetKnob->getValue(1) : 0.0,
+                           doc.width, doc.height, formatW, formatH, &sx, &sy, &ox, &oy);
+        const double docHeight = doc.height > 0.0 ? doc.height : formatH;
+
+        // Single pass in document order: occurrence key first (the same logic the
+        // import used), then the imported curve, then this frame's keys.
+        std::map<std::string, int> keyOccurrences;
+        for (std::vector<VectorMask::VectorShape>::const_iterator it = doc.shapes.begin();
+             it != doc.shapes.end(); ++it) {
+            if (it->vertices.empty()) {
+                continue;
+            }
+            const std::string key = shapeMapKey(*it, keyOccurrences);
+            std::map<std::string, std::weak_ptr<Bezier> >::iterator curveIt =
+                _imp->importedShapes.find(key);
+            if (curveIt == _imp->importedShapes.end() || curveIt->second.expired()) {
+                if (std::find(missingShapes.begin(), missingShapes.end(), key) == missingShapes.end()) {
+                    missingShapes.push_back(key);
+                }
+                continue;
+            }
+            const BezierPtr curve = curveIt->second.lock();
+
+            const VectorMask::VectorShape shape =
+                VectorMask::transformShape(*it, sx, sy, ox, oy, flipY, docHeight);
+
+            if ((int)shape.vertices.size() != curve->getControlPointsCount()) {
+                // Topology changed across frames: leave that shape at its previous keys.
+                continue;
+            }
+            for (size_t i = 0; i < shape.vertices.size(); ++i) {
+                const VectorMask::ShapeVertex& v = shape.vertices[i];
+                const double lx = v.center.x + v.leftTangent.x;
+                const double ly = v.center.y + v.leftTangent.y;
+                const double rx = v.center.x + v.rightTangent.x;
+                const double ry = v.center.y + v.rightTangent.y;
+                curve->setPointAtIndex(false, (int)i, (double)t, v.center.x, v.center.y, lx, ly, rx, ry);
+                curve->setPointAtIndex(true, (int)i, (double)t, v.center.x, v.center.y, lx, ly, rx, ry);
+            }
+        }
+    }
+
+    endChanges(true);
+    ctx->evaluateChange();
+
+    // The shapes now carry per-frame keys: they are project-native animated
+    // Béziers, file-independent. Turn Auto Rebuild off so the next import cannot
+    // wipe the baked animation.
+    const KnobBoolPtr autoRebuild = _imp->autoRebuild.lock();
+    if (autoRebuild && autoRebuild->getValue()) {
+        autoRebuild->setValue(false);
+    }
+
+    if (!missingShapes.empty()) {
+        QString names;
+        for (std::list<std::string>::const_iterator it = missingShapes.begin();
+             it != missingShapes.end(); ++it) {
+            if (!names.isEmpty()) {
+                names += QLatin1String(", ");
+            }
+            names += QString::fromStdString(*it);
+        }
+        appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("ReadMask"), QDateTime::currentDateTime(),
+                                        QString::fromUtf8("Bake Sequence: no imported shape for %1 - those "
+                                                          "shapes were not baked.").arg(names));
+    }
+    appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("ReadMask"), QDateTime::currentDateTime(),
+                                    QString::fromUtf8("Bake Sequence: keyed %1 frames.").arg(bakedFrames));
 }
 
 void
@@ -399,16 +748,19 @@ ReadMask::importFile(double time)
         return;
     }
 
-    const QString path = QString::fromUtf8(fileKnob->getValue().c_str());
-    if (path.isEmpty()) {
+    const QString pattern = QString::fromUtf8(fileKnob->getValue().c_str());
+    if (pattern.isEmpty()) {
         return;
     }
+    bool isSequence = false;
+    const QString path = resolveSequencePattern(pattern, (int)time, &isSequence);
     const QFileInfo info(path);
     if (!info.exists() || !info.isFile()) {
         appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("ReadMask"), QDateTime::currentDateTime(),
                                         QString::fromUtf8("File not found: %1").arg(path));
         return;
     }
+    _imp->lastImportedPath = path;
 
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -486,11 +838,16 @@ ReadMask::importFile(double time)
 
     beginChanges();
 
+    // Occurrence-disambiguated map key per shape: the bake path keys per-frame
+    // files back into these curves by the same key computation (see shapeMapKey).
+    std::map<std::string, int> shapeOccurrences;
+
     for (std::vector<VectorMask::VectorShape>::const_iterator it = doc.shapes.begin();
          it != doc.shapes.end(); ++it) {
         if (it->vertices.empty()) {
             continue;
         }
+        const std::string mapKey = shapeMapKey(*it, shapeOccurrences);
         const VectorMask::VectorShape shape =
             VectorMask::transformShape(*it, sx, sy, ox, oy, flipY, docHeight);
 
@@ -524,6 +881,7 @@ ReadMask::importFile(double time)
         curve->createNodes();
         ctx->addItem(dest, 0, curve, RotoItem::eSelectionReasonOther);
         _imp->importedItems.push_back(curve);
+        _imp->importedShapes[mapKey] = curve;
 
         // Build-up: control points (feather points are added at the same positions).
         for (std::vector<VectorMask::ShapeVertex>::const_iterator v = shape.vertices.begin();

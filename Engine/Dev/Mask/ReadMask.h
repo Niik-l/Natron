@@ -57,10 +57,13 @@ struct ReadMaskPrivate;
  * SVG groups. With Feather Splines off (default) the imported shapes have zero
  * feather distance/fall-off, exactly like vectorNuke's clean single-line vectors.
  *
- * While file-driven, re-importing (file or knob changes) regenerates the shapes by
- * design — edits you make to imported shapes are wiped by the next import. The
- * "Bake Sequence" persistence path (per-frame keyframing, file-independent) is the
- * planned follow-up.
+ * While file-driven, re-importing (file or knob changes, or a timeline scrub that
+ * resolves to a different frame of a '#' / printf-style file sequence) regenerates
+ * the shapes by design — edits you make to imported shapes are wiped by the next
+ * import. The "Bake Sequence" button is the persistence path: it keys every control
+ * point at every frame of the project range from the per-frame files, turning the
+ * shapes into project-native animated Béziers (file-independent) and disabling
+ * Auto Rebuild.
  *
  * Derived from vectorNuke, GPL-2.0.
  */
@@ -107,6 +110,16 @@ private Q_SLOTS:
 
     /// Connected to the Re-import button: imports regardless of Auto Rebuild.
     void onRefreshClicked();
+
+    /// Connected to the Bake Sequence button: keys every imported control point at
+    /// every frame of the project range from the per-frame file contents, making the
+    /// shapes project-native animated Béziers (file-independent) and turning Auto
+    /// Rebuild off.
+    void onBakeClicked();
+
+    /// Connected to the app timeline: with Auto Rebuild on, re-imports when the
+    /// scrubbed frame resolves to a different file in the sequence pattern.
+    void onTimeChanged(double frame, int reason);
 
 private:
 
