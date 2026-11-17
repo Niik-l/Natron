@@ -693,3 +693,103 @@ viewport as soft fire/smoke **splats**: it trilinearly samples the real density 
 a coarse lattice (cached per path/frame/res), smoke grey + fire via a black-body ramp. The
 **Viewport Display Res** knob (`viewportDisplayRes`, default 40) controls the lattice density
 (preview-only — no render trigger).
+
+## Gaussian Splats
+
+A 3D Gaussian splat (3DGS) scan is a photographed scene stored as millions of small, soft,
+coloured blobs. `ReadSplats` loads one; `SplatRender` renders it. Splats carry the lighting they
+were captured with: they cannot be relit and do not appear in other renderers' reflections.
+
+Typical graph: `ReadSplats` + `Camera3D` -> `SplatRender` -> Viewer. To line a scan up with other
+3D elements first, put the `ReadSplats` in a `Scene3D` and look at it in the 3D viewport or through
+`ScanlineRender`, where it shows as a point preview.
+
+### ReadSplats
+**Group:** 3D | **Inputs:** 0 | **Output:** splat scene (to Scene3D, ScanlineRender or SplatRender)
+
+Formats: the binary `.ply` written by the standard 3DGS trainers, `.splat` (base colour only),
+`.spz` versions 1 to 3. A plain binary point-cloud `.ply` loads as points. Not read: ASCII `.ply`,
+`.spz` version 4, `.ksplat` (each gives a message on the node).
+
+| Knob | Type | Default | Description |
+|------|------|---------|-------------|
+| File / Reload | File, Button | - | The scan to load |
+| SH Degree | Choice | 3 | How much view-dependent colour to keep in memory. 3 = all (236 bytes per splat), 0 = base colour only (56 bytes per splat), enough for layout work |
+| Translate / Rotate / Uniform Scale | Double | 0 / 0 / 1 | Transform tab: places the scan |
+| Y Down (COLMAP) | Bool | on | Turns the scan half a turn around X; COLMAP-trained scenes are Y down. Ignored for `.spz`, which is Y up |
+| Point Scale | Double | 2.0 | Preview tab: size of the preview points |
+| Size Limit | Double | 4.0 | Largest preview point, as a multiple of the median splat; stops a few huge background splats covering the picture |
+| Opacity Threshold | Double | 0.1 | Splats fainter than this are left out of the preview |
+| Viewport Max Points | Int | 4,000,000 | Larger scans are thinned evenly in the viewport (0 = no limit) |
+| Render Max Points | Int | 0 | Same for ScanlineRender (0 = all) |
+| sRGB to Linear | Bool | on | Converts the stored colours to linear for rendering; the viewport shows them as stored |
+| Crop Mode / Invert / Fit to Scene | Choice, Bool, Button | off | Crop tab: keep only the splats inside a box or sphere (drawn as a wireframe in the viewport) |
+| Min Opacity / Max Size | Double | 0 / 0 | Crop tab: drop faint or oversized splats (0 = off) |
+
+The crop and cleanup settings change what every downstream node sees, not only the preview.
+
+**Point preview:** the 3D viewport and ScanlineRender draw one solid round point per splat in its
+base colour. This is for placement, not for final pictures. The viewport buffer is uploaded once
+and reused (about 5 ms per repaint for a 1.2M-splat scan).
+
+**Memory:** a 10M-splat scan is about 2.3 GB at SH Degree 3 and 0.5 GB at SH Degree 0, and about the
+same again on the graphics card once SplatRender has uploaded it.
+
+### SplatRender
+**Group:** 3D | **Inputs:** 2 (Scene, Camera) | **Output:** image (RGBA + AOVs)
+**Build:** gated `NATRON_FASTVOLUME` (needs wgpu-native, see `BUILDING.md`).
+
+Renders the splat picture on the GPU: each splat a soft ellipse, blended far to near, with the
+view-dependent colour stored in the scan. **Input 0 = Scene**: one to eight `ReadSplats`, directly
+or under a `Scene3D` / `Group3D` (the group's transform is applied). **Input 1 = Camera**
+(optional; without one the scene is framed from the front). The camera maths are ScanlineRender's,
+so a SplatRender and a ScanlineRender of the same camera line up.
+
+| Knob | Type | Default | Description |
+|------|------|---------|-------------|
+| Splat Scale | Double | 1.0 | Size of every splat; lower values show the individual splats |
+| Opacity | Double | 1.0 | Overall opacity multiplier |
+| SH Degree | Choice | 3 | View-dependent colour used for the render (0 = none) |
+| Antialiasing | Bool | on | The standard 0.3 px low-pass on each splat |
+| Output Size | Choice | Project Format | Or Custom with Width and Height |
+| Samples / Shutter / Shutter Offset / Custom Offset / Temporal Jitter | - | 1 / 0.5 / Centered / 0 / 0 | Motion Blur tab, same names and behaviour as ScanlineRender. Follows the camera and the scans' transforms. Samples 1 = off |
+| Depth of Field / Samples | Bool, Int | off / 32 | Depth of Field tab: a true depth of field, the frame drawn Samples times across the lens opening |
+| Focus / Focus Distance | Choice, Double | Camera / 5.0 | Focus from the camera or set on the node |
+| F-Stop From Camera / F-Stop | Bool, Double | on / 2.8 | Lens opening |
+| Aperture Scale | Double | 1.0 | A scan has no real unit; 1 treats one scene unit as a metre, 100 as a centimetre |
+| Blades / Blade Curvature / Rotation / Anamorphic Squeeze | - | 0 / 0 / 0 / 1 | Iris shape, same names as LensDefocus |
+
+**AOVs tab** (plane names match ScanlineRender's where it has the same layer):
+
+| Plane | Holds |
+|-------|-------|
+| `Depth` (on by default) | Mean distance along the view axis, weighted by visibility; follows motion blur and depth of field. What LensDefocus reads |
+| `NearestDepth` | Distance of the nearest splat at least half opaque: the first solid surface |
+| `world_position` | World position, from Depth and the camera |
+| `Pref` | Position in the scan's own space, before the ReadSplats transform |
+| `Normal` | Approximate: each splat's thinnest axis, turned towards the camera |
+| `Velocity` | Pixels per frame, ScanlineRender's convention, from camera and scan movement |
+| `SceneMatte` | Share of the pixel's alpha from the first, second and third ReadSplats |
+
+All planes except Depth are the sharp frame at the frame's own time.
+
+**Depth of field, two routes.** The node's own Depth of Field tab is exact through semi-transparent
+splats and thin edges and costs one draw per sample. Alternatively connect SplatRender to the Source
+of a `LensDefocus` and the same camera to its Camera input: one draw, plus LensDefocus' lens
+character (cat's eye, swirl, aberrations, real lenses). The two match within a fraction of a pixel
+when Aperture Scale 1 is paired with LensDefocus Scene Units = Metres.
+
+**Performance (RTX 2080, 1920x1080):** about 56 ms per frame for a 1.16M-splat scan; 115 to 175 ms
+for 10M splats. Motion blur and depth of field cost one full draw per sample. Rendering slows
+sharply when the graphics card's memory is full; check that first when it is slow.
+`NATRON_SPLAT_TIMING=1` prints per-stage timings.
+
+**Limits:** perspective cameras only; at most eight ReadSplats per node; with several scans,
+sRGB to Linear is taken from the first; Normal is an estimate; Depth is an average at soft edges, so
+a depth merge against geometry is approximate there. Verified on NVIDIA under Windows; it compiles
+and starts on Linux but has not been rendered there.
+
+**Writing multi-layer EXRs:** with a Write node set to All Planes in its default Parts mode, the
+colour is not the first part in the file, so some readers show Depth instead of the picture. Set
+the Write node's Parts to Single Part. This is a Write-node behaviour and applies to ScanlineRender
+AOVs as well.
