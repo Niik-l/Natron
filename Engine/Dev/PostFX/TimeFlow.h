@@ -110,6 +110,9 @@ private:
     // the source time shown at output time `time`
     double sourceTime(double time) const;
 
+    /// the frame range of the Source input; false when it has none
+    bool sourceRange(double* first, double* last) const;
+
     // splits a source time into the frame before it and the position between that and the next (0..1)
     static void splitTime(double src, double* before, double* position);
 

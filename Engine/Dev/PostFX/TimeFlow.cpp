@@ -171,12 +171,13 @@ TimeFlow::initializeKnobs()
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>( this, tr("Speed") );
         k->setName("speed");
         k->setDefaultValue(0.5);
-        k->setMinimum(0.001);
-        k->setDisplayMinimum(0.1);
+        k->setDisplayMinimum(-4.);
         k->setDisplayMaximum(4.);
-        k->setAnimationEnabled(false);
+        k->setAnimationEnabled(true);
         k->setHintToolTip( tr("Playback speed when Timing is Speed. 1 is unchanged, 0.5 is half speed (twice as long), 2 is double "
-                              "speed. For a speed that changes over the shot, use Source Frame instead.") );
+                              "speed, 0 holds the picture. A negative speed plays backwards: with -1 the clip runs from its last "
+                              "frame to its first. Set keys on it for a speed ramp; the speed at each frame is how fast the source "
+                              "is moving at that point of the result.") );
         page->addKnob(k);
         _imp->speed = k;
     }
@@ -188,7 +189,9 @@ TimeFlow::initializeKnobs()
         k->setDisplayMaximum(200.);
         k->setAnimationEnabled(false);
         k->setHintToolTip( tr("The frame that stays where it is when Timing is Speed: at this frame the output shows the same source "
-                              "frame, and the speed change is counted from here. Normally the first frame of the clip.") );
+                              "frame, and the speed change is counted from here. Normally the first frame of the clip. When the "
+                              "speed at this frame is negative, the output shows the last frame of the clip here instead and runs "
+                              "backwards from it.") );
         page->addKnob(k);
         _imp->startFrame = k;
     }
@@ -322,8 +325,47 @@ TimeFlow::sourceTime(double time) const
         return _imp->sourceFrame.lock()->getValueAtTime(time);
     }
     const double start = _imp->startFrame.lock()->getValue();
+    KnobDoublePtr speed = _imp->speed.lock();
+    double first, last;
+    const bool haveRange = sourceRange(&first, &last);
 
-    return start + (time - start) * _imp->speed.lock()->getValue();
+    if ( !speed->hasAnimation() ) {
+        const double s = speed->getValue();
+        // backwards: Start Frame shows the last frame of the clip
+        const double anchor = (s < 0. && haveRange) ? last : start;
+
+        return anchor + (time - start) * s;
+    }
+    // an animated speed: add up the speed from Start Frame to this frame, one output frame at a time, reading the
+    // speed in the middle of each step (exact for straight segments between keys)
+    const double anchor = (speed->getValueAtTime(start) < 0. && haveRange) ? last : start;
+    const double dir = time >= start ? 1. : -1.;
+    const double span = std::min(std::abs(time - start), 1e6);
+    const double whole = std::floor(span);
+    double src = anchor;
+    for (double i = 0.; i < whole; i += 1.) {
+        src += dir * speed->getValueAtTime(start + dir * (i + 0.5) );
+    }
+    const double rest = span - whole;
+    if (rest > 0.) {
+        src += dir * rest * speed->getValueAtTime(start + dir * (whole + rest * 0.5) );
+    }
+
+    return src;
+}
+
+bool
+TimeFlow::sourceRange(double* first,
+                      double* last) const
+{
+    EffectInstancePtr input = getInput(0);
+
+    if (!input) {
+        return false;
+    }
+    input->getFrameRange_public(input->getRenderHash(), first, last);
+
+    return (*first > -1e8) && (*last < 1e8) && (*last >= *first);
 }
 
 void
@@ -377,12 +419,49 @@ TimeFlow::getFrameRange(double *first,
     if (_imp->timing.lock()->getValue() != eTimingSpeed) {
         return;
     }
-    // where the first and the last source frame land on the output
+    if ( (*first <= -1e8) || (*last >= 1e8) || (*last < *first) ) {
+        return;
+    }
     const double start = _imp->startFrame.lock()->getValue();
-    const double speed = std::max( 0.001, _imp->speed.lock()->getValue() );
-    if ( (*first > -1e8) && (*last < 1e8) ) {
-        *first = std::floor(start + (*first - start) / speed + 0.5);
-        *last = std::floor(start + (*last - start) / speed + 0.5);
+    KnobDoublePtr speed = _imp->speed.lock();
+    const double srcFirst = *first, srcLast = *last;
+    if ( !speed->hasAnimation() ) {
+        const double s = speed->getValue();
+        if (std::abs(s) < 1e-6) {
+            return; // a held picture: keep the clip's own length
+        }
+        if (s > 0.) {
+            // where the first and the last source frame land on the output
+            *first = std::floor(start + (srcFirst - start) / s + 0.5);
+            *last = std::floor(start + (srcLast - start) / s + 0.5);
+        } else {
+            // backwards from the last frame at Start Frame down to the first
+            *first = std::floor(start + 0.5);
+            *last = std::floor(start + (srcFirst - srcLast) / s + 0.5);
+        }
+
+        return;
+    }
+    // an animated speed: walk forward from Start Frame until the source runs off either end of the clip. A ramp that
+    // slows to a stop never gets there, so the walk is capped and the clip's own last frame is kept in that case.
+    const double cap = std::min(1e5, 50. * (srcLast - srcFirst + 1.) + 1000.);
+    double src = (speed->getValueAtTime(start) < 0.) ? srcLast : start;
+    double out = start;
+    bool ended = false;
+    for (double i = 0.; i < cap; i += 1.) {
+        const double next = src + speed->getValueAtTime(start + i + 0.5);
+        if ( (next > srcLast + 1e-6) || (next < srcFirst - 1e-6) ) {
+            ended = true;
+            break;
+        }
+        src = next;
+        out = start + i + 1.;
+    }
+    *first = std::floor(start + 0.5);
+    if (ended) {
+        *last = std::max(*first, out);
+    } else {
+        *last = std::max(srcLast, *first);
     }
 }
 

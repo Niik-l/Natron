@@ -848,8 +848,8 @@ lands exactly on a source frame is that frame, untouched.
 | Knob | Type | Default | Description |
 |------|------|---------|-------------|
 | Timing | Choice | Speed | Speed = a constant speed. Source Frame = a curve saying which source frame shows at each output frame |
-| Speed | Double | 0.5 | 1 = unchanged, 0.5 = half speed (twice as long), 2 = double speed |
-| Start Frame | Double | 1 | The frame that stays put in Speed mode; the speed change is counted from here |
+| Speed | Double (animatable) | 0.5 | 1 = unchanged, 0.5 = half speed (twice as long), 2 = double speed, 0 = hold. Negative plays backwards: -1 runs the clip from its last frame to its first. Set keys for a speed ramp |
+| Start Frame | Double | 1 | The frame that stays put in Speed mode; the speed change is counted from here. When the speed at this frame is negative, the last frame of the clip shows here instead |
 | Source Frame | Double (animatable) | 1 | Used in Source Frame mode. Example: key 1 at frame 1 and 50 at frame 100 to play frames 1 to 50 at half speed. Fractions are allowed |
 | Method | Choice | Motion | Motion = follow the motion. Blend = dissolve between the two nearest frames. Nearest = show the nearest frame. The last two are for comparison and for shots where the motion cannot be followed |
 | Vector Detail / Smoothness / Flicker Compensation | - | 0.5 / 0.5 / on | As on VectorGenerator |
@@ -858,6 +858,11 @@ lands exactly on a source frame is that frame, untouched.
 | Weight Red / Green / Blue | Double | 0.3 / 0.6 / 0.1 | As on VectorGenerator |
 
 In Speed mode the node reports a stretched frame range: 50 frames at speed 0.25 become 197.
+
+**Speed ramps and reverse:** with keys on Speed, the value at each frame is how fast the source is moving at that
+point of the result, so a ramp from 1 down to 0.25 eases into slow motion. A ramp through 0 into negative values
+plays forward, stops and runs back. Source Frame mode remains for timing that is easier to give as "this frame
+shows here".
 
 **Covered and uncovered areas:** where a moving object hides or reveals what is behind it, there
 is no motion to follow. The node solves the motion in both directions; where the two disagree it
