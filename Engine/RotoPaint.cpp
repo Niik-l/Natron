@@ -346,6 +346,12 @@ RotoPaint::initializeKnobs()
     generalPage->addKnob(showTransform);
     addOverlaySlaveParam(showTransform);
     _imp->ui->showTransformHandle = showTransform;
+
+    // Raster-paint-only knobs (stroke brush settings, clone source pickers).
+    // Vector-only derived nodes (ReadMask) skip their creation entirely - see
+    // supportsRasterPaintTools(). RotoPaintInteract::onRoleChangedInternal
+    // null-checks every pointer set below.
+    if ( supportsRasterPaintTools() ) {
     // RotoPaint
 
     KnobBoolPtr multiStroke = AppManager::createKnob<KnobBool>( this, tr(kRotoUIParamMultiStrokeEnabledLabel) );
@@ -558,6 +564,7 @@ RotoPaint::initializeKnobs()
     generalPage->addKnob(resetCloneOffset);
     addOverlaySlaveParam(resetCloneOffset);
     _imp->ui->resetCloneOffsetButton = resetCloneOffset;
+    } // if ( supportsRasterPaintTools() )
 
 
     // Roto
@@ -571,36 +578,56 @@ RotoPaint::initializeKnobs()
     addKnobToViewerUI(removeKeyframe);
     addKnobToViewerUI(showTransform);
 
-    // RotoPaint
-    addKnobToViewerUI(multiStroke);
-    multiStroke->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
-    addKnobToViewerUI(colorWheel);
-    colorWheel->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
-    addKnobToViewerUI(blendingModes);
-    blendingModes->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
-    addKnobToViewerUI(opacityKnob);
-    opacityKnob->setInViewerContextItemSpacing(1);
-    addKnobToViewerUI(pressureOpacity);
-    pressureOpacity->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
-    addKnobToViewerUI(sizeKnob);
-    sizeKnob->setInViewerContextItemSpacing(1);
-    addKnobToViewerUI(pressureSize);
-    pressureSize->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
-    addKnobToViewerUI(hardnessKnob);
-    hardnessKnob->setInViewerContextItemSpacing(1);
-    addKnobToViewerUI(pressureHardness);
-    pressureHardness->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
-    addKnobToViewerUI(buildUp);
-    buildUp->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
-    addKnobToViewerUI(autoConnectViewer);
-    autoConnectViewer->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
-    addKnobToViewerUI(effectStrength);
-    effectStrength->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
-    addKnobToViewerUI(timeOffsetSb);
-    timeOffsetSb->setInViewerContextItemSpacing(1);
-    addKnobToViewerUI(timeOffsetMode);
-    addKnobToViewerUI(sourceType);
-    addKnobToViewerUI(resetCloneOffset);
+    // Viewer-UI registration for the raster-paint knobs created above: registered
+    // only when they exist (vector-only nodes skip their creation entirely).
+    if ( _imp->ui->multiStrokeEnabled.lock() ) {
+        KnobBoolPtr multiStroke = _imp->ui->multiStrokeEnabled.lock();
+        KnobColorPtr colorWheel = _imp->ui->colorWheelButton.lock();
+        KnobChoicePtr blendingModes = _imp->ui->compositingOperatorChoice.lock();
+        KnobDoublePtr opacityKnob = _imp->ui->opacitySpinbox.lock();
+        KnobButtonPtr pressureOpacity = _imp->ui->pressureOpacityButton.lock();
+        KnobDoublePtr sizeKnob = _imp->ui->sizeSpinbox.lock();
+        KnobButtonPtr pressureSize = _imp->ui->pressureSizeButton.lock();
+        KnobDoublePtr hardnessKnob = _imp->ui->hardnessSpinbox.lock();
+        KnobButtonPtr pressureHardness = _imp->ui->pressureHardnessButton.lock();
+        KnobButtonPtr buildUp = _imp->ui->buildUpButton.lock();
+        KnobButtonPtr autoConnectViewer = _imp->ui->autoConnectViewerButton.lock();
+        KnobDoublePtr effectStrength = _imp->ui->effectSpinBox.lock();
+        KnobIntPtr timeOffsetSb = _imp->ui->timeOffsetSpinBox.lock();
+        KnobChoicePtr timeOffsetMode = _imp->ui->timeOffsetModeChoice.lock();
+        KnobChoicePtr sourceType = _imp->ui->sourceTypeChoice.lock();
+        KnobButtonPtr resetCloneOffset = _imp->ui->resetCloneOffsetButton.lock();
+        // RotoPaint
+        addKnobToViewerUI(multiStroke);
+        multiStroke->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
+        addKnobToViewerUI(colorWheel);
+        colorWheel->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
+        addKnobToViewerUI(blendingModes);
+        blendingModes->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
+        addKnobToViewerUI(opacityKnob);
+        opacityKnob->setInViewerContextItemSpacing(1);
+        addKnobToViewerUI(pressureOpacity);
+        pressureOpacity->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
+        addKnobToViewerUI(sizeKnob);
+        sizeKnob->setInViewerContextItemSpacing(1);
+        addKnobToViewerUI(pressureSize);
+        pressureSize->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
+        addKnobToViewerUI(hardnessKnob);
+        hardnessKnob->setInViewerContextItemSpacing(1);
+        addKnobToViewerUI(pressureHardness);
+        pressureHardness->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
+        addKnobToViewerUI(buildUp);
+        buildUp->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
+        addKnobToViewerUI(autoConnectViewer);
+        autoConnectViewer->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
+        addKnobToViewerUI(effectStrength);
+        effectStrength->setInViewerContextItemSpacing(ROTOPAINT_VIEWER_UI_SECTIONS_SPACING_PX);
+        addKnobToViewerUI(timeOffsetSb);
+        timeOffsetSb->setInViewerContextItemSpacing(1);
+        addKnobToViewerUI(timeOffsetMode);
+        addKnobToViewerUI(sourceType);
+        addKnobToViewerUI(resetCloneOffset);
+    } // raster-paint knobs viewer-UI
 
 
     KnobPagePtr toolbar = AppManager::createKnob<KnobPage>( this, std::string(kRotoUIParamToolbar) );
@@ -635,15 +662,18 @@ RotoPaint::initializeKnobs()
     editBezierToolButton->setIsPersistent(false);
     toolbar->addKnob(editBezierToolButton);
     _imp->ui->bezierEditionToolGroup = editBezierToolButton;
-    KnobGroupPtr paintToolButton = AppManager::createKnob<KnobGroup>( this, tr(kRotoUIParamPaintBrushToolButtonLabel) );
-    paintToolButton->setName(kRotoUIParamPaintBrushToolButton);
-    paintToolButton->setAsToolButton(true);
-    paintToolButton->setEvaluateOnChange(false);
-    paintToolButton->setSecretByDefault(true);
-    paintToolButton->setInViewerContextCanHaveShortcut(true);
-    paintToolButton->setIsPersistent(false);
-    toolbar->addKnob(paintToolButton);
-    _imp->ui->paintBrushToolGroup = paintToolButton;
+    KnobGroupPtr paintToolButton;
+    if ( supportsRasterPaintTools() ) {
+        paintToolButton = AppManager::createKnob<KnobGroup>( this, tr(kRotoUIParamPaintBrushToolButtonLabel) );
+        paintToolButton->setName(kRotoUIParamPaintBrushToolButton);
+        paintToolButton->setAsToolButton(true);
+        paintToolButton->setEvaluateOnChange(false);
+        paintToolButton->setSecretByDefault(true);
+        paintToolButton->setInViewerContextCanHaveShortcut(true);
+        paintToolButton->setIsPersistent(false);
+        toolbar->addKnob(paintToolButton);
+        _imp->ui->paintBrushToolGroup = paintToolButton;
+    }
 
     KnobGroupPtr cloneToolButton, effectToolButton, mergeToolButton;
     if (_imp->isPaintByDefault) {
@@ -850,46 +880,48 @@ RotoPaint::initializeKnobs()
         editBezierToolButton->addKnob(tool);
         _imp->ui->drawRectangleAction = tool;
     }
-    {
-        KnobButtonPtr tool = AppManager::createKnob<KnobButton>( this, tr(kRotoUIParamDrawBrushToolButtonActionLabel) );
-        tool->setName(kRotoUIParamDrawBrushToolButtonAction);
-        tool->setHintToolTip( tr(kRotoUIParamDrawBrushToolButtonActionHint) );
-        tool->setCheckable(true);
-        tool->setDefaultValue(true);
-        tool->setSecretByDefault(true);
-        tool->setEvaluateOnChange(false);
-        tool->setIconLabel(NATRON_IMAGES_PATH "rotopaint_solid.png");
-        tool->setIsPersistent(false);
-        paintToolButton->addKnob(tool);
-        _imp->ui->brushAction = tool;
-    }
-    {
-        KnobButtonPtr tool = AppManager::createKnob<KnobButton>( this, tr(kRotoUIParamPencilToolButtonActionLabel) );
-        tool->setName(kRotoUIParamPencilToolButtonAction);
-        tool->setHintToolTip( tr(kRotoUIParamPencilToolButtonAction) );
-        tool->setCheckable(true);
-        tool->setDefaultValue(false);
-        tool->setSecretByDefault(true);
-        tool->setEvaluateOnChange(false);
-        tool->setIconLabel(NATRON_IMAGES_PATH "rotoToolPencil.png");
-        tool->setIsPersistent(false);
-        paintToolButton->addKnob(tool);
-        _imp->ui->pencilAction = tool;
-    }
+    if (paintToolButton) {
+        {
+            KnobButtonPtr tool = AppManager::createKnob<KnobButton>( this, tr(kRotoUIParamDrawBrushToolButtonActionLabel) );
+            tool->setName(kRotoUIParamDrawBrushToolButtonAction);
+            tool->setHintToolTip( tr(kRotoUIParamDrawBrushToolButtonActionHint) );
+            tool->setCheckable(true);
+            tool->setDefaultValue(true);
+            tool->setSecretByDefault(true);
+            tool->setEvaluateOnChange(false);
+            tool->setIconLabel(NATRON_IMAGES_PATH "rotopaint_solid.png");
+            tool->setIsPersistent(false);
+            paintToolButton->addKnob(tool);
+            _imp->ui->brushAction = tool;
+        }
+        {
+            KnobButtonPtr tool = AppManager::createKnob<KnobButton>( this, tr(kRotoUIParamPencilToolButtonActionLabel) );
+            tool->setName(kRotoUIParamPencilToolButtonAction);
+            tool->setHintToolTip( tr(kRotoUIParamPencilToolButtonAction) );
+            tool->setCheckable(true);
+            tool->setDefaultValue(false);
+            tool->setSecretByDefault(true);
+            tool->setEvaluateOnChange(false);
+            tool->setIconLabel(NATRON_IMAGES_PATH "rotoToolPencil.png");
+            tool->setIsPersistent(false);
+            paintToolButton->addKnob(tool);
+            _imp->ui->pencilAction = tool;
+        }
 
-    {
-        KnobButtonPtr tool = AppManager::createKnob<KnobButton>( this, tr(kRotoUIParamEraserToolButtonActionLabel) );
-        tool->setName(kRotoUIParamEraserToolButtonAction);
-        tool->setHintToolTip( tr(kRotoUIParamEraserToolButtonActionHint) );
-        tool->setCheckable(true);
-        tool->setDefaultValue(false);
-        tool->setSecretByDefault(true);
-        tool->setEvaluateOnChange(false);
-        tool->setIconLabel(NATRON_IMAGES_PATH "rotopaint_eraser.png");
-        tool->setIsPersistent(false);
-        paintToolButton->addKnob(tool);
-        _imp->ui->eraserAction = tool;
-    }
+        {
+            KnobButtonPtr tool = AppManager::createKnob<KnobButton>( this, tr(kRotoUIParamEraserToolButtonActionLabel) );
+            tool->setName(kRotoUIParamEraserToolButtonAction);
+            tool->setHintToolTip( tr(kRotoUIParamEraserToolButtonActionHint) );
+            tool->setCheckable(true);
+            tool->setDefaultValue(false);
+            tool->setSecretByDefault(true);
+            tool->setEvaluateOnChange(false);
+            tool->setIconLabel(NATRON_IMAGES_PATH "rotopaint_eraser.png");
+            tool->setIsPersistent(false);
+            paintToolButton->addKnob(tool);
+            _imp->ui->eraserAction = tool;
+        }
+    } // if (paintToolButton)
     if (_imp->isPaintByDefault) {
         {
             KnobButtonPtr tool = AppManager::createKnob<KnobButton>( this, tr(kRotoUIParamCloneToolButtonActionLabel) );

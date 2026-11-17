@@ -92,6 +92,11 @@ public:
     /// the RotoPaint input fan (Bg, Bg2..Bg10, Mask) would only be confusing here.
     virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
 
+    /// Vector-only surface: no brush/pencil/eraser tools, no stroke viewer knobs,
+    /// no Stroke/Clone property tabs — raster paint is meaningless on a vector-file
+    /// importer. Selection/point-edit/Bézier tools and the vector overlay knobs stay.
+    virtual bool supportsRasterPaintTools() const OVERRIDE FINAL WARN_UNUSED_RETURN { return false; }
+
 private Q_SLOTS:
 
     /// Connected to the File knob: re-imports when Auto Rebuild is on.

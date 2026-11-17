@@ -1423,14 +1423,21 @@ public:
             isPaintNode = false;
         }
 
+        // Vector-only nodes (ReadMask) drop the raster paint surface: no Stroke/Clone
+        // property tabs and no stroke/clone context knobs at all. Roto/RotoPaint keep
+        // the default (true) — see RotoPaint::supportsRasterPaintTools().
+        const bool paintTools = isRotoNode ? isRotoNode->supportsRasterPaintTools() : true;
+
         assert( n && n->getEffectInstance() );
 
         KnobPagePtr shapePage, strokePage, generalPage, clonePage, transformPage;
 
         generalPage = AppManager::createKnob<KnobPage>(effect.get(), tr("General"), 1, true);
         shapePage = AppManager::createKnob<KnobPage>(effect.get(), tr("Shape"), 1, true);
-        strokePage = AppManager::createKnob<KnobPage>(effect.get(), tr("Stroke"), 1, true);
-        clonePage = AppManager::createKnob<KnobPage>(effect.get(), tr("Clone"), 1, true);
+        if (paintTools) {
+            strokePage = AppManager::createKnob<KnobPage>(effect.get(), tr("Stroke"), 1, true);
+            clonePage = AppManager::createKnob<KnobPage>(effect.get(), tr("Clone"), 1, true);
+        }
         transformPage = AppManager::createKnob<KnobPage>(effect.get(), tr("Transform"), 1, true);
 
         KnobDoublePtr opacityKnob = AppManager::createKnob<KnobDouble>(effect.get(), tr(kRotoOpacityParamLabel), 1, true);
@@ -1550,6 +1557,11 @@ public:
         shapeKnobs.push_back(featherFallOffKnob);
         featherFallOff = featherFallOffKnob;
 
+        // Clone + stroke context knobs: raster-paint only, may not exist on
+        // vector-only nodes (ReadMask). Every context knob below is pushed into
+        // cloneKnobs/strokeKnobs; consumers in RotoContext (e.g. selectInternal)
+        // already treat those as optional via null compares.
+        if (paintTools) {
         {
             KnobChoicePtr sourceType = AppManager::createKnob<KnobChoice>(effect.get(), tr(kRotoBrushSourceColorLabel), 1, true);
             sourceType->setName(kRotoBrushSourceColor);
@@ -1890,6 +1902,7 @@ public:
             strokeKnobs.push_back(visiblePortion);
             brushVisiblePortionKnob = visiblePortion;
         }
+        } // if (paintTools)
 
         KnobDoublePtr translate = AppManager::createKnob<KnobDouble>(effect.get(), tr(kRotoDrawableItemTranslateParamLabel), 2, true);
         translate->setName(kRotoDrawableItemTranslateParam);

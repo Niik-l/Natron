@@ -65,6 +65,14 @@ public:
         return 10;
     }
 
+    /// Whether the raster-paint-only UI surface is created on this node: the viewer
+    /// brush tool group (solid/pencil/eraser), the stroke viewer-context knobs and the
+    /// Stroke/Clone settings tabs. Vector-only nodes (ReadMask) return false so those
+    /// knobs/tools are never created at all — the viewer toolbar builds its buttons
+    /// without a secret check (NodeViewerContext::createGui), so the tools must not
+    /// exist rather than be hidden. Roto and RotoPaint keep the default (true).
+    virtual bool supportsRasterPaintTools() const WARN_UNUSED_RETURN { return true; }
+
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN
     {
         return 1;
