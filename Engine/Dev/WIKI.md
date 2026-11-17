@@ -793,3 +793,91 @@ and starts on Linux but has not been rendered there.
 colour is not the first part in the file, so some readers show Depth instead of the picture. Set
 the Write node's Parts to Single Part. This is a Write-node behaviour and applies to ScanlineRender
 AOVs as well.
+
+## Motion Vectors and Retiming
+
+Three nodes work with the motion in footage. `VectorGenerator` measures it, `VectorBlur` uses it
+to add motion blur, and `TimeFlow` uses it to change the speed of a clip. VectorGenerator and
+TimeFlow share one motion estimator (`Engine/Dev/PostFX/FlowCore`), which runs on the CPU and
+needs no extra library.
+
+Typical graphs:
+- Motion blur on footage shot without it: `Read` -> `VectorGenerator` -> the Vectors input of
+  `VectorBlur`, with the same `Read` on VectorBlur's Source.
+- Slow motion: `Read` -> `TimeFlow` -> Viewer. TimeFlow estimates the motion itself; it does not
+  need a VectorGenerator in front of it.
+
+### VectorGenerator
+**Group:** Time | **Inputs:** 1 (Source) | **Output:** vector image (RGBA)
+
+For every pixel, how far it moves to the next frame (Forward) or from the previous frame
+(Backward). Red = horizontal motion, green = vertical motion (up is positive), in pixels per
+frame; blue = 0; alpha = confidence.
+
+| Knob | Type | Default | Description |
+|------|------|---------|-------------|
+| Output | Choice | Forward | Forward = to the next frame (what VectorBlur expects). Backward = from the previous frame |
+| Vector Detail | Double | 0.5 | Resolution of the vector field relative to the image. 1 = a vector per pixel; 0.5 is about four times faster and less noisy. Raise it for small or thin objects |
+| Smoothness | Double | 0.5 | How strongly neighbouring vectors are evened out. The smoothing does not cross edges in the image |
+| Flicker Compensation | Bool | on | Ignores brightness changes between frames so they are not mistaken for motion |
+| Temporal Smoothing | Double | 1.0 | Steadies the vectors over time using the previous and next frame. 0 = off. About twice the time on a sequence, three times on a single frame |
+| Weight Red / Green / Blue | Double | 0.3 / 0.6 / 0.1 | How much each channel counts when looking for motion. Lower a noisy channel |
+
+**A renderer's Velocity pass:** ScanlineRender's `Velocity` layer holds the motion since the
+previous frame. VectorGenerator set to Backward gives the same vectors with the opposite sign.
+For CG, the rendered pass is exact and should be preferred; VectorGenerator is for footage.
+
+**What to expect:** on textured, well-lit footage the vectors are accurate to a fraction of a
+pixel. The estimate is weakest where there is nothing to follow (flat, untextured areas), where
+something is covered or uncovered between the two frames, and on very fast motion of thin
+objects. An area that is identical in both frames and reaches the frame edge is given zero
+motion, so an element over black does not drag its background along.
+
+**Confidence (alpha):** a rough measure taken from how well the picture matched. It reads low
+along hard, high-contrast edges even where the vector is correct, and reads 1 in background that
+was set to zero motion. Do not rely on it as a matte.
+
+### TimeFlow
+**Group:** Time | **Inputs:** 3 (Source, Vectors optional, Matte optional) | **Output:** image
+
+Retimes a clip: slow motion, speed-ups and speed ramps. Where the new timing lands between two
+source frames, the picture is built by moving both frames along their motion and mixing them, so
+moving things stay single and sharp where a dissolve would double them. An output frame that
+lands exactly on a source frame is that frame, untouched.
+
+| Knob | Type | Default | Description |
+|------|------|---------|-------------|
+| Timing | Choice | Speed | Speed = a constant speed. Source Frame = a curve saying which source frame shows at each output frame |
+| Speed | Double | 0.5 | 1 = unchanged, 0.5 = half speed (twice as long), 2 = double speed |
+| Start Frame | Double | 1 | The frame that stays put in Speed mode; the speed change is counted from here |
+| Source Frame | Double (animatable) | 1 | Used in Source Frame mode. Example: key 1 at frame 1 and 50 at frame 100 to play frames 1 to 50 at half speed. Fractions are allowed |
+| Method | Choice | Motion | Motion = follow the motion. Blend = dissolve between the two nearest frames. Nearest = show the nearest frame. The last two are for comparison and for shots where the motion cannot be followed |
+| Vector Detail / Smoothness / Flicker Compensation | - | 0.5 / 0.5 / on | As on VectorGenerator |
+| Temporal Smoothing | Double | 0 | As on VectorGenerator, off by default here: it made no measurable difference to retimed frames in testing and costs four more motion solves per pair of source frames |
+| Vectors Input | Choice | Backward Vectors | What the Vectors input holds: Backward Vectors (VectorGenerator set to Backward) or Velocity Pass (ScanlineRender's Velocity layer) |
+| Weight Red / Green / Blue | Double | 0.3 / 0.6 / 0.1 | As on VectorGenerator |
+
+In Speed mode the node reports a stretched frame range: 50 frames at speed 0.25 become 197.
+
+**Covered and uncovered areas:** where a moving object hides or reveals what is behind it, there
+is no motion to follow. The node solves the motion in both directions; where the two disagree it
+uses whichever source frame can see the area, and falls back to a dissolve where neither can be
+trusted.
+
+**Vectors input (optional):** replaces the node's own estimate with supplied vectors that belong
+to the same frames as the picture, for example the velocity pass of a 3D render.
+
+**Matte input (optional):** the alpha of a foreground object (a roto shape, a key, or a CG
+alpha). Without it, a fast-moving object with a hard edge gets a faint second outline, because
+the two source frames place the edge a pixel or two apart. With it, the object and the
+background behind it are followed and rebuilt separately and put back together, and the outline
+goes. It roughly doubles the motion solve. The matte must cover the object on every source
+frame; it handles one foreground layer; it is not used when the Vectors input is connected, and
+Temporal Smoothing is not applied with it.
+
+**Speed (1920x1080, one desktop CPU):** about 0.7 s per in-between frame at Vector Detail 0.5 and
+1.2 to 1.4 s at 1.0; about 2.5 s at 1.0 with a matte. The motion of the last few frame pairs is
+kept, so the several output frames built from one pair of source frames share one solve.
+
+**Status:** measured on rendered test scenes with exact answers (`tools/flow-tests`); not yet
+tried on real footage.
