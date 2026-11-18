@@ -667,15 +667,22 @@ getAllUpstreamNodesRecursiveWithDependencies_internal(const NodePtr& node,
 
     //If we already called it, don't do it again
     if (!foundButDidntRecursivelyCallUpstream) {
-        std::set<NodePtr> expressionsDeps;
-        node->getEffectInstance()->getAllExpressionDependenciesRecursive(expressionsDeps);
+        //A node whose effect instance is not attached yet (or is being torn down) can be
+        //reached here when the tree is refreshed asynchronously: getEffectInstance() is then
+        //null and calling into KnobHolder::getAllExpressionDependenciesRecursive dereferences
+        //a null _imp (crash at the mutex lock).
+        EffectInstancePtr effect = node->getEffectInstance();
+        if (effect) {
+            std::set<NodePtr> expressionsDeps;
+            effect->getAllExpressionDependenciesRecursive(expressionsDeps);
 
-        //Also add all expression dependencies but mark them as we did not recursed on them yet
-        for (std::set<NodePtr>::iterator it = expressionsDeps.begin(); it != expressionsDeps.end(); ++it) {
-            FindDependenciesNode n;
-            n.recursed = false;
-            n.visitCounter = 0;
-            finalNodes.insert(std::make_pair(node, n));
+            //Also add all expression dependencies but mark them as we did not recursed on them yet
+            for (std::set<NodePtr>::iterator it = expressionsDeps.begin(); it != expressionsDeps.end(); ++it) {
+                FindDependenciesNode n;
+                n.recursed = false;
+                n.visitCounter = 0;
+                finalNodes.insert(std::make_pair(node, n));
+            }
         }
     }
 
@@ -751,7 +758,11 @@ ParallelRenderArgsSetter::ParallelRenderArgsSetter(double time,
             (*it2)->getOutputs_mt_safe(outputs);
             int visitsCounter = (int)outputs.size();
 
-            (*it2)->getEffectInstance()->setParallelRenderArgsTLS(time, view, isRenderUserInteraction, isSequential, nodeHash, abortInfo, treeRoot, visitsCounter, NodeFrameRequestPtr(), glContext, textureIndex, timeline, isAnalysis, activeRotoPaintNode && (*it2)->isDuringPaintStrokeCreation(), NodesList(), (*it2)->getCurrentRenderThreadSafety(),  (*it2)->getCurrentOpenGLRenderSupport(),doNanHandling, draftMode, stats);
+            EffectInstancePtr rotoInstance = (*it2)->getEffectInstance();
+            if (!rotoInstance) {
+                continue;
+            }
+            rotoInstance->setParallelRenderArgsTLS(time, view, isRenderUserInteraction, isSequential, nodeHash, abortInfo, treeRoot, visitsCounter, NodeFrameRequestPtr(), glContext, textureIndex, timeline, isAnalysis, activeRotoPaintNode && (*it2)->isDuringPaintStrokeCreation(), NodesList(), (*it2)->getCurrentRenderThreadSafety(),  (*it2)->getCurrentOpenGLRenderSupport(),doNanHandling, draftMode, stats);
         }
 
         if ( node->isMultiInstance() ) {
@@ -765,6 +776,9 @@ ParallelRenderArgsSetter::ParallelRenderArgsSetter(double time,
                 assert(*it2);
                 EffectInstancePtr childLiveInstance = (*it2)->getEffectInstance();
                 assert(childLiveInstance);
+                if (!childLiveInstance) {
+                    continue;
+                }
                 RenderSafetyEnum childSafety = (*it2)->getCurrentRenderThreadSafety();
                 PluginOpenGLRenderSupport childGlSupport = (*it2)->getCurrentOpenGLRenderSupport();
                 childLiveInstance->setParallelRenderArgsTLS(time, view, isRenderUserInteraction, isSequential, nodeHash, abortInfo, treeRoot, 1, NodeFrameRequestPtr(), glContext, textureIndex, timeline, isAnalysis, false, NodesList(), childSafety, childGlSupport, doNanHandling, draftMode, stats);
