@@ -173,7 +173,7 @@ Implementation notes beyond the original sketch:
 area), AppManager include + register row, grouping "Image" (Roto family),
 NODE_REGISTRY.md row. New files → cmake regen.
 
-## Part 2 — Bake + persistence
+## Part 2 — Bake + persistence — DELIVERED 2026-11-17 (commit `e68df13f3`)
 
 - "Bake Sequence" button: for the sequence's frame range, for every shape CP,
   `setPointAtIndex(false, i, t, ...)` per frame → every frame becomes a keyframe;
@@ -185,7 +185,7 @@ NODE_REGISTRY.md row. New files → cmake regen.
   **regenerated on rebuild by design** — bake is the persistence path. Stated in
   the panel description (user confirmed 2026-11-06).
 
-## Part 3 — MaskToGeo
+## Part 3 — MaskToGeo — DELIVERED 2026-11-18 (commit `7aef51512`)
 
 **Where:** `Engine/Dev/Scene3D/MaskToGeo.{h,cpp}` (goes into the existing
 DevScene3D GLOB — no cmake-list edit beyond regen).
@@ -210,7 +210,22 @@ uniformScale, rotationPivot).
 sequences / baked keyframes / hand-animated Roto) become animated geo;
 mesh snapshot hash-keyed per GeoBuilder pattern (curves + knobs in hash).
 
-## Part 4 — Tests + docs for parts 1–3
+Implementation notes beyond the sketch:
+- **World Scale default is 2.0** (mask pixels -> world, format height = 2 world units) and UVs stay in
+  mask pixel space; the flat shape sits at z=0 with the whole model centred on the format.
+- **Nested layers**: imported ReadMask shapes live under a file layer, so the walk recurses into
+  `RotoLayer` children; layers and curves are de-duplicated by identity (a layer reachable twice
+  used to emit every curve twice, stacking two coincident shells and doubling the triangle count).
+- `supportsMultiResolution()` returns true deliberately: ReadMask's RoD is the shape bbox, so the
+  multi-res input gate (`checkCanConnectNoMultiRes`) would refuse the connection.
+- **Verification caveat (2026-11-18)**: this box's headless renderers are not usable as an oracle
+  right now - Cycles returns firefly-only images and ScanlineRender all-black ones even for a
+  reference ReadGeo cube / Sphere3D - so the acceptance check rasterizes the mesh the renderer
+  actually received (`NATRON_SC_DUMP`) offline with the camera-exact projection: flat rect and
+  rect+circle union IoU 1.000, extrusion z 0..depth, baked 3-frame sequence lands on the per-frame
+  mask rects.
+
+## Part 4 — Tests + docs for parts 1–3 — DELIVERED 2026-11-18 (`tools/mask-tests/` MASK_CHECK DONE_OK, docs ripple in NODE_REGISTRY / README / DEV_3D_SYSTEM_CHANGELOG)
 
 - Fixtures: vectorNuke's `examples/` (sample.svg, demo-vector-logo.ai, …) —
   re-fetch at implementation time (commit the useful SVG subset; the repo has
