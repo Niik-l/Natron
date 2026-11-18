@@ -290,6 +290,8 @@ ReadMask::initializeData()
                              "can no longer wipe the baked animation.\n\n"
                              "A static file (no sequence pattern) has nothing to bake."));
         k->setCheckable(false);
+        // Sit on the Re-import row, to its right (no new line).
+        k->setAddNewLine(false);
         page->addKnob(k);
         _imp->bakeSequence = k;
     }
