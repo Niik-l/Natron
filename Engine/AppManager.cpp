@@ -215,6 +215,7 @@
 #include "Dev/Scene3D/Card3D.h"
 #include "Dev/Scene3D/Cube3D.h"
 #include "Dev/Scene3D/GeoBuilder.h"
+#include "Dev/Scene3D/MaskToGeo.h"
 #include "Dev/Scene3D/Path3D.h"
 #include "Dev/Scene3D/Zap3D.h"
 #include "Dev/Scene3D/Cylinder3D.h"
@@ -1745,6 +1746,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<Cube3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Cylinder3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<GeoBuilder>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<MaskToGeo>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Path3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Zap3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Scene3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
