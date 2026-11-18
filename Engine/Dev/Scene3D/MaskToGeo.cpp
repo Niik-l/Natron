@@ -59,6 +59,11 @@ struct MaskToGeoPrivate
     KnobDoubleWPtr extrudeDepth;
     KnobStringWPtr info;
 
+    // True while programmatically setting knobs (info line): knobChanged must
+    // ignore those, or the info setValue re-enters knobChanged forever
+    // (stack overflow, seen while editing roto curves).
+    bool syncing = false;
+
     // Transform page (read by name by every consumer)
     KnobDoubleWPtr translateX, translateY, translateZ;
     KnobDoubleWPtr rotateX, rotateY, rotateZ;
@@ -654,6 +659,9 @@ MaskToGeo::knobChanged(KnobI* /*k*/, ValueChangedReasonEnum /*reason*/,
 {
     // Main-thread knob edit: refresh the published snapshot + the info line
     // (GeoBuilder's rebuildMesh pattern). Returns false: no knob consumed.
+    if (_imp->syncing) {
+        return false;
+    }
     const double time = getApp() ? getApp()->getTimeLine()->currentFrame() : 0.0;
     const unsigned long long h = currentInputsHash(time);
     MeshDataPtr built = buildMeshSnapshot(time);
@@ -666,7 +674,9 @@ MaskToGeo::knobChanged(KnobI* /*k*/, ValueChangedReasonEnum /*reason*/,
     if (KnobStringPtr info = _imp->info.lock()) {
         std::ostringstream ss;
         ss << built->numVertices << " vertices, " << built->numFaces << " faces";
+        _imp->syncing = true;
         info->setValue(ss.str());
+        _imp->syncing = false;
     }
     return false;
 }
