@@ -457,6 +457,16 @@ MaskToGeo::isInputOptional(int inputNb) const
     return true;
 }
 
+bool
+MaskToGeo::carriesOverlayPath(int inputNb) const
+{
+    // The mask source is pure data: its 2D roto overlay must not be drawn over
+    // the image produced by the 3D comp this node feeds. The mask node still
+    // shows its overlay when viewed directly.
+    Q_UNUSED(inputNb);
+    return false;
+}
+
 void
 MaskToGeo::addAcceptedComponents(int /*inputNb*/, std::list<ImagePlaneDesc>* comps)
 {

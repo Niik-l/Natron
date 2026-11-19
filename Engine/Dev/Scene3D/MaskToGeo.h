@@ -90,6 +90,7 @@ public:
     virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
     { grouping->push_back("3D"); }
     virtual bool isInputOptional(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    virtual bool carriesOverlayPath(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual void addAcceptedComponents(int inputNb, std::list<ImagePlaneDesc>* comps) OVERRIDE FINAL;
     virtual void addSupportedBitDepth(std::list<ImageBitDepthEnum>* depths) const OVERRIDE FINAL;
     virtual RenderSafetyEnum renderThreadSafety() const OVERRIDE FINAL WARN_UNUSED_RETURN

@@ -557,6 +557,22 @@ public:
     virtual bool isInputOptional(int inputNb) const WARN_UNUSED_RETURN = 0;
 
     /**
+     * @brief Does the connection into inputNb carry the viewer overlay path?
+     * When false, overlay interacts of nodes upstream of inputNb are not drawn
+     * over the image produced through this node (they are still drawn when
+     * those nodes are viewed directly or reached through another connection).
+     * Nodes that consume an input as pure data - e.g. a mask turned into 3D
+     * geometry - return false so a 2D roto overlay does not draw over a 3D
+     * comp. The default is true: the connection is an ordinary image pipe.
+     **/
+    virtual bool carriesOverlayPath(int /*inputNb*/) const WARN_UNUSED_RETURN
+    {
+        return true;
+    }
+
+
+
+    /**
      * @brief Is inputNb a mask ? In which case the effect will have an additional mask parameter.
      **/
     virtual bool isInputMask(int /*inputNb*/) const WARN_UNUSED_RETURN
