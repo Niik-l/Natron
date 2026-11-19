@@ -516,18 +516,23 @@ std::map<QString, std::pair<int, int> >
 indexIds(const std::vector<MiniEvent>& events)
 {
     // id -> [startIndex, endIndex): endIndex points at the matching End event.
+    // Every Start pushes a (id-or-empty, index) entry and every End pops one,
+    // so childless elements (e.g. the <use/> of a group) cannot truncate the
+    // range of an enclosing id'd element: with ids popped on any End event,
+    // <g id="star"><path id="p"/><use/>...</g> would end star's range at the
+    // first <use/> and a <use href="#star"> replay would lose the rest.
     std::map<QString, std::pair<int, int> > ranges;
-    std::vector<std::pair<QString, int> > openIds; // (id, startIndex)
+    std::vector<std::pair<QString, int> > openIds; // (id-or-empty, startIndex)
     for (std::size_t i = 0; i < events.size(); ++i) {
         if (events[i].isStart) {
-            if (!events[i].id.isEmpty()) {
-                openIds.push_back( std::make_pair(events[i].id, (int)i) );
-            }
+            openIds.push_back( std::make_pair(events[i].id, (int)i) );
         } else if (!openIds.empty()) {
             // Well-formed XML: the innermost open element closes first.
-            const std::pair<QString, int>& open = openIds.back();
-            ranges[open.first] = std::make_pair(open.second, (int)i);
+            const std::pair<QString, int> open = openIds.back();
             openIds.pop_back();
+            if (!open.first.isEmpty()) {
+                ranges[open.first] = std::make_pair(open.second, (int)i);
+            }
         }
     }
     return ranges;
@@ -719,7 +724,10 @@ SvgParser::parseStream(QXmlStreamReader& xml, VectorDocument* doc, QString* erro
             }
 
             UseCtx ctx = stack.empty() ? UseCtx() : stack.back();
-            ctx.styles = parseStyleDict(ev.atts);
+            // SVG style inheritance: the element's own presentation attributes
+            // win, everything else (e.g. a fill="none" on the enclosing <g>)
+            // is inherited from the parent context.
+            ctx.styles = mergedStyles(ctx.styles, ev.atts);
 
             bool ignored = tag == QLatin1String("defs") ||
                            tag == QLatin1String("clippath") ||
@@ -808,6 +816,13 @@ SvgParser::applyStylesAndAppend(const VectorShape& shape, const std::map<QString
         strokeColor.a *= (opacity * strokeOpacity);
         out.hasStrokeColor = true;
         out.strokeColor = strokeColor;
+    }
+    // fill="none" / fully transparent fills contribute nothing to a mask:
+    // roto shapes are fills, so such shapes must not be imported at all
+    // (stroke-only outlines are not rasterized paint in this node). Unknown
+    // fill keywords (e.g. currentColor) keep the legacy import behavior.
+    if (hasFill && fillColor.a <= 0.0) {
+        return;
     }
     out.opacity = opacity;
     oIt = styles.find(QLatin1String("stroke-width"));

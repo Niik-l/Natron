@@ -191,20 +191,52 @@ m2g_tess_combine(double coords[3], void* /*data*/[4], double /*w*/[4], void** da
 }
 
 /**
- * @brief Tessellate one closed contour (in mask pixel coordinates). Returns
- * triangles with CCW orientation when viewed from +Z (the contour is forced
- * CCW first: roto contours may come in either orientation and winding is the
- * source of truth for normals).
+ * @brief Drop consecutive points closer than kM2GDupeEps mask pixels (SVG
+ * paths legitimately carry sub-hundredth-of-pixel segments; they tessellate
+ * into zero-area triangles whose normal normalization divides by zero) and
+ * collapse the closure point. Returns false if fewer than 3 points remain.
  */
-static void
-tessellateContour(const std::vector<std::pair<double, double> >& contour,
-                  std::vector<std::vector<ParametricPoint> >* triangles)
+static bool
+cleanContour(std::vector<std::pair<double, double> >* contour)
 {
-    if (contour.size() < 3) {
-        return;
+    const double kM2GDupeEps = 0.02;
+    if (!contour || contour->empty()) {
+        return false;
     }
+    std::vector<std::pair<double, double> > cleaned;
+    cleaned.reserve(contour->size());
+    for (std::size_t i = 0; i < contour->size(); ++i) {
+        const std::pair<double, double>& p = (*contour)[i];
+        if (!cleaned.empty()) {
+            const double dx = p.first - cleaned.back().first;
+            const double dy = p.second - cleaned.back().second;
+            if (dx * dx + dy * dy < kM2GDupeEps * kM2GDupeEps) {
+                continue;
+            }
+        }
+        cleaned.push_back(p);
+    }
+    while (cleaned.size() > 1) {
+        const double dx = cleaned.front().first - cleaned.back().first;
+        const double dy = cleaned.front().second - cleaned.back().second;
+        if (dx * dx + dy * dy < kM2GDupeEps * kM2GDupeEps) {
+            cleaned.pop_back();
+        } else {
+            break;
+        }
+    }
+    contour->swap(cleaned);
+    return contour->size() >= 3;
+}
 
-    // Signed area (shoelace): > 0 means CCW in a bottom-left y-up space.
+/**
+ * @brief Orient a closed contour CCW (shoelace signed area: > 0 is CCW in a
+ * bottom-left y-up space). Roto contours may come in either orientation and
+ * winding is the source of truth for normals.
+ */
+static std::vector<ParametricPoint>
+orientedCCW(const std::vector<std::pair<double, double> >& contour)
+{
     double area = 0.0;
     for (std::size_t i = 0; i < contour.size(); ++i) {
         const std::pair<double, double>& a = contour[i];
@@ -221,12 +253,16 @@ tessellateContour(const std::vector<std::pair<double, double> >& contour,
     if (area < 0.0) {
         std::reverse(oriented.begin(), oriented.end());
     }
+    return oriented;
+}
 
-    M2GTessData tessData;
-    tessData.out = triangles;
-    tessData.error = 0;
+static void
+tessSetup(libtess_GLUtesselator* tess, std::vector<std::vector<ParametricPoint> >* triangles,
+          M2GTessData* tessData)
+{
+    tessData->out = triangles;
+    tessData->error = 0;
 
-    libtess_GLUtesselator* tess = libtess_gluNewTess();
     libtess_gluTessCallback(tess, LIBTESS_GLU_TESS_BEGIN_DATA, (void (*)())m2g_tess_begin);
     libtess_gluTessCallback(tess, LIBTESS_GLU_TESS_VERTEX_DATA, (void (*)())m2g_tess_vertex);
     libtess_gluTessCallback(tess, LIBTESS_GLU_TESS_END_DATA, (void (*)())m2g_tess_end);
@@ -235,13 +271,74 @@ tessellateContour(const std::vector<std::pair<double, double> >& contour,
 
     // All contours lie in the XY plane: fix the normal per the libtess README.
     libtess_gluTessNormal(tess, 0, 0, 1);
-    libtess_gluTessBeginPolygon(tess, (void*)&tessData);
+    libtess_gluTessBeginPolygon(tess, (void*)tessData);
+}
+
+static void
+tessAddContour(libtess_GLUtesselator* tess, std::vector<ParametricPoint>& oriented)
+{
     libtess_gluTessBeginContour(tess);
     for (std::size_t i = 0; i < oriented.size(); ++i) {
         double coords[3] = { oriented[i].x, oriented[i].y, 0.0 };
         libtess_gluTessVertex(tess, coords, &oriented[i]);
     }
     libtess_gluTessEndContour(tess);
+}
+
+/**
+ * @brief Tessellate one closed contour (in mask pixel coordinates). Returns
+ * triangles with CCW orientation when viewed from +Z.
+ */
+static void
+tessellateContour(const std::vector<std::pair<double, double> >& contour,
+                  std::vector<std::vector<ParametricPoint> >* triangles)
+{
+    if (contour.size() < 3) {
+        return;
+    }
+
+    std::vector<ParametricPoint> oriented = orientedCCW(contour);
+
+    M2GTessData tessData;
+    libtess_GLUtesselator* tess = libtess_gluNewTess();
+    tessSetup(tess, triangles, &tessData);
+    tessAddContour(tess, oriented);
+    libtess_gluTessEndPolygon(tess);
+    libtess_gluDeleteTess(tess);
+}
+
+/**
+ * @brief Tessellate several closed contours as ONE polygon with the nonzero
+ * winding rule, every contour forced CCW: overlapping shapes union instead of
+ * stacking coincident coplanar triangles (which z-fights in the viewport and
+ * double-hits in the raytracer). This matches the mask semantics, where each
+ * shape is painted over the previous ones.
+ */
+static void
+tessellateContoursUnion(const std::vector<std::vector<std::pair<double, double> > >& contours,
+                        std::vector<std::vector<ParametricPoint> >* triangles)
+{
+    std::vector<std::vector<ParametricPoint> > oriented;
+    oriented.reserve(contours.size());
+    int totalPts = 0;
+    for (std::size_t i = 0; i < contours.size(); ++i) {
+        if (contours[i].size() < 3) {
+            continue;
+        }
+        oriented.push_back(orientedCCW(contours[i]));
+        totalPts += (int)oriented.back().size();
+    }
+    if (oriented.empty()) {
+        return;
+    }
+
+    libtess_GLUtesselator* tess = libtess_gluNewTess();
+    libtess_gluTessProperty(tess, LIBTESS_GLU_TESS_WINDING_RULE, LIBTESS_GLU_TESS_WINDING_NONZERO);
+    M2GTessData tessData;
+    tessSetup(tess, triangles, &tessData);
+    for (std::size_t i = 0; i < oriented.size(); ++i) {
+        tessAddContour(tess, oriented[i]);
+    }
     libtess_gluTessEndPolygon(tess);
     libtess_gluDeleteTess(tess);
 }
@@ -282,20 +379,15 @@ struct M2GBuilder
 };
 
 /**
- * @brief One curve -> mesh: flatten at time (50 points per segment, the Roto
- * house value), close open curves implicitly (the Roto fill closes them too),
- * tessellate in mask space (CCW-normalized), emit the fill at z=0 facing +Z
- * and, for depth > 0, the bottom cap (reversed), the outward side walls and
- * the offset top cap.
+ * @brief Flatten one curve at time into a closed mask-space contour (50 points
+ * per segment, the Roto house value; open curves are closed implicitly - the
+ * Roto fill closes them too) and drop sub-pixel duplicates + the closure
+ * point. Returns false for degenerate results.
  */
-static void
-emitCurve(const BezierPtr& curve, double time,
-          double s, double cx, double cy, double depth,
-          double formatW, double formatH, M2GBuilder& b)
+static bool
+flattenCurveContour(const BezierPtr& curve, double time,
+                    std::vector<std::pair<double, double> >* contour)
 {
-    const double invFormatW = 1.0 / (formatW != 0.0 ? formatW : 1.0);
-    const double invFormatH = 1.0 / (formatH != 0.0 ? formatH : 1.0);
-
     std::list<ParametricPoint> polygon;
     RectD bbox;
     curve->evaluateAtTime_DeCasteljau(false, time, 0,
@@ -306,20 +398,107 @@ emitCurve(const BezierPtr& curve, double time,
 #endif
                                       &polygon, &bbox);
     if (polygon.size() < 3) {
+        return false;
+    }
+    contour->reserve(polygon.size());
+    for (std::list<ParametricPoint>::const_iterator p = polygon.begin();
+         p != polygon.end(); ++p) {
+        contour->push_back(std::make_pair(p->x, p->y));
+    }
+    if (contour->front() != contour->back()) {
+        contour->push_back(contour->front());
+    }
+    return cleanContour(contour);
+}
+
+/**
+ * @brief Emit fill triangles (CCW mask-space) at z, optionally reversed
+ * (bottom cap). Zero-area faces are skipped: their normal normalizes 0/0 and
+ * poisons the shading with NaNs in the viewport and the raytracer.
+ */
+static void
+emitFillTriangles(const std::vector<std::vector<ParametricPoint> >& tris,
+                  float z, bool reverseWinding,
+                  double s, double cx, double cy,
+                  double invFormatW, double invFormatH, M2GBuilder& b)
+{
+    for (std::size_t t = 0; t < tris.size(); ++t) {
+        const std::vector<ParametricPoint>& tri = tris[t];
+        if (tri.size() != 3) {
+            continue;
+        }
+        const double area2 = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y)
+                             - (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
+        // 1e-6 px^2: libtess seam vertices at contour intersections collapse
+        // to identical float32 positions, whose normal normalizes 0/0.
+        if (std::fabs(area2) < 1e-6) {
+            continue;
+        }
+        int idx[3];
+        for (int k = 0; k < 3; ++k) {
+            const double wx = (tri[k].x - cx) * s;
+            const double wy = (tri[k].y - cy) * s;
+            idx[k] = b.vert((float)wx, (float)wy, z,
+                            (float)(tri[k].x * invFormatW), (float)(tri[k].y * invFormatH));
+        }
+        if (reverseWinding) {
+            b.tri(idx[2], idx[1], idx[0]);
+        } else {
+            b.tri(idx[0], idx[1], idx[2]);
+        }
+    }
+}
+
+/**
+ * @brief Flat fill (depth == 0) for ALL curves at once: every contour goes
+ * into one libtess polygon with the nonzero winding rule, so overlapping
+ * shapes union instead of stacking coincident coplanar triangles (which
+ * z-fights in the viewport and double-hits in the raytracer). This matches
+ * the mask semantics, where each shape is painted over the previous ones.
+ */
+static void
+emitFlatUnionFill(const std::vector<BezierPtr>& curves, double time,
+                  double s, double cx, double cy,
+                  double formatW, double formatH, M2GBuilder& b)
+{
+    const double invFormatW = 1.0 / (formatW != 0.0 ? formatW : 1.0);
+    const double invFormatH = 1.0 / (formatH != 0.0 ? formatH : 1.0);
+
+    std::vector<std::vector<std::pair<double, double> > > contours;
+    contours.reserve(curves.size());
+    for (std::size_t i = 0; i < curves.size(); ++i) {
+        std::vector<std::pair<double, double> > c;
+        if ( flattenCurveContour(curves[i], time, &c) ) {
+            contours.push_back(c);
+        }
+    }
+    if (contours.empty()) {
         return;
     }
 
-    // Flatten to a closed contour in mask pixel coordinates.
+    std::vector<std::vector<ParametricPoint> > tris;
+    tessellateContoursUnion(contours, &tris);
+    if (tris.empty()) {
+        return;
+    }
+    emitFillTriangles(tris, 0.0f, false, s, cx, cy, invFormatW, invFormatH, b);
+}
+
+/**
+ * @brief One curve -> mesh (extruded case, depth > 0): fill at z=0 facing +Z,
+ * the bottom cap (reversed), the outward side walls and the offset top cap.
+ * Shapes stay per-curve so the walls of overlapping shapes remain visible.
+ */
+static void
+emitCurve(const BezierPtr& curve, double time,
+          double s, double cx, double cy, double depth,
+          double formatW, double formatH, M2GBuilder& b)
+{
+    const double invFormatW = 1.0 / (formatW != 0.0 ? formatW : 1.0);
+    const double invFormatH = 1.0 / (formatH != 0.0 ? formatH : 1.0);
+
     std::vector<std::pair<double, double> > contour;
-    contour.reserve(polygon.size());
-    for (std::list<ParametricPoint>::const_iterator p = polygon.begin();
-         p != polygon.end(); ++p) {
-        contour.push_back(std::make_pair(p->x, p->y));
-    }
-    if (contour.front() != contour.back()) {
-        contour.push_back(contour.front());
-    }
-    if (contour.size() < 4) {
+    if (!flattenCurveContour(curve, time, &contour)) {
         return;
     }
 
@@ -330,89 +509,36 @@ emitCurve(const BezierPtr& curve, double time,
         return;
     }
 
-    const int zVert = (depth > 0.0) ? (int)depth : 0;
-
     // Emit: fill triangles at z=0 (facing +Z after the CCW normalize).
-    for (std::size_t t = 0; t < tris.size(); ++t) {
-        const std::vector<ParametricPoint>& tri = tris[t];
-        if (tri.size() != 3) {
-            continue;
-        }
-        int idx[3];
-        for (int k = 0; k < 3; ++k) {
-            const double wx = (tri[k].x - cx) * s;
-            const double wy = (tri[k].y - cy) * s;
-            idx[k] = b.vert((float)wx, (float)wy, 0.0f,
-                            (float)(tri[k].x * invFormatW), (float)(tri[k].y * invFormatH));
-        }
-        b.tri(idx[0], idx[1], idx[2]);
-    }
+    emitFillTriangles(tris, 0.0f, false, s, cx, cy, invFormatW, invFormatH, b);
 
-    if (depth > 0.0) {
-        // Contour outline (deduplicated consecutive points).
-        std::vector<std::pair<double, double> > outline;
-        for (std::size_t i = 0; i < contour.size(); ++i) {
-            if (i > 0 && contour[i] == contour[i - 1]) {
-                continue;
-            }
-            outline.push_back(contour[i]);
-        }
-        while (outline.size() > 1 && outline.front() == outline.back()) {
-            outline.pop_back();
-        }
-        if (outline.size() < 3) {
-            return;
-        }
-        // Bottom cap (z=0, facing -Z): reversed winding per triangle.
-        for (std::size_t t = 0; t < tris.size(); ++t) {
-            const std::vector<ParametricPoint>& tri = tris[t];
-            if (tri.size() != 3) {
-                continue;
-            }
-            int idx[3];
-            for (int k = 0; k < 3; ++k) {
-                const double wx = (tri[k].x - cx) * s;
-                const double wy = (tri[k].y - cy) * s;
-                idx[k] = b.vert((float)wx, (float)wy, 0.0f,
-                                (float)(tri[k].x * invFormatW), (float)(tri[k].y * invFormatH));
-            }
-            b.tri(idx[2], idx[1], idx[0]);
-        }
-        // Side walls: contour is CCW; quad (a0, b0, b1, a1) faces outward.
-        for (std::size_t i = 0; i < outline.size(); ++i) {
-            const std::pair<double, double>& a = outline[i];
-            const std::pair<double, double>& cpt = outline[(i + 1) % outline.size()];
-            const double ax = (a.first - cx) * s;
-            const double ay = (a.second - cy) * s;
-            const double bx = (cpt.first - cx) * s;
-            const double by = (cpt.second - cy) * s;
-            const int a0 = b.vert((float)ax, (float)ay, 0.0f,
-                                  (float)(a.first * invFormatW), (float)(a.second * invFormatH));
-            const int b0 = b.vert((float)bx, (float)by, 0.0f,
-                                  (float)(cpt.first * invFormatW), (float)(cpt.second * invFormatH));
-            const int b1 = b.vert((float)bx, (float)by, (float)depth,
-                                  (float)(cpt.first * invFormatW), (float)(cpt.second * invFormatH));
-            const int a1 = b.vert((float)ax, (float)ay, (float)depth,
-                                  (float)(a.first * invFormatW), (float)(a.second * invFormatH));
-            b.quad(a0, b0, b1, a1);
-        }
-        // Top cap (z=depth, facing +Z): same winding as the fill, offset in z.
-        for (std::size_t t = 0; t < tris.size(); ++t) {
-            const std::vector<ParametricPoint>& tri = tris[t];
-            if (tri.size() != 3) {
-                continue;
-            }
-            int idx[3];
-            for (int k = 0; k < 3; ++k) {
-                const double wx = (tri[k].x - cx) * s;
-                const double wy = (tri[k].y - cy) * s;
-                idx[k] = b.vert((float)wx, (float)wy, (float)depth,
-                                (float)(tri[k].x * invFormatW), (float)(tri[k].y * invFormatH));
-            }
-            b.tri(idx[0], idx[1], idx[2]);
-        }
+    // Contour outline is already deduplicated by cleanContour.
+    const std::size_t outlineSize = contour.size();
+    if (outlineSize < 3) {
+        return;
     }
-    Q_UNUSED(zVert);
+    // Bottom cap (z=0, facing -Z): reversed winding per triangle.
+    emitFillTriangles(tris, 0.0f, true, s, cx, cy, invFormatW, invFormatH, b);
+    // Side walls: contour is CCW; quad (a0, b0, b1, a1) faces outward.
+    for (std::size_t i = 0; i < outlineSize; ++i) {
+        const std::pair<double, double>& a = contour[i];
+        const std::pair<double, double>& cpt = contour[(i + 1) % outlineSize];
+        const double ax = (a.first - cx) * s;
+        const double ay = (a.second - cy) * s;
+        const double bx = (cpt.first - cx) * s;
+        const double by = (cpt.second - cy) * s;
+        const int a0 = b.vert((float)ax, (float)ay, 0.0f,
+                              (float)(a.first * invFormatW), (float)(a.second * invFormatH));
+        const int b0 = b.vert((float)bx, (float)by, 0.0f,
+                              (float)(cpt.first * invFormatW), (float)(cpt.second * invFormatH));
+        const int b1 = b.vert((float)bx, (float)by, (float)depth,
+                              (float)(cpt.first * invFormatW), (float)(cpt.second * invFormatH));
+        const int a1 = b.vert((float)ax, (float)ay, (float)depth,
+                              (float)(a.first * invFormatW), (float)(a.second * invFormatH));
+        b.quad(a0, b0, b1, a1);
+    }
+    // Top cap (z=depth, facing +Z): same winding as the fill, offset in z.
+    emitFillTriangles(tris, (float)depth, false, s, cx, cy, invFormatW, invFormatH, b);
 }
 
 } // anonymous namespace
@@ -606,11 +732,13 @@ MaskToGeo::buildMeshSnapshot(double time) const
         const KnobDoublePtr depthKnob = _imp->extrudeDepth.lock();
         const double depth = depthKnob ? std::max(0.0, depthKnob->getValueAtTime(time)) : 0.0;
 
-        // Emit every active Bezier in the tree, recursing into layers (ReadMask
-        // groups imported shapes under a file layer + per-group sub-layers).
-        // A layer can be reachable twice (base layer also lists the file layer's
-        // items), so guard both layers and curves by identity: emitting the same
-        // curve twice stacks two coincident shells in the mesh.
+        // Collect every active Bezier in the tree, recursing into layers
+        // (ReadMask groups imported shapes under a file layer + per-group
+        // sub-layers). A layer can be reachable twice (base layer also lists
+        // the file layer's items), so guard both layers and curves by
+        // identity: emitting the same curve twice stacks two coincident
+        // shells in the mesh.
+        std::vector<BezierPtr> curves;
         std::set<const RotoLayer*> visitedLayers;
         std::set<const Bezier*> visitedCurves;
         std::function<void(const RotoLayerPtr&)> walkLayer = [&](const RotoLayerPtr& layer) {
@@ -630,13 +758,23 @@ MaskToGeo::buildMeshSnapshot(double time) const
                 if (!visitedCurves.insert(curve.get()).second) {
                     continue;
                 }
-                emitCurve(curve, time, s, cx, cy, depth, formatW, formatH, b);
+                curves.push_back(curve);
             }
         };
 
         const std::list<RotoLayerPtr>& layers = ctx->getLayers();
         for (std::list<RotoLayerPtr>::const_iterator it = layers.begin(); it != layers.end(); ++it) {
             walkLayer(*it);
+        }
+
+        if (depth <= 0.0) {
+            // Flat fill: union all contours in one tessellation (no coincident
+            // coplanar overlap between shapes).
+            emitFlatUnionFill(curves, time, s, cx, cy, formatW, formatH, b);
+        } else {
+            for (std::size_t i = 0; i < curves.size(); ++i) {
+                emitCurve(curves[i], time, s, cx, cy, depth, formatW, formatH, b);
+            }
         }
     }
 
