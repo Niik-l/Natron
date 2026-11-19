@@ -478,6 +478,8 @@ public:
 
     void setChildrenLockedRecursively(bool locked, QTreeWidgetItem* item);
 
+    void setChildrenActivatedRecursively(bool activated, QTreeWidgetItem* item);
+
     bool itemHasKey(const RotoItemPtr& item, double time) const;
 
     void setItemKey(const RotoItemPtr& item, double time);
@@ -1485,6 +1487,9 @@ RotoPanel::onItemClicked(QTreeWidgetItem* item,
                 TreeItems::iterator found = _imp->findItem(selected[i]);
                 assert( found != _imp->items.end() );
                 found->rotoItem->setGloballyActivated(activated, true);
+                // Reflect the subtree state in the tree (the engine signal only
+                // refreshes the clicked row).
+                _imp->setChildrenActivatedRecursively(activated, found->treeItem);
             }
             break;
         }
@@ -1607,6 +1612,19 @@ RotoPanelPrivate::setChildrenLockedRecursively(bool locked,
     item->setIcon(COL_LOCKED, locked ? iconLocked : iconUnlocked);
     for (int i = 0; i < item->childCount(); ++i) {
         setChildrenLockedRecursively( locked, item->child(i) );
+    }
+}
+
+void
+RotoPanelPrivate::setChildrenActivatedRecursively(bool activated,
+                                                  QTreeWidgetItem* item)
+{
+    // The engine's setGloballyActivated(a, /*setChildren=*/true) updates the
+    // flags of the whole subtree but fires itemGloballyActivatedChanged only
+    // for the top item, so child rows would keep a stale eye icon.
+    item->setIcon(COL_ACTIVATED, activated ? iconVisible : iconUnvisible);
+    for (int i = 0; i < item->childCount(); ++i) {
+        setChildrenActivatedRecursively( activated, item->child(i) );
     }
 }
 
