@@ -1,3 +1,4 @@
+import os
 import sys
 try:
     import NatronEngine
@@ -49,8 +50,13 @@ except Exception as e:
     print("RESULT ERROR:", e)
     traceback.print_exc()
 
-# Exit cleanly so interpreter mode does not block on stdin.
+# Exit cleanly so interpreter mode does not block on stdin. sys.exit() is
+# swallowed by the embedded interpreter, which then starts the Python REPL;
+# with stdin redirected (07-verify uses </dev/null) CPython 3.14's _pyrepl
+# fails in GetConsoleScreenBufferInfo and loops, so leave the process for real.
 try:
-    sys.exit(0)
-except SystemExit:
+    sys.stdout.flush()
+    sys.stderr.flush()
+except Exception:
     pass
+os._exit(0)
