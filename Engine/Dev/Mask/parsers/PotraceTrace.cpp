@@ -239,24 +239,43 @@ kmeansRGB(int w,
     assign->assign(n, 0);
     centers->assign((std::size_t)k * 3, 0.0f);
 
-    // luminance per pixel for deterministic spread init
+    // Cluster a strided sample (<= ~256k pixels): k-means does not need every
+    // pixel to find the palette, and the naive per-iteration full reassign
+    // made a 2500x2500 trace take ~30 s. Every pixel is assigned once against
+    // the final centers below.
+    std::size_t stride = 1;
+    while (n / stride > 256 * 1024) {
+        stride *= 2;
+    }
+    std::vector<std::size_t> sample;
+    sample.reserve(n / stride + 1);
+    for (std::size_t i = 0; i < n; i += stride) {
+        sample.push_back(i);
+    }
+    const int sn = (int)sample.size();
+
+    // luminance per sampled pixel for deterministic spread init
     std::vector<std::pair<float, int> > byLum;
-    byLum.reserve(n);
-    for (std::size_t i = 0; i < n; ++i) {
+    byLum.reserve(sample.size());
+    for (int si = 0; si < sn; ++si) {
+        const std::size_t i = sample[si];
         const float lum = 0.2126f * rgb[i * 3] + 0.7152f * rgb[i * 3 + 1] + 0.0722f * rgb[i * 3 + 2];
-        byLum.push_back(std::make_pair(lum, (int)i));
+        byLum.push_back(std::make_pair(lum, si));
     }
     std::sort(byLum.begin(), byLum.end());
     for (int c = 0; c < k; ++c) {
-        const int pick = byLum[(std::size_t)((n - 1) * c / (double)std::max(1, k - 1) + 0.5)].second;
-        (*centers)[(std::size_t)c * 3 + 0] = rgb[(std::size_t)pick * 3 + 0];
-        (*centers)[(std::size_t)c * 3 + 1] = rgb[(std::size_t)pick * 3 + 1];
-        (*centers)[(std::size_t)c * 3 + 2] = rgb[(std::size_t)pick * 3 + 2];
+        const int pick = byLum[(std::size_t)((sn - 1) * c / (double)std::max(1, k - 1) + 0.5)].second;
+        const std::size_t i = sample[pick];
+        (*centers)[(std::size_t)c * 3 + 0] = rgb[i * 3 + 0];
+        (*centers)[(std::size_t)c * 3 + 1] = rgb[i * 3 + 1];
+        (*centers)[(std::size_t)c * 3 + 2] = rgb[i * 3 + 2];
     }
 
+    std::vector<int> sampleAssign((std::size_t)sn, 0);
     for (int it = 0; it < iterations; ++it) {
-        // assign
-        for (std::size_t i = 0; i < n; ++i) {
+        // assign (sample only)
+        for (int si = 0; si < sn; ++si) {
+            const std::size_t i = sample[si];
             int best = 0;
             float bestDist = 1e30f;
             for (int c = 0; c < k; ++c) {
@@ -269,13 +288,14 @@ kmeansRGB(int w,
                     best = c;
                 }
             }
-            (*assign)[i] = best;
+            sampleAssign[(std::size_t)si] = best;
         }
         // update
         std::vector<float> sum((std::size_t)k * 3, 0.0f);
         std::vector<int> count(k, 0);
-        for (std::size_t i = 0; i < n; ++i) {
-            const int c = (*assign)[i];
+        for (int si = 0; si < sn; ++si) {
+            const std::size_t i = sample[si];
+            const int c = sampleAssign[(std::size_t)si];
             sum[(std::size_t)c * 3 + 0] += rgb[i * 3 + 0];
             sum[(std::size_t)c * 3 + 1] += rgb[i * 3 + 1];
             sum[(std::size_t)c * 3 + 2] += rgb[i * 3 + 2];
@@ -290,7 +310,7 @@ kmeansRGB(int w,
         }
     }
 
-    // final assign with the updated centers
+    // final: assign EVERY pixel against the converged centers
     for (std::size_t i = 0; i < n; ++i) {
         int best = 0;
         float bestDist = 1e30f;

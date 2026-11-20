@@ -210,12 +210,23 @@ the node "still worked in the 1st size"; tracing froze the UI and eventually cra
    the format to the image size and rescaled every downstream render), and the
    valve below. The RotoContext import stays on the main thread, now wrapped in
    try/catch (an exception escaping a Qt slot aborts the app).
-6. **Import valve (kMaxImportedShapes = 800)**: a photographic source decomposes into
-   thousands of contours (the noisy 600x600 stress traced 21,876 paths) - importing
-   that many Beziers (2 internal nodes each) stalls the UI for minutes and can OOM,
-   which matches the reported color-mode stall+crash. Traces above the valve are
-   refused with "N shapes traced - too complex to import; raise Despeckle" and the
-   previous import is kept; bake frames above it are skipped.
+6. **Import valve -> Max Shapes knob (default 8, user request)**: a photographic source
+   decomposes into thousands of contours (the noisy 600x600 stress traced 21,876 paths;
+   the 1600x1600 penguin-like probe traces 11) - importing that many Beziers (2 internal
+   nodes each) stalls the UI for minutes and can OOM, which matches the reported
+   color-mode stall+crash. The valve is now the **Max Shapes** knob (Trace page, default
+   8): traces above it are refused with "N shapes traced - too complex to import; raise
+   Max Shapes or Despeckle" and the previous import is kept; bake frames above it are
+   skipped; RAISING the knob imports the cached refused document WITHOUT re-tracing.
+7. **Color-mode stall**: the naive k-means ran every pixel against every center for all
+   8 iterations (2500x2500 x 4 x 8 = 200M distance evals, ~30 s for 1600x1600 measured).
+   k-means now clusters a strided sample (<= 256k px) and assigns every pixel once
+   against the converged centers: the same 1600x1600 color trace dropped to ~1.3 s.
+8. **Pump hardening**: the nested event loop now runs with ExcludeUserInputEvents - the
+   window keeps painting (no frozen look) but clicks/keys cannot re-enter the trace or
+   the settings panel mid-import (the GUI-side crash on selecting Color is not
+   reproducible headlessly; input re-entrancy during the 30 s stall was the plausible
+   trigger and is now closed, together with the stall itself).
 
 Harness: color mode (3 colored circles -> 4 clusters incl. the anti-aliased edge
 cluster, one sub-layer each), a 900x900 smooth-blob color stress, and the noisy-image

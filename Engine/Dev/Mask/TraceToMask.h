@@ -113,6 +113,11 @@ private Q_SLOTS:
     /// Connected to the Reset button: removes every traced shape/layer.
     void onResetClicked();
 
+    /// Connected to the Max Shapes knob: if the last trace was refused for
+    /// exceeding the limit and the new limit admits it, imports the cached
+    /// document without re-tracing.
+    void onMaxShapesChanged();
+
     /// Connected to the Bake Sequence button: keys every traced control point
     /// across the [Bake From, Bake To] frame range so the shapes play back the
     /// traced animation as project-native animated BAcziers, independent of

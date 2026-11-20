@@ -78,6 +78,7 @@ struct TraceToMaskPrivate
     KnobIntWPtr bands;
     KnobIntWPtr colorCount;
     KnobDoubleWPtr despeckle;
+    KnobIntWPtr maxShapes;
     KnobDoubleWPtr cornerThreshold;
     KnobBoolWPtr curveOptimization;
     KnobDoubleWPtr optTolerance;
@@ -125,9 +126,11 @@ struct TraceToMaskPrivate
     bool traceRunning = false;
     bool traceDirty = false;
 
-    /// Import valve: above this many traced paths the import is refused (each
-    /// Bezier drags two internal nodes; thousands stall the UI and can OOM).
-    static const int kMaxImportedShapes = 800;
+    /// The last successful trace's document, kept so raising Max Shapes can
+    /// import it without re-computing.
+    VectorMask::VectorDocument lastDoc;
+    RectI lastDocBounds;
+    bool hasLastDoc = false;
 
     /// Canonical integer bounds of the plane the current shapes were traced
     /// from - the anchor for the fit transform and the input-change check.
@@ -454,6 +457,25 @@ TraceToMask::initializeData()
         _imp->despeckle = k;
     }
     {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Max Shapes"));
+        k->setName("maxShapes");
+        k->setDefaultValue(8);
+        k->setMinimum(1);
+        k->setMaximum(100000);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Import valve: a trace of more shapes than this is refused "
+                             "with its previous import kept. Shape count is not the number "
+                             "of colors/bands: each color cluster's or band's bitmap "
+                             "decomposes into ONE shape per connected region (plus one per "
+                             "hole), and photographic content scatters every cluster into "
+                             "thousands of tiny speckles - 4 Colors on a photo easily means "
+                             "tens of thousands of contours. Raise Despeckle to drop small "
+                             "speckles, or Max Shapes to allow bigger imports (each shape "
+                             "carries two internal roto nodes)."));
+        page->addKnob(k);
+        _imp->maxShapes = k;
+    }
+    {
         KnobDoublePtr k = AppManager::createKnob<KnobDouble>(this, tr("Corner Threshold"));
         k->setName("cornerThreshold");
         k->setDefaultValue(1.0);
@@ -586,12 +608,13 @@ TraceToMask::initializeData()
     struct ConnectEntry
     {
         KnobIPtr knob;
-        int action; // 0 = option knob (auto re-trace), 1 = Trace, 2 = Bake, 3 = Reset
+        int action; // 0 = option knob (auto re-trace), 1 = Trace, 2 = Bake, 3 = Reset, 4 = Max Shapes
     };
     const ConnectEntry entries[] = {
         { _imp->traceButton.lock(), 1 },
         { _imp->bakeSequence.lock(), 2 },
         { _imp->resetButton.lock(), 3 },
+        { _imp->maxShapes.lock(), 4 },
         { _imp->mode.lock(), 0 },
         { _imp->channel.lock(), 0 },
         { _imp->invert.lock(), 0 },
@@ -630,6 +653,10 @@ TraceToMask::initializeData()
         case 3:
             QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
                               this, SLOT(onResetClicked()) );
+            break;
+        case 4:
+            QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
+                              this, SLOT(onMaxShapesChanged()) );
             break;
         default:
             QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
@@ -1166,7 +1193,10 @@ TraceToMask::trace(double time)
             }));
             QEventLoop loop;
             QObject::connect(_imp->traceWatcher, SIGNAL(finished()), &loop, SLOT(quit()));
-            loop.exec();
+            // Exclude user input while pumping: the window keeps painting (the
+            // UI does not look frozen) but clicks/keys cannot re-enter the
+            // trace or the settings panel mid-import.
+            loop.exec(QEventLoop::ExcludeUserInputEvents);
             QObject::disconnect(_imp->traceWatcher, SIGNAL(finished()), &loop, SLOT(quit()));
 
             const TraceToMaskPrivate::TraceJobResult res = _imp->traceWatcher->result();
@@ -1180,19 +1210,26 @@ TraceToMask::trace(double time)
                 // Safety valve: a photographic source in Color/B/W mode can
                 // decompose into thousands of contours; importing that many
                 // Beziers (2 internal nodes each) stalls the UI for minutes
-                // and can exhaust memory. Refuse and point at Despeckle
-                // instead - the previous import is kept.
+                // and can exhaust memory. Refuse and point at Max Shapes /
+                // Despeckle instead - the previous import is kept, and the
+                // refused document stays cached so raising Max Shapes imports
+                // it without re-tracing.
+                const KnobIntPtr maxKnob = _imp->maxShapes.lock();
+                const int maxShapes = maxKnob ? maxKnob->getValue() : 8;
                 const int pathCount = (int)res.doc.shapes.size();
-                if (pathCount > TraceToMaskPrivate::kMaxImportedShapes) {
+                _imp->lastDoc = res.doc;
+                _imp->lastDocBounds = res.bounds;
+                _imp->hasLastDoc = true;
+                if (pathCount > maxShapes) {
                     if (KnobStringPtr info = _imp->info.lock()) {
                         std::ostringstream ss;
-                        ss << pathCount << " shapes traced - too complex to import; raise Despeckle";
+                        ss << pathCount << " shapes traced - too complex to import; raise Max Shapes or Despeckle";
                         info->setValue(ss.str());
                     }
                     appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("TraceToMask"), QDateTime::currentDateTime(),
-                                                    QString::fromUtf8("Trace produced %1 shapes (max %2) - not imported. "
-                                                                      "Raise Despeckle to drop small regions.")
-                                                        .arg(pathCount).arg(TraceToMaskPrivate::kMaxImportedShapes));
+                                                    QString::fromUtf8("Trace produced %1 shapes (Max Shapes %2) - not imported. "
+                                                                      "Raise Despeckle to drop small regions, or Max Shapes to allow bigger imports.")
+                                                        .arg(pathCount).arg(maxShapes));
                 } else {
                     // An exception escaping a Qt slot aborts the app - the mass
                     // import is exactly where that could happen (node creation,
@@ -1278,6 +1315,40 @@ TraceToMask::onInputMayHaveChanged()
     _imp->inputDirty = true;
     if (_imp->inputCheckTimer && !_imp->inputCheckTimer->isActive()) {
         _imp->inputCheckTimer->start(0);
+    }
+}
+
+void
+TraceToMask::onMaxShapesChanged()
+{
+    // A Max Shapes raise can admit the LAST trace's document without
+    // re-tracing: it is cached for exactly this purpose.
+    const KnobIntPtr maxKnob = _imp->maxShapes.lock();
+    const int maxShapes = maxKnob ? maxKnob->getValue() : 8;
+    RotoContextPtr ctx = getNode()->getRotoContext();
+    if (!ctx || !_imp->hasLastDoc) {
+        return;
+    }
+    const int pathCount = (int)_imp->lastDoc.shapes.size();
+    if (pathCount > maxShapes) {
+        if (KnobStringPtr info = _imp->info.lock()) {
+            std::ostringstream ss;
+            ss << pathCount << " shapes traced - too complex to import; raise Max Shapes or Despeckle";
+            info->setValue(ss.str());
+        }
+        return;
+    }
+    const double time = ctx->getTimelineCurrentTime();
+    try {
+        importDocument(_imp->lastDoc, _imp->lastDocBounds, time);
+    } catch (const std::exception& e) {
+        if (KnobStringPtr info = _imp->info.lock()) {
+            info->setValue(std::string("import failed: ") + e.what());
+        }
+    } catch (...) {
+        if (KnobStringPtr info = _imp->info.lock()) {
+            info->setValue("import failed");
+        }
     }
 }
 
@@ -1385,6 +1456,8 @@ TraceToMask::onBakeClicked()
 
     beginChanges();
 
+    const KnobIntPtr maxShapesKnob = _imp->maxShapes.lock();
+    const int maxShapesBake = maxShapesKnob ? maxShapesKnob->getValue() : 8;
     int bakedFrames = 0;
     int skippedFrames = 0;
     for (int t = start; t <= end; ++t) {
@@ -1407,7 +1480,7 @@ TraceToMask::onBakeClicked()
             ++skippedFrames;
             continue;
         }
-        if ((int)doc.shapes.size() > TraceToMaskPrivate::kMaxImportedShapes) {
+        if ((int)doc.shapes.size() > maxShapesBake) {
             // Too complex: keep the previous keys (same valve as the trace).
             ++skippedFrames;
             continue;
