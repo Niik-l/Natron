@@ -136,6 +136,8 @@ struct VectorShape
     double strokeWidth = 1.0;
     double opacity = 1.0;
     std::string layerName = "Layer1";
+    int compositingOperator = -1;   //< -1: leave the node default; else a Natron::MergingFunctionEnum
+                                    //< (e.g. eMergeMinus/eMergeXOR for traced holes)
 
     void bounds(double* minX, double* minY, double* maxX, double* maxY) const;
 };

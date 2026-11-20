@@ -98,7 +98,9 @@ public:
         grouping->push_back(PLUGIN_GROUP_PAINT);
     }
 
-    virtual std::string getInputLabel (int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    /// Not final: vector-only derived nodes re-label the input fan (TraceToMask
+    /// calls its single input "Source" — see also getMaskInputIndex above).
+    virtual std::string getInputLabel (int inputNb) const OVERRIDE WARN_UNUSED_RETURN;
     virtual bool isInputMask(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual bool isInputOptional(int /*inputNb*/) const OVERRIDE FINAL WARN_UNUSED_RETURN
     {

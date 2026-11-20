@@ -128,7 +128,15 @@ MaskToGeo → Scene3D/Cycles — tracing a logo bitmap then extruding it becomes
 
 ## Status
 
-- [ ] Part 1 — potrace backend + node skeleton + b/w trace + check harness
+- [x] Part 1 — potrace backend + node skeleton + b/w trace + check harness
+      (done 2026-11-20: vendored potrace 1.16 static lib, `Dev/Mask/parsers/PotraceTrace`,
+      `Dev/Mask/TraceToMask` registered as `fr.inria.built-in.TraceToMask`; harness
+      `tools/trace-tests/run_check.sh` green — 3 shapes, despeckle, y-flip, hole punch,
+      IoU 1.0000. Notes: potrace's flat path list already includes holes, punch by
+      `path->sign` (do NOT also recurse `childlist`); potrace y is y-up so `pathToShape`
+      flips with `docHeight - y`; `RotoContext::generateUniqueName` always appends its
+      own counter, so import a fixed base name ("Traced") and let it number the shapes;
+      hole operator default = minus (`eMergeMinus`).)
 - [ ] Part 2 — stacked bands + holes-as-minus + MaskToGeo operator union
 - [ ] Part 3 — UX (auto-retrace/bake/info) + docs
 - [ ] Part 4 — centerline (exploratory)
