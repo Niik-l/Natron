@@ -142,11 +142,14 @@ private:
      **/
     virtual void initializeData() OVERRIDE FINAL;
 
-    /// Fetches input 1 at time (plane request, channel extraction, pre-blur,
-    /// knob -> TraceParams). Returns false (and leaves outputs untouched) when
-    /// nothing was fetched. *bounds receives the plane's canonical integer
-    /// bounds - the trace is anchored there so the shapes land on the image.
+    /// Fetches input 1 at time over the given (main-thread-queried) RoD:
+    /// plane request via renderRoI with fresh per-thread render args, channel
+    /// extraction, pre-blur, knob -> TraceParams. Returns false (and leaves
+    /// outputs untouched) when nothing was fetched. *bounds receives the
+    /// plane's canonical integer bounds - the trace is anchored there so the
+    /// shapes land on the image. Thread-agnostic (called from the worker).
     bool fetchPlaneAndParams(double time,
+                             const RectD& inputRod,
                              std::vector<float>* values,
                              std::vector<float>* valuesRGB,
                              int* w, int* h,

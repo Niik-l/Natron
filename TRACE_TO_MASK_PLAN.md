@@ -199,6 +199,27 @@ the node "still worked in the 1st size"; tracing froze the UI and eventually cra
    edits during a trace are coalesced into one follow-up trace (traceRunning/traceDirty)
    instead of nesting - the likely crash source.
 4. **Reset button** next to Trace: removes every traced shape/layer without re-tracing.
+5. **Second freeze round + color-mode crash**: the FETCH still ran on the main thread
+   (the upstream render for a big image is the slow part). It now runs on the worker
+   thread too - the input's RoD is queried on the main thread (cheap, cached, fresh
+   hash) and handed to the job as renderRoI's preComputedRoD; the worker does
+   ParallelRenderArgsSetter + renderRoI + cleanupTLSForThread (the TrackMarker
+   pattern). Two guards make the off-main fetch safe: the project's
+   autoSetProjectFormat is suppressed+restored around the fetch (renderRoIInternal
+   sets the project format from the reader only on non-main threads - it hijacked
+   the format to the image size and rescaled every downstream render), and the
+   valve below. The RotoContext import stays on the main thread, now wrapped in
+   try/catch (an exception escaping a Qt slot aborts the app).
+6. **Import valve (kMaxImportedShapes = 800)**: a photographic source decomposes into
+   thousands of contours (the noisy 600x600 stress traced 21,876 paths) - importing
+   that many Beziers (2 internal nodes each) stalls the UI for minutes and can OOM,
+   which matches the reported color-mode stall+crash. Traces above the valve are
+   refused with "N shapes traced - too complex to import; raise Despeckle" and the
+   previous import is kept; bake frames above it are skipped.
+
+Harness: color mode (3 colored circles -> 4 clusters incl. the anti-aliased edge
+cluster, one sub-layer each), a 900x900 smooth-blob color stress, and the noisy-image
+valve check. TRACE_CHECK DONE_OK, 07-verify DONE_OK.
 
 Harness: input-swap re-trace (300x300 rect -> 600x600 rect, shapes follow at 1:1
 canonical placement), reset clears all shapes; whole suite TRACE_CHECK DONE_OK,

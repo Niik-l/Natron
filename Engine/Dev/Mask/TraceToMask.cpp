@@ -101,11 +101,18 @@ struct TraceToMaskPrivate
     /// Everything the last trace created (shapes + layers), for rebuild removal.
     std::list<std::weak_ptr<RotoItem> > importedItems;
 
-    /// Result of one background trace job (potrace/cluster/skeleton compute).
+    /// Result of one background trace job: the plane fetch AND the heavy
+    /// compute (potrace/cluster/skeleton) both run on the worker thread, so
+    /// the main thread only pumps the GUI and imports the result.
     struct TraceJobResult
     {
         bool ok = false;
         std::string error;
+        std::vector<float> values;
+        std::vector<float> valuesRGB;
+        int w = 0, h = 0;
+        VectorMask::TraceParams params;
+        RectI bounds;
         VectorMask::VectorDocument doc;
     };
 
@@ -117,6 +124,10 @@ struct TraceToMaskPrivate
     /// one follow-up trace (traceDirty), never nested.
     bool traceRunning = false;
     bool traceDirty = false;
+
+    /// Import valve: above this many traced paths the import is refused (each
+    /// Bezier drags two internal nodes; thousands stall the UI and can OOM).
+    static const int kMaxImportedShapes = 800;
 
     /// Canonical integer bounds of the plane the current shapes were traced
     /// from - the anchor for the fit transform and the input-change check.
@@ -726,6 +737,7 @@ TraceToMask::computeDocTransform(double docW, double docH, double bx, double by,
 
 bool
 TraceToMask::fetchPlaneAndParams(double time,
+                                 const RectD& inputRod,
                                  std::vector<float>* valuesOut,
                                  std::vector<float>* valuesRGBOut,
                                  int* wOut, int* hOut,
@@ -744,26 +756,15 @@ TraceToMask::fetchPlaneAndParams(double time,
                                         : ImagePlaneDesc::getRGBAComponents();
 
     // Fetch the input through renderRoI with fresh per-thread render args
-    // (the TrackMarker::getMarkerImage pattern). Going through getImage from
-    // outside a render action would reuse the thread's leftover render TLS -
-    // whose node hash still points at the pre-edit state, so after an image
-    // swap/resize the fetch would silently return the OLD image. The setter
-    // below pushes fresh args (isAnalysis: no stale request pass), the RoI is
-    // the input's own RoD, and the thread's TLS is cleaned up afterwards.
+    // (the TrackMarker::getMarkerImage pattern), over the caller-queried RoD.
+    // Going through getImage from outside a render action would reuse the
+    // thread's leftover render TLS - whose node hash still points at the
+    // pre-edit state, so after an image swap/resize the fetch would silently
+    // return the OLD image. The setter below pushes fresh args (isAnalysis:
+    // no stale request pass) and the thread's TLS is cleaned up afterwards.
     NodePtr inputNode = getNode() ? getNode()->getInput(0) : NodePtr();
     if (!inputNode || !inputNode->getEffectInstance()) {
         return false;
-    }
-    RectD inputRod;
-    {
-        RectD rod;
-        bool isProjectFormat = false;
-        const StatusEnum st = inputNode->getEffectInstance()->getRegionOfDefinition_public(
-            inputNode->getHashValue(), time, RenderScale::identity, ViewIdx(0), &rod, &isProjectFormat);
-        if (st != eStatusOK || rod.isNull()) {
-            return false;
-        }
-        inputRod = rod;
     }
 
     AbortableRenderInfoPtr abortInfo = AbortableRenderInfo::create(false, 0);
@@ -784,6 +785,16 @@ TraceToMask::fetchPlaneAndParams(double time,
                                              false,  // draftMode
                                              RenderStatsPtr());
 
+    // The reader would otherwise consume the project's auto-format on this
+    // off-schedule render (renderRoIInternal sets it from non-main threads);
+    // suppress + restore so the project format keeps following the first
+    // regular render, not our trace fetch.
+    const ProjectPtr proj = getApp() ? getApp()->getProject() : ProjectPtr();
+    const bool wasAutoFormat = proj ? proj->isAutoSetProjectFormatEnabled() : false;
+    if (wasAutoFormat) {
+        proj->setAutoSetProjectFormatEnabled(false);
+    }
+
     std::list<ImagePlaneDesc> comps;
     comps.push_back(reqComps);
     const double par = getAspectRatio(0);
@@ -794,7 +805,7 @@ TraceToMask::fetchPlaneAndParams(double time,
                                        ViewIdx(0),
                                        false,    // byPassCache
                                        roiPixel,
-                                       RectD(),  // preComputedRoD: computed inside from the fresh args
+                                       inputRod, // preComputedRoD: queried on the main thread
                                        comps,
                                        eImageBitDepthFloat,
                                        true,     // fetchUserSelectedComponentsUpstream
@@ -803,6 +814,11 @@ TraceToMask::fetchPlaneAndParams(double time,
                                        time);
     std::map<ImagePlaneDesc, ImagePtr> planes;
     const EffectInstance::RenderRoIRetCode stat = inputNode->getEffectInstance()->renderRoI(args, &planes);
+
+    if (wasAutoFormat && proj) {
+        proj->setAutoSetProjectFormatEnabled(true);
+    }
+
     appPTR->getAppTLS()->cleanupTLSForThread();
     if (stat != EffectInstance::eRenderRoIRetCodeOk || planes.empty()) {
         return false;
@@ -935,10 +951,26 @@ TraceToMask::fetchPlaneAndParams(double time,
 bool
 TraceToMask::buildTraceDocument(double time, VectorMask::VectorDocument* doc, RectI* bounds)
 {
+    // Main-thread path (bake): query the input's RoD here, fresh.
+    NodePtr inputNode = getNode() ? getNode()->getInput(0) : NodePtr();
+    if (!inputNode || !inputNode->getEffectInstance()) {
+        return false;
+    }
+    RectD inputRod;
+    {
+        RectD rod;
+        bool isProjectFormat = false;
+        const StatusEnum st = inputNode->getEffectInstance()->getRegionOfDefinition_public(
+            inputNode->getHashValue(), time, RenderScale::identity, ViewIdx(0), &rod, &isProjectFormat);
+        if (st != eStatusOK || rod.isNull()) {
+            return false;
+        }
+        inputRod = rod;
+    }
     std::vector<float> values, valuesRGB;
     int w = 0, h = 0;
     VectorMask::TraceParams params;
-    if (!fetchPlaneAndParams(time, &values, &valuesRGB, &w, &h, &params, bounds)) {
+    if (!fetchPlaneAndParams(time, inputRod, &values, &valuesRGB, &w, &h, &params, bounds)) {
         return false;
     }
     return VectorMask::tracePlaneToDocument(w, h, values, valuesRGB, params, "Trace", doc);
@@ -1088,30 +1120,41 @@ TraceToMask::trace(double time)
     for (;;) {
         _imp->traceDirty = false;
 
-        // Plane fetch on the main thread: the ParallelRenderArgsSetter inside
-        // gives this thread fresh render args so the fetch resolves the
-        // input's CURRENT state (the leftover TLS would serve the pre-edit
-        // image after a swap/resize), and staying on the main thread keeps the
-        // reader from hijacking the project format (renderRoIInternal only
-        // sets it from non-main threads). The heavy compute (potrace / k-means
-        // / thinning) then runs off the main thread - the nested event loop
-        // below pumps while it runs - and the RotoContext import comes back
-        // on the main thread.
-        std::vector<float> values, valuesRGB;
-        int w = 0, h = 0;
-        VectorMask::TraceParams params;
-        RectI bounds;
-        const bool fetched = fetchPlaneAndParams(time, &values, &valuesRGB, &w, &h, &params, &bounds);
-        if (!fetched) {
+        // The input's RoD is queried here on the main thread (cheap, cached,
+        // fresh hash) and handed to the worker as the fetch region.
+        NodePtr inputNode = getNode() ? getNode()->getInput(0) : NodePtr();
+        RectD inputRod;
+        bool haveRod = false;
+        if (inputNode && inputNode->getEffectInstance()) {
+            RectD rod;
+            bool isProjectFormat = false;
+            const StatusEnum st = inputNode->getEffectInstance()->getRegionOfDefinition_public(
+                inputNode->getHashValue(), time, RenderScale::identity, ViewIdx(0), &rod, &isProjectFormat);
+            if (st == eStatusOK && !rod.isNull()) {
+                inputRod = rod;
+                haveRod = true;
+            }
+        }
+
+        // Fetch AND heavy compute (render upstream, potrace / k-means /
+        // thinning) on the worker thread: the main thread only pumps the GUI
+        // (nested event loop below) and imports the result into the
+        // RotoContext. The worker carries no stale render TLS, so the fetch
+        // sees the input's CURRENT state after a swap/resize.
+        if (!haveRod) {
             removeImportedItems();
             if (KnobStringPtr info = _imp->info.lock()) {
                 info->setValue("0 shapes (nothing traced)");
             }
         } else {
-            _imp->traceWatcher->setFuture(QtConcurrent::run([w, h, values, valuesRGB, params]() -> TraceToMaskPrivate::TraceJobResult {
+            _imp->traceWatcher->setFuture(QtConcurrent::run([this, time, inputRod]() -> TraceToMaskPrivate::TraceJobResult {
                 TraceToMaskPrivate::TraceJobResult r;
                 try {
-                    r.ok = VectorMask::tracePlaneToDocument(w, h, values, valuesRGB, params, "Trace", &r.doc);
+                    if (!fetchPlaneAndParams(time, inputRod, &r.values, &r.valuesRGB, &r.w, &r.h, &r.params, &r.bounds)) {
+                        r.ok = false;
+                        return r;
+                    }
+                    r.ok = VectorMask::tracePlaneToDocument(r.w, r.h, r.values, r.valuesRGB, r.params, "Trace", &r.doc);
                 } catch (const std::exception& e) {
                     r.ok = false;
                     r.error = e.what();
@@ -1134,7 +1177,45 @@ TraceToMask::trace(double time)
                                                      : std::string("trace failed: ") + res.error);
                 }
             } else {
-                importDocument(res.doc, bounds, time);
+                // Safety valve: a photographic source in Color/B/W mode can
+                // decompose into thousands of contours; importing that many
+                // Beziers (2 internal nodes each) stalls the UI for minutes
+                // and can exhaust memory. Refuse and point at Despeckle
+                // instead - the previous import is kept.
+                const int pathCount = (int)res.doc.shapes.size();
+                if (pathCount > TraceToMaskPrivate::kMaxImportedShapes) {
+                    if (KnobStringPtr info = _imp->info.lock()) {
+                        std::ostringstream ss;
+                        ss << pathCount << " shapes traced - too complex to import; raise Despeckle";
+                        info->setValue(ss.str());
+                    }
+                    appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("TraceToMask"), QDateTime::currentDateTime(),
+                                                    QString::fromUtf8("Trace produced %1 shapes (max %2) - not imported. "
+                                                                      "Raise Despeckle to drop small regions.")
+                                                        .arg(pathCount).arg(TraceToMaskPrivate::kMaxImportedShapes));
+                } else {
+                    // An exception escaping a Qt slot aborts the app - the mass
+                    // import is exactly where that could happen (node creation,
+                    // allocations for hundreds of shapes).
+                    bool imported = false;
+                    std::string importError;
+                    try {
+                        importDocument(res.doc, res.bounds, time);
+                        imported = true;
+                    } catch (const std::exception& e) {
+                        importError = e.what();
+                    } catch (...) {
+                        importError = "unknown import error";
+                    }
+                    if (!imported) {
+                        removeImportedItems();
+                        if (KnobStringPtr info = _imp->info.lock()) {
+                            info->setValue(std::string("import failed: ") + importError);
+                        }
+                        appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("TraceToMask"), QDateTime::currentDateTime(),
+                                                        QString::fromUtf8("Trace import failed: %1").arg(QString::fromUtf8(importError.c_str())));
+                    }
+                }
             }
         }
 
@@ -1309,8 +1390,25 @@ TraceToMask::onBakeClicked()
     for (int t = start; t <= end; ++t) {
         VectorMask::VectorDocument doc;
         RectI bounds;
-        if (!buildTraceDocument((double)t, &doc, &bounds)) {
+        bool traced = false;
+        // One bad frame must not throw through the slot and kill the bake.
+        try {
+            traced = buildTraceDocument((double)t, &doc, &bounds);
+        } catch (const std::exception& e) {
+            appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("TraceToMask"), QDateTime::currentDateTime(),
+                                            QString::fromUtf8("Bake Sequence: frame %1 failed (%2) - skipped.")
+                                                .arg(t).arg(QString::fromUtf8(e.what())));
+        } catch (...) {
+            appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("TraceToMask"), QDateTime::currentDateTime(),
+                                            QString::fromUtf8("Bake Sequence: frame %1 failed - skipped.").arg(t));
+        }
+        if (!traced) {
             // Unreadable/empty frame at t: keep the previous keys.
+            ++skippedFrames;
+            continue;
+        }
+        if ((int)doc.shapes.size() > TraceToMaskPrivate::kMaxImportedShapes) {
+            // Too complex: keep the previous keys (same valve as the trace).
             ++skippedFrames;
             continue;
         }
