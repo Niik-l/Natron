@@ -46,6 +46,7 @@
 #include "Engine/RotoContext.h"
 #include "Engine/RotoItem.h"
 #include "Engine/RotoLayer.h"
+#include "Global/Enums.h"
 #include "libtess.h"
 
 #include "Dev/Scene3D/MeshData.h"
@@ -316,6 +317,7 @@ tessellateContour(const std::vector<std::pair<double, double> >& contour,
  */
 static void
 tessellateContoursUnion(const std::vector<std::vector<std::pair<double, double> > >& contours,
+                        const std::vector<bool>& subtract,
                         std::vector<std::vector<ParametricPoint> >* triangles)
 {
     std::vector<std::vector<ParametricPoint> > oriented;
@@ -325,7 +327,13 @@ tessellateContoursUnion(const std::vector<std::vector<std::pair<double, double> 
         if (contours[i].size() < 3) {
             continue;
         }
-        oriented.push_back(orientedCCW(contours[i]));
+        // CCW = adds coverage, CW = subtracts it (nonzero winding rule), which
+        // is how a minus-operator shape punches a hole in the union.
+        std::vector<ParametricPoint> c = orientedCCW(contours[i]);
+        if (i < subtract.size() && subtract[i]) {
+            std::reverse(c.begin(), c.end());
+        }
+        oriented.push_back(c);
         totalPts += (int)oriented.back().size();
     }
     if (oriented.empty()) {
@@ -450,11 +458,24 @@ emitFillTriangles(const std::vector<std::vector<ParametricPoint> >& tris,
 }
 
 /**
+ * @brief True for roto operators that remove coverage instead of adding it.
+ * Minus punches a hole; XOR behaves the same for a contour nested inside its
+ * parent (the traced-hole case), which is what the flat fill can express with
+ * the nonzero winding rule.
+ */
+static bool
+isSubtractiveOperator(int op)
+{
+    return op == (int)eMergeMinus || op == (int)eMergeXOR;
+}
+
+/**
  * @brief Flat fill (depth == 0) for ALL curves at once: every contour goes
  * into one libtess polygon with the nonzero winding rule, so overlapping
  * shapes union instead of stacking coincident coplanar triangles (which
- * z-fights in the viewport and double-hits in the raytracer). This matches
- * the mask semantics, where each shape is painted over the previous ones.
+ * z-fights in the viewport and double-hits in the raytracer). Contours of
+ * minus-operator shapes are reversed (CW) so they subtract from the union,
+ * matching the mask render where holes punch through.
  */
 static void
 emitFlatUnionFill(const std::vector<BezierPtr>& curves, double time,
@@ -465,11 +486,14 @@ emitFlatUnionFill(const std::vector<BezierPtr>& curves, double time,
     const double invFormatH = 1.0 / (formatH != 0.0 ? formatH : 1.0);
 
     std::vector<std::vector<std::pair<double, double> > > contours;
+    std::vector<bool> subtract;
     contours.reserve(curves.size());
+    subtract.reserve(curves.size());
     for (std::size_t i = 0; i < curves.size(); ++i) {
         std::vector<std::pair<double, double> > c;
         if ( flattenCurveContour(curves[i], time, &c) ) {
             contours.push_back(c);
+            subtract.push_back(isSubtractiveOperator(curves[i]->getCompositingOperator()));
         }
     }
     if (contours.empty()) {
@@ -477,7 +501,7 @@ emitFlatUnionFill(const std::vector<BezierPtr>& curves, double time,
     }
 
     std::vector<std::vector<ParametricPoint> > tris;
-    tessellateContoursUnion(contours, &tris);
+    tessellateContoursUnion(contours, subtract, &tris);
     if (tris.empty()) {
         return;
     }
@@ -769,10 +793,16 @@ MaskToGeo::buildMeshSnapshot(double time) const
 
         if (depth <= 0.0) {
             // Flat fill: union all contours in one tessellation (no coincident
-            // coplanar overlap between shapes).
+            // coplanar overlap between shapes), minus shapes punch holes.
             emitFlatUnionFill(curves, time, s, cx, cy, formatW, formatH, b);
         } else {
             for (std::size_t i = 0; i < curves.size(); ++i) {
+                // Boolean subtraction is not available on extruded solids yet:
+                // a minus shape emitted as a solid slab would plug its hole, so
+                // skip it (flat mode does cut the hole).
+                if (isSubtractiveOperator(curves[i]->getCompositingOperator())) {
+                    continue;
+                }
                 emitCurve(curves[i], time, s, cx, cy, depth, formatW, formatH, b);
             }
         }

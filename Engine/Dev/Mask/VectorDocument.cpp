@@ -526,6 +526,7 @@ transformShape(const VectorShape& shape,
     out.strokeWidth = shape.strokeWidth;
     out.opacity = shape.opacity;
     out.layerName = shape.layerName;
+    out.compositingOperator = shape.compositingOperator;
 
     out.vertices.reserve(shape.vertices.size());
     for (std::vector<ShapeVertex>::const_iterator it = shape.vertices.begin();

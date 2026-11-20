@@ -161,7 +161,8 @@ walkPaths(const potrace_path_t* plist,
         char suffix[16];
         std::snprintf(suffix, sizeof(suffix), "%d", *shapeCount);
         const std::string name = layerName + "_" + suffix;
-        VectorShape shape = pathToShape(p, p->sign < 0, holeOperator, name, layerName, docHeight);
+        // potrace stores the path sign as the characters '+'/'-' (not +-1).
+        VectorShape shape = pathToShape(p, p->sign == '-', holeOperator, name, layerName, docHeight);
         if (fillColor) {
             shape.hasFillColor = true;
             shape.fillColor = *fillColor;
@@ -661,13 +662,17 @@ tracePlaneToDocument(int w,
     }
 
     // bw mode: optional stacked threshold bands, cumulative like Inkscape's
-    // multiple scans / VTracer stacking. Band b = pixels brighter than t_b,
-    // with t_b spread from the low edge up to the threshold; the brightest
-    // (smallest) band traces first so it ends up at the bottom of the tree
-    // and the largest band layers over the top of the stack.
+    // multiple scans / VTracer stacking. N band thresholds span [Threshold
+    // Low, Threshold] inclusively; band b = pixels brighter than t_b. The
+    // regions are nested (a brighter band is a subset of a darker one), so the
+    // darkest (largest) band is traced first and the brighter (smaller) bands
+    // layer over it - shapes import in document order, which is also the paint
+    // order of the RotoContext merge chain.
     const int bands = std::max(1, std::min(16, params.bands));
-    const double tLow = (bands > 1) ? params.thresholdLow : params.threshold;
-    const double tStep = (params.threshold - tLow) / bands;
+    const double tLow = (bands > 1)
+                            ? std::min(params.thresholdLow, params.threshold)
+                            : params.threshold;
+    const double tStep = (bands > 1) ? (params.threshold - tLow) / (bands - 1) : 0.0;
     std::size_t anyForeground = 0;
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
@@ -675,7 +680,7 @@ tracePlaneToDocument(int w,
             if (params.invert) {
                 v = 1.0 - v;
             }
-            if (v > tLow + tStep) {
+            if (v > tLow) {
                 ++anyForeground;
             }
         }
@@ -685,8 +690,8 @@ tracePlaneToDocument(int w,
     }
 
     int shapeCount = 0;
-    for (int b = bands - 1; b >= 0; --b) {
-        const double tb = tLow + tStep * (b + 1);
+    for (int b = 0; b < bands; ++b) {
+        const double tb = tLow + tStep * b;
         std::size_t count = 0;
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {

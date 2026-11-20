@@ -137,6 +137,14 @@ MaskToGeo → Scene3D/Cycles — tracing a logo bitmap then extruding it becomes
       flips with `docHeight - y`; `RotoContext::generateUniqueName` always appends its
       own counter, so import a fixed base name ("Traced") and let it number the shapes;
       hole operator default = minus (`eMergeMinus`).)
-- [ ] Part 2 — stacked bands + holes-as-minus + MaskToGeo operator union
+- [x] Part 2 — stacked bands + holes-as-minus + MaskToGeo operator union
+      (done 2026-11-20: N band thresholds span [Threshold Low, Threshold] inclusively,
+      darkest/largest band traced first so brighter bands layer over it; each band/cluster
+      imports into its own sub-layer under "Trace"; holes carry a minus operator end to end
+      — potrace's path `sign` holds the CHARACTERS '+'/'-', not +-1, and transformShape
+      must carry `compositingOperator` through (both bugs found via harness); MaskToGeo's
+      flat fill reverses minus/XOR contours (CW) so the nonzero-winding tessellation cuts
+      holes; extruded mode skips subtractive curves (no CSG yet). Harness: bands nest
+      200/120/60 px in 3 layers, MaskToGeo hole cut verified via NATRON_SC_DUMP, IoU 0.984.)
 - [ ] Part 3 — UX (auto-retrace/bake/info) + docs
 - [ ] Part 4 — centerline (exploratory)

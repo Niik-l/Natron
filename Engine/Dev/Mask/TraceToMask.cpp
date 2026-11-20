@@ -756,6 +756,11 @@ TraceToMask::trace(double time)
 
     beginChanges();
 
+    // Stacked bands (and color clusters) each carry their own doc layer name;
+    // group their shapes into one sub-layer per band/cluster so the RotoPanel
+    // shows the stack and bands can be toggled independently.
+    std::map<std::string, RotoLayerPtr> subLayers;
+
     int shapeIdx = 0;
     for (std::vector<VectorMask::VectorShape>::const_iterator it = doc.shapes.begin();
          it != doc.shapes.end(); ++it) {
@@ -765,13 +770,29 @@ TraceToMask::trace(double time)
         const VectorMask::VectorShape shape =
             VectorMask::transformShape(*it, sx, sy, ox, oy, flipY, docHeight);
 
+        RotoLayerPtr dest = mainLayer;
+        if (!shape.layerName.empty() && shape.layerName != mainLabel) {
+            const std::string safeLayer =
+                VectorMask::sanitizeName(shape.layerName, "Trace");
+            std::map<std::string, RotoLayerPtr>::iterator found = subLayers.find(safeLayer);
+            if (found == subLayers.end()) {
+                RotoLayerPtr sub(new RotoLayer(ctx, safeLayer, RotoLayerPtr()));
+                ctx->addItem(mainLayer, (int)mainLayer->getItems().size(), sub, RotoItem::eSelectionReasonOther);
+                subLayers[safeLayer] = sub;
+                _imp->importedItems.push_back(sub);
+                dest = sub;
+            } else {
+                dest = found->second;
+            }
+        }
+
         // RotoContext::generateUniqueName appends its own counter to the base
         // (Traced1, Traced2, ...), so pass a fixed base rather than the
         // potrace path name.
         const std::string shapeName = ctx->generateUniqueName("Traced");
         BezierPtr curve(new Bezier(ctx, shapeName, RotoLayerPtr(), !shape.closed));
         curve->createNodes();
-        ctx->addItem(mainLayer, (int)mainLayer->getItems().size(), curve, RotoItem::eSelectionReasonOther);
+        ctx->addItem(dest, (int)dest->getItems().size(), curve, RotoItem::eSelectionReasonOther);
         _imp->importedItems.push_back(curve);
 
         for (std::vector<VectorMask::ShapeVertex>::const_iterator v = shape.vertices.begin();
