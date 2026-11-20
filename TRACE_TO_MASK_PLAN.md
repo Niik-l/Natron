@@ -146,5 +146,12 @@ MaskToGeo → Scene3D/Cycles — tracing a logo bitmap then extruding it becomes
       flat fill reverses minus/XOR contours (CW) so the nonzero-winding tessellation cuts
       holes; extruded mode skips subtractive curves (no CSG yet). Harness: bands nest
       200/120/60 px in 3 layers, MaskToGeo hole cut verified via NATRON_SC_DUMP, IoU 0.984.)
-- [ ] Part 3 — UX (auto-retrace/bake/info) + docs
+- [x] Part 3 — UX (auto-retrace/bake/info) + docs
+      (done 2026-11-20: Auto Re-trace was already wired knob-signal -> re-trace; Info knob
+      live. Added **Bake Sequence** (+ Bake From/To, project-range fallback): traces input 1
+      per frame in [From, To] and keys every traced CP into the current shapes (curve i <->
+      i-th non-empty doc shape; frames whose shape/CP count changed keep their previous
+      keys), turns Auto Re-trace off and reports "baked N frames (M skipped)". Harness:
+      a 3-frame marching-rect sequence keys CPs that follow the rect per frame.
+      Docs: NODE_REGISTRY (Mask Import 2 nodes), DEV_3D_SYSTEM_CHANGELOG entry.)
 - [ ] Part 4 — centerline (exploratory)

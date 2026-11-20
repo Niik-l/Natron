@@ -43,6 +43,9 @@
 NATRON_NAMESPACE_ENTER
 
 struct TraceToMaskPrivate;
+namespace VectorMask {
+struct VectorDocument;
+}
 
 /**
  * @brief "TraceToMask": bitmap tracing that IS a Roto node.
@@ -105,6 +108,12 @@ private Q_SLOTS:
     /// Connected to the Trace button: re-traces regardless of Auto Re-trace.
     void onTraceClicked();
 
+    /// Connected to the Bake Sequence button: keys every traced control point
+    /// across the [Bake From, Bake To] frame range so the shapes play back the
+    /// traced animation as project-native animated BAcziers, independent of
+    /// the input.
+    void onBakeClicked();
+
     /// Connected to the option knobs: re-traces when Auto Re-trace is on.
     void onControlKnobChanged(ViewSpec view, int dimension, int reason);
 
@@ -115,6 +124,21 @@ private:
      * ReadMask, this is the latest safe hook).
      **/
     virtual void initializeData() OVERRIDE FINAL;
+
+    /// Fetches input 1 at time and traces it into a fresh document (plane
+    /// request, channel extraction, pre-blur, knob -> TraceParams).
+    /// Returns false (and leaves *doc untouched) when nothing was traced.
+    bool buildTraceDocument(double time, VectorMask::VectorDocument* doc);
+
+    /// Effective fit transform for a document of (docW, docH) against the
+    /// project format, from the fit knobs (shared by the import and the bake).
+    void computeDocTransform(double docW, double docH,
+                             double* sx, double* sy, double* ox, double* oy,
+                             bool* flipY, double* docHeight);
+
+    /// Discards the previous import and imports doc into the RotoContext
+    /// (layers from the shape layer names, shapes keyed at time).
+    void importDocument(const VectorMask::VectorDocument& doc, double time);
 
     void trace(double time);
     void removeImportedItems();

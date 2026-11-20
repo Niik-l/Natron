@@ -33,6 +33,10 @@
 #include <list>
 #include <map>
 #include <sstream>
+#include <vector>
+
+#include <QDateTime>
+#include <QString>
 
 #include "Engine/AppInstance.h"
 #include "Engine/AppManager.h"
@@ -79,6 +83,9 @@ struct TraceToMaskPrivate
     KnobBoolWPtr invertY;
     KnobBoolWPtr importColors;
     KnobBoolWPtr autoRetrace;
+    KnobIntWPtr bakeFrom;
+    KnobIntWPtr bakeTo;
+    KnobButtonWPtr bakeSequence;
     KnobButtonWPtr traceButton;
     KnobStringWPtr info;
 
@@ -245,6 +252,38 @@ TraceToMask::initializeData()
         k->setAddNewLine(false);
         page->addKnob(k);
         _imp->autoRetrace = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Bake From"));
+        k->setName("bakeFrom");
+        k->setDefaultValue(1);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("First frame of the Bake Sequence range."));
+        page->addKnob(k);
+        _imp->bakeFrom = k;
+    }
+    {
+        KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Bake To"));
+        k->setName("bakeTo");
+        k->setDefaultValue(1);
+        k->setAnimationEnabled(false);
+        k->setHintToolTip(tr("Last frame of the Bake Sequence range."));
+        page->addKnob(k);
+        _imp->bakeTo = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Bake Sequence"));
+        k->setName("bakeSequence");
+        k->setHintToolTip(tr("Trace input 1 at every frame in [Bake From, Bake To] and "
+                             "key the control points of the current shapes at each frame: "
+                             "the traced animation becomes project-native animated "
+                             "BAcziers, independent of the input afterwards. Shapes whose "
+                             "control point count changes across frames keep their "
+                             "previous keys (topology changes cannot be keyed). Auto "
+                             "Re-trace is turned off so the baked animation survives."));
+        k->setCheckable(false);
+        page->addKnob(k);
+        _imp->bakeSequence = k;
     }
     {
         KnobChoicePtr k = AppManager::createKnob<KnobChoice>(this, tr("Channel"));
@@ -467,42 +506,50 @@ TraceToMask::initializeData()
     struct ConnectEntry
     {
         KnobIPtr knob;
-        bool isTrace;
+        int action; // 0 = option knob (auto re-trace), 1 = Trace, 2 = Bake
     };
     const ConnectEntry entries[] = {
-        { _imp->traceButton.lock(), true },
-        { _imp->mode.lock(), false },
-        { _imp->channel.lock(), false },
-        { _imp->invert.lock(), false },
-        { _imp->preBlur.lock(), false },
-        { _imp->threshold.lock(), false },
-        { _imp->thresholdLow.lock(), false },
-        { _imp->bands.lock(), false },
-        { _imp->colorCount.lock(), false },
-        { _imp->despeckle.lock(), false },
-        { _imp->cornerThreshold.lock(), false },
-        { _imp->curveOptimization.lock(), false },
-        { _imp->optTolerance.lock(), false },
-        { _imp->simplify.lock(), false },
-        { _imp->holesAsXor.lock(), false },
-        { _imp->fitMode.lock(), false },
-        { _imp->customScale.lock(), false },
-        { _imp->customOffset.lock(), false },
-        { _imp->invertY.lock(), false },
-        { _imp->importColors.lock(), false },
-        { _imp->autoRetrace.lock(), false },
+        { _imp->traceButton.lock(), 1 },
+        { _imp->bakeSequence.lock(), 2 },
+        { _imp->mode.lock(), 0 },
+        { _imp->channel.lock(), 0 },
+        { _imp->invert.lock(), 0 },
+        { _imp->preBlur.lock(), 0 },
+        { _imp->threshold.lock(), 0 },
+        { _imp->thresholdLow.lock(), 0 },
+        { _imp->bands.lock(), 0 },
+        { _imp->colorCount.lock(), 0 },
+        { _imp->despeckle.lock(), 0 },
+        { _imp->cornerThreshold.lock(), 0 },
+        { _imp->curveOptimization.lock(), 0 },
+        { _imp->optTolerance.lock(), 0 },
+        { _imp->simplify.lock(), 0 },
+        { _imp->holesAsXor.lock(), 0 },
+        { _imp->fitMode.lock(), 0 },
+        { _imp->customScale.lock(), 0 },
+        { _imp->customOffset.lock(), 0 },
+        { _imp->invertY.lock(), 0 },
+        { _imp->importColors.lock(), 0 },
+        { _imp->autoRetrace.lock(), 0 },
     };
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); ++i) {
         const KnobSignalSlotHandlerPtr handler = entries[i].knob ? entries[i].knob->getSignalSlotHandler() : KnobSignalSlotHandlerPtr();
         if (!handler) {
             continue;
         }
-        if (entries[i].isTrace) {
+        switch (entries[i].action) {
+        case 1:
             QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
                               this, SLOT(onTraceClicked()) );
-        } else {
+            break;
+        case 2:
+            QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
+                              this, SLOT(onBakeClicked()) );
+            break;
+        default:
             QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
                               this, SLOT(onControlKnobChanged(ViewSpec,int,int)) );
+            break;
         }
     }
 }
@@ -569,12 +616,33 @@ TraceToMask::removeImportedItems()
 }
 
 void
-TraceToMask::trace(double time)
+TraceToMask::computeDocTransform(double docW, double docH,
+                                 double* sx, double* sy, double* ox, double* oy,
+                                 bool* flipY, double* docHeight)
 {
-    RotoContextPtr ctx = getNode()->getRotoContext();
-    if (!ctx) {
-        return;
-    }
+    Format fmt;
+    getApp()->getProject()->getProjectDefaultFormat(&fmt);
+    const double formatW = fmt.x2 - fmt.x1;
+    const double formatH = fmt.y2 - fmt.y1;
+
+    const KnobChoicePtr fitKnob = _imp->fitMode.lock();
+    const KnobDoublePtr scaleKnob = _imp->customScale.lock();
+    const KnobDoublePtr offsetKnob = _imp->customOffset.lock();
+    const KnobBoolPtr invertYKnob = _imp->invertY.lock();
+    *flipY = invertYKnob ? invertYKnob->getValue() : true;
+
+    calculateTransform(fitKnob ? fitKnob->getValue() : 0,
+                       scaleKnob ? scaleKnob->getValue(0) : 1.0,
+                       scaleKnob ? scaleKnob->getValue(1) : 1.0,
+                       offsetKnob ? offsetKnob->getValue(0) : 0.0,
+                       offsetKnob ? offsetKnob->getValue(1) : 0.0,
+                       docW, docH, formatW, formatH, sx, sy, ox, oy);
+    *docHeight = docH > 0.0 ? docH : formatH;
+}
+
+bool
+TraceToMask::buildTraceDocument(double time, VectorMask::VectorDocument* doc)
+{
     const KnobChoicePtr channelKnob = _imp->channel.lock();
     const int channelIdx = channelKnob ? channelKnob->getValue() : 0;
     const KnobChoicePtr modeKnob = _imp->mode.lock();
@@ -592,21 +660,17 @@ TraceToMask::trace(double time)
                                      NULL, &reqComps, false, true,
                                      eStorageModeRAM, 0, NULL);
     if (!srcImg) {
-        removeImportedItems();
-        return;
+        return false;
     }
     const RectI bounds = srcImg->getBounds();
     const int w = bounds.width();
     const int h = bounds.height();
     if (w <= 1 || h <= 1) {
-        removeImportedItems();
-        return;
+        return false;
     }
 
     const KnobDoublePtr blurKnob = _imp->preBlur.lock();
     const double preBlur = blurKnob ? blurKnob->getValue() : 0.0;
-    const KnobBoolPtr colorKnob = _imp->importColors.lock();
-    const bool importColors = colorKnob ? colorKnob->getValue() : true;
 
     std::vector<float> values((std::size_t)w * h, 0.0f);
     std::vector<float> valuesRGB;
@@ -708,40 +772,26 @@ TraceToMask::trace(double time)
         if (ki) params.invert = ki->getValue();
     }
 
-    VectorMask::VectorDocument doc;
-    if (!VectorMask::tracePlaneToDocument(w, h, values, valuesRGB, params, "Trace", &doc)) {
-        removeImportedItems();
-        if (KnobStringPtr info = _imp->info.lock()) {
-            info->setValue("0 shapes (nothing traced)");
-        }
+    return VectorMask::tracePlaneToDocument(w, h, values, valuesRGB, params, "Trace", doc);
+}
+
+void
+TraceToMask::importDocument(const VectorMask::VectorDocument& doc, double time)
+{
+    RotoContextPtr ctx = getNode()->getRotoContext();
+    if (!ctx) {
         return;
     }
+    const KnobBoolPtr colorKnob = _imp->importColors.lock();
+    const bool importColors = colorKnob ? colorKnob->getValue() : true;
 
-    // The trace succeeded: only now discard the previous import.
+    // The import replaces the previous one only once the new trace succeeded.
     removeImportedItems();
 
-    Format fmt;
-    getApp()->getProject()->getProjectDefaultFormat(&fmt);
-    const double formatW = fmt.x2 - fmt.x1;
-    const double formatH = fmt.y2 - fmt.y1;
-
-    const KnobChoicePtr fitKnob = _imp->fitMode.lock();
-    const KnobDoublePtr scaleKnob = _imp->customScale.lock();
-    const KnobDoublePtr offsetKnob = _imp->customOffset.lock();
-    const KnobBoolPtr invertYKnob = _imp->invertY.lock();
-    const bool flipY = invertYKnob ? invertYKnob->getValue() : true;
-
     double sx = 1.0, sy = 1.0, ox = 0.0, oy = 0.0;
-    calculateTransform(fitKnob ? fitKnob->getValue() : 0,
-                       scaleKnob ? scaleKnob->getValue(0) : 1.0,
-                       scaleKnob ? scaleKnob->getValue(1) : 1.0,
-                       offsetKnob ? offsetKnob->getValue(0) : 0.0,
-                       offsetKnob ? offsetKnob->getValue(1) : 0.0,
-                       doc.width, doc.height,
-                       formatW, formatH,
-                       &sx, &sy, &ox, &oy);
-
-    const double docHeight = doc.height > 0.0 ? doc.height : formatH;
+    bool flipY = true;
+    double docHeight = doc.height;
+    computeDocTransform(doc.width, doc.height, &sx, &sy, &ox, &oy, &flipY, &docHeight);
 
     RotoLayerPtr baseLayer = ctx->getOrCreateBaseLayer();
     RotoLayerPtr mainLayer;
@@ -834,6 +884,167 @@ TraceToMask::trace(double time)
         ss << shapeIdx << " shapes, " << (int)doc.shapes.size() << " traced paths";
         info->setValue(ss.str());
     }
+}
+
+void
+TraceToMask::trace(double time)
+{
+    RotoContextPtr ctx = getNode()->getRotoContext();
+    if (!ctx) {
+        return;
+    }
+    VectorMask::VectorDocument doc;
+    if (!buildTraceDocument(time, &doc)) {
+        removeImportedItems();
+        if (KnobStringPtr info = _imp->info.lock()) {
+            info->setValue("0 shapes (nothing traced)");
+        }
+        return;
+    }
+    importDocument(doc, time);
+}
+
+void
+TraceToMask::onBakeClicked()
+{
+    RotoContextPtr ctx = getNode()->getRotoContext();
+    if (!ctx) {
+        return;
+    }
+
+    // The bake keys into the shapes of the current trace, in import order
+    // (doc order); make sure there is one.
+    std::vector<BezierPtr> curves;
+    for (std::list<std::weak_ptr<RotoItem> >::const_iterator it = _imp->importedItems.begin();
+         it != _imp->importedItems.end(); ++it) {
+        const BezierPtr curve = std::dynamic_pointer_cast<Bezier>(it->lock());
+        if (curve) {
+            curves.push_back(curve);
+        }
+    }
+    if (curves.empty()) {
+        trace(ctx->getTimelineCurrentTime());
+        curves.clear();
+        for (std::list<std::weak_ptr<RotoItem> >::const_iterator it = _imp->importedItems.begin();
+             it != _imp->importedItems.end(); ++it) {
+            const BezierPtr curve = std::dynamic_pointer_cast<Bezier>(it->lock());
+            if (curve) {
+                curves.push_back(curve);
+            }
+        }
+        if (curves.empty()) {
+            appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("TraceToMask"), QDateTime::currentDateTime(),
+                                            QString::fromUtf8("Bake Sequence: no traced shapes to bake "
+                                                              "(is input 1 readable?)."));
+            return;
+        }
+    }
+
+    int start = _imp->bakeFrom.lock() ? _imp->bakeFrom.lock()->getValue() : 1;
+    int end = _imp->bakeTo.lock() ? _imp->bakeTo.lock()->getValue() : 1;
+    if (end < start) {
+        // Unset/invalid range: fall back to the project frame range.
+        double first = 0.0, last = 0.0;
+        getApp()->getProject()->getFrameRange(&first, &last);
+        start = (int)std::floor(first);
+        end = (int)std::ceil(last);
+    }
+    if (end < start) {
+        return;
+    }
+    const int frameCount = end - start + 1;
+    if (frameCount > 1000) {
+        appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("TraceToMask"), QDateTime::currentDateTime(),
+                                        QString::fromUtf8("Bake Sequence: %1 frames to bake, this may "
+                                                          "take a while.").arg(frameCount));
+    }
+
+    beginChanges();
+
+    int bakedFrames = 0;
+    int skippedFrames = 0;
+    for (int t = start; t <= end; ++t) {
+        VectorMask::VectorDocument doc;
+        if (!buildTraceDocument((double)t, &doc)) {
+            // Unreadable/empty frame at t: keep the previous keys.
+            ++skippedFrames;
+            continue;
+        }
+
+        double sx = 1.0, sy = 1.0, ox = 0.0, oy = 0.0;
+        bool flipY = true;
+        double docHeight = doc.height;
+        computeDocTransform(doc.width, doc.height, &sx, &sy, &ox, &oy, &flipY, &docHeight);
+
+        // The import skips empty-vertex shapes; the bake matches the same
+        // filter so curve i corresponds to doc shape i.
+        std::vector<const VectorMask::VectorShape*> shapes;
+        shapes.reserve(doc.shapes.size());
+        for (std::vector<VectorMask::VectorShape>::const_iterator it = doc.shapes.begin();
+             it != doc.shapes.end(); ++it) {
+            if (!it->vertices.empty()) {
+                shapes.push_back(&*it);
+            }
+        }
+        if (shapes.size() != curves.size()) {
+            // Topology changed across frames: leave the previous keys in place.
+            ++skippedFrames;
+            continue;
+        }
+
+        std::vector<VectorMask::VectorShape> transformed;
+        transformed.reserve(shapes.size());
+        bool topologyChanged = false;
+        for (std::size_t i = 0; i < shapes.size(); ++i) {
+            transformed.push_back(VectorMask::transformShape(*shapes[i], sx, sy, ox, oy, flipY, docHeight));
+            if ((int)transformed.back().vertices.size() != curves[i]->getControlPointsCount()) {
+                topologyChanged = true;
+                break;
+            }
+        }
+        if (topologyChanged) {
+            ++skippedFrames;
+            continue;
+        }
+
+        for (std::size_t i = 0; i < curves.size(); ++i) {
+            const VectorMask::VectorShape& shape = transformed[i];
+            for (std::size_t v = 0; v < shape.vertices.size(); ++v) {
+                const VectorMask::ShapeVertex& vert = shape.vertices[v];
+                const double lx = vert.center.x + vert.leftTangent.x;
+                const double ly = vert.center.y + vert.leftTangent.y;
+                const double rx = vert.center.x + vert.rightTangent.x;
+                const double ry = vert.center.y + vert.rightTangent.y;
+                curves[i]->setPointAtIndex(false, (int)v, (double)t, vert.center.x, vert.center.y, lx, ly, rx, ry);
+                // Keep the feather curve aligned with the shape curve.
+                curves[i]->setPointAtIndex(true, (int)v, (double)t, vert.center.x, vert.center.y, lx, ly, rx, ry);
+            }
+        }
+        ++bakedFrames;
+    }
+
+    endChanges(true);
+    ctx->evaluateChange();
+
+    // The shapes now carry per-frame keys: project-native animated BAcziers,
+    // independent of the input. Turn Auto Re-trace off so the next knob change
+    // cannot wipe the baked animation.
+    const KnobBoolPtr autoKnob = _imp->autoRetrace.lock();
+    if (autoKnob && autoKnob->getValue()) {
+        autoKnob->setValue(false);
+    }
+
+    if (KnobStringPtr info = _imp->info.lock()) {
+        std::ostringstream ss;
+        ss << "baked " << bakedFrames << " frames";
+        if (skippedFrames) {
+            ss << " (" << skippedFrames << " skipped: shape count changed)";
+        }
+        info->setValue(ss.str());
+    }
+    appPTR->writeToErrorLog_mt_safe(QString::fromUtf8("TraceToMask"), QDateTime::currentDateTime(),
+                                    QString::fromUtf8("Bake Sequence: keyed %1 frames (%2 skipped).")
+                                        .arg(bakedFrames).arg(skippedFrames));
 }
 
 NATRON_NAMESPACE_EXIT
