@@ -67,8 +67,8 @@ struct TraceParams;
  *    Bézier curves (line-art style).
  *
  * Holes (potrace child contours) punch with the Minus or XOR operator, toggle.
- * The Trace button re-runs on demand; Auto Re-trace re-runs whenever a knob
- * changes, exactly like ReadMask's Auto Rebuild. Tracing regenerates the
+ * The Trace button re-runs on demand; Auto Re-trace (off by default) re-runs
+ * whenever a knob changes or the input is edited. Tracing regenerates the
  * shapes by design - edits to traced shapes are wiped by the next trace.
  */
 class TraceToMask
@@ -113,9 +113,13 @@ private Q_SLOTS:
     /// Connected to the Reset button: removes every traced shape/layer.
     void onResetClicked();
 
-    /// Connected to the Max Shapes knob: if the last trace was refused for
-    /// exceeding the limit and the new limit admits it, imports the cached
-    /// document without re-tracing.
+    /// Connected to the Max Shapes knob: defers to onMaxShapesChanged via a
+    /// zero-timer - the knob's valueChanged stack must not run the Roto import
+    /// (remove + re-add + evaluateChange) re-entrantly.
+    void onMaxShapesKnobChanged();
+
+    /// Timer slot: if the last trace was refused for exceeding the limit and
+    /// the new limit admits it, imports the cached document without re-tracing.
     void onMaxShapesChanged();
 
     /// Connected to the Bake Sequence button: keys every traced control point

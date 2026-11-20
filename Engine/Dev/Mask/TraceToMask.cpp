@@ -148,6 +148,14 @@ struct TraceToMaskPrivate
     QTimer* inputCheckTimer = NULL;
     bool inputDirty = false;
 
+    /// Max Shapes edits are deferred to a zero-timer: the knob's valueChanged
+    /// slot must not run the Roto import (remove + re-add + evaluateChange)
+    /// re-entrantly inside the knob's signal emission - a spinner drag fires
+    /// valueChanged repeatedly and each import would nest inside the previous
+    /// one's stack. Coalesces a drag into one import.
+    QTimer* maxShapesTimer = NULL;
+    bool maxShapesDirty = false;
+
     /// The input node currently hooked for knob edits (rewired on re-connect).
     NodeWPtr hookedInput;
 };
@@ -259,6 +267,9 @@ TraceToMask::TraceToMask(NodePtr node)
     _imp->inputCheckTimer = new QTimer(this);
     _imp->inputCheckTimer->setSingleShot(true);
     QObject::connect( _imp->inputCheckTimer, SIGNAL(timeout()), this, SLOT(onInputCheckTimeout()) );
+    _imp->maxShapesTimer = new QTimer(this);
+    _imp->maxShapesTimer->setSingleShot(true);
+    QObject::connect( _imp->maxShapesTimer, SIGNAL(timeout()), this, SLOT(onMaxShapesChanged()) );
 }
 
 TraceToMask::~TraceToMask()
@@ -309,12 +320,15 @@ TraceToMask::initializeData()
     {
         KnobBoolPtr k = AppManager::createKnob<KnobBool>(this, tr("Auto Re-trace"));
         k->setName("autoRetrace");
-        k->setDefaultValue(true);
+        // Off by default: tracing wipes user edits to the shapes, so the
+        // rebuild must be an explicit action (Trace button), not a side effect
+        // of touching a knob.
+        k->setDefaultValue(false);
         k->setAnimationEnabled(false);
-        k->setHintToolTip(tr("Re-trace whenever a knob changes. Tracing regenerates the "
-                             "shapes by design - user edits to traced shapes are wiped "
-                             "by the next trace. Turn off to edit freely; the Trace "
-                             "button still rebuilds on demand."));
+        k->setHintToolTip(tr("Re-trace whenever a knob changes or the input is edited. "
+                             "Tracing regenerates the shapes by design - user edits to "
+                             "traced shapes are wiped by the next trace. Off by default; "
+                             "the Trace button rebuilds on demand."));
         // Sit on the Trace row, to its right.
         k->setAddNewLine(false);
         page->addKnob(k);
@@ -656,7 +670,7 @@ TraceToMask::initializeData()
             break;
         case 4:
             QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
-                              this, SLOT(onMaxShapesChanged()) );
+                              this, SLOT(onMaxShapesKnobChanged()) );
             break;
         default:
             QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
@@ -689,8 +703,8 @@ TraceToMask::getPluginDescription() const
            "clusters traced and stacked with their mean color, VTracer-style), and "
            "Centerline (skeletonization of thin strokes into open Beziers).\n\n"
            "Holes punch with Minus (default) or XOR (toggle). The Trace button re-runs "
-           "on demand; Auto Re-trace re-runs whenever a knob changes. Tracing "
-           "regenerates the shapes by design.";
+           "on demand; Auto Re-trace (off by default) re-runs whenever a knob changes "
+           "or the input is edited. Tracing regenerates the shapes by design.";
 }
 
 std::string
@@ -1319,8 +1333,31 @@ TraceToMask::onInputMayHaveChanged()
 }
 
 void
+TraceToMask::onMaxShapesKnobChanged()
+{
+    // Defer the import to the event loop: the knob's valueChanged stack must
+    // not be under a Roto tree rebuild (see TraceToMaskPrivate::maxShapesTimer).
+    _imp->maxShapesDirty = true;
+    if (_imp->maxShapesTimer && !_imp->maxShapesTimer->isActive()) {
+        _imp->maxShapesTimer->start(0);
+    }
+}
+
+void
 TraceToMask::onMaxShapesChanged()
 {
+    if (!_imp->maxShapesDirty) {
+        return;
+    }
+    _imp->maxShapesDirty = false;
+
+    if (_imp->traceRunning) {
+        // The running trace's coalescing loop re-checks Max Shapes with the
+        // latest value; do not import underneath it.
+        _imp->traceDirty = true;
+        return;
+    }
+
     // A Max Shapes raise can admit the LAST trace's document without
     // re-tracing: it is cached for exactly this purpose.
     const KnobIntPtr maxKnob = _imp->maxShapes.lock();
