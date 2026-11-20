@@ -167,3 +167,51 @@ MaskToGeo → Scene3D/Cycles — tracing a logo bitmap then extruding it becomes
       chains end at the junction instead of bending around it). Harness: a 5px stroke
       thins to ONE 2-CP curve at the stroke ends (ends recede ~3 px, classic Zhang-Suen
       erosion), a plus traces exactly 4 spokes meeting at the junction.)
+
+## Field-report fixes (2026-11-20, after first real use)
+
+User report: traces mismatched the image's size/aspect; after swapping to a bigger input
+the node "still worked in the 1st size"; tracing froze the UI and eventually crashed.
+
+1. **Fit default**: fitMode defaulted to Fit-to-Format (95% margin, format-anchored) -
+   wrong for a tracer, whose shapes must sit ON the image. Default is now **Original
+   Size**, and Original/Custom anchor at the SOURCE PLANE's own bounds (not the format's
+   bottom-left), so traces land exactly on the image wherever it sits (chained roto
+   outputs, centered images...).
+2. **Stale fetch after an input swap/resize** (the "1st size" bug, two layers deep):
+   (a) nothing re-traced on an input change - now the input node's knobsAgeChanged +
+   the timeline frameChanged mark a deferred check (a zero-timer: the input emits
+   knobsAgeChanged BEFORE recomputing its hash, so the direct slot must not trace);
+   the check compares the input's knobs age (any upstream edit retraces - the shapes
+   follow the image) and, for timeline moves, the input's RoD. (b) the fetch itself
+   went through getImage, which outside a render action reuses the thread's leftover
+   render TLS (frameArgs never popped) whose node hash still pointed at the pre-edit
+   state - the fetch silently returned the OLD image (and the RoI was clipped to the
+   node's own RoD = the old shapes' bbox). The fetch now follows the
+   TrackMarker::getMarkerImage pattern: ParallelRenderArgsSetter (fresh args, isAnalysis)
+   + direct renderRoI over the input's own RoD + cleanupTLSForThread. On the main thread
+   on purpose: from a worker thread the reader would hijack the project format
+   (renderRoIInternal sets it from non-main threads), which rescaled every downstream
+   render.
+3. **UI freeze / crash**: tracing ran synchronously on the main thread. The heavy
+   compute (potrace/k-means/thinning) now runs on the global thread pool while a nested
+   event loop pumps the GUI; the RotoContext import stays main-thread. Re-entrant knob
+   edits during a trace are coalesced into one follow-up trace (traceRunning/traceDirty)
+   instead of nesting - the likely crash source.
+4. **Reset button** next to Trace: removes every traced shape/layer without re-tracing.
+
+Harness: input-swap re-trace (300x300 rect -> 600x600 rect, shapes follow at 1:1
+canonical placement), reset clears all shapes; whole suite TRACE_CHECK DONE_OK,
+07-verify DONE_OK.
+      (done 2026-11-20: Zhang-Suen thinning + degree-based chain extraction into open
+      Beziers verified end to end. Three bugs surfaced: the 8-neighbor ring arrays were
+      corrupted — dx had 0 in the SW slot (duplicate of S) and dy was scrambled in three
+      slots, so the thinning barely eroded (8 px/iteration, skeletons never collapsed);
+      the pass guards were diagonal-neighbor forms instead of the classic cardinal
+      N&&E&&S / E&&S&&W / N&&E&&W / N&&S&&W; and rdpSimplify returned the whole polyline
+      instead of collapsing to the endpoints when no point strays past the tolerance.
+      The chain walk is now degree-based: endpoint chains, closed loops, then one chain
+      per junction spoke (a diagonal step into a junction-adjacent pixel is refused so
+      chains end at the junction instead of bending around it). Harness: a 5px stroke
+      thins to ONE 2-CP curve at the stroke ends (ends recede ~3 px, classic Zhang-Suen
+      erosion), a plus traces exactly 4 spokes meeting at the junction.)

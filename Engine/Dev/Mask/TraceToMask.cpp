@@ -36,10 +36,15 @@
 #include <vector>
 
 #include <QDateTime>
+#include <QEventLoop>
+#include <QFutureWatcher>
 #include <QString>
+#include <QTimer>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include "Engine/AppInstance.h"
 #include "Engine/AppManager.h"
+#include "Engine/AbortableRenderInfo.h"
 #include "Engine/Bezier.h"
 #include "Engine/Format.h"
 #include "Engine/Image.h"
@@ -51,6 +56,7 @@
 #include "Engine/RotoItem.h"
 #include "Engine/RotoLayer.h"
 #include "Engine/TimeLine.h"
+#include "Engine/TLSHolder.h"
 #include "Global/Enums.h"
 
 #include "Dev/Mask/VectorDocument.h"
@@ -87,12 +93,49 @@ struct TraceToMaskPrivate
     KnobIntWPtr bakeTo;
     KnobButtonWPtr bakeSequence;
     KnobButtonWPtr traceButton;
+    KnobButtonWPtr resetButton;
     KnobStringWPtr info;
 
     bool knobsCreated = false;
 
     /// Everything the last trace created (shapes + layers), for rebuild removal.
     std::list<std::weak_ptr<RotoItem> > importedItems;
+
+    /// Result of one background trace job (potrace/cluster/skeleton compute).
+    struct TraceJobResult
+    {
+        bool ok = false;
+        std::string error;
+        VectorMask::VectorDocument doc;
+    };
+
+    /// The heavy compute runs on the global thread pool; the nested event loop
+    /// below pumps the GUI until this watcher reports the result.
+    QFutureWatcher<TraceJobResult>* traceWatcher = NULL;
+
+    /// Re-entrancy: knob edits arriving while a trace runs are coalesced into
+    /// one follow-up trace (traceDirty), never nested.
+    bool traceRunning = false;
+    bool traceDirty = false;
+
+    /// Canonical integer bounds of the plane the current shapes were traced
+    /// from - the anchor for the fit transform and the input-change check.
+    RectI lastTracedBounds;
+    bool hasLastTracedBounds = false;
+
+    /// The input node's knobs age when the current shapes were traced: any
+    /// upstream edit (image swap, resize, grade...) bumps it, which is the
+    /// change signal for Auto Re-trace.
+    U64 lastTracedInputAge = 0;
+    bool hasLastTracedInputAge = false;
+
+    /// Input-change detection is deferred to a zero-timer: see
+    /// onInputMayHaveChanged. Coalesces bursts of knob edits into one check.
+    QTimer* inputCheckTimer = NULL;
+    bool inputDirty = false;
+
+    /// The input node currently hooked for knob edits (rewired on re-connect).
+    NodeWPtr hookedInput;
 };
 
 namespace {
@@ -106,6 +149,7 @@ calculateTransform(int fitModeIdx,
                    double userOffsetX, double userOffsetY,
                    double docW, double docH,
                    double formatW, double formatH,
+                   double bx, double by,
                    double* sx, double* sy, double* ox, double* oy)
 {
     if (docW <= 0.0) {
@@ -136,13 +180,13 @@ calculateTransform(int fitModeIdx,
         *oy = (formatH - scaledH) / 2.0 + userOffsetY;
         break;
     }
-    case 2: // original
-    case 3: // custom
+    case 2: // original: 1:1 anchored at the source plane's position
+    case 3: // custom: user scale/offset anchored at the source plane's position
     default:
         *sx = userScaleX;
         *sy = userScaleY;
-        *ox = userOffsetX;
-        *oy = userOffsetY;
+        *ox = bx + userOffsetX;
+        *oy = by + userOffsetY;
         break;
     }
 }
@@ -197,10 +241,19 @@ TraceToMask::TraceToMask(NodePtr node)
     : RotoNode(node)
     , _imp(new TraceToMaskPrivate())
 {
+    _imp->traceWatcher = new QFutureWatcher<TraceToMaskPrivate::TraceJobResult>(this);
+    _imp->inputCheckTimer = new QTimer(this);
+    _imp->inputCheckTimer->setSingleShot(true);
+    QObject::connect( _imp->inputCheckTimer, SIGNAL(timeout()), this, SLOT(onInputCheckTimeout()) );
 }
 
 TraceToMask::~TraceToMask()
 {
+    // A running background job may still hold this; wait it out (it only
+    // computes - it never touches the RotoContext).
+    if (_imp->traceWatcher && _imp->traceWatcher->isRunning()) {
+        _imp->traceWatcher->future().waitForFinished();
+    }
 }
 
 void
@@ -252,6 +305,17 @@ TraceToMask::initializeData()
         k->setAddNewLine(false);
         page->addKnob(k);
         _imp->autoRetrace = k;
+    }
+    {
+        KnobButtonPtr k = AppManager::createKnob<KnobButton>(this, tr("Reset"));
+        k->setName("reset");
+        k->setHintToolTip(tr("Remove every traced shape and layer from this node's roto "
+                             "tree now (no re-trace; the Trace button rebuilds on demand)."));
+        k->setCheckable(false);
+        // Sit on the Trace row too.
+        k->setAddNewLine(false);
+        page->addKnob(k);
+        _imp->resetButton = k;
     }
     {
         KnobIntPtr k = AppManager::createKnob<KnobInt>(this, tr("Bake From"));
@@ -443,12 +507,17 @@ TraceToMask::initializeData()
         opts.push_back(ChoiceOption("center_format", "Center to Format",
                                     "Native size (1:1, times the custom scale), centered."));
         opts.push_back(ChoiceOption("original", "Original Size",
-                                    "1:1 at the bottom-left origin."));
+                                    "1:1 anchored at the source image's own position - the traces sit exactly on it."));
         opts.push_back(ChoiceOption("custom", "Custom",
-                                    "Custom scale and offset only."));
+                                    "Custom scale and offset, anchored at the source image's position."));
         k->populateChoices(opts);
-        k->setDefaultValue(0);
-        k->setHintToolTip(tr("How the source image maps onto the project format."));
+        // A tracer's default must land the shapes ON the source image: 1:1 at
+        // the image's own position (Fit-to-Format is for vector-file imports).
+        k->setDefaultValue(2);
+        k->setHintToolTip(tr("How the traced document maps onto the project. Original "
+                             "Size (default) anchors 1:1 at the source image itself, so "
+                             "the traces match its position and aspect; the other modes "
+                             "map into the project format like ReadMask's."));
         xformPage->addKnob(k);
         _imp->fitMode = k;
     }
@@ -506,11 +575,12 @@ TraceToMask::initializeData()
     struct ConnectEntry
     {
         KnobIPtr knob;
-        int action; // 0 = option knob (auto re-trace), 1 = Trace, 2 = Bake
+        int action; // 0 = option knob (auto re-trace), 1 = Trace, 2 = Bake, 3 = Reset
     };
     const ConnectEntry entries[] = {
         { _imp->traceButton.lock(), 1 },
         { _imp->bakeSequence.lock(), 2 },
+        { _imp->resetButton.lock(), 3 },
         { _imp->mode.lock(), 0 },
         { _imp->channel.lock(), 0 },
         { _imp->invert.lock(), 0 },
@@ -546,12 +616,26 @@ TraceToMask::initializeData()
             QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
                               this, SLOT(onBakeClicked()) );
             break;
+        case 3:
+            QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
+                              this, SLOT(onResetClicked()) );
+            break;
         default:
             QObject::connect( handler.get(), SIGNAL(valueChanged(ViewSpec,int,int)),
                               this, SLOT(onControlKnobChanged(ViewSpec,int,int)) );
             break;
         }
     }
+
+    // Timeline scrub / input knob edits: re-trace when the input's region of
+    // definition changed underneath the current shapes. Connection changes go
+    // through the onInputChanged override.
+    const TimeLinePtr timeline = getApp() ? getApp()->getTimeLine() : TimeLinePtr();
+    if (timeline) {
+        QObject::connect( timeline.get(), SIGNAL(frameChanged(SequenceTime,int)),
+                          this, SLOT(onInputMayHaveChanged()) );
+    }
+    updateInputHooks();
 }
 
 std::string
@@ -616,7 +700,7 @@ TraceToMask::removeImportedItems()
 }
 
 void
-TraceToMask::computeDocTransform(double docW, double docH,
+TraceToMask::computeDocTransform(double docW, double docH, double bx, double by,
                                  double* sx, double* sy, double* ox, double* oy,
                                  bool* flipY, double* docHeight)
 {
@@ -636,29 +720,94 @@ TraceToMask::computeDocTransform(double docW, double docH,
                        scaleKnob ? scaleKnob->getValue(1) : 1.0,
                        offsetKnob ? offsetKnob->getValue(0) : 0.0,
                        offsetKnob ? offsetKnob->getValue(1) : 0.0,
-                       docW, docH, formatW, formatH, sx, sy, ox, oy);
+                       docW, docH, formatW, formatH, bx, by, sx, sy, ox, oy);
     *docHeight = docH > 0.0 ? docH : formatH;
 }
 
 bool
-TraceToMask::buildTraceDocument(double time, VectorMask::VectorDocument* doc)
+TraceToMask::fetchPlaneAndParams(double time,
+                                 std::vector<float>* valuesOut,
+                                 std::vector<float>* valuesRGBOut,
+                                 int* wOut, int* hOut,
+                                 VectorMask::TraceParams* paramsOut,
+                                 RectI* boundsOut)
 {
     const KnobChoicePtr channelKnob = _imp->channel.lock();
     const int channelIdx = channelKnob ? channelKnob->getValue() : 0;
     const KnobChoicePtr modeKnob = _imp->mode.lock();
     const int modeIdx = modeKnob ? modeKnob->getValue() : 0;
-    // Request the plane explicitly: a NULL layer makes getImage fall back to
-    // the input's clip-preferred components, which for a Roto node's input is
-    // Alpha-only - pixel buffers would then be single-component and the RGBA
-    // read below would run off the end of each pixel. Alpha is requested for
-    // the alpha channel (and alpha-only sources like another Roto/mask node);
-    // RGBA otherwise (luma/R/G/B channels and Color-mode clustering).
+    // Request the plane explicitly: Alpha for the alpha channel (and
+    // alpha-only sources like another Roto/mask node), RGBA otherwise (luma/
+    // R/G/B channels and Color-mode clustering).
     const ImagePlaneDesc reqComps = (channelIdx == 1 && modeIdx != 1)
                                         ? ImagePlaneDesc::getAlphaComponents()
                                         : ImagePlaneDesc::getRGBAComponents();
-    const ImagePtr srcImg = getImage(0, time, RenderScale(), ViewIdx(0),
-                                     NULL, &reqComps, false, true,
-                                     eStorageModeRAM, 0, NULL);
+
+    // Fetch the input through renderRoI with fresh per-thread render args
+    // (the TrackMarker::getMarkerImage pattern). Going through getImage from
+    // outside a render action would reuse the thread's leftover render TLS -
+    // whose node hash still points at the pre-edit state, so after an image
+    // swap/resize the fetch would silently return the OLD image. The setter
+    // below pushes fresh args (isAnalysis: no stale request pass), the RoI is
+    // the input's own RoD, and the thread's TLS is cleaned up afterwards.
+    NodePtr inputNode = getNode() ? getNode()->getInput(0) : NodePtr();
+    if (!inputNode || !inputNode->getEffectInstance()) {
+        return false;
+    }
+    RectD inputRod;
+    {
+        RectD rod;
+        bool isProjectFormat = false;
+        const StatusEnum st = inputNode->getEffectInstance()->getRegionOfDefinition_public(
+            inputNode->getHashValue(), time, RenderScale::identity, ViewIdx(0), &rod, &isProjectFormat);
+        if (st != eStatusOK || rod.isNull()) {
+            return false;
+        }
+        inputRod = rod;
+    }
+
+    AbortableRenderInfoPtr abortInfo = AbortableRenderInfo::create(false, 0);
+    AbortableThread* isAbortable = dynamic_cast<AbortableThread*>(QThread::currentThread());
+    if (isAbortable) {
+        isAbortable->setAbortInfo(true, abortInfo, getNode()->getEffectInstance());
+    }
+    ParallelRenderArgsSetter frameRenderArgs(time,
+                                             ViewIdx(0),
+                                             true,   // isRenderUserInteraction
+                                             false,  // isSequentialRender
+                                             abortInfo,
+                                             getNode(),
+                                             0,      // textureIndex
+                                             getApp()->getTimeLine().get(),
+                                             NodePtr(),
+                                             true,   // isAnalysis
+                                             false,  // draftMode
+                                             RenderStatsPtr());
+
+    std::list<ImagePlaneDesc> comps;
+    comps.push_back(reqComps);
+    const double par = getAspectRatio(0);
+    const RectI roiPixel = inputRod.toPixelEnclosing(0, par);
+    EffectInstance::RenderRoIArgs args(time,
+                                       RenderScale::identity,
+                                       0,        // mipmapLevel
+                                       ViewIdx(0),
+                                       false,    // byPassCache
+                                       roiPixel,
+                                       RectD(),  // preComputedRoD: computed inside from the fresh args
+                                       comps,
+                                       eImageBitDepthFloat,
+                                       true,     // fetchUserSelectedComponentsUpstream
+                                       this,     // caller
+                                       eStorageModeRAM,
+                                       time);
+    std::map<ImagePlaneDesc, ImagePtr> planes;
+    const EffectInstance::RenderRoIRetCode stat = inputNode->getEffectInstance()->renderRoI(args, &planes);
+    appPTR->getAppTLS()->cleanupTLSForThread();
+    if (stat != EffectInstance::eRenderRoIRetCodeOk || planes.empty()) {
+        return false;
+    }
+    const ImagePtr srcImg = planes.begin()->second;
     if (!srcImg) {
         return false;
     }
@@ -772,11 +921,31 @@ TraceToMask::buildTraceDocument(double time, VectorMask::VectorDocument* doc)
         if (ki) params.invert = ki->getValue();
     }
 
+    *valuesOut = std::move(values);
+    if (valuesRGBOut) {
+        *valuesRGBOut = std::move(valuesRGB);
+    }
+    *wOut = w;
+    *hOut = h;
+    *paramsOut = params;
+    *boundsOut = bounds;
+    return true;
+}
+
+bool
+TraceToMask::buildTraceDocument(double time, VectorMask::VectorDocument* doc, RectI* bounds)
+{
+    std::vector<float> values, valuesRGB;
+    int w = 0, h = 0;
+    VectorMask::TraceParams params;
+    if (!fetchPlaneAndParams(time, &values, &valuesRGB, &w, &h, &params, bounds)) {
+        return false;
+    }
     return VectorMask::tracePlaneToDocument(w, h, values, valuesRGB, params, "Trace", doc);
 }
 
 void
-TraceToMask::importDocument(const VectorMask::VectorDocument& doc, double time)
+TraceToMask::importDocument(const VectorMask::VectorDocument& doc, const RectI& bounds, double time)
 {
     RotoContextPtr ctx = getNode()->getRotoContext();
     if (!ctx) {
@@ -791,7 +960,22 @@ TraceToMask::importDocument(const VectorMask::VectorDocument& doc, double time)
     double sx = 1.0, sy = 1.0, ox = 0.0, oy = 0.0;
     bool flipY = true;
     double docHeight = doc.height;
-    computeDocTransform(doc.width, doc.height, &sx, &sy, &ox, &oy, &flipY, &docHeight);
+    // Original/Custom fit modes anchor at the source plane's own position so
+    // the traces sit exactly on the image; Fit/Center map into the format.
+    computeDocTransform(doc.width, doc.height, bounds.x1, bounds.y1,
+                        &sx, &sy, &ox, &oy, &flipY, &docHeight);
+    _imp->lastTracedBounds = bounds;
+    _imp->hasLastTracedBounds = true;
+    {
+        NodePtr input = getNode()->getInput(0);
+        if (input) {
+            _imp->lastTracedInputAge = input->getKnobsAge();
+            _imp->hasLastTracedInputAge = true;
+        }
+    }
+    // The input is definitely wired by now: (re)attach the input-change hooks
+    // so a later image swap/resize is detected.
+    updateInputHooks();
 
     RotoLayerPtr baseLayer = ctx->getOrCreateBaseLayer();
     RotoLayerPtr mainLayer;
@@ -893,15 +1077,174 @@ TraceToMask::trace(double time)
     if (!ctx) {
         return;
     }
-    VectorMask::VectorDocument doc;
-    if (!buildTraceDocument(time, &doc)) {
-        removeImportedItems();
-        if (KnobStringPtr info = _imp->info.lock()) {
-            info->setValue("0 shapes (nothing traced)");
-        }
+    if (_imp->traceRunning) {
+        // A trace is already in flight (its event loop is pumping the GUI):
+        // coalesce this request into one follow-up instead of nesting.
+        _imp->traceDirty = true;
         return;
     }
-    importDocument(doc, time);
+    _imp->traceRunning = true;
+
+    for (;;) {
+        _imp->traceDirty = false;
+
+        // Plane fetch on the main thread: the ParallelRenderArgsSetter inside
+        // gives this thread fresh render args so the fetch resolves the
+        // input's CURRENT state (the leftover TLS would serve the pre-edit
+        // image after a swap/resize), and staying on the main thread keeps the
+        // reader from hijacking the project format (renderRoIInternal only
+        // sets it from non-main threads). The heavy compute (potrace / k-means
+        // / thinning) then runs off the main thread - the nested event loop
+        // below pumps while it runs - and the RotoContext import comes back
+        // on the main thread.
+        std::vector<float> values, valuesRGB;
+        int w = 0, h = 0;
+        VectorMask::TraceParams params;
+        RectI bounds;
+        const bool fetched = fetchPlaneAndParams(time, &values, &valuesRGB, &w, &h, &params, &bounds);
+        if (!fetched) {
+            removeImportedItems();
+            if (KnobStringPtr info = _imp->info.lock()) {
+                info->setValue("0 shapes (nothing traced)");
+            }
+        } else {
+            _imp->traceWatcher->setFuture(QtConcurrent::run([w, h, values, valuesRGB, params]() -> TraceToMaskPrivate::TraceJobResult {
+                TraceToMaskPrivate::TraceJobResult r;
+                try {
+                    r.ok = VectorMask::tracePlaneToDocument(w, h, values, valuesRGB, params, "Trace", &r.doc);
+                } catch (const std::exception& e) {
+                    r.ok = false;
+                    r.error = e.what();
+                } catch (...) {
+                    r.ok = false;
+                    r.error = "unknown tracing error";
+                }
+                return r;
+            }));
+            QEventLoop loop;
+            QObject::connect(_imp->traceWatcher, SIGNAL(finished()), &loop, SLOT(quit()));
+            loop.exec();
+            QObject::disconnect(_imp->traceWatcher, SIGNAL(finished()), &loop, SLOT(quit()));
+
+            const TraceToMaskPrivate::TraceJobResult res = _imp->traceWatcher->result();
+            if (!res.ok) {
+                removeImportedItems();
+                if (KnobStringPtr info = _imp->info.lock()) {
+                    info->setValue(res.error.empty() ? std::string("0 shapes (nothing traced)")
+                                                     : std::string("trace failed: ") + res.error);
+                }
+            } else {
+                importDocument(res.doc, bounds, time);
+            }
+        }
+
+        if (!_imp->traceDirty) {
+            break;
+        }
+        // A knob edit landed while tracing: run once more with the latest values.
+        time = ctx->getTimelineCurrentTime();
+    }
+    _imp->traceRunning = false;
+}
+
+void
+TraceToMask::onResetClicked()
+{
+    removeImportedItems();
+    _imp->hasLastTracedBounds = false;
+    if (KnobStringPtr info = _imp->info.lock()) {
+        info->setValue("0 shapes (reset)");
+    }
+}
+
+void
+TraceToMask::updateInputHooks()
+{
+    NodePtr input = getNode() ? getNode()->getInput(0) : NodePtr();
+    if (input == _imp->hookedInput.lock()) {
+        return;
+    }
+    const NodePtr old = _imp->hookedInput.lock();
+    if (old) {
+        QObject::disconnect( old.get(), SIGNAL(knobsAgeChanged(U64)), this, SLOT(onInputMayHaveChanged()) );
+    }
+    _imp->hookedInput = input;
+    if (input) {
+        // Direct connection on purpose: the node emits knobsAgeChanged after
+        // bumping its age but BEFORE recomputing its hash, so the age compare
+        // below is fresh while a hash-based RoD query would be stale here.
+        QObject::connect( input.get(), SIGNAL(knobsAgeChanged(U64)), this, SLOT(onInputMayHaveChanged()) );
+    }
+}
+
+void
+TraceToMask::onInputMayHaveChanged()
+{
+    updateInputHooks();
+
+    const KnobBoolPtr autoKnob = _imp->autoRetrace.lock();
+    if (!autoKnob || !autoKnob->getValue()) {
+        return;
+    }
+    if (!_imp->hasLastTracedInputAge) {
+        // Never traced: the first trace is the user's explicit one.
+        return;
+    }
+    // Defer the check: the input emits knobsAgeChanged before recomputing its
+    // hash, so tracing right here would fetch the pre-edit image. The zero
+    // timer fires once the edit's stack (and hash) is done; a running trace's
+    // event loop pumps it too, so scripted callers see the re-trace as well.
+    _imp->inputDirty = true;
+    if (_imp->inputCheckTimer && !_imp->inputCheckTimer->isActive()) {
+        _imp->inputCheckTimer->start(0);
+    }
+}
+
+void
+TraceToMask::onInputCheckTimeout()
+{
+    if (!_imp->inputDirty) {
+        return;
+    }
+    _imp->inputDirty = false;
+
+    if (_imp->traceRunning) {
+        // The running trace's coalescing loop picks this up.
+        _imp->traceDirty = true;
+        return;
+    }
+
+    // Change detection, cheapest first:
+    // 1. The input's knobs age - ANY upstream edit (image swap, resize, grade)
+    //    retraces. This is the correct semantic for a tracer: the shapes
+    //    follow the image.
+    bool changed = false;
+    NodePtr input = getNode() ? getNode()->getInput(0) : NodePtr();
+    if (!input || !input->getEffectInstance()) {
+        return;
+    }
+    if (input->getKnobsAge() != _imp->lastTracedInputAge) {
+        changed = true;
+    } else if (_imp->hasLastTracedBounds) {
+        // 2. Timeline moves with an unchanged age: a sequence input's frame
+        //    may resolve to a differently-sized image. The hash is up to date
+        //    here (no knob edit in flight), so the RoD query is reliable.
+        RectD rod;
+        bool isProjectFormat = false;
+        const StatusEnum st = input->getEffectInstance()->getRegionOfDefinition_public(
+            input->getHashValue(), getApp()->getTimeLine()->currentFrame(),
+            RenderScale::identity, ViewIdx(0), &rod, &isProjectFormat);
+        if (st == eStatusOK) {
+            const RectI b((int)std::floor(rod.x1), (int)std::floor(rod.y1),
+                          (int)std::ceil(rod.x2), (int)std::ceil(rod.y2));
+            changed = !(b == _imp->lastTracedBounds);
+        }
+    }
+    if (!changed) {
+        return;
+    }
+    const double time = getNode()->getRotoContext() ? getNode()->getRotoContext()->getTimelineCurrentTime() : 0.0;
+    trace(time);
 }
 
 void
@@ -965,7 +1308,8 @@ TraceToMask::onBakeClicked()
     int skippedFrames = 0;
     for (int t = start; t <= end; ++t) {
         VectorMask::VectorDocument doc;
-        if (!buildTraceDocument((double)t, &doc)) {
+        RectI bounds;
+        if (!buildTraceDocument((double)t, &doc, &bounds)) {
             // Unreadable/empty frame at t: keep the previous keys.
             ++skippedFrames;
             continue;
@@ -974,7 +1318,8 @@ TraceToMask::onBakeClicked()
         double sx = 1.0, sy = 1.0, ox = 0.0, oy = 0.0;
         bool flipY = true;
         double docHeight = doc.height;
-        computeDocTransform(doc.width, doc.height, &sx, &sy, &ox, &oy, &flipY, &docHeight);
+        computeDocTransform(doc.width, doc.height, bounds.x1, bounds.y1,
+                            &sx, &sy, &ox, &oy, &flipY, &docHeight);
 
         // The import skips empty-vertex shapes; the bake matches the same
         // filter so curve i corresponds to doc shape i.

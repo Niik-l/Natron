@@ -33,6 +33,7 @@
 
 #include <memory>
 #include <list>
+#include <vector>
 
 #include "Global/Macros.h"
 
@@ -45,6 +46,7 @@ NATRON_NAMESPACE_ENTER
 struct TraceToMaskPrivate;
 namespace VectorMask {
 struct VectorDocument;
+struct TraceParams;
 }
 
 /**
@@ -108,6 +110,9 @@ private Q_SLOTS:
     /// Connected to the Trace button: re-traces regardless of Auto Re-trace.
     void onTraceClicked();
 
+    /// Connected to the Reset button: removes every traced shape/layer.
+    void onResetClicked();
+
     /// Connected to the Bake Sequence button: keys every traced control point
     /// across the [Bake From, Bake To] frame range so the shapes play back the
     /// traced animation as project-native animated BAcziers, independent of
@@ -117,6 +122,18 @@ private Q_SLOTS:
     /// Connected to the option knobs: re-traces when Auto Re-trace is on.
     void onControlKnobChanged(ViewSpec view, int dimension, int reason);
 
+    /// Connected to the timeline, this node's input connection changes and the
+    /// input node's knob edits: re-traces when the input changed underneath the
+    /// current shapes (image swap / resize) and Auto Re-trace is on - the
+    /// shapes would otherwise sit at the old scale. The check is deferred to a
+    /// zero-timer (onInputCheckTimeout): the input node emits knobsAgeChanged
+    /// BEFORE recomputing its hash, so any hash-dependent work done in the
+    /// direct slot would see the pre-edit state.
+    void onInputMayHaveChanged();
+
+    /// Runs the deferred input-change check (age / RoD compare -> trace).
+    void onInputCheckTimeout();
+
 private:
 
     /**
@@ -125,23 +142,41 @@ private:
      **/
     virtual void initializeData() OVERRIDE FINAL;
 
-    /// Fetches input 1 at time and traces it into a fresh document (plane
-    /// request, channel extraction, pre-blur, knob -> TraceParams).
-    /// Returns false (and leaves *doc untouched) when nothing was traced.
-    bool buildTraceDocument(double time, VectorMask::VectorDocument* doc);
+    /// Fetches input 1 at time (plane request, channel extraction, pre-blur,
+    /// knob -> TraceParams). Returns false (and leaves outputs untouched) when
+    /// nothing was fetched. *bounds receives the plane's canonical integer
+    /// bounds - the trace is anchored there so the shapes land on the image.
+    bool fetchPlaneAndParams(double time,
+                             std::vector<float>* values,
+                             std::vector<float>* valuesRGB,
+                             int* w, int* h,
+                             VectorMask::TraceParams* params,
+                             RectI* bounds);
 
-    /// Effective fit transform for a document of (docW, docH) against the
-    /// project format, from the fit knobs (shared by the import and the bake).
-    void computeDocTransform(double docW, double docH,
+    /// fetchPlaneAndParams + tracePlaneToDocument, synchronous (bake path).
+    bool buildTraceDocument(double time, VectorMask::VectorDocument* doc, RectI* bounds);
+
+    /// Effective fit transform for a document of (docW, docH): Fit/Center
+    /// modes map into the project format; Original/Custom anchor at the source
+    /// plane's bounds origin (bx, by) so the shapes land on the image.
+    void computeDocTransform(double docW, double docH, double bx, double by,
                              double* sx, double* sy, double* ox, double* oy,
                              bool* flipY, double* docHeight);
 
     /// Discards the previous import and imports doc into the RotoContext
     /// (layers from the shape layer names, shapes keyed at time).
-    void importDocument(const VectorMask::VectorDocument& doc, double time);
+    void importDocument(const VectorMask::VectorDocument& doc, const RectI& bounds, double time);
 
+    /// Traces input 1 at time: the plane fetch runs on the main thread, the
+    /// heavy potrace/cluster/skeleton compute on a background thread while a
+    /// nested event loop keeps the UI responsive, and the RotoContext import
+    /// back on the main thread. Coalesces re-entrant requests.
     void trace(double time);
     void removeImportedItems();
+
+    /// (Dis)connects the input-change hooks (input node knob edits) for the
+    /// current input.
+    void updateInputHooks();
 
     std::unique_ptr<TraceToMaskPrivate> _imp;
 };
