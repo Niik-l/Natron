@@ -154,4 +154,16 @@ MaskToGeo → Scene3D/Cycles — tracing a logo bitmap then extruding it becomes
       keys), turns Auto Re-trace off and reports "baked N frames (M skipped)". Harness:
       a 3-frame marching-rect sequence keys CPs that follow the rect per frame.
       Docs: NODE_REGISTRY (Mask Import 2 nodes), DEV_3D_SYSTEM_CHANGELOG entry.)
-- [ ] Part 4 — centerline (exploratory)
+- [x] Part 4 — centerline (exploratory)
+      (done 2026-11-20: Zhang-Suen thinning + degree-based chain extraction into open
+      Beziers verified end to end. Three bugs surfaced: the 8-neighbor ring arrays were
+      corrupted — dx had 0 in the SW slot (duplicate of S) and dy was scrambled in three
+      slots, so the thinning barely eroded (8 px/iteration, skeletons never collapsed);
+      the pass guards were diagonal-neighbor forms instead of the classic cardinal
+      N&&E&&S / E&&S&&W / N&&E&&W / N&&S&&W; and rdpSimplify returned the whole polyline
+      instead of collapsing to the endpoints when no point strays past the tolerance.
+      The chain walk is now degree-based: endpoint chains, closed loops, then one chain
+      per junction spoke (a diagonal step into a junction-adjacent pixel is refused so
+      chains end at the junction instead of bending around it). Harness: a 5px stroke
+      thins to ONE 2-CP curve at the stroke ends (ends recede ~3 px, classic Zhang-Suen
+      erosion), a plus traces exactly 4 spokes meeting at the junction.)

@@ -315,8 +315,8 @@ kmeansRGB(int w,
 int
 neighbors8(const std::vector<unsigned char>& bits, int w, int h, int x, int y)
 {
-    static const int dx[8] = { 1, 1, 1, 0, 0, -1, -1, -1 };
-    static const int dy[8] = { -1, 0, 1, 1, -1, 1, 0, -1 };
+    static const int dx[8] = { 1, 1, 1, 0, -1, -1, -1, 0 };
+    static const int dy[8] = { -1, 0, 1, 1, 1, 0, -1, -1 };
     int n = 0;
     for (int i = 0; i < 8; ++i) {
         const int nx = x + dx[i];
@@ -336,8 +336,8 @@ zhangSuenThin(std::vector<unsigned char>* bits, int w, int h)
     // still count as ink for the current pass (parallel-removal semantics),
     // then cleared before the next pass.
     bool changed = false;
-    static const int dx[8] = { 1, 1, 1, 0, 0, -1, -1, -1 };
-    static const int dy[8] = { -1, 0, 1, 1, -1, 1, 0, -1 };
+    static const int dx[8] = { 1, 1, 1, 0, -1, -1, -1, 0 };
+    static const int dy[8] = { -1, 0, 1, 1, 1, 0, -1, -1 };
     for (int pass = 0; pass < 2; ++pass) {
         for (int y = 1; y < h - 1; ++y) {
             for (int x = 1; x < w - 1; ++x) {
@@ -368,17 +368,20 @@ zhangSuenThin(std::vector<unsigned char>* bits, int w, int h)
                     continue;
                 }
                 if (pass == 0) {
-                    if (nb[0] && nb[2] && nb[4]) {
+                    // Classic Zhang-Suen step 1 guards: N&&E&&S (south edge)
+                    // and E&&S&&W (west edge). Ring order: NE E SE S SW W NW N.
+                    if (nb[7] && nb[1] && nb[3]) {
                         continue;
                     }
-                    if (nb[2] && nb[4] && nb[6]) {
+                    if (nb[1] && nb[3] && nb[5]) {
                         continue;
                     }
                 } else {
-                    if (nb[0] && nb[2] && nb[6]) {
+                    // Step 2 guards: N&&E&&W (east edge) and N&&S&&W (north edge).
+                    if (nb[7] && nb[1] && nb[5]) {
                         continue;
                     }
-                    if (nb[0] && nb[4] && nb[6]) {
+                    if (nb[7] && nb[3] && nb[5]) {
                         continue;
                     }
                 }
@@ -432,7 +435,11 @@ rdpSimplify(const std::vector<Point2D>& pts,
         }
     }
     if (maxIdx < 0 || maxDist <= tol) {
-        *out = pts;
+        // No point strays from the (a,b) chord: the whole run collapses to
+        // its two endpoints.
+        out->clear();
+        out->push_back(pts.front());
+        out->push_back(pts.back());
         return;
     }
     std::vector<Point2D> left(pts.begin(), pts.begin() + maxIdx + 1);
@@ -499,114 +506,203 @@ tracePlaneToDocument(int w,
             }
         }
 
-        const int dx[8] = { 1, 1, 1, 0, 0, -1, -1, -1 };
-        const int dy[8] = { -1, 0, 1, 1, -1, 1, 0, -1 };
-        std::vector<int> visit((std::size_t)w * h, 0);
-        int shapeCount = 0;
+        // Degree per skeleton pixel (8-neighborhood, NE E SE S SW W NW N):
+        // 1 = endpoint, 2 = plain chain pixel, >=3 = junction. Chains run
+        // between nodes (endpoints and junctions); each spoke of a junction
+        // becomes its own curve, so a plus traces 4 curves meeting at the
+        // centre.
+        const int dx[8] = { 1, 1, 1, 0, -1, -1, -1, 0 };
+        const int dy[8] = { -1, 0, 1, 1, 1, 0, -1, -1 };
+        std::vector<unsigned char> deg((std::size_t)w * h, 0);
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 const std::size_t idx = (std::size_t)y * w + x;
-                if (!skel[idx] || visit[idx]) {
+                if (skel[idx]) {
+                    deg[idx] = (unsigned char)neighbors8(skel, w, h, x, y);
+                }
+            }
+        }
+        std::vector<int> visit((std::size_t)w * h, 0);
+        int shapeCount = 0;
+
+        // One walk step from (cx,cy) to the next unvisited ink neighbour (ring
+        // order). A diagonal step is refused when an ink cardinal pixel shared
+        // with that diagonal is a junction (deg >= 3): the step would bend the
+        // chain around a junction instead of ending there. Returns false at
+        // the chain end.
+        auto nextChainPixel = [&](int* cx, int* cy) -> bool {
+            for (int i = 0; i < 8; ++i) {
+                const int nx = *cx + dx[i];
+                const int ny = *cy + dy[i];
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
                     continue;
                 }
-                const int ncount = neighbors8(skel, w, h, x, y);
-                if (ncount == 0) {
-                    visit[idx] = 1;
+                const std::size_t tidx = (std::size_t)ny * w + nx;
+                if (!skel[tidx] || visit[tidx]) {
                     continue;
                 }
-                // Endpoints (1) start chains; junction pixels (>=3) are walked
-                // once per spoke. Plain 2-neighbor pixels belong to a chain
-                // started elsewhere (walked from its endpoint/junction).
-                if (ncount == 2) {
-                    // Only start a chain on a 2-neighbor pixel if no adjacent
-                    // pixel has been visited (isolated loop pixel).
-                    bool anyVisitedNeighbor = false;
-                    for (int i = 0; i < 8; ++i) {
-                        const int tx = x + dx[i];
-                        const int ty = y + dy[i];
-                        if (tx < 0 || ty < 0 || tx >= w || ty >= h) {
-                            continue;
-                        }
-                        if (visit[(std::size_t)ty * w + tx]) {
-                            anyVisitedNeighbor = true;
-                            break;
-                        }
-                    }
-                    if (anyVisitedNeighbor) {
+                if (dy[i] != 0 && dx[i] != 0) {
+                    // Diagonal slot: shared cardinals are (nx, cy) and (cx, ny).
+                    const std::size_t s1 = (std::size_t)(*cy) * w + nx;
+                    const std::size_t s2 = (std::size_t)ny * w + (*cx);
+                    if ((skel[s1] && deg[s1] >= 3) || (skel[s2] && deg[s2] >= 3)) {
                         continue;
                     }
                 }
-                std::vector<Point2D> chain;
-                int cx = x, cy = y;
-                chain.push_back(Point2D(cx + 0.5, cy + 0.5));
+                *cx = nx;
+                *cy = ny;
+                return true;
+            }
+            return false;
+        };
+
+        // Walk one chain from an already-visited start pixel, following
+        // unvisited ink until a node (deg != 2) or the chain end.
+        auto walkChain = [&](int sx, int sy, std::vector<Point2D>* chain) {
+            int cx = sx, cy = sy;
+            chain->push_back(Point2D(cx + 0.5, cy + 0.5));
+            for (int guard = 0; guard < w * h; ++guard) {
+                int nx = cx, ny = cy;
+                if (!nextChainPixel(&nx, &ny)) {
+                    break;
+                }
+                const std::size_t tidx = (std::size_t)ny * w + nx;
+                visit[tidx] = 1;
+                chain->push_back(Point2D(nx + 0.5, ny + 0.5));
+                cx = nx;
+                cy = ny;
+                if (deg[tidx] != 2) {
+                    break;
+                }
+            }
+        };
+
+        auto emitChain = [&](const std::vector<Point2D>& chain) {
+            if (chain.size() < 2) {
+                return;
+            }
+            std::vector<Point2D> simple;
+            rdpSimplify(chain, std::max(0.1, params.simplifyTolerance), &simple);
+            if (simple.size() < 2) {
+                return;
+            }
+            VectorShape shape;
+            ++shapeCount;
+            shape.name = layerName + "_cl_" + std::to_string((long long)shapeCount);
+            shape.closed = false;
+            shape.layerName = layerName;
+            shape.vertices.reserve(simple.size());
+            for (std::size_t i = 0; i < simple.size(); ++i) {
+                Point2D leftTan(0.0, 0.0);
+                Point2D rightTan(0.0, 0.0);
+                if (i > 0 && i + 1 < simple.size()) {
+                    Point2D dir(simple[i + 1].x - simple[i - 1].x,
+                                simple[i + 1].y - simple[i - 1].y);
+                    const double len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+                    if (len > 1e-9) {
+                        dir.x /= len;
+                        dir.y /= len;
+                        const double dl = std::sqrt(
+                            (simple[i].x - simple[i - 1].x) * (simple[i].x - simple[i - 1].x) +
+                            (simple[i].y - simple[i - 1].y) * (simple[i].y - simple[i - 1].y));
+                        const double dr = std::sqrt(
+                            (simple[i + 1].x - simple[i].x) * (simple[i + 1].x - simple[i].x) +
+                            (simple[i + 1].y - simple[i].y) * (simple[i + 1].y - simple[i].y));
+                        const double scale = std::min(dl, dr) * 0.5;
+                        leftTan = Point2D(-dir.x * scale, -dir.y * scale);
+                        rightTan = Point2D(dir.x * scale, dir.y * scale);
+                    }
+                }
+                shape.vertices.push_back(ShapeVertex(simple[i], leftTan, rightTan));
+            }
+            doc->shapes.push_back(shape);
+        };
+
+        // Pass 1: chains from endpoints (deg == 1).
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const std::size_t idx = (std::size_t)y * w + x;
+                if (!skel[idx] || visit[idx] || deg[idx] != 1) {
+                    continue;
+                }
                 visit[idx] = 1;
-                for (int guard = 0; guard < w * h; ++guard) {
-                    int nx = -1, ny = -1;
-                    for (int i = 0; i < 8; ++i) {
-                        const int tx = cx + dx[i];
-                        const int ty = cy + dy[i];
-                        if (tx < 0 || ty < 0 || tx >= w || ty >= h) {
-                            continue;
-                        }
-                        const std::size_t tidx = (std::size_t)ty * w + tx;
-                        if (!skel[tidx] || visit[tidx]) {
-                            continue;
-                        }
-                        nx = tx;
-                        ny = ty;
+                std::vector<Point2D> chain;
+                walkChain(x, y, &chain);
+                emitChain(chain);
+            }
+        }
+        // Pass 2: closed loops - unvisited plain pixels with no visited
+        // neighbour (their chain never touches an endpoint or junction).
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const std::size_t idx = (std::size_t)y * w + x;
+                if (!skel[idx] || visit[idx] || deg[idx] != 2) {
+                    continue;
+                }
+                bool anyVisitedNeighbor = false;
+                for (int i = 0; i < 8; ++i) {
+                    const int tx = x + dx[i];
+                    const int ty = y + dy[i];
+                    if (tx < 0 || ty < 0 || tx >= w || ty >= h) {
+                        continue;
+                    }
+                    if (visit[(std::size_t)ty * w + tx]) {
+                        anyVisitedNeighbor = true;
                         break;
                     }
-                    if (nx < 0) {
-                        break;
+                }
+                if (anyVisitedNeighbor) {
+                    continue;
+                }
+                visit[idx] = 1;
+                std::vector<Point2D> chain;
+                walkChain(x, y, &chain);
+                emitChain(chain);
+            }
+        }
+        // Pass 3: junction spokes - each unvisited junction (deg >= 3) walks
+        // one chain per unvisited ink neighbour, starting at the junction.
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const std::size_t idx = (std::size_t)y * w + x;
+                if (!skel[idx] || visit[idx] || deg[idx] < 3) {
+                    continue;
+                }
+                visit[idx] = 1;
+                const Point2D junction(x + 0.5, y + 0.5);
+                for (int i = 0; i < 8; ++i) {
+                    const int tx = x + dx[i];
+                    const int ty = y + dy[i];
+                    if (tx < 0 || ty < 0 || tx >= w || ty >= h) {
+                        continue;
                     }
-                    const std::size_t tidx = (std::size_t)ny * w + nx;
+                    const std::size_t tidx = (std::size_t)ty * w + tx;
+                    if (!skel[tidx] || visit[tidx]) {
+                        continue;
+                    }
                     visit[tidx] = 1;
-                    chain.push_back(Point2D(nx + 0.5, ny + 0.5));
-                    const int tn = neighbors8(skel, w, h, nx, ny);
-                    cx = nx;
-                    cy = ny;
-                    if (tn != 2) {
-                        break;
-                    }
-                }
-                if (chain.size() < 2) {
-                    continue;
-                }
-                std::vector<Point2D> simple;
-                rdpSimplify(chain, std::max(0.1, params.simplifyTolerance), &simple);
-                if (simple.size() < 2) {
-                    continue;
-                }
-                VectorShape shape;
-                ++shapeCount;
-                shape.name = layerName + "_cl_" + std::to_string((long long)shapeCount);
-                shape.closed = false;
-                shape.layerName = layerName;
-                shape.vertices.reserve(simple.size());
-                for (std::size_t i = 0; i < simple.size(); ++i) {
-                    Point2D leftTan(0.0, 0.0);
-                    Point2D rightTan(0.0, 0.0);
-                    if (i > 0 && i + 1 < simple.size()) {
-                        Point2D dir(simple[i + 1].x - simple[i - 1].x,
-                                    simple[i + 1].y - simple[i - 1].y);
-                        const double len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-                        if (len > 1e-9) {
-                            dir.x /= len;
-                            dir.y /= len;
-                            const double dl = std::sqrt(
-                                (simple[i].x - simple[i - 1].x) * (simple[i].x - simple[i - 1].x) +
-                                (simple[i].y - simple[i - 1].y) * (simple[i].y - simple[i - 1].y));
-                            const double dr = std::sqrt(
-                                (simple[i + 1].x - simple[i].x) * (simple[i + 1].x - simple[i].x) +
-                                (simple[i + 1].y - simple[i].y) * (simple[i + 1].y - simple[i].y));
-                            const double scale = std::min(dl, dr) * 0.5;
-                            leftTan = Point2D(-dir.x * scale, -dir.y * scale);
-                            rightTan = Point2D(dir.x * scale, dir.y * scale);
+                    std::vector<Point2D> spoke;
+                    spoke.push_back(junction);
+                    spoke.push_back(Point2D(tx + 0.5, ty + 0.5));
+                    if (deg[tidx] == 2) {
+                        int cx = tx, cy = ty;
+                        for (int guard = 0; guard < w * h; ++guard) {
+                            int nx = cx, ny = cy;
+                            if (!nextChainPixel(&nx, &ny)) {
+                                break;
+                            }
+                            const std::size_t nidx = (std::size_t)ny * w + nx;
+                            visit[nidx] = 1;
+                            spoke.push_back(Point2D(nx + 0.5, ny + 0.5));
+                            cx = nx;
+                            cy = ny;
+                            if (deg[nidx] != 2) {
+                                break;
+                            }
                         }
                     }
-                    shape.vertices.push_back(ShapeVertex(simple[i], leftTan, rightTan));
+                    emitChain(spoke);
                 }
-                doc->shapes.push_back(shape);
             }
         }
         return !doc->shapes.empty();

@@ -6,7 +6,11 @@
   Inkscape's tracing engine) behind `Dev/Mask/parsers/PotraceTrace`; three modes: **B/W** (binary outline, optional
   stacked threshold bands spanning [Threshold Low, Threshold] - darkest band traced first so brighter bands layer
   over it, each band its own sub-layer), **Color** (k-means clusters traced and stacked with their mean fill),
-  **Centerline** (Zhang-Suen skeletonization into open Beziers). Holes import as **minus-operator** shapes (potrace
+  **Centerline** (Zhang-Suen skeletonization into open Beziers - the neighbor ring
+  dx/dy arrays were corrupted (a duplicated S slot instead of SW, three scrambled dy
+  slots) so skeletons never collapsed, and rdpSimplify kept the whole polyline; the
+  chain walk is degree-based with one curve per junction spoke, so a plus traces 4
+  curves meeting at the centre). Holes import as **minus-operator** shapes (potrace
   contours punch like hand-roto; XOR toggle) - potrace's path `sign` stores the CHARACTERS '+'/'-' (not +-1) and
   `transformShape` originally dropped `VectorShape::compositingOperator`, both caught by the harness. Source page:
   Channel (luma/alpha/R/G/B), Invert, Pre-Blur, Threshold (+Low), Bands; Trace page: Despeckle (turdsize), Corner
