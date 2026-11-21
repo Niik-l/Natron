@@ -227,23 +227,17 @@ the node "still worked in the 1st size"; tracing froze the UI and eventually cra
    the settings panel mid-import (the GUI-side crash on selecting Color is not
    reproducible headlessly; input re-entrancy during the 30 s stall was the plausible
    trigger and is now closed, together with the stall itself).
+9. **Max Shapes import re-entrancy + Auto Re-trace default (2026-11-20, after the field
+   fixes)**: the Max Shapes knob now defers its import to a zero-timer — its
+   valueChanged stack must not sit under a Roto tree rebuild (remove + re-add +
+   evaluateChange), and a spinner drag coalesces into one import; if a trace is running
+   the request folds into that trace's follow-up instead of importing underneath it.
+   Auto Re-trace now defaults OFF: tracing wipes user edits to the shapes by design, so
+   a rebuild must be an explicit Trace click, not a side effect of touching a knob
+   (tooltip + plugin description updated).
 
 Harness: color mode (3 colored circles -> 4 clusters incl. the anti-aliased edge
-cluster, one sub-layer each), a 900x900 smooth-blob color stress, and the noisy-image
-valve check. TRACE_CHECK DONE_OK, 07-verify DONE_OK.
-
-Harness: input-swap re-trace (300x300 rect -> 600x600 rect, shapes follow at 1:1
-canonical placement), reset clears all shapes; whole suite TRACE_CHECK DONE_OK,
-07-verify DONE_OK.
-      (done 2026-11-20: Zhang-Suen thinning + degree-based chain extraction into open
-      Beziers verified end to end. Three bugs surfaced: the 8-neighbor ring arrays were
-      corrupted — dx had 0 in the SW slot (duplicate of S) and dy was scrambled in three
-      slots, so the thinning barely eroded (8 px/iteration, skeletons never collapsed);
-      the pass guards were diagonal-neighbor forms instead of the classic cardinal
-      N&&E&&S / E&&S&&W / N&&E&&W / N&&S&&W; and rdpSimplify returned the whole polyline
-      instead of collapsing to the endpoints when no point strays past the tolerance.
-      The chain walk is now degree-based: endpoint chains, closed loops, then one chain
-      per junction spoke (a diagonal step into a junction-adjacent pixel is refused so
-      chains end at the junction instead of bending around it). Harness: a 5px stroke
-      thins to ONE 2-CP curve at the stroke ends (ends recede ~3 px, classic Zhang-Suen
-      erosion), a plus traces exactly 4 spokes meeting at the junction.)
+cluster, one sub-layer each), a 900x900 smooth-blob color stress, the noisy-image valve
+check, input-swap re-trace (300x300 rect -> 600x600 rect, shapes follow at 1:1 canonical
+placement) and reset. Full suite green on the rebuilt renderer, IoU 0.9838;
+TRACE_CHECK DONE_OK, 07-verify DONE_OK.
