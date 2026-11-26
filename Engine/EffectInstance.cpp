@@ -388,7 +388,8 @@ EffectInstance::getHash() const
 {
     NodePtr n = _node.lock();
 
-    return n->getHashValue();
+    // The node can be gone while a queued viewer refresh is still pending.
+    return n ? n->getHashValue() : 0;
 }
 
 U64
