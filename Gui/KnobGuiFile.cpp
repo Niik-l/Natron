@@ -162,7 +162,11 @@ KnobGuiFile::open_file()
     std::vector<std::string> filters;
     KnobFilePtr knob = _knob.lock();
 
-    if ( !knob->isInputImageFile() ) {
+    if ( knob->isVectorFile() ) {
+        // Vector importer (ReadMask): SVG only for now. The dialog's filter
+        // convention is BARE extensions (setDefaultFilter builds "*.%1").
+        filters.push_back( "svg" );
+    } else if ( !knob->isInputImageFile() ) {
         filters.push_back("*");
     } else {
         appPTR->getSupportedReaderFileFormats(&filters);

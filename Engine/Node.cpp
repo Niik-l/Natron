@@ -200,7 +200,11 @@ Node::isPartOfProject() const
 void
 Node::createRotoContextConditionnally()
 {
-    assert(!_imp->rotoContext);
+    // An effect may have created and attached its own context already
+    // (TraceMask does this in initializeData(), which runs just before this).
+    if (_imp->rotoContext) {
+        return;
+    }
     assert(_imp->effect);
     ///Initialize the roto context if any
     if ( isRotoNode() || isRotoPaintingNode() ) {
@@ -3648,6 +3652,12 @@ RotoContextPtr
 Node::getRotoContext() const
 {
     return _imp->rotoContext;
+}
+
+void
+Node::setRotoContext(const RotoContextPtr& rotoContext)
+{
+    _imp->rotoContext = rotoContext;
 }
 
 TrackerContextPtr

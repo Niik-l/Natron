@@ -54,8 +54,8 @@ struct ReadMaskPrivate;
  * scale/offset, with the top-left -> bottom-left Y flip on by default (tangent
  * handles flip accordingly). Fill/stroke colors and opacity import onto the shape
  * color/opacity knobs; layers become RotoLayer groups named after the file and the
- * SVG groups. With Feather Splines off (default) the imported shapes have zero
- * feather distance/fall-off, exactly like vectorNuke's clean single-line vectors.
+ * SVG groups. The imported shapes have zero feather distance/fall-off, exactly like
+ * vectorNuke's clean single-line vectors.
  *
  * While file-driven, re-importing (file or knob changes, or a timeline scrub that
  * resolves to a different frame of a '#' / printf-style file sequence) regenerates
@@ -91,6 +91,9 @@ public:
 
     virtual std::string getPluginDescription() const OVERRIDE FINAL WARN_UNUSED_RETURN;
 
+    virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
+    { grouping->push_back(PLUGIN_GROUP_KEYER); }
+
     /// The mask importer is a pure source: no Bg clone sources, no Mask input —
     /// the RotoPaint input fan (Bg, Bg2..Bg10, Mask) would only be confusing here.
     virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN { return 0; }
@@ -119,9 +122,16 @@ private Q_SLOTS:
 
     /// Connected to the app timeline: with Auto Rebuild on, re-imports when the
     /// scrubbed frame resolves to a different file in the sequence pattern.
-    void onTimeChanged(double frame, int reason);
+    /// SequenceTime (int), not double: the old-style SIGNAL/SLOT connection only
+    /// matches when the slot spells the signal's argument type, and a mismatch
+    /// makes QObject::connect fail silently at runtime (the slot never fired).
+    void onTimeChanged(SequenceTime frame, int reason);
 
 private:
+
+    /// Enable/disable the Bake Sequence button: only a sequence pattern
+    /// (contains '#' or a printf token) has frames to bake.
+    void updateBakeEnabled(const QString& pattern);
 
     /**
      * @brief Knob creation hook. Runs after the effect is attached to its node and
@@ -135,6 +145,12 @@ private:
 
     void importFile(double time);
     void removeImportedItems();
+
+    /// Bake Sequence core: parse the resolved per-frame files over [start,
+    /// end] and key them into the imported curves (same occurrence-keying as
+    /// the import; topology mismatches keep their previous keys). Logs per
+    /// the Bake button semantics.
+    void bakeSequenceInternal(int start, int end, bool disableAutoRebuild);
 
     std::unique_ptr<ReadMaskPrivate> _imp;
 };

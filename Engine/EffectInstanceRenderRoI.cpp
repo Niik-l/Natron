@@ -579,6 +579,17 @@ EffectInstance::renderRoI(const RenderRoIArgs & args,
         if (identity) {
             ///The effect is an identity but it has no inputs
             if (inputNbIdentity == -1) {
+                // A generator identity (e.g: a roto shape whose eye was turned
+                // off): the output must be BLACK. The output planes were just
+                // allocated and are NOT zero-filled - leaving them would hand
+                // the downstream merge uninitialized (possibly stale shape)
+                // pixels.
+                for (std::map<ImagePlaneDesc, ImagePtr>::const_iterator it = outputPlanes->begin();
+                     it != outputPlanes->end(); ++it) {
+                    if (it->second) {
+                        it->second->fillZero(args.roi);
+                    }
+                }
                 return eRenderRoIRetCodeOk;
             } else if (inputNbIdentity == -2) {
                 // there was at least one crash if you set the first frame to a negative value

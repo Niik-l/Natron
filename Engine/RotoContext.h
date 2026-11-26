@@ -227,6 +227,13 @@ public:
     void evaluateChange();
     void evaluateChange_noIncrement();
 
+    /// Bracket that suppresses the downstream evaluate part of
+    /// evaluateChange() (the roto age still bumps). Used by render-time
+    /// shape imports: a nested evaluate from a render thread re-enters
+    /// rendering recursively.
+    void beginSuppressEvaluateChange();
+    void endSuppressEvaluateChange();
+
     void incrementAge();
 
     void clearViewersLastRenderedStrokes();
@@ -369,6 +376,26 @@ public:
      * To be called whenever changes position in the hierarchy or when one gets removed/inserted
      **/
     void refreshRotoPaintTree();
+
+    /**
+     * @brief Defer refreshRotoPaintTree() while inserting/removing many items
+     * (mass import/removal): the merge chain is rebuilt once instead of once
+     * per item. Nestable; callers must always pair true/false, then call
+     * refreshRotoPaintTree() once after resuming.
+     **/
+    void setRotoPaintTreeRefreshSuppressed(bool suppressed);
+
+    bool isRotoPaintTreeRefreshSuppressed() const;
+
+    /**
+     * @brief While suppressed, bulk insertion/removal of curves does not run
+     * the per-item Python field declaration/removal (an interpreter call per
+     * item, ~100ms each on big imports). Layers are still declared/removed.
+     * Nestable; pair true/false with the tree refresh suppression.
+     **/
+    void setRotoPythonFieldSuppression(bool suppressed);
+
+    bool isRotoPythonFieldSuppressed() const;
 
     void onRotoPaintInputChanged(const NodePtr& node);
 

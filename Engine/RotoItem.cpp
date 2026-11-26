@@ -169,6 +169,14 @@ RotoItem::setGloballyActivated_recursive(bool a)
             }
         }
     }
+    // Every drawable in the subtree must invalidate its internal render
+    // nodes: the layer toggle itself has no internal nodes, so without this
+    // the shapes' hashes stay stale and the eye toggle never reaches the
+    // render (icons showed off while the shapes kept rendering).
+    RotoDrawableItem* isDrawable = dynamic_cast<RotoDrawableItem*>(this);
+    if (isDrawable) {
+        isDrawable->incrementNodesAge();
+    }
 }
 
 void

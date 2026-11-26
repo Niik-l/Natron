@@ -29,6 +29,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <QString>
@@ -252,6 +253,17 @@ VectorShape transformShape(const VectorShape& shape,
                            double scaleX, double scaleY,
                            double offsetX, double offsetY,
                            bool flipY, double docHeight);
+
+/**
+ * @brief Flatten a shape's cubic Bezier segments (center + tangent-OFFSET
+ * vertices: control points are center+rightTangent / next.center+leftTangent)
+ * into a polyline. Each segment is sampled at `samplesPerSegment` steps.
+ * Closed shapes append the wrap-around last->first segment; open shapes do
+ * not. Returns false if fewer than 3 points result (degenerate shape).
+ */
+bool flattenShape(const VectorShape& shape,
+                  std::vector<std::pair<double, double> >* out,
+                  int samplesPerSegment = 16);
 
 } // namespace VectorMask
 

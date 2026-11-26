@@ -811,6 +811,18 @@ public:
         return _isLabel;
     }
 
+    /// For label knobs placed on an existing row: the GUI description label
+    /// wraps long text instead of widening the row (trace status lines etc.).
+    void setWordWrap(bool wrap)
+    {
+        _wordWrap = wrap;
+    }
+
+    bool isWordWrap() const
+    {
+        return _wordWrap;
+    }
+
     void setAsCustom()
     {
         _isCustom = true;
@@ -844,6 +856,7 @@ private:
     bool _customHtmlText;
     bool _isLabel;
     bool _isCustom;
+    bool _wordWrap;
 };
 
 /******************************KnobGroup**************************************/

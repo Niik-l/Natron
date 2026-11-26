@@ -29,6 +29,8 @@
 #include <cctype>
 #include <cstdlib>
 #include <map>
+#include <utility>
+#include <vector>
 
 #include <QRegularExpression>
 #include <QStringList>
@@ -553,6 +555,42 @@ transformShape(const VectorShape& shape,
         out.vertices.push_back(v);
     }
     return out;
+}
+
+bool
+flattenShape(const VectorShape& shape,
+             std::vector<std::pair<double, double> >* out,
+             int samplesPerSegment)
+{
+    if (!out || shape.vertices.size() < 2 || samplesPerSegment < 1) {
+        return false;
+    }
+    const int n = (int)shape.vertices.size();
+    const int segs = shape.closed ? n : (n - 1);
+    out->clear();
+    out->reserve((std::size_t)(segs * samplesPerSegment) + 1);
+    for (int i = 0; i < segs; ++i) {
+        const ShapeVertex& v0 = shape.vertices[i];
+        const ShapeVertex& v1 = shape.vertices[(i + 1) % n];
+        const Point2D p0 = v0.center;
+        const Point2D p1 = v0.center + v0.rightTangent;   // outgoing handle
+        const Point2D p2 = v1.center + v1.leftTangent;    // incoming handle
+        const Point2D p3 = v1.center;
+        for (int k = 0; k < samplesPerSegment; ++k) {
+            const double t = (double)k / samplesPerSegment;
+            const double mt = 1.0 - t;
+            // De Casteljau for a cubic segment.
+            const double a = mt * mt * mt;
+            const double b = 3.0 * mt * mt * t;
+            const double c = 3.0 * mt * t * t;
+            const double d = t * t * t;
+            out->push_back(std::make_pair(a * p0.x + b * p1.x + c * p2.x + d * p3.x,
+                                          a * p0.y + b * p1.y + c * p2.y + d * p3.y));
+        }
+    }
+    out->push_back(std::make_pair(shape.vertices[shape.closed ? 0 : (n - 1)].center.x,
+                                  shape.vertices[shape.closed ? 0 : (n - 1)].center.y));
+    return out->size() >= 3;
 }
 
 } // namespace VectorMask

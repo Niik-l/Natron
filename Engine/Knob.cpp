@@ -4662,6 +4662,9 @@ KnobHelper::createDuplicateOnHolder(KnobHolder* otherHolder,
         if ( isString->usesRichText() ) {
             newKnob->setUsesRichText(true);
         }
+        if ( isString->isWordWrap() ) {
+            newKnob->setWordWrap(true);
+        }
         output = newKnob;
     } else if (isFile) {
         KnobFilePtr newKnob = otherHolder->createFileKnob(newScriptName, newLabel, isUserKnob);

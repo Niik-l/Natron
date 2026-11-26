@@ -33,6 +33,7 @@ CLANG_DIAG_OFF(uninitialized)
 #include <QHBoxLayout>
 #include <QMessageBox>
 #include <QPixmap>
+#include <QSizePolicy>
 #include <QApplication>
 #include <QUndoStack>
 #include <QUndoCommand>
@@ -756,6 +757,11 @@ KnobGuiContainerHelper::findKnobGuiOrCreate(const KnobIPtr & knob,
                 }
                 label->setText_overload(labelStr );
             }
+            // Label knobs may request wrapped text (long status lines).
+            KnobString* isLabelString = dynamic_cast<KnobString*>( ret->getKnob().get() );
+            if ( isLabelString && isLabelString->isWordWrap() ) {
+                label->setWordWrap(true);
+            }
             QObject::connect( label, SIGNAL(clicked(bool)), ret.get(), SIGNAL(labelClicked(bool)) );
 
 
@@ -816,6 +822,17 @@ KnobGuiContainerHelper::findKnobGuiOrCreate(const KnobIPtr & knob,
 
         // Fill the fieldLayout with the widgets
         ret->createGUI(fieldContainer, labelContainer, label, warningLabel, fieldLayout, makeNewLine, lastKnobLineSpacing, knobsOnSameLine);
+
+        // A wrapped label knob sharing an existing row must take whatever
+        // width the row has left instead of widening the panel with its
+        // sizeHint (KnobGui::createGUI has already added it to the row).
+        if (!makeNewLine && label) {
+            KnobString* isRowLabelString = dynamic_cast<KnobString*>( ret->getKnob().get() );
+            if ( isRowLabelString && isRowLabelString->isLabel() && isRowLabelString->isWordWrap() ) {
+                label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                label->setMinimumWidth(0);
+            }
+        }
 
         ret->setEnabledSlot();
 

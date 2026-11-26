@@ -93,12 +93,14 @@ public:
     virtual std::string getPluginID() const OVERRIDE WARN_UNUSED_RETURN;
     virtual std::string getPluginLabel() const OVERRIDE WARN_UNUSED_RETURN;
     virtual std::string getPluginDescription() const OVERRIDE WARN_UNUSED_RETURN;
-    virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
+    /// Not final: vector-only derived nodes re-group (ReadMask / TraceMask
+    /// register under the Keyer group).
+    virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE
     {
         grouping->push_back(PLUGIN_GROUP_PAINT);
     }
 
-    /// Not final: vector-only derived nodes re-label the input fan (TraceToMask
+    /// Not final: vector-only derived nodes re-label the input fan (TraceMask
     /// calls its single input "Source" — see also getMaskInputIndex above).
     virtual std::string getInputLabel (int inputNb) const OVERRIDE WARN_UNUSED_RETURN;
     virtual bool isInputMask(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
@@ -199,8 +201,15 @@ private:
                             double* inputTime,
                             ViewIdx* inputView,
                             int* inputNb) OVERRIDE FINAL WARN_UNUSED_RETURN;
-    virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
     virtual void refreshExtraStateAfterTimeChanged(bool isPlayback, double time)  OVERRIDE FINAL;
+
+protected:
+
+    /// Protected (not private): vector-only derived nodes (ReadMask) wrap the
+    /// base render with their own per-frame logic.
+    virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
+
+private:
     std::unique_ptr<RotoPaintPrivate> _imp;
 };
 

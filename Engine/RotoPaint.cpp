@@ -1766,13 +1766,12 @@ RotoPaint::drawOverlay(double time,
 
                 std::list<std::list<std::pair<Point, double> > > strokes;
                 isStroke->evaluateStroke(0, time, &strokes);
-                bool locked = (*it)->isLockedRecursive();
+                // The item color identifies the shape even when locked: a
+                // locked import (e.g. ReadMask file-driven shapes) must not
+                // lose its color identity in the overlay - the lock only
+                // blocks editing.
                 double curveColor[4];
-                if (!locked) {
-                    (*it)->getOverlayColor(curveColor);
-                } else {
-                    curveColor[0] = 0.8; curveColor[1] = 0.8; curveColor[2] = 0.8; curveColor[3] = 1.;
-                }
+                (*it)->getOverlayColor(curveColor);
                 glColor4dv(curveColor);
 
                 for (std::list<std::list<std::pair<Point, double> > >::iterator itStroke = strokes.begin(); itStroke != strokes.end(); ++itStroke) {
@@ -1809,13 +1808,11 @@ RotoPaint::drawOverlay(double time,
 #endif
                                                      &points, NULL);
 
-                bool locked = (*it)->isLockedRecursive();
+                // Same as the stroke path: the item color stays on locked
+                // shapes (a locked import keeps its color identity; the lock
+                // only blocks editing).
                 double curveColor[4];
-                if (!locked) {
-                    (*it)->getOverlayColor(curveColor);
-                } else {
-                    curveColor[0] = 0.8; curveColor[1] = 0.8; curveColor[2] = 0.8; curveColor[3] = 1.;
-                }
+                (*it)->getOverlayColor(curveColor);
                 glColor4dv(curveColor);
                 glLineWidth(1.5 * screenPixelRatio);
                 glBegin(isLoop ? GL_LINE_LOOP : GL_LINE_STRIP);
@@ -1866,7 +1863,7 @@ RotoPaint::drawOverlay(double time,
                 }
 
 
-                if (selected && !locked) {
+                if (selected && !isBezier->isLockedRecursive()) {
                     Transform::Matrix3x3 transform;
                     isBezier->getTransformAtTime(time, &transform);
 

@@ -1319,6 +1319,15 @@ public:
     bool rippleEdit;
     bool featherLink;
     bool isCurrentlyLoading;
+    /// >0 while a bulk edit (mass import/removal) is inserting/removing items:
+    /// refreshRotoPaintTree() is deferred so the merge chain is rebuilt once
+    /// at the end instead of once per item (O(n^2) on big imports).
+    int treeRefreshSuppression;
+    /// >0 while a bulk edit is inserting/removing curves: their Python field
+    /// declaration/removal (one interpreter call per item) is skipped. Layers
+    /// are still declared. Declaring/removing hundreds of per-shape Python
+    /// attributes cost ~100ms each, which froze large imports and resets.
+    int pythonFieldSuppression;
     NodeWPtr node;
     U64 age;
 
@@ -1408,10 +1417,13 @@ public:
         , rippleEdit(false)
         , featherLink(true)
         , isCurrentlyLoading(false)
+        , treeRefreshSuppression(0)
+        , pythonFieldSuppression(0)
         , node(n)
         , age(0)
         , doingNeatRender(false)
         , mustDoNeatRender(false)
+        , evaluateSuppressCount(0)
         , globalMergeNodes()
     {
         EffectInstancePtr effect = n->getEffectInstance();
@@ -2193,6 +2205,14 @@ public:
         QMutexLocker l(&rotoContextMutex);
         ++age;
     }
+
+    /// > 0: evaluateChange() bumps the roto age but skips the downstream
+    /// evaluate (refresh previews / hash re-evaluation). Used by render-time
+    /// shape imports (ReadMask sequence renders) - a nested evaluate from a
+    /// render thread re-enters rendering recursively. Guarded by
+    /// evaluateSuppressMutex, which lives next to it below.
+    int evaluateSuppressCount;
+    mutable QMutex evaluateSuppressMutex;
 
     RotoLayerPtr
     findDeepestSelectedLayer() const

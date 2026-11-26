@@ -161,7 +161,6 @@ target_link_libraries(NatronEngine
         ${XDG_LIBS}
         ceres
         hoedown
-        potrace
         mv
         openMVG
         tess

@@ -47,9 +47,11 @@
 #include "Engine/RotoItem.h"
 #include "Engine/RotoLayer.h"
 #include "Global/Enums.h"
-#include "libtess.h"
 
+#include "Dev/Mask/VectorDocument.h"
+#include "Dev/Scene3D/MaskMeshBuilder.h"
 #include "Dev/Scene3D/MeshData.h"
+#include "Dev/Scene3D/VectorShapeProvider.h"
 
 NATRON_NAMESPACE_ENTER
 
@@ -95,296 +97,19 @@ makeDouble(MaskToGeo* self, KnobPagePtr page, const QString& label, const char* 
     k->setDisplayMinimum(dispMin);
     k->setDisplayMaximum(dispMax);
     if (step > 0.0) k->setIncrement(step);
-    page->addKnob(k);
+    // Geometry-group knobs pass a null page (they are added to the group by
+    // the caller, not to a page): adding to a null KnobPagePtr crashed the
+    // node on creation.
+    if (page) {
+        page->addKnob(k);
+    }
     return k;
 }
 
 // ---------------------------------------------------------------------------
-// libtess tessellation of one flattened shape contour -> plain triangles.
-// Same vendored libtess the Roto fill uses, with normal (0,0,1) since every
-// contour lies in the XY plane.
+// Bezier flattening: the roto-context side of the shared MaskMeshBuilder
+// (the tessellation/extrusion itself lives in MaskMeshBuilder.cpp).
 // ---------------------------------------------------------------------------
-
-struct M2GTessData
-{
-    std::vector<std::vector<ParametricPoint> >* out;
-    std::vector<ParametricPoint> current;   // primitive being collected
-    unsigned int mode;
-    std::list<ParametricPoint> allocatedIntersections;
-    unsigned int error;
-};
-
-static void
-m2g_tess_begin(unsigned int which, void* polygonData)
-{
-    M2GTessData* d = (M2GTessData*)polygonData;
-    d->mode = which;
-    d->current.clear();
-}
-
-static void
-m2g_tess_vertex(void* data, void* polygonData)
-{
-    M2GTessData* d = (M2GTessData*)polygonData;
-    const ParametricPoint* p = (const ParametricPoint*)data;
-    d->current.push_back(*p);
-}
-
-static void
-m2g_emit_current(M2GTessData* d)
-{
-    const std::vector<ParametricPoint>& v = d->current;
-    switch (d->mode) {
-    case LIBTESS_GL_TRIANGLES:
-        for (std::size_t i = 0; i + 2 < v.size(); i += 3) {
-            std::vector<ParametricPoint> tri;
-            tri.push_back(v[i]); tri.push_back(v[i + 1]); tri.push_back(v[i + 2]);
-            d->out->push_back(tri);
-        }
-        break;
-    case LIBTESS_GL_TRIANGLE_FAN:
-        for (std::size_t i = 2; i < v.size(); ++i) {
-            std::vector<ParametricPoint> tri;
-            tri.push_back(v[0]); tri.push_back(v[i - 1]); tri.push_back(v[i]);
-            d->out->push_back(tri);
-        }
-        break;
-    case LIBTESS_GL_TRIANGLE_STRIP:
-        for (std::size_t i = 2; i < v.size(); ++i) {
-            std::vector<ParametricPoint> tri;
-            if (i % 2 == 0) {
-                tri.push_back(v[i - 2]); tri.push_back(v[i - 1]); tri.push_back(v[i]);
-            } else {
-                tri.push_back(v[i - 1]); tri.push_back(v[i - 2]); tri.push_back(v[i]);
-            }
-            d->out->push_back(tri);
-        }
-        break;
-    default:
-        break;
-    }
-    d->current.clear();
-}
-
-static void
-m2g_tess_end(void* polygonData)
-{
-    M2GTessData* d = (M2GTessData*)polygonData;
-    m2g_emit_current(d);
-}
-
-static void
-m2g_tess_error(unsigned int error, void* polygonData)
-{
-    M2GTessData* d = (M2GTessData*)polygonData;
-    d->error = error;
-}
-
-static void
-m2g_tess_combine(double coords[3], void* /*data*/[4], double /*w*/[4], void** dataOut, void* polygonData)
-{
-    M2GTessData* d = (M2GTessData*)polygonData;
-    d->allocatedIntersections.push_back(ParametricPoint());
-    d->allocatedIntersections.back().x = coords[0];
-    d->allocatedIntersections.back().y = coords[1];
-    d->allocatedIntersections.back().t = 0.0;
-    *dataOut = &d->allocatedIntersections.back();
-}
-
-/**
- * @brief Drop consecutive points closer than kM2GDupeEps mask pixels (SVG
- * paths legitimately carry sub-hundredth-of-pixel segments; they tessellate
- * into zero-area triangles whose normal normalization divides by zero) and
- * collapse the closure point. Returns false if fewer than 3 points remain.
- */
-static bool
-cleanContour(std::vector<std::pair<double, double> >* contour)
-{
-    const double kM2GDupeEps = 0.02;
-    if (!contour || contour->empty()) {
-        return false;
-    }
-    std::vector<std::pair<double, double> > cleaned;
-    cleaned.reserve(contour->size());
-    for (std::size_t i = 0; i < contour->size(); ++i) {
-        const std::pair<double, double>& p = (*contour)[i];
-        if (!cleaned.empty()) {
-            const double dx = p.first - cleaned.back().first;
-            const double dy = p.second - cleaned.back().second;
-            if (dx * dx + dy * dy < kM2GDupeEps * kM2GDupeEps) {
-                continue;
-            }
-        }
-        cleaned.push_back(p);
-    }
-    while (cleaned.size() > 1) {
-        const double dx = cleaned.front().first - cleaned.back().first;
-        const double dy = cleaned.front().second - cleaned.back().second;
-        if (dx * dx + dy * dy < kM2GDupeEps * kM2GDupeEps) {
-            cleaned.pop_back();
-        } else {
-            break;
-        }
-    }
-    contour->swap(cleaned);
-    return contour->size() >= 3;
-}
-
-/**
- * @brief Orient a closed contour CCW (shoelace signed area: > 0 is CCW in a
- * bottom-left y-up space). Roto contours may come in either orientation and
- * winding is the source of truth for normals.
- */
-static std::vector<ParametricPoint>
-orientedCCW(const std::vector<std::pair<double, double> >& contour)
-{
-    double area = 0.0;
-    for (std::size_t i = 0; i < contour.size(); ++i) {
-        const std::pair<double, double>& a = contour[i];
-        const std::pair<double, double>& b = contour[(i + 1) % contour.size()];
-        area += a.first * b.second - b.first * a.second;
-    }
-
-    std::vector<ParametricPoint> oriented(contour.size());
-    for (std::size_t i = 0; i < contour.size(); ++i) {
-        oriented[i].x = contour[i].first;
-        oriented[i].y = contour[i].second;
-        oriented[i].t = 0.0;
-    }
-    if (area < 0.0) {
-        std::reverse(oriented.begin(), oriented.end());
-    }
-    return oriented;
-}
-
-static void
-tessSetup(libtess_GLUtesselator* tess, std::vector<std::vector<ParametricPoint> >* triangles,
-          M2GTessData* tessData)
-{
-    tessData->out = triangles;
-    tessData->error = 0;
-
-    libtess_gluTessCallback(tess, LIBTESS_GLU_TESS_BEGIN_DATA, (void (*)())m2g_tess_begin);
-    libtess_gluTessCallback(tess, LIBTESS_GLU_TESS_VERTEX_DATA, (void (*)())m2g_tess_vertex);
-    libtess_gluTessCallback(tess, LIBTESS_GLU_TESS_END_DATA, (void (*)())m2g_tess_end);
-    libtess_gluTessCallback(tess, LIBTESS_GLU_TESS_ERROR_DATA, (void (*)())m2g_tess_error);
-    libtess_gluTessCallback(tess, LIBTESS_GLU_TESS_COMBINE_DATA, (void (*)())m2g_tess_combine);
-
-    // All contours lie in the XY plane: fix the normal per the libtess README.
-    libtess_gluTessNormal(tess, 0, 0, 1);
-    libtess_gluTessBeginPolygon(tess, (void*)tessData);
-}
-
-static void
-tessAddContour(libtess_GLUtesselator* tess, std::vector<ParametricPoint>& oriented)
-{
-    libtess_gluTessBeginContour(tess);
-    for (std::size_t i = 0; i < oriented.size(); ++i) {
-        double coords[3] = { oriented[i].x, oriented[i].y, 0.0 };
-        libtess_gluTessVertex(tess, coords, &oriented[i]);
-    }
-    libtess_gluTessEndContour(tess);
-}
-
-/**
- * @brief Tessellate one closed contour (in mask pixel coordinates). Returns
- * triangles with CCW orientation when viewed from +Z.
- */
-static void
-tessellateContour(const std::vector<std::pair<double, double> >& contour,
-                  std::vector<std::vector<ParametricPoint> >* triangles)
-{
-    if (contour.size() < 3) {
-        return;
-    }
-
-    std::vector<ParametricPoint> oriented = orientedCCW(contour);
-
-    M2GTessData tessData;
-    libtess_GLUtesselator* tess = libtess_gluNewTess();
-    tessSetup(tess, triangles, &tessData);
-    tessAddContour(tess, oriented);
-    libtess_gluTessEndPolygon(tess);
-    libtess_gluDeleteTess(tess);
-}
-
-/**
- * @brief Tessellate several closed contours as ONE polygon with the nonzero
- * winding rule, every contour forced CCW: overlapping shapes union instead of
- * stacking coincident coplanar triangles (which z-fights in the viewport and
- * double-hits in the raytracer). This matches the mask semantics, where each
- * shape is painted over the previous ones.
- */
-static void
-tessellateContoursUnion(const std::vector<std::vector<std::pair<double, double> > >& contours,
-                        const std::vector<bool>& subtract,
-                        std::vector<std::vector<ParametricPoint> >* triangles)
-{
-    std::vector<std::vector<ParametricPoint> > oriented;
-    oriented.reserve(contours.size());
-    int totalPts = 0;
-    for (std::size_t i = 0; i < contours.size(); ++i) {
-        if (contours[i].size() < 3) {
-            continue;
-        }
-        // CCW = adds coverage, CW = subtracts it (nonzero winding rule), which
-        // is how a minus-operator shape punches a hole in the union.
-        std::vector<ParametricPoint> c = orientedCCW(contours[i]);
-        if (i < subtract.size() && subtract[i]) {
-            std::reverse(c.begin(), c.end());
-        }
-        oriented.push_back(c);
-        totalPts += (int)oriented.back().size();
-    }
-    if (oriented.empty()) {
-        return;
-    }
-
-    libtess_GLUtesselator* tess = libtess_gluNewTess();
-    libtess_gluTessProperty(tess, LIBTESS_GLU_TESS_WINDING_RULE, LIBTESS_GLU_TESS_WINDING_NONZERO);
-    M2GTessData tessData;
-    tessSetup(tess, triangles, &tessData);
-    for (std::size_t i = 0; i < oriented.size(); ++i) {
-        tessAddContour(tess, oriented[i]);
-    }
-    libtess_gluTessEndPolygon(tess);
-    libtess_gluDeleteTess(tess);
-}
-
-/// Builder for the MeshData payload: same emission contract as GeoBuilder's
-/// (CCW-from-outside winding, per-corner UVs, wireframe edges).
-struct M2GBuilder
-{
-    MeshData& m;
-
-    explicit M2GBuilder(MeshData& mesh) : m(mesh) {}
-
-    int vert(float x, float y, float z, float u, float v)
-    {
-        m.vertices.push_back(x); m.vertices.push_back(y); m.vertices.push_back(z);
-        m.uvs.push_back(u); m.uvs.push_back(v);
-        return (int)(m.vertices.size() / 3) - 1;
-    }
-
-    void edge(int a, int b)
-    {
-        m.edgeIndices.push_back(a); m.edgeIndices.push_back(b);
-    }
-
-    void tri(int a, int b, int c)
-    {
-        m.faceIndices.push_back(a); m.faceIndices.push_back(b); m.faceIndices.push_back(c);
-        m.faceCounts.push_back(3);
-        edge(a, b); edge(b, c); edge(c, a);
-    }
-
-    void quad(int a, int b, int c, int d)
-    {
-        m.faceIndices.push_back(a); m.faceIndices.push_back(b); m.faceIndices.push_back(c); m.faceIndices.push_back(d);
-        m.faceCounts.push_back(4);
-        edge(a, b); edge(b, c); edge(c, d); edge(d, a);
-    }
-};
 
 /**
  * @brief Flatten one curve at time into a closed mask-space contour (50 points
@@ -416,153 +141,7 @@ flattenCurveContour(const BezierPtr& curve, double time,
     if (contour->front() != contour->back()) {
         contour->push_back(contour->front());
     }
-    return cleanContour(contour);
-}
-
-/**
- * @brief Emit fill triangles (CCW mask-space) at z, optionally reversed
- * (bottom cap). Zero-area faces are skipped: their normal normalizes 0/0 and
- * poisons the shading with NaNs in the viewport and the raytracer.
- */
-static void
-emitFillTriangles(const std::vector<std::vector<ParametricPoint> >& tris,
-                  float z, bool reverseWinding,
-                  double s, double cx, double cy,
-                  double invFormatW, double invFormatH, M2GBuilder& b)
-{
-    for (std::size_t t = 0; t < tris.size(); ++t) {
-        const std::vector<ParametricPoint>& tri = tris[t];
-        if (tri.size() != 3) {
-            continue;
-        }
-        const double area2 = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y)
-                             - (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
-        // 1e-6 px^2: libtess seam vertices at contour intersections collapse
-        // to identical float32 positions, whose normal normalizes 0/0.
-        if (std::fabs(area2) < 1e-6) {
-            continue;
-        }
-        int idx[3];
-        for (int k = 0; k < 3; ++k) {
-            const double wx = (tri[k].x - cx) * s;
-            const double wy = (tri[k].y - cy) * s;
-            idx[k] = b.vert((float)wx, (float)wy, z,
-                            (float)(tri[k].x * invFormatW), (float)(tri[k].y * invFormatH));
-        }
-        if (reverseWinding) {
-            b.tri(idx[2], idx[1], idx[0]);
-        } else {
-            b.tri(idx[0], idx[1], idx[2]);
-        }
-    }
-}
-
-/**
- * @brief True for roto operators that remove coverage instead of adding it.
- * Minus punches a hole; XOR behaves the same for a contour nested inside its
- * parent (the traced-hole case), which is what the flat fill can express with
- * the nonzero winding rule.
- */
-static bool
-isSubtractiveOperator(int op)
-{
-    return op == (int)eMergeMinus || op == (int)eMergeXOR;
-}
-
-/**
- * @brief Flat fill (depth == 0) for ALL curves at once: every contour goes
- * into one libtess polygon with the nonzero winding rule, so overlapping
- * shapes union instead of stacking coincident coplanar triangles (which
- * z-fights in the viewport and double-hits in the raytracer). Contours of
- * minus-operator shapes are reversed (CW) so they subtract from the union,
- * matching the mask render where holes punch through.
- */
-static void
-emitFlatUnionFill(const std::vector<BezierPtr>& curves, double time,
-                  double s, double cx, double cy,
-                  double formatW, double formatH, M2GBuilder& b)
-{
-    const double invFormatW = 1.0 / (formatW != 0.0 ? formatW : 1.0);
-    const double invFormatH = 1.0 / (formatH != 0.0 ? formatH : 1.0);
-
-    std::vector<std::vector<std::pair<double, double> > > contours;
-    std::vector<bool> subtract;
-    contours.reserve(curves.size());
-    subtract.reserve(curves.size());
-    for (std::size_t i = 0; i < curves.size(); ++i) {
-        std::vector<std::pair<double, double> > c;
-        if ( flattenCurveContour(curves[i], time, &c) ) {
-            contours.push_back(c);
-            subtract.push_back(isSubtractiveOperator(curves[i]->getCompositingOperator()));
-        }
-    }
-    if (contours.empty()) {
-        return;
-    }
-
-    std::vector<std::vector<ParametricPoint> > tris;
-    tessellateContoursUnion(contours, subtract, &tris);
-    if (tris.empty()) {
-        return;
-    }
-    emitFillTriangles(tris, 0.0f, false, s, cx, cy, invFormatW, invFormatH, b);
-}
-
-/**
- * @brief One curve -> mesh (extruded case, depth > 0): fill at z=0 facing +Z,
- * the bottom cap (reversed), the outward side walls and the offset top cap.
- * Shapes stay per-curve so the walls of overlapping shapes remain visible.
- */
-static void
-emitCurve(const BezierPtr& curve, double time,
-          double s, double cx, double cy, double depth,
-          double formatW, double formatH, M2GBuilder& b)
-{
-    const double invFormatW = 1.0 / (formatW != 0.0 ? formatW : 1.0);
-    const double invFormatH = 1.0 / (formatH != 0.0 ? formatH : 1.0);
-
-    std::vector<std::pair<double, double> > contour;
-    if (!flattenCurveContour(curve, time, &contour)) {
-        return;
-    }
-
-    // Fill: libtess over the mask-space contour (CCW-normalized).
-    std::vector<std::vector<ParametricPoint> > tris;
-    tessellateContour(contour, &tris);
-    if (tris.empty()) {
-        return;
-    }
-
-    // Emit: fill triangles at z=0 (facing +Z after the CCW normalize).
-    emitFillTriangles(tris, 0.0f, false, s, cx, cy, invFormatW, invFormatH, b);
-
-    // Contour outline is already deduplicated by cleanContour.
-    const std::size_t outlineSize = contour.size();
-    if (outlineSize < 3) {
-        return;
-    }
-    // Bottom cap (z=0, facing -Z): reversed winding per triangle.
-    emitFillTriangles(tris, 0.0f, true, s, cx, cy, invFormatW, invFormatH, b);
-    // Side walls: contour is CCW; quad (a0, b0, b1, a1) faces outward.
-    for (std::size_t i = 0; i < outlineSize; ++i) {
-        const std::pair<double, double>& a = contour[i];
-        const std::pair<double, double>& cpt = contour[(i + 1) % outlineSize];
-        const double ax = (a.first - cx) * s;
-        const double ay = (a.second - cy) * s;
-        const double bx = (cpt.first - cx) * s;
-        const double by = (cpt.second - cy) * s;
-        const int a0 = b.vert((float)ax, (float)ay, 0.0f,
-                              (float)(a.first * invFormatW), (float)(a.second * invFormatH));
-        const int b0 = b.vert((float)bx, (float)by, 0.0f,
-                              (float)(cpt.first * invFormatW), (float)(cpt.second * invFormatH));
-        const int b1 = b.vert((float)bx, (float)by, (float)depth,
-                              (float)(cpt.first * invFormatW), (float)(cpt.second * invFormatH));
-        const int a1 = b.vert((float)ax, (float)ay, (float)depth,
-                              (float)(a.first * invFormatW), (float)(a.second * invFormatH));
-        b.quad(a0, b0, b1, a1);
-    }
-    // Top cap (z=depth, facing +Z): same winding as the fill, offset in z.
-    emitFillTriangles(tris, (float)depth, false, s, cx, cy, invFormatW, invFormatH, b);
+    return MaskMesh::cleanContour(contour);
 }
 
 } // anonymous namespace
@@ -633,20 +212,27 @@ void
 MaskToGeo::initializeKnobs()
 {
     // ---------------- Controls ----------------
+    // World Scale / Extrude Depth live in a Geometry group like TraceMask's:
+    // the group header is the panel's first row, keeping the sliders clear of
+    // the page tab bar (a wrapped tab row used to clip the first slider).
     KnobPagePtr page = AppManager::createKnob<KnobPage>(this, tr("Controls"));
     {
-        KnobDoublePtr k = makeDouble(this, page, tr("World Scale"), "worldScale", 1.0, 0.01, 10.0, 0.0, 0.01);
+        KnobGroupPtr geoGroup = AppManager::createKnob<KnobGroup>(this, tr("Geometry"));
+        geoGroup->setName("geometryGroup");
+        geoGroup->setDefaultValue(true);
+        page->addKnob(geoGroup);
+        KnobDoublePtr k = makeDouble(this, KnobPagePtr(), tr("World Scale"), "worldScale", 1.0, 0.01, 10.0, 0.0, 0.01);
         k->setHintToolTip(tr("World size of the project format height. The mask pixel "
                              "coordinates are normalized so the format height equals this "
                              "value (1.0 = Nuke-style normalized space), then centered on "
                              "the format rect."));
+        geoGroup->addKnob(k);
         _imp->worldScale = k;
-    }
-    {
-        KnobDoublePtr k = makeDouble(this, page, tr("Extrude Depth"), "extrudeDepth", 0.0, 0.0, 5.0, 0.0, 0.01);
+        k = makeDouble(this, KnobPagePtr(), tr("Extrude Depth"), "extrudeDepth", 0.0, 0.0, 5.0, 0.0, 0.01);
         k->setHintToolTip(tr("0 (default): a pure flat shape mesh in the XY plane at z=0. "
                              "Greater than 0: side walls between the contour at z=0 and an "
                              "offset cap at z=depth, plus both caps."));
+        geoGroup->addKnob(k);
         _imp->extrudeDepth = k;
     }
     {
@@ -737,82 +323,95 @@ MaskToGeo::currentInputsHash(double time) const
 MeshDataPtr
 MaskToGeo::buildMeshSnapshot(double time) const
 {
-    MeshDataPtr mesh = std::make_shared<MeshData>();
-    M2GBuilder b(*mesh);
-
     NodePtr input = getNode()->getInput(0);
-    RotoContextPtr ctx = input ? input->getRotoContext() : RotoContextPtr();
-    if (ctx) {
-        // Scale: world units per mask pixel, format height -> World Scale.
-        Format fmt;
-        getApp()->getProject()->getProjectDefaultFormat(&fmt);
-        const double formatW = fmt.x2 - fmt.x1;
-        const double formatH = fmt.y2 - fmt.y1;
-        const KnobDoublePtr worldScaleKnob = _imp->worldScale.lock();
-        const double worldScale = worldScaleKnob ? worldScaleKnob->getValueAtTime(time) : 1.0;
-        const double s = (formatH > 0.0) ? worldScale / formatH : 1.0;
-        const double cx = fmt.x1 + formatW / 2.0;
-        const double cy = fmt.y1 + formatH / 2.0;
-        const KnobDoublePtr depthKnob = _imp->extrudeDepth.lock();
-        const double depth = depthKnob ? std::max(0.0, depthKnob->getValueAtTime(time)) : 0.0;
 
-        // Collect every active Bezier in the tree, recursing into layers
-        // (ReadMask groups imported shapes under a file layer + per-group
-        // sub-layers). A layer can be reachable twice (base layer also lists
-        // the file layer's items), so guard both layers and curves by
-        // identity: emitting the same curve twice stacks two coincident
-        // shells in the mesh.
-        std::vector<BezierPtr> curves;
-        std::set<const RotoLayer*> visitedLayers;
-        std::set<const Bezier*> visitedCurves;
-        std::function<void(const RotoLayerPtr&)> walkLayer = [&](const RotoLayerPtr& layer) {
-            if (!layer || !visitedLayers.insert(layer.get()).second) {
-                return;
-            }
-            const std::list<RotoItemPtr>& items = layer->getItems();
-            for (std::list<RotoItemPtr>::const_iterator it2 = items.begin(); it2 != items.end(); ++it2) {
-                if (RotoLayerPtr child = std::dynamic_pointer_cast<RotoLayer>(*it2)) {
-                    walkLayer(child);
-                    continue;
-                }
-                const BezierPtr curve = std::dynamic_pointer_cast<Bezier>(*it2);
-                if (!curve || !curve->isActivated(time)) {
-                    continue;
-                }
-                if (!visitedCurves.insert(curve.get()).second) {
-                    continue;
-                }
-                curves.push_back(curve);
-            }
-        };
+    // Collect closed contours in canonical (mask/format) space, then hand
+    // them to the shared MaskMeshBuilder (union fill / extrusion).
+    std::vector<MaskMesh::Contour> contours;
 
-        const std::list<RotoLayerPtr>& layers = ctx->getLayers();
-        for (std::list<RotoLayerPtr>::const_iterator it = layers.begin(); it != layers.end(); ++it) {
-            walkLayer(*it);
+    // Prefer a VectorShapeProvider (TraceMask & friends): its shapes arrive
+    // already in canonical space, with per-shape hole operators. The roto
+    // context is the legacy path.
+    VectorShapeProvider* provider = (input && input->getEffectInstance())
+        ? dynamic_cast<VectorShapeProvider*>(input->getEffectInstance().get())
+        : (VectorShapeProvider*)0;
+    if (provider) {
+        const VectorMask::VectorDocument doc = provider->getShapeDocument(time);
+        contours.reserve(doc.shapes.size());
+        for (std::size_t i = 0; i < doc.shapes.size(); ++i) {
+            std::vector<std::pair<double, double> > poly;
+            if (VectorMask::flattenShape(doc.shapes[i], &poly)) {
+                MaskMesh::Contour c;
+                c.points.swap(poly);
+                c.op = doc.shapes[i].compositingOperator;
+                contours.push_back(c);
+            }
         }
-
-        if (depth <= 0.0) {
-            // Flat fill: union all contours in one tessellation (no coincident
-            // coplanar overlap between shapes), minus shapes punch holes.
-            emitFlatUnionFill(curves, time, s, cx, cy, formatW, formatH, b);
-        } else {
-            for (std::size_t i = 0; i < curves.size(); ++i) {
-                // Boolean subtraction is not available on extruded solids yet:
-                // a minus shape emitted as a solid slab would plug its hole, so
-                // skip it (flat mode does cut the hole).
-                if (isSubtractiveOperator(curves[i]->getCompositingOperator())) {
-                    continue;
+    } else {
+        RotoContextPtr ctx = input ? input->getRotoContext() : RotoContextPtr();
+        if (ctx) {
+            // Collect every active Bezier in the tree, recursing into layers
+            // (ReadMask groups imported shapes under a file layer + per-group
+            // sub-layers). A layer can be reachable twice (base layer also
+            // lists the file layer's items), so guard both layers and curves
+            // by identity: emitting the same curve twice stacks two
+            // coincident shells in the mesh.
+            std::vector<BezierPtr> curves;
+            std::set<const RotoLayer*> visitedLayers;
+            std::set<const Bezier*> visitedCurves;
+            std::function<void(const RotoLayerPtr&)> walkLayer = [&](const RotoLayerPtr& layer) {
+                if (!layer || !visitedLayers.insert(layer.get()).second) {
+                    return;
                 }
-                emitCurve(curves[i], time, s, cx, cy, depth, formatW, formatH, b);
+                const std::list<RotoItemPtr>& items = layer->getItems();
+                for (std::list<RotoItemPtr>::const_iterator it2 = items.begin(); it2 != items.end(); ++it2) {
+                    if (RotoLayerPtr child = std::dynamic_pointer_cast<RotoLayer>(*it2)) {
+                        walkLayer(child);
+                        continue;
+                    }
+                    const BezierPtr curve = std::dynamic_pointer_cast<Bezier>(*it2);
+                    if (!curve || !curve->isActivated(time)) {
+                        continue;
+                    }
+                    if (!visitedCurves.insert(curve.get()).second) {
+                        continue;
+                    }
+                    curves.push_back(curve);
+                }
+            };
+
+            const std::list<RotoLayerPtr>& layers = ctx->getLayers();
+            for (std::list<RotoLayerPtr>::const_iterator it = layers.begin(); it != layers.end(); ++it) {
+                walkLayer(*it);
+            }
+
+            contours.reserve(curves.size());
+            for (std::size_t i = 0; i < curves.size(); ++i) {
+                std::vector<std::pair<double, double> > poly;
+                if (flattenCurveContour(curves[i], time, &poly)) {
+                    MaskMesh::Contour c;
+                    c.points.swap(poly);
+                    c.op = curves[i]->getCompositingOperator();
+                    contours.push_back(c);
+                }
             }
         }
     }
 
-    mesh->numVertices = mesh->vertices.size() / 3;
-    mesh->numFaces = mesh->faceCounts.size();
-    mesh->texCoordComponents = 2;
-    mesh->hasUVs = !mesh->uvs.empty();
-    return mesh;
+    // Scale: world units per mask pixel, format height -> World Scale.
+    Format fmt;
+    getApp()->getProject()->getProjectDefaultFormat(&fmt);
+    const double formatW = fmt.x2 - fmt.x1;
+    const double formatH = fmt.y2 - fmt.y1;
+    const KnobDoublePtr worldScaleKnob = _imp->worldScale.lock();
+    const double worldScale = worldScaleKnob ? worldScaleKnob->getValueAtTime(time) : 1.0;
+    const double s = (formatH > 0.0) ? worldScale / formatH : 1.0;
+    const double cx = fmt.x1 + formatW / 2.0;
+    const double cy = fmt.y1 + formatH / 2.0;
+    const KnobDoublePtr depthKnob = _imp->extrudeDepth.lock();
+    const double depth = depthKnob ? std::max(0.0, depthKnob->getValueAtTime(time)) : 0.0;
+
+    return MaskMesh::buildMesh(contours, s, cx, cy, formatW, formatH, depth, 0.0);
 }
 
 MeshDataPtr

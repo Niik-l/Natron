@@ -536,11 +536,6 @@ private:
         _entryLock.lockForWrite();
     }
 
-    void unlock() const
-    {
-        _entryLock.unlock();
-    }
-
     template <typename SRCPIX, typename DSTPIX, int srcMaxValue, int dstMaxValue>
     static void convertToFormatInternal_sameComps(const RectI & renderWindow,
                                                   const Image & srcImg,
@@ -592,11 +587,23 @@ private:
                                                 ViewerColorSpaceEnum srcColorSpace,
                                                 ViewerColorSpaceEnum dstColorSpace,
                                                 int channelForAlpha,
-                                                bool useAlpha0,
-                                                bool copyBitmap,
-                                                bool requiresUnpremult);
+                                                 bool useAlpha0,
+                                                 bool copyBitmap,
+                                                 bool requiresUnpremult);
 
 public:
+
+    /// Non-blocking write lock acquisition on the entry lock (false when it
+    /// is held by another thread). On true, release with unlock().
+    bool lockForWriteTry() const
+    {
+        return _entryLock.tryLockForWrite();
+    }
+
+    void unlock() const
+    {
+        _entryLock.unlock();
+    }
 
 
     /**

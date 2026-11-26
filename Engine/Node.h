@@ -312,6 +312,14 @@ public:
      * @brief Returns a pointer to the rotoscoping context if the node is in the paint context, otherwise NULL.
      **/
     RotoContextPtr getRotoContext() const;
+
+    /**
+     * @brief Attach a roto context created by the effect itself (e.g. TraceMask).
+     * The node then exposes it through getRotoContext() for MaskToGeo, the Roto
+     * panel, Python and project serialization.
+     **/
+    void setRotoContext(const RotoContextPtr& rotoContext);
+
     TrackerContextPtr getTrackerContext() const;
 
     U64 getRotoAge() const;
