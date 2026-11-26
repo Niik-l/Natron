@@ -2694,6 +2694,14 @@ TraceMask::render(const RenderActionArgs& args)
 {
     // Serialize with the worker's fetch (see traceInternal).
     QMutexLocker gate(&_imp->renderGate);
+    // The planes arrive uninitialised and several paths below draw nothing
+    // (no shapes, Brush and Pen both off): start from transparent black.
+    for (std::list<std::pair<ImagePlaneDesc, ImagePtr> >::const_iterator it = args.outputPlanes.begin();
+         it != args.outputPlanes.end(); ++it) {
+        if (it->second) {
+            it->second->fillZero(args.roi);
+        }
+    }
     VectorMask::VectorDocument doc;
     bool hasDoc = false;
     double docTime = -1.0;

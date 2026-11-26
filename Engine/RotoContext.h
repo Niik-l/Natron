@@ -186,6 +186,11 @@ public:
     const std::list<RotoLayerPtr> & getLayers() const;
 
     /**
+     * @brief A copy of the layers list, taken under the context lock. Safe from any thread.
+     **/
+    std::list<RotoLayerPtr> getLayers_mt_safe() const;
+
+    /**
      * @brief Returns a bezier curves nearby the point (x,y) and the parametric value
      * which would be used to find the exact Bezier point lying on the curve.
      **/

@@ -463,8 +463,10 @@ VRChromaticAberration::render(const RenderActionArgs& args)
                 }
                 const double offX = (dirX * radAmt * mult[c] * w + shiftXc[c]) * latScale;
                 const double offY = dirY * radAmt * mult[c] * w + shiftYc[c];
-                const double sx = cx + (qx * cosR[c] + qy * sinR[c]) + offX;
-                const double sy = cy + (-qx * sinR[c] + qy * cosR[c]) + offY;
+                // px/py are pixel centres at +0.5; the sampler's integer
+                // coordinates are pixel centres, hence the -0.5.
+                const double sx = cx + (qx * cosR[c] + qy * sinR[c]) + offX - 0.5;
+                const double sy = cy + (-qx * sinR[c] + qy * cosR[c]) + offY - 0.5;
                 VRFilterCore::wrapBilinearSample(&bufA[0], W, H, nComp, sx, sy, samp);
                 dstPix[c] = samp[c];
             }

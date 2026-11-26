@@ -363,7 +363,7 @@ MaskToGeo::buildMeshSnapshot(double time) const
                 if (!layer || !visitedLayers.insert(layer.get()).second) {
                     return;
                 }
-                const std::list<RotoItemPtr>& items = layer->getItems();
+                const std::list<RotoItemPtr> items = layer->getItems_mt_safe();
                 for (std::list<RotoItemPtr>::const_iterator it2 = items.begin(); it2 != items.end(); ++it2) {
                     if (RotoLayerPtr child = std::dynamic_pointer_cast<RotoLayer>(*it2)) {
                         walkLayer(child);
@@ -380,7 +380,7 @@ MaskToGeo::buildMeshSnapshot(double time) const
                 }
             };
 
-            const std::list<RotoLayerPtr>& layers = ctx->getLayers();
+            const std::list<RotoLayerPtr> layers = ctx->getLayers_mt_safe();
             for (std::list<RotoLayerPtr>::const_iterator it = layers.begin(); it != layers.end(); ++it) {
                 walkLayer(*it);
             }

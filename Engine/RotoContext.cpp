@@ -679,6 +679,14 @@ RotoContext::getLayers() const
     return _imp->layers;
 }
 
+std::list<RotoLayerPtr>
+RotoContext::getLayers_mt_safe() const
+{
+    QMutexLocker l(&_imp->rotoContextMutex);
+
+    return _imp->layers;
+}
+
 BezierPtr
 RotoContext::isNearbyBezier(double x,
                             double y,

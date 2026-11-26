@@ -301,6 +301,12 @@ parseSvgPathData(const QString& dString)
             } else {
                 cmd = lastCmd;
             }
+            // A number with no command to repeat (path data that starts with a
+            // number, or a number after Z) is dropped: putting it back would
+            // pop the same token again forever.
+            if ( cmd.isEmpty() || (cmd.toUpper() == QLatin1String("Z")) ) {
+                continue;
+            }
             putBackCoord(tok.value);
         }
         if (cmd.isEmpty()) {
