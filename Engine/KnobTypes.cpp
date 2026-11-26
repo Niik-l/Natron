@@ -1353,6 +1353,7 @@ KnobString::KnobString(KnobHolder* holder,
     , _customHtmlText(false)
     , _isLabel(false)
     , _isCustom(false)
+    , _wordWrap(false)
 {
 }
 
@@ -1366,6 +1367,7 @@ KnobString::KnobString(KnobHolder* holder,
     , _customHtmlText(false)
     , _isLabel(false)
     , _isCustom(false)
+    , _wordWrap(false)
 {
 }
 

@@ -401,6 +401,12 @@ Node::isInputOnlyAlpha(int inputNb) const
 {
     assert(_imp->inputsInitialized);
 
+    if ( (inputNb < 0) || (inputNb >= (int)_imp->inputsComponents.size()) ) {
+        // Effects may query the background input even when the node has none
+        // (e.g. RotoPaint::render on a source-only node).
+        return false;
+    }
+
     const std::list<ImagePlaneDesc>& inputSupportedComps = _imp->inputsComponents[inputNb];
     return (inputSupportedComps.size() == 1 && inputSupportedComps.front().getNumComponents() == 1);
 }

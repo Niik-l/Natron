@@ -82,6 +82,17 @@ public:
         return _isInputImage;
     }
 
+    /// The file dialog filters to vector formats only (ReadMask: SVG for now).
+    void setAsVectorFile()
+    {
+        _isVectorFile = true;
+    }
+
+    bool isVectorFile() const
+    {
+        return _isVectorFile;
+    }
+
     void open_file()
     {
         Q_EMIT openFile();
@@ -110,6 +121,7 @@ private:
     virtual const std::string & typeName() const OVERRIDE FINAL;
     static const std::string _typeNameStr;
     int _isInputImage;
+    int _isVectorFile = 0;
 };
 
 /******************************KnobOutputFile**************************************/

@@ -1922,9 +1922,36 @@ RotoContext::incrementAge()
 }
 
 void
+RotoContext::beginSuppressEvaluateChange()
+{
+    QMutexLocker k(&_imp->evaluateSuppressMutex);
+    ++_imp->evaluateSuppressCount;
+}
+
+void
+RotoContext::endSuppressEvaluateChange()
+{
+    QMutexLocker k(&_imp->evaluateSuppressMutex);
+    --_imp->evaluateSuppressCount;
+}
+
+void
 RotoContext::evaluateChange()
 {
+    // The age bump comes FIRST (suppressed or not): consumers key their
+    // caches by it - a suppressed render-time import must still invalidate
+    // the roto evaluation cache or the keyed shapes never show up.
     _imp->incrementRotoAge();
+    {
+        QMutexLocker k(&_imp->evaluateSuppressMutex);
+        if (_imp->evaluateSuppressCount > 0) {
+            // Suppressed (render-time shape imports): the downstream
+            // evaluate must not run from inside a render - a nested
+            // evaluate re-enters rendering recursively (the caller's render
+            // pass re-evaluates the shapes right after the import anyway).
+            return;
+        }
+    }
     getNode()->getEffectInstance()->incrHashAndEvaluate(true, false);
 }
 
@@ -1970,16 +1997,28 @@ RotoContext::onItemLockedChanged(const RotoItemPtr& item,
     assert(item);
     ///refresh knobs
     int nbBeziersUnLockedBezier = 0;
+    int nbSelected = 0;
 
     {
         QMutexLocker l(&_imp->rotoContextMutex);
 
         for (std::list<RotoItemPtr>::iterator it = _imp->selectedItems.begin(); it != _imp->selectedItems.end(); ++it) {
+            ++nbSelected;
             BezierPtr isBezier = std::dynamic_pointer_cast<Bezier>(*it);
             if ( isBezier && !isBezier->isLockedRecursive() ) {
                 ++nbBeziersUnLockedBezier;
             }
         }
+    }
+    // The panel knobs follow the SELECTION: with nothing selected they keep
+    // their current state (stock default = enabled). Recomputing from an
+    // empty selection disabled every knob - General / Shape / Transform
+    // included - which is how an import-time lock change (or any lock change
+    // with nothing selected) wedged the whole settings panel.
+    if (nbSelected == 0) {
+        _imp->lastLockedItem = item;
+        Q_EMIT itemLockedChanged( (int)reason );
+        return;
     }
     bool dirty = nbBeziersUnLockedBezier > 1;
     bool enabled = nbBeziersUnLockedBezier > 0;
@@ -2889,7 +2928,6 @@ RotoDrawableItem::renderMaskInternal(const RectI & roi,
 
     double shapeColor[3];
     getColor(time, shapeColor);
-
     double opacity = getOpacity(time);
 
     ////Allocate the cairo temporary buffer
@@ -4626,6 +4664,11 @@ RotoContext::removeItemAsPythonField(const RotoItemPtr& item)
         ///Strokes are unsupported in Python currently
         return;
     }
+    if (dynamic_cast<RotoLayer*>( item.get() ) == NULL && _imp->pythonFieldSuppression > 0) {
+        // Bulk removal: the curves were never declared (see
+        // declareItemAsPythonField), so there is no attribute to delete.
+        return;
+    }
     std::string appID = getNode()->getApp()->getAppIDString();
     std::string nodeName = getNode()->getFullyQualifiedName();
     std::string nodeFullName = appID + "." + nodeName;
@@ -4699,7 +4742,7 @@ RotoContext::getOrCreateGlobalMergeNode(int *availableInputIndex)
 void
 RotoContext::refreshRotoPaintTree()
 {
-    if (_imp->isCurrentlyLoading) {
+    if (_imp->isCurrentlyLoading || _imp->treeRefreshSuppression > 0) {
         return;
     }
 
@@ -4762,6 +4805,38 @@ RotoContext::refreshRotoPaintTree()
 } // RotoContext::refreshRotoPaintTree
 
 void
+RotoContext::setRotoPaintTreeRefreshSuppressed(bool suppressed)
+{
+    if (suppressed) {
+        ++_imp->treeRefreshSuppression;
+    } else if (_imp->treeRefreshSuppression > 0) {
+        --_imp->treeRefreshSuppression;
+    }
+}
+
+bool
+RotoContext::isRotoPaintTreeRefreshSuppressed() const
+{
+    return _imp->treeRefreshSuppression > 0;
+}
+
+void
+RotoContext::setRotoPythonFieldSuppression(bool suppressed)
+{
+    if (suppressed) {
+        ++_imp->pythonFieldSuppression;
+    } else if (_imp->pythonFieldSuppression > 0) {
+        --_imp->pythonFieldSuppression;
+    }
+}
+
+bool
+RotoContext::isRotoPythonFieldSuppressed() const
+{
+    return _imp->pythonFieldSuppression > 0;
+}
+
+void
 RotoContext::onRotoPaintInputChanged(const NodePtr& node)
 {
     if (node) {
@@ -4782,6 +4857,11 @@ RotoContext::declareItemAsPythonField(const RotoItemPtr& item)
         return;
     }
     RotoLayer* isLayer = dynamic_cast<RotoLayer*>( item.get() );
+    if (!isLayer && _imp->pythonFieldSuppression > 0) {
+        // Bulk import: skip the per-shape Python attribute (the layers are
+        // declared; shapes stay reachable via getItemByName).
+        return;
+    }
     std::string err;
     std::string script = (nodeFullName + ".roto." + item->getFullyQualifiedName() + " = " +
                           nodeFullName + ".roto.getItemByName(\"" + item->getScriptName() + "\")\n");

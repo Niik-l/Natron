@@ -1319,6 +1319,15 @@ public:
     bool rippleEdit;
     bool featherLink;
     bool isCurrentlyLoading;
+    /// >0 while a bulk edit (mass import/removal) is inserting/removing items:
+    /// refreshRotoPaintTree() is deferred so the merge chain is rebuilt once
+    /// at the end instead of once per item (O(n^2) on big imports).
+    int treeRefreshSuppression;
+    /// >0 while a bulk edit is inserting/removing curves: their Python field
+    /// declaration/removal (one interpreter call per item) is skipped. Layers
+    /// are still declared. Declaring/removing hundreds of per-shape Python
+    /// attributes cost ~100ms each, which froze large imports and resets.
+    int pythonFieldSuppression;
     NodeWPtr node;
     U64 age;
 
@@ -1408,10 +1417,13 @@ public:
         , rippleEdit(false)
         , featherLink(true)
         , isCurrentlyLoading(false)
+        , treeRefreshSuppression(0)
+        , pythonFieldSuppression(0)
         , node(n)
         , age(0)
         , doingNeatRender(false)
         , mustDoNeatRender(false)
+        , evaluateSuppressCount(0)
         , globalMergeNodes()
     {
         EffectInstancePtr effect = n->getEffectInstance();
@@ -1423,14 +1435,21 @@ public:
             isPaintNode = false;
         }
 
+        // Vector-only nodes (ReadMask) drop the raster paint surface: no Stroke/Clone
+        // property tabs and no stroke/clone context knobs at all. Roto/RotoPaint keep
+        // the default (true) — see RotoPaint::supportsRasterPaintTools().
+        const bool paintTools = isRotoNode ? isRotoNode->supportsRasterPaintTools() : true;
+
         assert( n && n->getEffectInstance() );
 
         KnobPagePtr shapePage, strokePage, generalPage, clonePage, transformPage;
 
         generalPage = AppManager::createKnob<KnobPage>(effect.get(), tr("General"), 1, true);
         shapePage = AppManager::createKnob<KnobPage>(effect.get(), tr("Shape"), 1, true);
-        strokePage = AppManager::createKnob<KnobPage>(effect.get(), tr("Stroke"), 1, true);
-        clonePage = AppManager::createKnob<KnobPage>(effect.get(), tr("Clone"), 1, true);
+        if (paintTools) {
+            strokePage = AppManager::createKnob<KnobPage>(effect.get(), tr("Stroke"), 1, true);
+            clonePage = AppManager::createKnob<KnobPage>(effect.get(), tr("Clone"), 1, true);
+        }
         transformPage = AppManager::createKnob<KnobPage>(effect.get(), tr("Transform"), 1, true);
 
         KnobDoublePtr opacityKnob = AppManager::createKnob<KnobDouble>(effect.get(), tr(kRotoOpacityParamLabel), 1, true);
@@ -1550,6 +1569,11 @@ public:
         shapeKnobs.push_back(featherFallOffKnob);
         featherFallOff = featherFallOffKnob;
 
+        // Clone + stroke context knobs: raster-paint only, may not exist on
+        // vector-only nodes (ReadMask). Every context knob below is pushed into
+        // cloneKnobs/strokeKnobs; consumers in RotoContext (e.g. selectInternal)
+        // already treat those as optional via null compares.
+        if (paintTools) {
         {
             KnobChoicePtr sourceType = AppManager::createKnob<KnobChoice>(effect.get(), tr(kRotoBrushSourceColorLabel), 1, true);
             sourceType->setName(kRotoBrushSourceColor);
@@ -1890,6 +1914,7 @@ public:
             strokeKnobs.push_back(visiblePortion);
             brushVisiblePortionKnob = visiblePortion;
         }
+        } // if (paintTools)
 
         KnobDoublePtr translate = AppManager::createKnob<KnobDouble>(effect.get(), tr(kRotoDrawableItemTranslateParamLabel), 2, true);
         translate->setName(kRotoDrawableItemTranslateParam);
@@ -2180,6 +2205,14 @@ public:
         QMutexLocker l(&rotoContextMutex);
         ++age;
     }
+
+    /// > 0: evaluateChange() bumps the roto age but skips the downstream
+    /// evaluate (refresh previews / hash re-evaluation). Used by render-time
+    /// shape imports (ReadMask sequence renders) - a nested evaluate from a
+    /// render thread re-enters rendering recursively. Guarded by
+    /// evaluateSuppressMutex, which lives next to it below.
+    int evaluateSuppressCount;
+    mutable QMutex evaluateSuppressMutex;
 
     RotoLayerPtr
     findDeepestSelectedLayer() const

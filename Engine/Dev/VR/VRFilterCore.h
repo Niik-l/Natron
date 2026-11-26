@@ -108,6 +108,17 @@ void downsample2xWrap(const float* src, float* dst, int W, int H, int nComp,
 void upsampleBilinearWrap(const float* src, int sw, int sh, float* dst, int dw, int dh, int nComp);
 
 /**
+ * @brief Bilinear fetch of one pixel at arbitrary (x, y) coordinates with the seam rules.
+ *
+ * x and y are pixel coordinates in the same convention as the buffers above (integer
+ * values land exactly on pixel centers). x WRAPS modulo the image width — samples past
+ * either edge continue smoothly across the 0/360-degree seam — and y CLAMPS at the pole
+ * rows. Writes nComp floats to out. Used by effect nodes that displace/re-sample the
+ * latlong image (e.g. ChromaticAberration VR) instead of rolling their own sampler.
+ */
+void wrapBilinearSample(const float* src, int W, int H, int nComp, double x, double y, float* out);
+
+/**
  * @brief dst += weight * srcAdd (elementwise, count = W*H*nComp floats).
  */
 void accumulate(float* dst, const float* srcAdd, size_t count, float weight);

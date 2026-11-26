@@ -1026,7 +1026,9 @@ RotoDrawableItem::load(const RotoItemSerialization &obj)
 bool
 RotoDrawableItem::isActivated(double time) const
 {
-    if ( !isGloballyActivated() ) {
+    // Ancestor-aware: an eye toggled on a parent layer must hide the subtree
+    // even if a child flag was left individually on (e.g. scripted changes).
+    if ( isDeactivatedRecursive() ) {
         return false;
     }
     try {

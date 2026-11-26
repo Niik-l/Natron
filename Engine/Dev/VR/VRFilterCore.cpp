@@ -526,6 +526,36 @@ upsampleBilinearWrap(const float* src, int sw, int sh, float* dst, int dw, int d
 }
 
 void
+wrapBilinearSample(const float* src, int W, int H, int nComp, double x, double y, float* out)
+{
+    if (W <= 0 || H <= 0 || nComp <= 0) return;
+    if (nComp > 4) nComp = 4;
+
+    int x0 = (int)std::floor(x);
+    const double fx = x - (double)x0;
+    int x1 = x0 + 1;
+    x0 %= W; if (x0 < 0) x0 += W;
+    x1 %= W; if (x1 < 0) x1 += W;
+    int y0 = (int)std::floor(y);
+    const double fy = y - (double)y0;
+    int y1 = y0 + 1;
+    y0 = std::max(0, std::min(H - 1, y0));
+    y1 = std::max(0, std::min(H - 1, y1));
+
+    const float* r0 = src + (size_t)y0 * W * nComp;
+    const float* r1 = src + (size_t)y1 * W * nComp;
+    const float* p00 = r0 + (size_t)x0 * nComp;
+    const float* p10 = r0 + (size_t)x1 * nComp;
+    const float* p01 = r1 + (size_t)x0 * nComp;
+    const float* p11 = r1 + (size_t)x1 * nComp;
+    for (int c = 0; c < nComp; ++c) {
+        const float a = p00[c] * (float)(1.0 - fx) + p10[c] * (float)fx;
+        const float b = p01[c] * (float)(1.0 - fx) + p11[c] * (float)fx;
+        out[c] = a * (float)(1.0 - fy) + b * (float)fy;
+    }
+}
+
+void
 accumulate(float* dst, const float* srcAdd, size_t count, float weight)
 {
     for (size_t i = 0; i < count; ++i) {

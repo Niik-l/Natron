@@ -133,6 +133,8 @@
 #include "Engine/ReadNode.h"
 #include "Engine/RotoPaint.h"
 #include "Engine/RotoSmear.h"
+#include "Dev/Mask/ReadMask.h"
+#include "Dev/Mask/TraceMask.h"
 #include "Engine/StandardPaths.h"
 #include "Engine/TrackerNode.h"
 #include "Engine/CameraTrackerNode.h"
@@ -214,6 +216,7 @@
 #include "Dev/Scene3D/Card3D.h"
 #include "Dev/Scene3D/Cube3D.h"
 #include "Dev/Scene3D/GeoBuilder.h"
+#include "Dev/Scene3D/MaskToGeo.h"
 #include "Dev/Scene3D/Path3D.h"
 #include "Dev/Scene3D/Zap3D.h"
 #include "Dev/Scene3D/Cylinder3D.h"
@@ -251,6 +254,7 @@
 #include "Dev/VR/VRExpoGlow.h"
 #include "Dev/VR/VRDepthBlur.h"
 #include "Dev/VR/VRLightWrap.h"
+#include "Dev/VR/VRChromaticAberration.h"
 
 #include "sbkversion.h" // shiboken/pyside version
 
@@ -1702,6 +1706,8 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<RotoPaint>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/paint_grouping_2.png"), false, false);
     registerBuiltInPlugin<RotoNode>(QString::fromUtf8(NATRON_IMAGES_PATH "rotoNodeIcon.png"), false, false);
     registerBuiltInPlugin<RotoSmear>(QString::fromUtf8(""), false, true);
+    registerBuiltInPlugin<ReadMask>(QString::fromUtf8(NATRON_IMAGES_PATH "rotoNodeIcon.png"), false, false);
+    registerBuiltInPlugin<TraceMask>(QString::fromUtf8(NATRON_IMAGES_PATH "rotoNodeIcon.png"), false, false);
     registerBuiltInPlugin<PrecompNode>(QString::fromUtf8(NATRON_IMAGES_PATH "precompNodeIcon.png"), false, false);
     registerBuiltInPlugin<TrackerNode>(QString::fromUtf8(NATRON_IMAGES_PATH "trackerNodeIcon.png"), false, false);
     registerBuiltInPlugin<JoinViewsNode>(QString::fromUtf8(NATRON_IMAGES_PATH "joinViewsNode.png"), false, false);
@@ -1744,6 +1750,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<Cube3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Cylinder3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<GeoBuilder>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
+    registerBuiltInPlugin<MaskToGeo>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Path3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Zap3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
     registerBuiltInPlugin<Scene3D>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/3D_grouping_3.png"), false, false);
@@ -1803,6 +1810,7 @@ AppManager::loadBuiltinNodePlugins(IOPluginsMap* /*readersMap*/,
     registerBuiltInPlugin<VRExpoGlow>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
     registerBuiltInPlugin<VRDepthBlur>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
     registerBuiltInPlugin<VRLightWrap>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
+    registerBuiltInPlugin<VRChromaticAberration>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set3/vr_grouping_3.png"), false, false);
 
     // Dev nodes — Channel
     registerBuiltInPlugin<DevShuffle>(QString::fromUtf8(NATRON_IMAGES_PATH "GroupingIcons/Set2/channel_grouping_2.png"), false, false);

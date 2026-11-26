@@ -687,23 +687,58 @@ RotoPaintInteract::onRoleChangedInternal(const KnobGroupPtr& roleGroup)
     removeKeyframeButton.lock()->setInViewerContextSecret(isPaintRole);
     showTransformHandle.lock()->setInViewerContextSecret(isPaintRole);
 
-    // RotoPaint action bar
-    colorWheelButton.lock()->setInViewerContextSecret(!isPaintRole);
-    compositingOperatorChoice.lock()->setInViewerContextSecret(!isPaintRole);
-    opacitySpinbox.lock()->setInViewerContextSecret(!isPaintRole);
-    pressureOpacityButton.lock()->setInViewerContextSecret(!isPaintRole);
-    sizeSpinbox.lock()->setInViewerContextSecret(!isPaintRole);
-    pressureSizeButton.lock()->setInViewerContextSecret(!isPaintRole);
-    hardnessSpinbox.lock()->setInViewerContextSecret(!isPaintRole);
-    pressureHardnessButton.lock()->setInViewerContextSecret(!isPaintRole);
-    buildUpButton.lock()->setInViewerContextSecret(!isPaintRole);
-    autoConnectViewerButton.lock()->setInViewerContextSecret(!isPaintRole);
-    effectSpinBox.lock()->setInViewerContextSecret(!isPaintRole);
-    timeOffsetSpinBox.lock()->setInViewerContextSecret(!isPaintRole);
-    timeOffsetModeChoice.lock()->setInViewerContextSecret(!isPaintRole);
-    sourceTypeChoice.lock()->setInViewerContextSecret(!isPaintRole);
-    resetCloneOffsetButton.lock()->setInViewerContextSecret(!isPaintRole);
-    multiStrokeEnabled.lock()->setInViewerContextSecret(!isPaintRole);
+    // RotoPaint action bar. Vector-only nodes (ReadMask — supportsRasterPaintTools()
+    // false) never create these knobs, so every pointer may be null here. This block
+    // runs on every role change, including the vector roles, and at init from
+    // RotoPaint::initializeKnobs.
+    if (colorWheelButton.lock()) {
+        colorWheelButton.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (compositingOperatorChoice.lock()) {
+        compositingOperatorChoice.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (opacitySpinbox.lock()) {
+        opacitySpinbox.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (pressureOpacityButton.lock()) {
+        pressureOpacityButton.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (sizeSpinbox.lock()) {
+        sizeSpinbox.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (pressureSizeButton.lock()) {
+        pressureSizeButton.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (hardnessSpinbox.lock()) {
+        hardnessSpinbox.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (pressureHardnessButton.lock()) {
+        pressureHardnessButton.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (buildUpButton.lock()) {
+        buildUpButton.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (autoConnectViewerButton.lock()) {
+        autoConnectViewerButton.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (effectSpinBox.lock()) {
+        effectSpinBox.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (timeOffsetSpinBox.lock()) {
+        timeOffsetSpinBox.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (timeOffsetModeChoice.lock()) {
+        timeOffsetModeChoice.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (sourceTypeChoice.lock()) {
+        sourceTypeChoice.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (resetCloneOffsetButton.lock()) {
+        resetCloneOffsetButton.lock()->setInViewerContextSecret(!isPaintRole);
+    }
+    if (multiStrokeEnabled.lock()) {
+        multiStrokeEnabled.lock()->setInViewerContextSecret(!isPaintRole);
+    }
 
     selectedRole = role;
 
@@ -1021,7 +1056,9 @@ isBranchConnectedToRotoNodeRecursive(Node* node,
 void
 RotoPaintInteract::checkViewersAreDirectlyConnected()
 {
-    if (!autoConnectViewerButton.lock()->getValue()) {
+    // Vector-only nodes (ReadMask) never create this knob
+    KnobButtonPtr autoConnect = autoConnectViewerButton.lock();
+    if ( !autoConnect || !autoConnect->getValue() ) {
         return;
     }
     NodePtr rotoNode = p->publicInterface->getNode();

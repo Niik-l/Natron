@@ -3749,15 +3749,26 @@ Viewport3D::drawMeshNode(const SceneNode& sn) const
 
     // Per-entry file color: an archive entry's own material tints the fill
     // (Cycles shades it as a full per-entry material; the viewport draws
-    // the base color). Falls back to the classic grey.
+    // the base color). A plain MaterialProvider mesh (TraceMask's brush
+    // color, MaskToGeo's material knobs) tints its fill the same way.
+    // Falls back to the classic grey.
     float entryColor[3] = { 0.45f, 0.45f, 0.45f };
     bool haveEntryColor = false;
     {
-        ArchiveProvider* ap = dynamic_cast<ArchiveProvider*>(meshSrc->getEffectInstance().get());
+        EffectInstancePtr meshEffect = meshSrc->getEffectInstance();
+        ArchiveProvider* ap = dynamic_cast<ArchiveProvider*>(meshEffect.get());
         if (ap && sn.archiveEntryIdx >= 0) {
             if (MaterialProvider* ep = ap->getEntryMaterialProvider(sn.archiveEntryIdx)) {
                 double r, g, b;
                 ep->getMaterialBaseColor(meshTime, r, g, b);
+                entryColor[0] = (float)r; entryColor[1] = (float)g; entryColor[2] = (float)b;
+                haveEntryColor = true;
+            }
+        } else if (meshEffect) {
+            MaterialProvider* mp = dynamic_cast<MaterialProvider*>(meshEffect.get());
+            if (mp && !mp->hasMaterialInput()) {
+                double r, g, b;
+                mp->getMaterialBaseColor(meshTime, r, g, b);
                 entryColor[0] = (float)r; entryColor[1] = (float)g; entryColor[2] = (float)b;
                 haveEntryColor = true;
             }

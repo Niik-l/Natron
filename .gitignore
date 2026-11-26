@@ -318,3 +318,5 @@ tools/particle_testbed/
 tools/abc_dump.cpp
 tools/mcp/
 tools/geoio-tests/
+tools/mask-tests/
+tools/trace-tests/

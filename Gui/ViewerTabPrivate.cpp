@@ -205,6 +205,11 @@ ViewerTabPrivate::getOverlayTransform(double time,
         ///We cycle in reverse by default. It should be a setting of the application.
         ///In this case it will return input B instead of input A of a merge for example.
         for (int i = maxInp - 1; i >= 0; --i) {
+            if (!currentNode->carriesOverlayPath(i)) {
+                // Input is a data pipe (e.g. mask -> MaskToGeo): overlays of
+                // nodes upstream of it do not belong on this image.
+                continue;
+            }
             EffectInstancePtr inp = currentNode->getInput(i);
             bool optional = currentNode->isInputOptional(i);
             if (inp) {
@@ -323,6 +328,11 @@ ViewerTabPrivate::getTimeTransform(double time,
     ///We cycle in reverse by default. It should be a setting of the application.
     ///In this case it will return input B instead of input A of a merge for example.
     for (int i = maxInp - 1; i >= 0; --i) {
+        if (!currentNode->carriesOverlayPath(i)) {
+            // Data pipe (e.g. MaskToGeo's mask input): it never carries the
+            // viewer overlay path and contributes no time transform either.
+            continue;
+        }
         bool optional = currentNode->isInputOptional(i);
 
         if (optional) {

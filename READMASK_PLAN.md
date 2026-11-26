@@ -109,7 +109,42 @@ parsers):
   canvas); tgY-flip must also negate tangent Y. Port `calculate_transform`
   (roto_builder.py) verbatim.
 
-## Part 1 — ReadMask core (SVG)
+## Part 1 — ReadMask core (SVG) — DELIVERED 2026-11-15 (commit `mask: ReadMask node`)
+
+Implementation notes beyond the original sketch:
+- **Knob hook**: `ReadMask` overrides `EffectInstance::initializeData()` (virtual, empty
+  base, non-final) instead of the constructor — the ctor runs while `Node::_imp->effect`
+  is still being assigned, and knob value evaluation
+  (`setDefaultValue` → apply → `Node::onEffectKnobValueChanged`) segfaults on the
+  half-built node (gdb-verified). `initializeKnobs`/`onKnobsLoaded`/`knobChanged` are all
+  sealed FINAL by RotoPaint; `initializeData` runs after the effect is attached and
+  before loadKnobs — the latest safe hook. Knob changes are tracked via the knobs'
+  `getSignalSlotHandler()` `valueChanged` signals (three slots: file / controls /
+  re-import button).
+- **Tangents**: Natron's `setPointAtIndex` takes ABSOLUTE handle positions (Natron right
+  = P1 = outgoing, left = P2 = incoming — vectorNuke offset names match); import converts
+  center + offset → absolute. Feather curve gets the same values (`setPointAtIndex(true, …)`)
+  plus `setFeatherDistance(0)`/`setFeatherFallOff(0)` when Feather Splines is off.
+- **Shapes**: built directly (`new Bezier(ctx, name, parent, open)` + `createNodes()` +
+  `ctx->addItem(dest, 0, curve, eSelectionReasonOther)`), no selection churn per shape;
+  `ctx->evaluateChange()` once at the end. Rebuild removal via `ctx->removeItem` in
+  reverse insertion order. (2026-11-15 fix: the import originally mutated RotoLayer
+  directly — silent, so the RotoPanel tree went stale and a rebuild crashed
+  `QTreeWidgetItem::insertChild` on a stale pointer; insertions now go through the
+  context so the panel receives itemInserted like any Roto edit. `RotoPanel::
+  insertItemRecursively` also got a top-level fallback when the parent is not in the
+  tree — the release build has no assert to save it.)
+- **Inputs**: none (2026-11-15). RotoPaint's input fan (Bg, Bg2..Bg10 clone sources +
+  Mask) is meaningless on a vector importer; `RotoPaint::getMaskInputIndex` is virtual
+  now and ReadMask overrides `getNInputs() → 0`. `RotoPaint::render` guards the
+  background fetch on `getNInputs() > 0`.
+- **`<use>`/defs (2026-11-15)**: the SVG parser tokenizes into events and indexes every
+  id'ed element; `<use href/xlink:href>` replays the referenced subtree with the
+  referencing transform/styles composed on top (nested uses bounded + cycle-guarded).
+  The SVG logo (star = rotated uses, letters in defs) imports fully now.
+- **Deviation from the sketch above**: the file knob is a literal path in Part 1 —
+  per-frame sequence resolution + the frame-change rebuild land with Part 2 (Bake
+  Sequence); auto-rebuild fires on knob changes / the Re-import button.
 
 **Where:** new family dir `Engine/Dev/Mask/`:
 
@@ -138,7 +173,7 @@ parsers):
 area), AppManager include + register row, grouping "Image" (Roto family),
 NODE_REGISTRY.md row. New files → cmake regen.
 
-## Part 2 — Bake + persistence
+## Part 2 — Bake + persistence — DELIVERED 2026-11-17 (commit `e68df13f3`)
 
 - "Bake Sequence" button: for the sequence's frame range, for every shape CP,
   `setPointAtIndex(false, i, t, ...)` per frame → every frame becomes a keyframe;
@@ -150,7 +185,7 @@ NODE_REGISTRY.md row. New files → cmake regen.
   **regenerated on rebuild by design** — bake is the persistence path. Stated in
   the panel description (user confirmed 2026-11-06).
 
-## Part 3 — MaskToGeo
+## Part 3 — MaskToGeo — DELIVERED 2026-11-18 (commit `7aef51512`)
 
 **Where:** `Engine/Dev/Scene3D/MaskToGeo.{h,cpp}` (goes into the existing
 DevScene3D GLOB — no cmake-list edit beyond regen).
@@ -175,7 +210,22 @@ uniformScale, rotationPivot).
 sequences / baked keyframes / hand-animated Roto) become animated geo;
 mesh snapshot hash-keyed per GeoBuilder pattern (curves + knobs in hash).
 
-## Part 4 — Tests + docs for parts 1–3
+Implementation notes beyond the sketch:
+- **World Scale default is 2.0** (mask pixels -> world, format height = 2 world units) and UVs stay in
+  mask pixel space; the flat shape sits at z=0 with the whole model centred on the format.
+- **Nested layers**: imported ReadMask shapes live under a file layer, so the walk recurses into
+  `RotoLayer` children; layers and curves are de-duplicated by identity (a layer reachable twice
+  used to emit every curve twice, stacking two coincident shells and doubling the triangle count).
+- `supportsMultiResolution()` returns true deliberately: ReadMask's RoD is the shape bbox, so the
+  multi-res input gate (`checkCanConnectNoMultiRes`) would refuse the connection.
+- **Verification caveat (2026-11-18)**: this box's headless renderers are not usable as an oracle
+  right now - Cycles returns firefly-only images and ScanlineRender all-black ones even for a
+  reference ReadGeo cube / Sphere3D - so the acceptance check rasterizes the mesh the renderer
+  actually received (`NATRON_SC_DUMP`) offline with the camera-exact projection: flat rect and
+  rect+circle union IoU 1.000, extrusion z 0..depth, baked 3-frame sequence lands on the per-frame
+  mask rects.
+
+## Part 4 — Tests + docs for parts 1–3 — DELIVERED 2026-11-18 (`tools/mask-tests/` MASK_CHECK DONE_OK, docs ripple in NODE_REGISTRY / README / DEV_3D_SYSTEM_CHANGELOG)
 
 - Fixtures: vectorNuke's `examples/` (sample.svg, demo-vector-logo.ai, …) —
   re-fetch at implementation time (commit the useful SVG subset; the repo has

@@ -58,6 +58,21 @@ public:
 
     virtual bool isRotoPaintNode() const OVERRIDE FINAL WARN_UNUSED_RETURN  { return true; }
 
+    /// Index of the Mask input. Derived nodes that trim the input set (e.g. ReadMask,
+    /// which has no inputs at all) override both this and getNInputs().
+    virtual int getMaskInputIndex() const
+    {
+        return 10;
+    }
+
+    /// Whether the raster-paint-only UI surface is created on this node: the viewer
+    /// brush tool group (solid/pencil/eraser), the stroke viewer-context knobs and the
+    /// Stroke/Clone settings tabs. Vector-only nodes (ReadMask) return false so those
+    /// knobs/tools are never created at all — the viewer toolbar builds its buttons
+    /// without a secret check (NodeViewerContext::createGui), so the tools must not
+    /// exist rather than be hidden. Roto and RotoPaint keep the default (true).
+    virtual bool supportsRasterPaintTools() const WARN_UNUSED_RETURN { return true; }
+
     virtual int getMajorVersion() const OVERRIDE FINAL WARN_UNUSED_RETURN
     {
         return 1;
@@ -68,7 +83,7 @@ public:
         return 0;
     }
 
-    virtual int getNInputs() const OVERRIDE FINAL WARN_UNUSED_RETURN
+    virtual int getNInputs() const OVERRIDE WARN_UNUSED_RETURN
     {
         return 11;
     }
@@ -78,12 +93,16 @@ public:
     virtual std::string getPluginID() const OVERRIDE WARN_UNUSED_RETURN;
     virtual std::string getPluginLabel() const OVERRIDE WARN_UNUSED_RETURN;
     virtual std::string getPluginDescription() const OVERRIDE WARN_UNUSED_RETURN;
-    virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE FINAL
+    /// Not final: vector-only derived nodes re-group (ReadMask / TraceMask
+    /// register under the Keyer group).
+    virtual void getPluginGrouping(std::list<std::string>* grouping) const OVERRIDE
     {
         grouping->push_back(PLUGIN_GROUP_PAINT);
     }
 
-    virtual std::string getInputLabel (int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
+    /// Not final: vector-only derived nodes re-label the input fan (TraceMask
+    /// calls its single input "Source" — see also getMaskInputIndex above).
+    virtual std::string getInputLabel (int inputNb) const OVERRIDE WARN_UNUSED_RETURN;
     virtual bool isInputMask(int inputNb) const OVERRIDE FINAL WARN_UNUSED_RETURN;
     virtual bool isInputOptional(int /*inputNb*/) const OVERRIDE FINAL WARN_UNUSED_RETURN
     {
@@ -182,8 +201,15 @@ private:
                             double* inputTime,
                             ViewIdx* inputView,
                             int* inputNb) OVERRIDE FINAL WARN_UNUSED_RETURN;
-    virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
     virtual void refreshExtraStateAfterTimeChanged(bool isPlayback, double time)  OVERRIDE FINAL;
+
+protected:
+
+    /// Protected (not private): vector-only derived nodes (ReadMask) wrap the
+    /// base render with their own per-frame logic.
+    virtual StatusEnum render(const RenderActionArgs& args) OVERRIDE WARN_UNUSED_RETURN;
+
+private:
     std::unique_ptr<RotoPaintPrivate> _imp;
 };
 

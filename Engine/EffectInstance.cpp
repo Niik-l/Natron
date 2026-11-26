@@ -5941,7 +5941,17 @@ EffectInstance::decrementRecursionLevel()
 {
     EffectTLSDataPtr tls = _imp->tlsData->getTLSData();
 
-    assert(tls);
+    if (!tls) {
+        // The per-thread TLS vanished mid-action (something cleaned this
+        // thread's TLS while a render pass was still on the stack). Bail
+        // out instead of dereferencing null: the pass completes, the
+        // recursion bookkeeping for this thread is discarded.
+        std::fprintf(stderr, "[TLSBUG] %s: TLS data gone at decrementRecursionLevel (thread %p)\n",
+                     getNode() ? getNode()->getScriptName_mt_safe().c_str() : "?",
+                     (void*)QThread::currentThreadId());
+        std::fflush(stderr);
+        return;
+    }
     --tls->actionRecursionLevel;
 }
 

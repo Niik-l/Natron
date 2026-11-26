@@ -97,6 +97,8 @@
 #define PLUGINID_NATRON_ROTOPAINT (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.RotoPaint")
 #define PLUGINID_NATRON_ROTO (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.Roto")
 #define PLUGINID_NATRON_ROTOSMEAR (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.RotoSmear")
+#define PLUGINID_NATRON_READMASK (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.ReadMask")
+#define PLUGINID_NATRON_TRACEMASK (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.TraceMask")
 #define PLUGINID_NATRON_PRECOMP     (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.Precomp")
 #define PLUGINID_NATRON_TRACKER   (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.Tracker")
 #define PLUGINID_NATRON_CAMERATRACKER (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.CameraTracker")
@@ -171,6 +173,7 @@
 #define PLUGINID_NATRON_READGEO          (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.ReadGeo")
 #define PLUGINID_NATRON_READGEOARCHIVE   (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.ReadGeoArchive")
 #define PLUGINID_NATRON_GEOBUILDER       (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.GeoBuilder")
+#define PLUGINID_NATRON_MASKTOGEO        (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.MaskToGeo")
 #define PLUGINID_NATRON_PATH3D           (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.Path3D")
 #define PLUGINID_NATRON_ZAP3D            (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.Zap3D")
 #define PLUGINID_NATRON_GEOMATERIALOVERRIDE (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.GeoMaterialOverride")
@@ -200,6 +203,7 @@
 #define PLUGINID_NATRON_VREXPOGLOW       (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.VRExpoGlow")
 #define PLUGINID_NATRON_VRDEPTHBLUR      (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.VRDepthBlur")
 #define PLUGINID_NATRON_VRLIGHTWRAP      (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.VRLightWrap")
+#define PLUGINID_NATRON_VRCHROMATICABERRATION (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.VRChromaticAberration")
 
 // Channel routing
 #define PLUGINID_NATRON_DEVSHUFFLE       (NATRON_ORGANIZATION_DOMAIN_TOPLEVEL "." NATRON_ORGANIZATION_DOMAIN_SUB ".built-in.DevShuffle")
@@ -554,6 +558,22 @@ public:
      * @brief Is inputNb optional ? In which case the render can be made without it.
      **/
     virtual bool isInputOptional(int inputNb) const WARN_UNUSED_RETURN = 0;
+
+    /**
+     * @brief Does the connection into inputNb carry the viewer overlay path?
+     * When false, overlay interacts of nodes upstream of inputNb are not drawn
+     * over the image produced through this node (they are still drawn when
+     * those nodes are viewed directly or reached through another connection).
+     * Nodes that consume an input as pure data - e.g. a mask turned into 3D
+     * geometry - return false so a 2D roto overlay does not draw over a 3D
+     * comp. The default is true: the connection is an ordinary image pipe.
+     **/
+    virtual bool carriesOverlayPath(int /*inputNb*/) const WARN_UNUSED_RETURN
+    {
+        return true;
+    }
+
+
 
     /**
      * @brief Is inputNb a mask ? In which case the effect will have an additional mask parameter.
