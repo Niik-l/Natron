@@ -100,6 +100,7 @@ install_ofx CImg "$NATRON_ROOT/openfx-misc/build/CImg.ofx"
 install_ofx IO   "$NATRON_ROOT/openfx-io/build/IO.ofx"
 install_ofx Arena "$NATRON_ROOT/openfx-arena/build/Arena.ofx"
 install_ofx NikKit "$NATRON_ROOT/nik-kit-natron/build/NikKit.ofx"
+for p in GridWrap UVGen SharpenZ TimeWarp ZDefocusZ; do install_ofx "$p" "$NATRON_ROOT/ofxlab-build/$p.ofx"; done
 # Arena needs ImageMagick's config files (delegates, colors, policy) at runtime;
 # the DLLs come with the DLL sweep above; MSYS2 ImageMagick resolves <dll dir>/../etc.
 if [ -d "$MINGW/etc/ImageMagick-7" ]; then

@@ -29,6 +29,12 @@ for p in Misc CImg IO Arena NikKit; do
     mkdir -p "$d"; cp "$src" "$d/"
 done
 
+for p in GridWrap UVGen SharpenZ TimeWarp ZDefocusZ; do
+    [ -f "ofxlab-build/$p.ofx" ] || { echo "::error::$p.ofx not found for packaging"; exit 1; }
+    d="$D/Plugins/OFX/Natron/$p.ofx.bundle/Contents/Linux-x86-64"
+    mkdir -p "$d"; cp "ofxlab-build/$p.ofx" "$d/"
+done
+
 # Arena.ofx's ImageMagick (built into /usr/local for the portable build) reads
 # its config (delegates, colors, policy) from etc/ImageMagick-7; ship it like
 # the Windows package does. AppRun points MAGICK_CONFIGURE_PATH at it.

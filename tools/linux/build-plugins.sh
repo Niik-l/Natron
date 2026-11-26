@@ -47,6 +47,12 @@ for repo in openfx-misc openfx-io openfx-arena nik-kit-natron; do
       | tee -a "$W/plugins.log" || fail=1
 done
 
+# OFX Lab plugins (ofxlab/ in the Natron tree), against the upstream OpenFX checkout.
+{ bash "$W/natron/ofxlab/build.sh" "$W/openfx-upstream" "$W/ofxlab-build"; } 2>&1 \n  | tee -a "$W/plugins.log" || fail=1
+for p in GridWrap UVGen SharpenZ TimeWarp ZDefocusZ; do
+    [ -f "$W/ofxlab-build/$p.ofx" ] || { echo "::error::$p.ofx was not built"; fail=1; }
+done
+
 for p in Misc CImg IO Arena NikKit; do
     find openfx-misc/build openfx-io/build openfx-arena/build nik-kit-natron/build -name "$p.ofx" -type f | grep -q . \
         || { echo "::error::$p.ofx was not built"; fail=1; }

@@ -40,6 +40,9 @@ grep -q "net.fxarena.openfx.ReadSVG" <<<"$out" || die "Arena.ofx not loaded (Rea
 grep -q "fr.inria.openfx.SeExprSimple" <<<"$out" || die "IO.ofx was built without SeExpr (SeExprSimple missing): is mingw-w64-x86_64-seexpr installed?"
 grep -q "net.sf.openfx.SeNoise" <<<"$out" || die "IO.ofx was built without SeNoise"
 grep -q "com.nikkit.openfx.SoftThreshold" <<<"$out" || die "NikKit.ofx not loaded (SoftThreshold missing)"
+for id in gridwrap uvgen sharpenz timewarp zdefocusz; do
+  grep -q "net.ofxlab.$id" <<<"$out" || die "OFX Lab plugin not loaded (net.ofxlab.$id missing)"
+done
 ok "OFX plugins loaded (openfx-io + CImg + Arena + SeExpr nodes + NikKit)"
 
 # PyPlug dependencies: every node ID the bundled PyPlugs create must exist. Known exception:

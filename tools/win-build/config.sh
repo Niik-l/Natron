@@ -50,6 +50,10 @@ OPENFX_ARENA_REF="49e4d5fc197a637196c1a7decab7f97751b867f6"
 # nik-kit-natron (NikKit.ofx: this fork's own OpenFX tools, menu group "Nik Kit"; its pyplugs/
 # ship under Plugins/PyPlugs/NikKit). No patch. https://github.com/Niik-l/nik-kit-natron
 NIK_KIT_REF="692201dde7e891895044a7ed224ffe6e37c0c66a"
+# Upstream ASWF OpenFX, used only to build the OFX Lab plugins in ofxlab/ (GridWrap, UVGen,
+# SharpenZ, TimeWarp, ZDefocusZ), which are written against the upstream Support library and
+# not against libs/OpenFX. https://github.com/AcademySoftwareFoundation/openfx
+OFXLAB_OPENFX_REF="4249fe1b590a7e65caf4b1e4693b6b53220703f5"
 # natron-plugins is content only (no patch); tracks tip. Built-with: b0c499fb6391024f54be9f26ed41b5cf7475d574
 
 # ---- Toolchain location ---------------------------------------------

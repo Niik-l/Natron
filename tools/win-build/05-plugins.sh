@@ -39,4 +39,9 @@ cmake .. "${CMAKE_COMMON[@]}"
 mingw32-make -j"$(jobs_n)"
 [ -f NikKit.ofx ] || die "nik-kit-natron incomplete (NikKit.ofx missing)"
 ok "nik-kit-natron built (NikKit.ofx)"
+
+log "ofxlab: build (GridWrap, UVGen, SharpenZ, TimeWarp, ZDefocusZ)"
+OFXLAB_JOBS="$(jobs_n)" bash "$NATRON_ROOT/Natron/ofxlab/build.sh" "$NATRON_ROOT/openfx-upstream" "$NATRON_ROOT/ofxlab-build"
+for p in GridWrap UVGen SharpenZ TimeWarp ZDefocusZ; do [ -f "$NATRON_ROOT/ofxlab-build/$p.ofx" ] || die "ofxlab incomplete ($p.ofx missing)"; done
+ok "ofxlab built"
 ok "Phase 05 (plugins) complete"

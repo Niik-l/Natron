@@ -96,11 +96,13 @@ jobs:
           io=$(grep -m1 '^OPENFX_IO_REF=' "$cfg" | cut -d'"' -f2)
           arena=$(grep -m1 '^OPENFX_ARENA_REF=' "$cfg" | cut -d'"' -f2)
           nikkit=$(grep -m1 '^NIK_KIT_REF=' "$cfg" | cut -d'"' -f2)
-          [ -n "$misc" ] && [ -n "$io" ] && [ -n "$arena" ] && [ -n "$nikkit" ] || { echo "::error::could not read plugin refs from $cfg"; exit 1; }
+          ofxup=$(grep -m1 '^OFXLAB_OPENFX_REF=' "$cfg" | cut -d'"' -f2)
+          [ -n "$misc" ] && [ -n "$io" ] && [ -n "$arena" ] && [ -n "$nikkit" ] && [ -n "$ofxup" ] || { echo "::error::could not read plugin refs from $cfg"; exit 1; }
           echo "misc=$misc" >> "$GITHUB_OUTPUT"
           echo "io=$io" >> "$GITHUB_OUTPUT"
           echo "arena=$arena" >> "$GITHUB_OUTPUT"
           echo "nikkit=$nikkit" >> "$GITHUB_OUTPUT"
+          echo "ofxup=$ofxup" >> "$GITHUB_OUTPUT"
 
       - name: Checkout openfx-misc
         uses: actions/checkout@v4
@@ -133,6 +135,14 @@ jobs:
           ref: ${{ steps.refs.outputs.nikkit }}
           path: nik-kit-natron
           submodules: recursive
+
+      # Upstream OpenFX Support library, for the OFX Lab plugins in natron/ofxlab.
+      - name: Checkout openfx (upstream)
+        uses: actions/checkout@v4
+        with:
+          repository: AcademySoftwareFoundation/openfx
+          ref: ${{ steps.refs.outputs.ofxup }}
+          path: openfx-upstream
 
       - name: Checkout natron-plugins
         uses: actions/checkout@v4
@@ -515,7 +525,7 @@ jobs:
           docker exec -e FV="${{ inputs.fastvolume }}" natron-build bash -eo pipefail -c '
             cd /w; B=natron/build; bad=0
             for f in $B/App/Natron $B/Renderer/NatronRenderer $B/PythonBin/natron-python \
-                     $(find openfx-misc/build openfx-io/build openfx-arena/build nik-kit-natron/build -name "*.ofx" -type f); do
+                     $(find openfx-misc/build openfx-io/build openfx-arena/build nik-kit-natron/build ofxlab-build -name "*.ofx" -type f); do
               file "$f"
               if ldd "$f" | grep "not found"; then echo "::error::$f has unresolved libraries"; bad=1; fi
             done
